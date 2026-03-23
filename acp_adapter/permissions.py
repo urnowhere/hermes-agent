@@ -61,6 +61,13 @@ def make_approval_callback(
 
         try:
             future = asyncio.run_coroutine_threadsafe(coro, loop)
+        except Exception as exc:
+            if asyncio.iscoroutine(coro):
+                coro.close()
+            logger.warning("Permission request timed out or failed: %s", exc)
+            return "deny"
+
+        try:
             response = future.result(timeout=timeout)
         except (FutureTimeout, Exception) as exc:
             logger.warning("Permission request timed out or failed: %s", exc)

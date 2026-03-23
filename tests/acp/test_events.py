@@ -2,6 +2,8 @@
 
 import asyncio
 from concurrent.futures import Future
+import gc
+import warnings
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -10,11 +12,26 @@ import acp
 from acp.schema import ToolCallStart, ToolCallProgress, AgentThoughtChunk, AgentMessageChunk
 
 from acp_adapter.events import (
+    _send_update,
     make_message_cb,
     make_step_cb,
     make_thinking_cb,
     make_tool_progress_cb,
 )
+
+
+def _mock_threadsafe_success(mock_rcts):
+    """Patch run_coroutine_threadsafe to close the submitted coroutine in tests."""
+    future = MagicMock(spec=Future)
+    future.result.return_value = None
+
+    def _submit(coro, loop):
+        if asyncio.iscoroutine(coro):
+            coro.close()
+        return future
+
+    mock_rcts.side_effect = _submit
+    return future
 
 
 @pytest.fixture()
@@ -48,9 +65,7 @@ class TestToolProgressCallback:
 
         # Run callback in the event loop context
         with patch("acp_adapter.events.asyncio.run_coroutine_threadsafe") as mock_rcts:
-            future = MagicMock(spec=Future)
-            future.result.return_value = None
-            mock_rcts.return_value = future
+            _mock_threadsafe_success(mock_rcts)
 
             cb("terminal", "$ ls -la", {"command": "ls -la"})
 
@@ -71,9 +86,7 @@ class TestToolProgressCallback:
         cb = make_tool_progress_cb(mock_conn, "session-1", loop, tool_call_ids)
 
         with patch("acp_adapter.events.asyncio.run_coroutine_threadsafe") as mock_rcts:
-            future = MagicMock(spec=Future)
-            future.result.return_value = None
-            mock_rcts.return_value = future
+            _mock_threadsafe_success(mock_rcts)
 
             cb("read_file", "Reading /etc/hosts", '{"path": "/etc/hosts"}')
 
@@ -87,9 +100,7 @@ class TestToolProgressCallback:
         cb = make_tool_progress_cb(mock_conn, "session-1", loop, tool_call_ids)
 
         with patch("acp_adapter.events.asyncio.run_coroutine_threadsafe") as mock_rcts:
-            future = MagicMock(spec=Future)
-            future.result.return_value = None
-            mock_rcts.return_value = future
+            _mock_threadsafe_success(mock_rcts)
 
             cb("terminal", "$ echo hi", None)
 
@@ -104,9 +115,7 @@ class TestToolProgressCallback:
         step_cb = make_step_cb(mock_conn, "session-1", loop, tool_call_ids)
 
         with patch("acp_adapter.events.asyncio.run_coroutine_threadsafe") as mock_rcts:
-            future = MagicMock(spec=Future)
-            future.result.return_value = None
-            mock_rcts.return_value = future
+            _mock_threadsafe_success(mock_rcts)
 
             progress_cb("terminal", "$ ls", {"command": "ls"})
             progress_cb("terminal", "$ pwd", {"command": "pwd"})
@@ -117,6 +126,37 @@ class TestToolProgressCallback:
 
             step_cb(2, [{"name": "terminal", "result": "ok-2"}])
             assert "terminal" not in tool_call_ids
+
+
+class TestSendUpdate:
+    def test_scheduler_failure_closes_update_coroutine(self, event_loop_fixture):
+        created = {"coro": None}
+
+        async def _session_update(session_id, update):
+            return None
+
+        conn = MagicMock()
+
+        def _capture_update(session_id, update):
+            created["coro"] = _session_update(session_id, update)
+            return created["coro"]
+
+        conn.session_update = _capture_update
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with patch("acp_adapter.events.asyncio.run_coroutine_threadsafe", side_effect=RuntimeError("scheduler down")):
+                _send_update(conn, "session-1", event_loop_fixture, {"type": "noop"})
+            gc.collect()
+
+        assert created["coro"] is not None
+        assert created["coro"].cr_frame is None
+        runtime_warnings = [
+            w for w in caught
+            if issubclass(w.category, RuntimeWarning)
+            and "was never awaited" in str(w.message)
+        ]
+        assert runtime_warnings == []
 
 
 # ---------------------------------------------------------------------------
@@ -132,9 +172,7 @@ class TestThinkingCallback:
         cb = make_thinking_cb(mock_conn, "session-1", loop)
 
         with patch("acp_adapter.events.asyncio.run_coroutine_threadsafe") as mock_rcts:
-            future = MagicMock(spec=Future)
-            future.result.return_value = None
-            mock_rcts.return_value = future
+            _mock_threadsafe_success(mock_rcts)
 
             cb("Analyzing the code...")
 
@@ -166,9 +204,7 @@ class TestStepCallback:
         cb = make_step_cb(mock_conn, "session-1", loop, tool_call_ids)
 
         with patch("acp_adapter.events.asyncio.run_coroutine_threadsafe") as mock_rcts:
-            future = MagicMock(spec=Future)
-            future.result.return_value = None
-            mock_rcts.return_value = future
+            _mock_threadsafe_success(mock_rcts)
 
             cb(1, [{"name": "terminal", "result": "success"}])
 
@@ -196,9 +232,7 @@ class TestStepCallback:
         cb = make_step_cb(mock_conn, "session-1", loop, tool_call_ids)
 
         with patch("acp_adapter.events.asyncio.run_coroutine_threadsafe") as mock_rcts:
-            future = MagicMock(spec=Future)
-            future.result.return_value = None
-            mock_rcts.return_value = future
+            _mock_threadsafe_success(mock_rcts)
 
             cb(2, ["read_file"])
 
@@ -219,9 +253,7 @@ class TestMessageCallback:
         cb = make_message_cb(mock_conn, "session-1", loop)
 
         with patch("acp_adapter.events.asyncio.run_coroutine_threadsafe") as mock_rcts:
-            future = MagicMock(spec=Future)
-            future.result.return_value = None
-            mock_rcts.return_value = future
+            _mock_threadsafe_success(mock_rcts)
 
             cb("Here is your answer.")
 

@@ -1,6 +1,8 @@
 """Tests for DingTalk platform adapter."""
 import asyncio
+import gc
 import json
+import warnings
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
@@ -261,6 +263,41 @@ class TestConnect:
         assert len(adapter._session_webhooks) == 0
         assert len(adapter._seen_messages) == 0
         assert adapter._http_client is None
+
+
+class TestIncomingHandler:
+    def test_scheduler_failure_closes_message_coroutine(self):
+        from gateway.platforms.dingtalk import DingTalkAdapter, _IncomingHandler
+
+        adapter = DingTalkAdapter(PlatformConfig(enabled=True))
+        created = {"coro": None}
+
+        async def _on_message(message):
+            return None
+
+        def _capture(message):
+            created["coro"] = _on_message(message)
+            return created["coro"]
+
+        adapter._on_message = _capture
+        loop = MagicMock()
+        loop.is_closed.return_value = False
+        handler = _IncomingHandler(adapter, loop)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with patch("gateway.platforms.dingtalk.asyncio.run_coroutine_threadsafe", side_effect=RuntimeError("scheduler down")):
+                handler.process(MagicMock())
+            gc.collect()
+
+        assert created["coro"] is not None
+        assert created["coro"].cr_frame is None
+        runtime_warnings = [
+            w for w in caught
+            if issubclass(w.category, RuntimeWarning)
+            and "was never awaited" in str(w.message)
+        ]
+        assert runtime_warnings == []
 
 
 # ---------------------------------------------------------------------------

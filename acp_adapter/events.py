@@ -31,10 +31,16 @@ def _send_update(
     update: Any,
 ) -> None:
     """Fire-and-forget an ACP session update from a worker thread."""
+    coro = conn.session_update(session_id, update)
     try:
-        future = asyncio.run_coroutine_threadsafe(
-            conn.session_update(session_id, update), loop
-        )
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+    except Exception:
+        if asyncio.iscoroutine(coro):
+            coro.close()
+        logger.debug("Failed to send ACP update", exc_info=True)
+        return
+
+    try:
         future.result(timeout=5)
     except Exception:
         logger.debug("Failed to send ACP update", exc_info=True)

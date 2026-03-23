@@ -331,7 +331,15 @@ class _IncomingHandler(ChatbotHandler if DINGTALK_STREAM_AVAILABLE else object):
             logger.error("[DingTalk] Event loop unavailable, cannot dispatch message")
             return dingtalk_stream.AckMessage.STATUS_OK, "OK"
 
-        future = asyncio.run_coroutine_threadsafe(self._adapter._on_message(message), loop)
+        coro = self._adapter._on_message(message)
+        try:
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
+        except Exception:
+            if asyncio.iscoroutine(coro):
+                coro.close()
+            logger.exception("[DingTalk] Error processing incoming message")
+            return dingtalk_stream.AckMessage.STATUS_OK, "OK"
+
         try:
             future.result(timeout=60)
         except Exception:

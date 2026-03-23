@@ -5041,18 +5041,18 @@ class GatewayRunner:
         _hooks_ref = self.hooks
 
         def _step_callback_sync(iteration: int, tool_names: list) -> None:
+            coro = _hooks_ref.emit("agent:step", {
+                "platform": source.platform.value if source.platform else "",
+                "user_id": source.user_id,
+                "session_id": session_id,
+                "iteration": iteration,
+                "tool_names": tool_names,
+            })
             try:
-                asyncio.run_coroutine_threadsafe(
-                    _hooks_ref.emit("agent:step", {
-                        "platform": source.platform.value if source.platform else "",
-                        "user_id": source.user_id,
-                        "session_id": session_id,
-                        "iteration": iteration,
-                        "tool_names": tool_names,
-                    }),
-                    _loop_for_step,
-                )
+                asyncio.run_coroutine_threadsafe(coro, _loop_for_step)
             except Exception as _e:
+                if asyncio.iscoroutine(coro):
+                    coro.close()
                 logger.debug("agent:step hook error: %s", _e)
 
         # Bridge sync status_callback → async adapter.send for context pressure
@@ -5063,16 +5063,16 @@ class GatewayRunner:
         def _status_callback_sync(event_type: str, message: str) -> None:
             if not _status_adapter:
                 return
+            coro = _status_adapter.send(
+                _status_chat_id,
+                message,
+                metadata=_status_thread_metadata,
+            )
             try:
-                asyncio.run_coroutine_threadsafe(
-                    _status_adapter.send(
-                        _status_chat_id,
-                        message,
-                        metadata=_status_thread_metadata,
-                    ),
-                    _loop_for_step,
-                )
+                asyncio.run_coroutine_threadsafe(coro, _loop_for_step)
             except Exception as _e:
+                if asyncio.iscoroutine(coro):
+                    coro.close()
                 logger.debug("status_callback error (%s): %s", event_type, _e)
 
         def run_sync():

@@ -70,8 +70,15 @@ class _AsyncWorker:
         a running event loop.
         """
         if self._loop is None or self._loop.is_closed():
+            if asyncio.iscoroutine(coro):
+                coro.close()
             raise RuntimeError("AsyncWorker loop is not running")
-        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        try:
+            future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        except Exception:
+            if asyncio.iscoroutine(coro):
+                coro.close()
+            raise
         return future.result(timeout=timeout)
 
     def stop(self):
