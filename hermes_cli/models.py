@@ -199,6 +199,15 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "qwen3.5-flash",
         "qwen-vl-max",
     ],
+    "featherless": [
+        "Qwen/Qwen2.5-72B-Instruct",
+        "Qwen/Qwen2.5-Coder-32B-Instruct",
+        "NousResearch/Hermes-3-Llama-3.1-70B",
+        "NousResearch/Hermes-3-Llama-3.1-8B",
+        "mistralai/Mistral-Small-24B-Instruct-2501",
+        "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
+        "meta-llama/Llama-3.3-70B-Instruct",
+    ],
 }
 
 _PROVIDER_LABELS = {
@@ -218,6 +227,7 @@ _PROVIDER_LABELS = {
     "ai-gateway": "AI Gateway",
     "kilocode": "Kilo Code",
     "alibaba": "Alibaba Cloud (DashScope)",
+    "featherless": "Featherless",
     "custom": "Custom endpoint",
 }
 
@@ -253,6 +263,7 @@ _PROVIDER_ALIASES = {
     "aliyun": "alibaba",
     "qwen": "alibaba",
     "alibaba-cloud": "alibaba",
+    "featherless-ai": "featherless",
 }
 
 
