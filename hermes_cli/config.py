@@ -510,6 +510,14 @@ OPTIONAL_ENV_VARS = {
         "password": False,
         "category": "provider",
     },
+    "CURSOR_API_KEY": {
+        "description": "Cursor API key for model discovery and Cursor ACP sessions",
+        "prompt": "Cursor API key",
+        "url": "https://docs.cursor.com/en/cli/reference/authentication",
+        "password": True,
+        "category": "provider",
+        "advanced": True,
+    },
     "DASHSCOPE_API_KEY": {
         "description": "Alibaba Cloud DashScope API key for Qwen models",
         "prompt": "DashScope API Key",
@@ -887,6 +895,14 @@ OPTIONAL_ENV_VARS = {
         "url": None,
         "password": False,
         "category": "setting",
+    },
+    "HERMES_ACP_ESTIMATE_USAGE": {
+        "description": "When using cursor-acp/copilot-acp, approximate token counts (chars/4) if the ACP result omits usage — not billing-grade",
+        "prompt": "ACP approximate usage (true/false)",
+        "url": None,
+        "password": False,
+        "category": "setting",
+        "advanced": True,
     },
 }
 

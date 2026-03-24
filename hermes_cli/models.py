@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 COPILOT_BASE_URL = "https://api.githubcopilot.com"
 COPILOT_MODELS_URL = f"{COPILOT_BASE_URL}/models"
+CURSOR_MODELS_URL = "https://api.cursor.com/v0/models"
 COPILOT_EDITOR_VERSION = "vscode/1.104.1"
 COPILOT_REASONING_EFFORTS_GPT5 = ["minimal", "low", "medium", "high"]
 COPILOT_REASONING_EFFORTS_O_SERIES = ["low", "medium", "high"]
@@ -23,6 +24,44 @@ COPILOT_REASONING_EFFORTS_O_SERIES = ["low", "medium", "high"]
 # Backward-compatible aliases for the earlier GitHub Models-backed Copilot work.
 GITHUB_MODELS_BASE_URL = COPILOT_BASE_URL
 GITHUB_MODELS_CATALOG_URL = COPILOT_MODELS_URL
+
+# Cursor ACP fallback model hints mirror the public models table in:
+# https://cursor.com/docs/models-and-pricing
+# These are only used when the live Cursor catalog is unavailable.
+CURSOR_FALLBACK_MODELS: list[str] = [
+    "Composer 2",
+    "Composer 2 (Fast)",
+    "Composer 1.5",
+    "Composer 1",
+    "Claude 4.6 Opus",
+    "Claude 4.6 Opus (Fast mode)",
+    "Claude 4.6 Sonnet",
+    "Claude 4 Sonnet",
+    "Claude 4 Sonnet 1M",
+    "Claude 4.5 Opus",
+    "Claude 4.5 Sonnet",
+    "Claude 4.5 Haiku",
+    "GPT-5.4",
+    "GPT-5.4 Mini",
+    "GPT-5.4 Nano",
+    "GPT-5.3 Codex",
+    "GPT-5.2",
+    "GPT-5.2 Codex",
+    "GPT-5.1 Codex",
+    "GPT-5.1 Codex Max",
+    "GPT-5.1 Codex Mini",
+    "GPT-5-Codex",
+    "GPT-5",
+    "GPT-5 Fast",
+    "GPT-5 Mini",
+    "Gemini 3.1 Pro",
+    "Gemini 3 Pro",
+    "Gemini 3 Pro Image Preview",
+    "Gemini 3 Flash",
+    "Gemini 2.5 Flash",
+    "Grok 4.20",
+    "Kimi K2.5",
+]
 
 # (model_id, display description shown in menus)
 OPENROUTER_MODELS: list[tuple[str, str]] = [
@@ -69,6 +108,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     "copilot-acp": [
         "copilot-acp",
     ],
+    "cursor-acp": list(CURSOR_FALLBACK_MODELS),
     "copilot": [
         "gpt-5.4",
         "gpt-5.4-mini",
@@ -205,6 +245,7 @@ _PROVIDER_LABELS = {
     "openrouter": "OpenRouter",
     "openai-codex": "OpenAI Codex",
     "copilot-acp": "GitHub Copilot ACP",
+    "cursor-acp": "Cursor ACP",
     "nous": "Nous Portal",
     "copilot": "GitHub Copilot",
     "zai": "Z.AI / GLM",
@@ -232,6 +273,8 @@ _PROVIDER_ALIASES = {
     "github-model": "copilot",
     "github-copilot-acp": "copilot-acp",
     "copilot-acp-agent": "copilot-acp",
+    "cursor": "cursor-acp",
+    "cursor-agent": "cursor-acp",
     "kimi": "kimi-coding",
     "moonshot": "kimi-coding",
     "minimax-china": "minimax-cn",
@@ -285,7 +328,7 @@ def list_available_providers() -> list[dict[str, str]]:
     """
     # Canonical providers in display order
     _PROVIDER_ORDER = [
-        "openrouter", "nous", "openai-codex", "copilot", "copilot-acp",
+        "openrouter", "nous", "openai-codex", "copilot", "copilot-acp", "cursor-acp",
         "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode", "anthropic", "alibaba",
         "opencode-zen", "opencode-go",
         "ai-gateway", "deepseek", "custom",
@@ -558,6 +601,10 @@ def provider_model_ids(provider: Optional[str]) -> list[str]:
             pass
         if normalized == "copilot-acp":
             return list(_PROVIDER_MODELS.get("copilot", []))
+    if normalized == "cursor-acp":
+        live = _fetch_cursor_models()
+        if live:
+            return live
     if normalized == "nous":
         # Try live Nous Portal /models endpoint
         try:
@@ -745,6 +792,47 @@ def _fetch_github_models(api_key: Optional[str] = None, timeout: float = 5.0) ->
     if not catalog:
         return None
     return [item.get("id", "") for item in catalog if item.get("id")]
+
+
+def _fetch_cursor_models(timeout: float = 5.0) -> Optional[list[str]]:
+    """Fetch available models from Cursor's public models endpoint."""
+    api_key = os.getenv("CURSOR_API_KEY", "").strip()
+    if not api_key:
+        return None
+
+    req = urllib.request.Request(
+        CURSOR_MODELS_URL,
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode())
+            models: list[str] = []
+            seen: set[str] = set()
+            if isinstance(data, list):
+                items = data
+            elif isinstance(data, dict):
+                items = data.get("data") or data.get("models") or data.get("items") or []
+            else:
+                items = []
+            for item in items:
+                model_id = ""
+                if isinstance(item, str):
+                    model_id = item.strip()
+                elif isinstance(item, dict):
+                    model_id = str(
+                        item.get("id")
+                        or item.get("name")
+                        or item.get("model")
+                        or ""
+                    ).strip()
+                if not model_id or model_id in seen:
+                    continue
+                seen.add(model_id)
+                models.append(model_id)
+            return models or None
+    except Exception:
+        return None
 
 
 _COPILOT_MODEL_ALIASES = {
