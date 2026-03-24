@@ -196,8 +196,11 @@ def _resolve_named_custom_runtime(
         os.getenv("OPENROUTER_API_KEY", "").strip(),
     ]
     api_key = next((candidate for candidate in api_key_candidates if has_usable_secret(candidate)), "")
+    placeholder_rejected = not api_key and any(
+        c and not has_usable_secret(c) for c in api_key_candidates
+    )
 
-    return {
+    result = {
         "provider": "openrouter",
         "api_mode": custom_provider.get("api_mode")
         or _detect_api_mode_for_url(base_url)
@@ -206,6 +209,9 @@ def _resolve_named_custom_runtime(
         "api_key": api_key,
         "source": f"custom_provider:{custom_provider.get('name', requested_provider)}",
     }
+    if placeholder_rejected:
+        result["_placeholder_rejected"] = True
+    return result
 
 
 def _resolve_openrouter_runtime(
@@ -276,10 +282,13 @@ def _resolve_openrouter_runtime(
         (str(candidate or "").strip() for candidate in api_key_candidates if has_usable_secret(candidate)),
         "",
     )
+    placeholder_rejected = not api_key and any(
+        str(c or "").strip() and not has_usable_secret(c) for c in api_key_candidates
+    )
 
     source = "explicit" if (explicit_api_key or explicit_base_url) else "env/config"
 
-    return {
+    result = {
         "provider": "openrouter",
         "api_mode": _parse_api_mode(model_cfg.get("api_mode"))
         or _detect_api_mode_for_url(base_url)
@@ -288,6 +297,9 @@ def _resolve_openrouter_runtime(
         "api_key": api_key,
         "source": source,
     }
+    if placeholder_rejected:
+        result["_placeholder_rejected"] = True
+    return result
 
 
 def resolve_runtime_provider(

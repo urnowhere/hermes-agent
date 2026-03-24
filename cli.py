@@ -1779,6 +1779,16 @@ class HermesCLI:
                     "using placeholder — local servers typically ignore auth",
                     base_url, _source,
                 )
+            elif runtime.get("_placeholder_rejected"):
+                self.console.print(
+                    "[bold red]Your configured API key is a placeholder value "
+                    "('none', 'null', 'dummy', etc.) which Hermes does not accept.[/] "
+                    "If you are running a [bold]local model[/] that does not require "
+                    "authentication, set [bold]base_url[/] to your server's address "
+                    "and leave the API key blank — Hermes will supply a no-op placeholder "
+                    "automatically. For cloud providers, please set a real API key."
+                )
+                return False
             else:
                 self.console.print("[bold red]Provider resolver returned an empty API key.[/]")
                 return False
