@@ -36,6 +36,127 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from cron.jobs import get_due_jobs, mark_job_run, save_job_output
 
+# ---------------------------------------------------------------------------
+# Trigger evaluation — $0 gates that run before the LLM is invoked
+# ---------------------------------------------------------------------------
+
+
+def check_trigger(job: dict) -> tuple[bool, str]:
+    """Evaluate a job's trigger condition.
+
+    Returns (should_run, reason).  When no trigger is configured the job
+    always runs.  Trigger evaluation is intentionally cheap — no LLM calls,
+    just SQL queries, file stats, or shell commands.
+    """
+    trigger = job.get("trigger")
+    if not trigger:
+        return True, "no_trigger"
+
+    trigger_type = trigger.get("type", "")
+
+    if trigger_type == "sql":
+        return _check_sql_trigger(trigger, job)
+    elif trigger_type == "file_changed":
+        return _check_file_trigger(trigger, job)
+    elif trigger_type == "command":
+        return _check_command_trigger(trigger)
+    else:
+        logger.warning("Job '%s': unknown trigger type '%s', running anyway",
+                        job.get("name", job["id"]), trigger_type)
+        return True, f"unknown_trigger_type:{trigger_type}"
+
+
+def _check_sql_trigger(trigger: dict, job: dict) -> tuple[bool, str]:
+    """Run a SQL query against state.db.  Skip if result < threshold."""
+    query = trigger.get("query", "")
+    threshold = trigger.get("threshold", 1)
+
+    if not query:
+        return True, "empty_query"
+
+    # Safety: block mutations
+    q_upper = query.strip().upper()
+    if any(q_upper.startswith(kw) for kw in
+           ("INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "ATTACH")):
+        logger.error("Job '%s': trigger query is not read-only, skipping",
+                      job.get("name", job["id"]))
+        return False, "blocked_mutation"
+
+    try:
+        from hermes_state import SessionDB
+        db = SessionDB()
+        cur = db.conn.execute(query)
+        row = cur.fetchone()
+        db.close()
+
+        if row is None:
+            return False, "null_result"
+
+        value = row[0] if isinstance(row, (tuple, list)) else row
+        if isinstance(value, (int, float)):
+            triggered = value >= threshold
+        else:
+            triggered = bool(value)
+
+        reason = f"sql:{value}>={threshold}" if triggered else f"sql:{value}<{threshold}"
+        return triggered, reason
+
+    except Exception as e:
+        logger.error("Job '%s': trigger query failed: %s", job.get("name", job["id"]), e)
+        return False, f"sql_error:{e}"
+
+
+def _check_file_trigger(trigger: dict, job: dict) -> tuple[bool, str]:
+    """Skip if file hasn't been modified since the job's last run."""
+    file_path = trigger.get("path", "")
+    if not file_path:
+        return True, "no_path"
+
+    path = Path(os.path.expanduser(file_path))
+    if not path.exists():
+        return False, f"file_not_found:{file_path}"
+
+    last_run = job.get("last_run_at")
+    if not last_run:
+        return True, "first_run"
+
+    try:
+        mtime = datetime.fromtimestamp(path.stat().st_mtime).astimezone()
+        last_run_dt = datetime.fromisoformat(last_run)
+        if last_run_dt.tzinfo is None:
+            last_run_dt = last_run_dt.astimezone()
+
+        if mtime > last_run_dt:
+            return True, f"file_modified:{mtime.isoformat()}"
+        return False, "file_unchanged"
+
+    except Exception as e:
+        logger.error("Job '%s': file trigger failed: %s", job.get("name", job["id"]), e)
+        return False, f"file_error:{e}"
+
+
+def _check_command_trigger(trigger: dict) -> tuple[bool, str]:
+    """Run a shell command.  Skip if exit code is non-zero."""
+    command = trigger.get("command", "")
+    if not command:
+        return True, "no_command"
+
+    try:
+        import subprocess
+        result = subprocess.run(
+            command, shell=True, capture_output=True, timeout=10,
+        )
+        if result.returncode == 0:
+            return True, "command_ok"
+        return False, f"command_exit:{result.returncode}"
+
+    except subprocess.TimeoutExpired:
+        logger.warning("Trigger command timed out (10s): %s", command[:80])
+        return False, "command_timeout"
+    except Exception as e:
+        logger.error("Trigger command failed: %s", e)
+        return False, f"command_error:{e}"
+
 # Sentinel: when a cron agent has nothing new to report, it can start its
 # response with this marker to suppress delivery.  Output is still saved
 # locally for audit.
@@ -528,6 +649,15 @@ def tick(verbose: bool = True) -> int:
         executed = 0
         for job in due_jobs:
             try:
+                # Trigger gate: cheap pre-check before spawning the agent
+                should_run, trigger_reason = check_trigger(job)
+                if not should_run:
+                    logger.info("Job '%s' skipped by trigger: %s",
+                                job.get("name", job["id"]), trigger_reason)
+                    # Advance the schedule so the job is checked again next tick
+                    mark_job_run(job["id"], True, None)
+                    continue
+
                 success, output, final_response, error = run_job(job)
 
                 output_file = save_job_output(job["id"], output)

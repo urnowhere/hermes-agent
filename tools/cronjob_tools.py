@@ -135,6 +135,7 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         "state": job.get("state", "scheduled" if job.get("enabled", True) else "paused"),
         "paused_at": job.get("paused_at"),
         "paused_reason": job.get("paused_reason"),
+        "trigger": job.get("trigger"),
     }
 
 
@@ -153,6 +154,7 @@ def cronjob(
     provider: Optional[str] = None,
     base_url: Optional[str] = None,
     reason: Optional[str] = None,
+    trigger: Optional[Dict[str, Any]] = None,
     task_id: str = None,
 ) -> str:
     """Unified cron job management tool."""
@@ -183,6 +185,7 @@ def cronjob(
                 model=_normalize_optional_job_value(model),
                 provider=_normalize_optional_job_value(provider),
                 base_url=_normalize_optional_job_value(base_url, strip_trailing_slash=True),
+                trigger=trigger,
             )
             return json.dumps(
                 {
@@ -278,6 +281,8 @@ def cronjob(
                 if job.get("state") != "paused":
                     updates["state"] = "scheduled"
                     updates["enabled"] = True
+            if trigger is not None:
+                updates["trigger"] = trigger if trigger else None
             if not updates:
                 return json.dumps({"success": False, "error": "No updates provided."}, indent=2)
             updated = update_job(job_id, updates)
@@ -402,6 +407,32 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
             "reason": {
                 "type": "string",
                 "description": "Optional pause reason"
+            },
+            "trigger": {
+                "type": "object",
+                "description": "Optional pre-run condition. If the trigger evaluates to false, the job is skipped (no LLM cost). Three types: sql (query state.db, skip if result < threshold), file_changed (skip if file unchanged since last run), command (skip if exit code non-zero). Examples: {\"type\": \"sql\", \"query\": \"SELECT COUNT(*) FROM messages WHERE timestamp > strftime('%s','now','-1 hour')\", \"threshold\": 1}, {\"type\": \"file_changed\", \"path\": \"~/data/feed.json\"}, {\"type\": \"command\", \"command\": \"test -f /tmp/new-data-ready\"}",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "description": "Trigger type: sql, file_changed, or command"
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "For sql triggers: read-only SQL query against state.db"
+                    },
+                    "threshold": {
+                        "type": "number",
+                        "description": "For sql triggers: minimum value to proceed (default: 1)"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "For file_changed triggers: file path to monitor"
+                    },
+                    "command": {
+                        "type": "string",
+                        "description": "For command triggers: shell command (must exit 0 to proceed)"
+                    }
+                }
             }
         },
         "required": ["action"]
@@ -451,6 +482,7 @@ registry.register(
         provider=args.get("provider"),
         base_url=args.get("base_url"),
         reason=args.get("reason"),
+        trigger=args.get("trigger"),
         task_id=kw.get("task_id"),
     ),
     check_fn=check_cronjob_requirements,

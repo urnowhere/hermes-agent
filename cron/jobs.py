@@ -361,6 +361,7 @@ def create_job(
     model: Optional[str] = None,
     provider: Optional[str] = None,
     base_url: Optional[str] = None,
+    trigger: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -377,6 +378,14 @@ def create_job(
         model: Optional per-job model override
         provider: Optional per-job provider override
         base_url: Optional per-job base URL override
+        trigger: Optional condition that must be met before the job runs.
+            Dict with "type" key and type-specific config:
+            - {"type": "sql", "query": "SELECT COUNT(*) ...", "threshold": 1}
+              Runs query against state.db; skips if result < threshold (default 1)
+            - {"type": "file_changed", "path": "/path/to/file"}
+              Skips if file mtime hasn't changed since last run
+            - {"type": "command", "command": "test -f /tmp/flag"}
+              Skips if command exits non-zero
 
     Returns:
         The created job dict
@@ -434,6 +443,7 @@ def create_job(
         # Delivery configuration
         "deliver": deliver,
         "origin": origin,  # Tracks where job was created for "origin" delivery
+        "trigger": trigger,
     }
 
     jobs = load_jobs()
