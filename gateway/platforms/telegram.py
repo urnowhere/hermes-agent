@@ -490,6 +490,11 @@ class TelegramAdapter(BasePlatformAdapter):
             message_ids = []
             thread_id = metadata.get("thread_id") if metadata else None
             
+            # Optional: Send tool hints silently
+            silent_tool_hints = self.config.extra.get("silent_tool_hints", False)
+            is_tool_hint = metadata.get("is_tool_hint", False) if metadata else False
+            disable_notification = silent_tool_hints and is_tool_hint
+
             try:
                 from telegram.error import NetworkError as _NetErr
             except ImportError:
@@ -510,6 +515,7 @@ class TelegramAdapter(BasePlatformAdapter):
                                 parse_mode=ParseMode.MARKDOWN_V2,
                                 reply_to_message_id=reply_to_id,
                                 message_thread_id=int(thread_id) if thread_id else None,
+                                disable_notification=disable_notification,
                             )
                         except Exception as md_error:
                             # Markdown parsing failed, try plain text
@@ -522,6 +528,7 @@ class TelegramAdapter(BasePlatformAdapter):
                                     parse_mode=None,
                                     reply_to_message_id=reply_to_id,
                                     message_thread_id=int(thread_id) if thread_id else None,
+                                    disable_notification=disable_notification,
                                 )
                             else:
                                 raise
