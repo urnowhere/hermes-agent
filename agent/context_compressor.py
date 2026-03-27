@@ -84,7 +84,9 @@ class ContextCompressor:
         self.quiet_mode = quiet_mode
 
         self.context_length = get_model_context_length(
-            model, base_url=base_url, api_key=api_key,
+            model,
+            base_url=base_url,
+            api_key=api_key,
             config_context_length=config_context_length,
             provider=provider,
         )
@@ -95,7 +97,8 @@ class ContextCompressor:
         target_tokens = int(self.threshold_tokens * self.summary_target_ratio)
         self.tail_token_budget = target_tokens
         self.max_summary_tokens = min(
-            int(self.context_length * 0.05), _SUMMARY_TOKENS_CEILING,
+            int(self.context_length * 0.05),
+            _SUMMARY_TOKENS_CEILING,
         )
 
         if not quiet_mode:
@@ -103,11 +106,29 @@ class ContextCompressor:
                 "Context compressor initialized: model=%s context_length=%d "
                 "threshold=%d (%.0f%%) target_ratio=%.0f%% tail_budget=%d "
                 "provider=%s base_url=%s",
-                model, self.context_length, self.threshold_tokens,
-                threshold_percent * 100, self.summary_target_ratio * 100,
+                model,
+                self.context_length,
+                self.threshold_tokens,
+                threshold_percent * 100,
+                self.summary_target_ratio * 100,
                 self.tail_token_budget,
-                provider or "none", base_url or "none",
+                provider or "none",
+                base_url or "none",
             )
+
+        # Warn if context is too small for typical Hermes system prompts (~8-15K tokens)
+        _MIN_SAFE_CONTEXT = 16384
+        if self.context_length < _MIN_SAFE_CONTEXT:
+            logger.warning(
+                "Context length %d tokens is below recommended minimum %d. "
+                "Hermes system prompts are typically 8-15K tokens — requests will "
+                "fail with 'n_keep >= n_ctx' or 'Compute error' if the system prompt "
+                "alone exceeds the context window. Load the model with at least %d tokens.",
+                self.context_length,
+                _MIN_SAFE_CONTEXT,
+                _MIN_SAFE_CONTEXT,
+            )
+
         self._context_probed = False  # True after a step-down from context error
 
         self.last_prompt_tokens = 0
@@ -141,7 +162,9 @@ class ContextCompressor:
             "last_prompt_tokens": self.last_prompt_tokens,
             "threshold_tokens": self.threshold_tokens,
             "context_length": self.context_length,
-            "usage_percent": (self.last_prompt_tokens / self.context_length * 100) if self.context_length else 0,
+            "usage_percent": (self.last_prompt_tokens / self.context_length * 100)
+            if self.context_length
+            else 0,
             "compression_count": self.compression_count,
         }
 
@@ -150,7 +173,9 @@ class ContextCompressor:
     # ------------------------------------------------------------------
 
     def _prune_old_tool_results(
-        self, messages: List[Dict[str, Any]], protect_tail_count: int,
+        self,
+        messages: List[Dict[str, Any]],
+        protect_tail_count: int,
     ) -> tuple[List[Dict[str, Any]], int]:
         """Replace old tool result contents with a short placeholder.
 
@@ -247,7 +272,9 @@ class ContextCompressor:
 
         return "\n\n".join(parts)
 
-    def _generate_summary(self, turns_to_summarize: List[Dict[str, Any]]) -> Optional[str]:
+    def _generate_summary(
+        self, turns_to_summarize: List[Dict[str, Any]]
+    ) -> Optional[str]:
         """Generate a structured summary of conversation turns.
 
         Uses a structured template (Goal, Progress, Decisions, Files, Next Steps)
@@ -361,8 +388,10 @@ Write only the summary body. Do not include any preamble or prefix."""
             self._previous_summary = summary
             return self._with_summary_prefix(summary)
         except RuntimeError:
-            logging.warning("Context compression: no provider available for "
-                            "summary. Middle turns will be dropped without summary.")
+            logging.warning(
+                "Context compression: no provider available for "
+                "summary. Middle turns will be dropped without summary."
+            )
             return None
         except Exception as e:
             logging.warning("Failed to generate context summary: %s", e)
@@ -374,7 +403,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         text = (summary or "").strip()
         for prefix in (LEGACY_SUMMARY_PREFIX, SUMMARY_PREFIX):
             if text.startswith(prefix):
-                text = text[len(prefix):].lstrip()
+                text = text[len(prefix) :].lstrip()
                 break
         return f"{SUMMARY_PREFIX}\n{text}" if text else SUMMARY_PREFIX
 
@@ -389,7 +418,9 @@ Write only the summary body. Do not include any preamble or prefix."""
             return tc.get("id", "")
         return getattr(tc, "id", "") or ""
 
-    def _sanitize_tool_pairs(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _sanitize_tool_pairs(
+        self, messages: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
         """Fix orphaned tool_call / tool_result pairs after compression.
 
         Two failure modes:
@@ -422,11 +453,18 @@ Write only the summary body. Do not include any preamble or prefix."""
         orphaned_results = result_call_ids - surviving_call_ids
         if orphaned_results:
             messages = [
-                m for m in messages
-                if not (m.get("role") == "tool" and m.get("tool_call_id") in orphaned_results)
+                m
+                for m in messages
+                if not (
+                    m.get("role") == "tool"
+                    and m.get("tool_call_id") in orphaned_results
+                )
             ]
             if not self.quiet_mode:
-                logger.info("Compression sanitizer: removed %d orphaned tool result(s)", len(orphaned_results))
+                logger.info(
+                    "Compression sanitizer: removed %d orphaned tool result(s)",
+                    len(orphaned_results),
+                )
 
         # 2. Add stub results for assistant tool_calls whose results were dropped
         missing_results = surviving_call_ids - result_call_ids
@@ -438,14 +476,19 @@ Write only the summary body. Do not include any preamble or prefix."""
                     for tc in msg.get("tool_calls") or []:
                         cid = self._get_tool_call_id(tc)
                         if cid in missing_results:
-                            patched.append({
-                                "role": "tool",
-                                "content": "[Result from earlier conversation — see context summary above]",
-                                "tool_call_id": cid,
-                            })
+                            patched.append(
+                                {
+                                    "role": "tool",
+                                    "content": "[Result from earlier conversation — see context summary above]",
+                                    "tool_call_id": cid,
+                                }
+                            )
             messages = patched
             if not self.quiet_mode:
-                logger.info("Compression sanitizer: added %d stub tool result(s)", len(missing_results))
+                logger.info(
+                    "Compression sanitizer: added %d stub tool result(s)",
+                    len(missing_results),
+                )
 
         return messages
 
@@ -479,7 +522,11 @@ Write only the summary body. Do not include any preamble or prefix."""
             check -= 1
         # If we landed on the parent assistant with tool_calls, pull the
         # boundary before it so the whole group gets summarised together.
-        if check >= 0 and messages[check].get("role") == "assistant" and messages[check].get("tool_calls"):
+        if (
+            check >= 0
+            and messages[check].get("role") == "assistant"
+            and messages[check].get("tool_calls")
+        ):
             idx = check
         return idx
 
@@ -488,7 +535,9 @@ Write only the summary body. Do not include any preamble or prefix."""
     # ------------------------------------------------------------------
 
     def _find_tail_cut_by_tokens(
-        self, messages: List[Dict[str, Any]], head_end: int,
+        self,
+        messages: List[Dict[str, Any]],
+        head_end: int,
         token_budget: int | None = None,
     ) -> int:
         """Walk backward from the end of messages, accumulating tokens until
@@ -542,7 +591,9 @@ Write only the summary body. Do not include any preamble or prefix."""
     # Main compression entry point
     # ------------------------------------------------------------------
 
-    def compress(self, messages: List[Dict[str, Any]], current_tokens: int = None) -> List[Dict[str, Any]]:
+    def compress(
+        self, messages: List[Dict[str, Any]], current_tokens: int = None
+    ) -> List[Dict[str, Any]]:
         """Compress conversation messages by summarizing middle turns.
 
         Algorithm:
@@ -565,11 +616,16 @@ Write only the summary body. Do not include any preamble or prefix."""
                 )
             return messages
 
-        display_tokens = current_tokens if current_tokens else self.last_prompt_tokens or estimate_messages_tokens_rough(messages)
+        display_tokens = (
+            current_tokens
+            if current_tokens
+            else self.last_prompt_tokens or estimate_messages_tokens_rough(messages)
+        )
 
         # Phase 1: Prune old tool results (cheap, no LLM call)
         messages, pruned_count = self._prune_old_tool_results(
-            messages, protect_tail_count=self.protect_last_n * 3,
+            messages,
+            protect_tail_count=self.protect_last_n * 3,
         )
         if pruned_count and not self.quiet_mode:
             logger.info("Pre-compression: pruned %d old tool result(s)", pruned_count)
@@ -624,8 +680,16 @@ Write only the summary body. Do not include any preamble or prefix."""
 
         _merge_summary_into_tail = False
         if summary:
-            last_head_role = messages[compress_start - 1].get("role", "user") if compress_start > 0 else "user"
-            first_tail_role = messages[compress_end].get("role", "user") if compress_end < n_messages else "user"
+            last_head_role = (
+                messages[compress_start - 1].get("role", "user")
+                if compress_start > 0
+                else "user"
+            )
+            first_tail_role = (
+                messages[compress_end].get("role", "user")
+                if compress_end < n_messages
+                else "user"
+            )
             # Pick a role that avoids consecutive same-role with both neighbors.
             # Priority: avoid colliding with head (already committed), then tail.
             if last_head_role in ("assistant", "tool"):
@@ -648,7 +712,9 @@ Write only the summary body. Do not include any preamble or prefix."""
                 compressed.append({"role": summary_role, "content": summary})
         else:
             if not self.quiet_mode:
-                logger.warning("No summary model available — middle turns dropped without summary")
+                logger.warning(
+                    "No summary model available — middle turns dropped without summary"
+                )
 
         for i in range(compress_end, n_messages):
             msg = messages[i].copy()
