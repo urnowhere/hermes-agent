@@ -674,6 +674,44 @@ class TestBuildApiKwargs:
         kwargs = agent._build_api_kwargs(messages)
         assert kwargs["max_tokens"] == 4096
 
+    def test_sampling_params_injected_for_chat_completions(self, agent):
+        agent.temperature = 0.42
+        agent.top_p = 0.91
+        messages = [{"role": "user", "content": "hi"}]
+        kwargs = agent._build_api_kwargs(messages)
+        assert kwargs["temperature"] == pytest.approx(0.42)
+        assert kwargs["top_p"] == pytest.approx(0.91)
+
+    def test_sampling_params_injected_for_codex_responses(self, agent):
+        agent.api_mode = "codex_responses"
+        agent.temperature = 0.3
+        agent.top_p = 0.8
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "hi"},
+        ]
+        kwargs = agent._build_api_kwargs(messages)
+        assert kwargs["temperature"] == pytest.approx(0.3)
+        assert kwargs["top_p"] == pytest.approx(0.8)
+
+    def test_sampling_params_for_anthropic_respect_adapter_temperature(self, agent):
+        agent.api_mode = "anthropic_messages"
+        agent.temperature = 0.5
+        agent.top_p = 0.77
+
+        with patch("agent.anthropic_adapter.build_anthropic_kwargs") as mock_build:
+            mock_build.return_value = {
+                "model": "claude-sonnet-4-20250514",
+                "messages": [],
+                "max_tokens": 4096,
+                "temperature": 1,
+            }
+            kwargs = agent._build_api_kwargs([{"role": "user", "content": "test"}])
+
+        # Adapter-enforced temperature wins (older Anthropic thinking mode).
+        assert kwargs["temperature"] == 1
+        assert kwargs["top_p"] == pytest.approx(0.77)
+
 
 class TestBuildAssistantMessage:
     def test_basic_message(self, agent):

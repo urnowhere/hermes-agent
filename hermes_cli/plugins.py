@@ -30,6 +30,7 @@ from __future__ import annotations
 import importlib
 import importlib.metadata
 import importlib.util
+import inspect
 import logging
 import os
 import sys
@@ -61,6 +62,11 @@ VALID_HOOKS: Set[str] = {
 ENTRY_POINTS_GROUP = "hermes_agent.plugins"
 
 _NS_PARENT = "hermes_plugins"
+
+# Tracks command tokens (canonical + aliases) that were already injected into
+# hermes_cli.commands.COMMAND_REGISTRY. Kept module-global so a reset
+# _plugin_manager in tests/new sessions doesn't duplicate command defs.
+_REGISTERED_PLUGIN_COMMAND_TOKENS: Set[str] = set()
 
 
 def _env_enabled(name: str) -> bool:
@@ -95,6 +101,7 @@ class LoadedPlugin:
     module: Optional[types.ModuleType] = None
     tools_registered: List[str] = field(default_factory=list)
     hooks_registered: List[str] = field(default_factory=list)
+    commands_registered: List[str] = field(default_factory=list)
     enabled: bool = False
     error: Optional[str] = None
 
@@ -160,6 +167,39 @@ class PluginContext:
         self._manager._hooks.setdefault(hook_name, []).append(callback)
         logger.debug("Plugin %s registered hook: %s", self.manifest.name, hook_name)
 
+    # -- slash command registration -----------------------------------------
+
+    def register_command(
+        self,
+        name: str,
+        handler: Callable[..., Any],
+        description: str = "",
+        *,
+        category: str = "Tools & Skills",
+        args_hint: str = "",
+        aliases: tuple[str, ...] = (),
+        subcommands: tuple[str, ...] = (),
+        cli_only: bool = False,
+        gateway_only: bool = False,
+    ) -> None:
+        """Register a plugin-defined slash command.
+
+        Handlers should accept at least an ``args`` string and may optionally
+        accept a second ``context`` argument or ``context=...`` keyword.
+        """
+        self._manager.register_command(
+            plugin_name=self.manifest.name,
+            name=name,
+            handler=handler,
+            description=description,
+            category=category,
+            args_hint=args_hint,
+            aliases=aliases,
+            subcommands=subcommands,
+            cli_only=cli_only,
+            gateway_only=gateway_only,
+        )
+
 
 # ---------------------------------------------------------------------------
 # PluginManager
@@ -172,6 +212,10 @@ class PluginManager:
         self._plugins: Dict[str, LoadedPlugin] = {}
         self._hooks: Dict[str, List[Callable]] = {}
         self._plugin_tool_names: Set[str] = set()
+        # command token (canonical + aliases) -> handler
+        self._plugin_commands: Dict[str, Callable[..., Any]] = {}
+        # canonical command names only
+        self._plugin_command_names: Set[str] = set()
         self._discovered: bool = False
 
     # -----------------------------------------------------------------------
@@ -209,6 +253,86 @@ class PluginManager:
                 len(self._plugins),
                 sum(1 for p in self._plugins.values() if p.enabled),
             )
+
+    def register_command(
+        self,
+        *,
+        plugin_name: str,
+        name: str,
+        handler: Callable[..., Any],
+        description: str = "",
+        category: str = "Tools & Skills",
+        args_hint: str = "",
+        aliases: tuple[str, ...] = (),
+        subcommands: tuple[str, ...] = (),
+        cli_only: bool = False,
+        gateway_only: bool = False,
+    ) -> None:
+        """Register a plugin slash command and expose it in command registries."""
+        from hermes_cli.commands import CommandDef, register_plugin_command, resolve_command
+
+        cmd_name = (name or "").strip().lower().lstrip("/")
+        if not cmd_name:
+            raise ValueError("Plugin command name cannot be empty")
+        if cli_only and gateway_only:
+            raise ValueError("Plugin command cannot be both cli_only and gateway_only")
+
+        alias_tokens: list[str] = []
+        seen_tokens = {cmd_name}
+        for raw_alias in aliases or ():
+            alias = str(raw_alias).strip().lower().lstrip("/")
+            if not alias or alias in seen_tokens:
+                continue
+            seen_tokens.add(alias)
+            alias_tokens.append(alias)
+
+        # Prevent collisions with built-ins and existing plugin commands.
+        for token in (cmd_name, *alias_tokens):
+            if token in self._plugin_commands:
+                raise ValueError(
+                    f"Plugin command '/{token}' is already registered by another plugin command."
+                )
+
+            existing = resolve_command(token)
+            if existing and token not in _REGISTERED_PLUGIN_COMMAND_TOKENS:
+                raise ValueError(
+                    f"Plugin command '/{token}' conflicts with existing '/{existing.name}'."
+                )
+
+        # Register in central slash-command registry exactly once per process.
+        if cmd_name not in _REGISTERED_PLUGIN_COMMAND_TOKENS:
+            register_plugin_command(
+                CommandDef(
+                    name=cmd_name,
+                    description=description or f"Plugin command from {plugin_name}",
+                    category=category,
+                    aliases=tuple(alias_tokens),
+                    args_hint=args_hint,
+                    subcommands=tuple(subcommands),
+                    cli_only=cli_only,
+                    gateway_only=gateway_only,
+                )
+            )
+            _REGISTERED_PLUGIN_COMMAND_TOKENS.add(cmd_name)
+            _REGISTERED_PLUGIN_COMMAND_TOKENS.update(alias_tokens)
+
+        self._plugin_commands[cmd_name] = handler
+        for alias in alias_tokens:
+            self._plugin_commands[alias] = handler
+        self._plugin_command_names.add(cmd_name)
+
+        logger.debug("Plugin %s registered command: /%s", plugin_name, cmd_name)
+
+    def get_command_names(self) -> Set[str]:
+        """Return plugin command tokens (canonical + aliases)."""
+        return set(self._plugin_commands.keys())
+
+    def get_command_handler(self, name: str) -> Optional[Callable[..., Any]]:
+        """Return the registered plugin command handler for a token."""
+        token = (name or "").strip().lower().lstrip("/")
+        if not token:
+            return None
+        return self._plugin_commands.get(token)
 
     # -----------------------------------------------------------------------
     # Directory scanning
@@ -304,26 +428,18 @@ class PluginManager:
                 logger.warning("Plugin '%s' has no register() function", manifest.name)
             else:
                 ctx = PluginContext(manifest, self)
+                tools_before = set(self._plugin_tool_names)
+                hooks_before = {h for h, cbs in self._hooks.items() if cbs}
+                commands_before = set(self._plugin_command_names)
+
                 register_fn(ctx)
-                loaded.tools_registered = [
-                    t for t in self._plugin_tool_names
-                    if t not in {
-                        n
-                        for name, p in self._plugins.items()
-                        for n in p.tools_registered
-                    }
-                ]
-                loaded.hooks_registered = list(
-                    {
-                        h
-                        for h, cbs in self._hooks.items()
-                        if cbs  # non-empty
-                    }
-                    - {
-                        h
-                        for name, p in self._plugins.items()
-                        for h in p.hooks_registered
-                    }
+
+                loaded.tools_registered = sorted(self._plugin_tool_names - tools_before)
+                loaded.hooks_registered = sorted(
+                    {h for h, cbs in self._hooks.items() if cbs} - hooks_before
+                )
+                loaded.commands_registered = sorted(
+                    self._plugin_command_names - commands_before
                 )
                 loaded.enabled = True
 
@@ -420,6 +536,7 @@ class PluginManager:
                     "enabled": loaded.enabled,
                     "tools": len(loaded.tools_registered),
                     "hooks": len(loaded.hooks_registered),
+                    "commands": len(loaded.commands_registered),
                     "error": loaded.error,
                 }
             )
@@ -454,6 +571,72 @@ def invoke_hook(hook_name: str, **kwargs: Any) -> None:
 def get_plugin_tool_names() -> Set[str]:
     """Return the set of tool names registered by plugins."""
     return get_plugin_manager()._plugin_tool_names
+
+
+def get_plugin_command_names() -> Set[str]:
+    """Return plugin command tokens (canonical + aliases)."""
+    discover_plugins()
+    return get_plugin_manager().get_command_names()
+
+
+def get_plugin_command_handler(name: str) -> Optional[Callable[..., Any]]:
+    """Return a plugin command handler by command token."""
+    discover_plugins()
+    return get_plugin_manager().get_command_handler(name)
+
+
+def _call_plugin_command_handler(
+    handler: Callable[..., Any],
+    args: str,
+    context: dict[str, Any],
+) -> Any:
+    """Call a plugin command handler with backward-compatible signatures.
+
+    Supported handler signatures:
+    - handler(args)
+    - handler(args, context)
+    - handler(args, *, context=...)
+    - handler(args, **kwargs)
+    """
+    try:
+        sig = inspect.signature(handler)
+    except (TypeError, ValueError):
+        # Builtins/objects without signatures: best effort legacy call.
+        return handler(args)
+
+    params = list(sig.parameters.values())
+    has_var_pos = any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params)
+    has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
+
+    positional = [
+        p
+        for p in params
+        if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+
+    if len(positional) >= 2 or has_var_pos:
+        return handler(args, context)
+
+    if any(p.name == "context" for p in params) or has_var_kw:
+        return handler(args, context=context)
+
+    return handler(args)
+
+
+def invoke_plugin_command(
+    name: str,
+    args: str = "",
+    *,
+    context: Optional[dict[str, Any]] = None,
+) -> Any:
+    """Invoke a plugin command by name and optional execution context.
+
+    Returns None when no command is registered for *name*.
+    """
+    handler = get_plugin_command_handler(name)
+    if handler is None:
+        return None
+    return _call_plugin_command_handler(handler, args, context or {})
 
 
 def get_plugin_toolsets() -> List[tuple]:

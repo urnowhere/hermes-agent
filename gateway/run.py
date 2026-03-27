@@ -1849,15 +1849,25 @@ class GatewayRunner:
         # Plugin-registered slash commands
         if command:
             try:
-                from hermes_cli.plugins import get_plugin_command_handler
-                plugin_handler = get_plugin_command_handler(command)
-                if plugin_handler:
-                    user_args = event.get_command_args().strip()
-                    import asyncio as _aio
-                    result = plugin_handler(user_args)
-                    if _aio.iscoroutine(result):
-                        result = await result
-                    return str(result) if result else None
+                from hermes_cli.plugins import invoke_plugin_command
+
+                user_args = event.get_command_args().strip()
+                result = invoke_plugin_command(
+                    command,
+                    user_args,
+                    context={
+                        "surface": "gateway",
+                        "runner": self,
+                        "event": event,
+                        "session_key": _quick_key,
+                    },
+                )
+
+                import asyncio as _aio
+                if _aio.iscoroutine(result):
+                    result = await result
+                if result is not None:
+                    return str(result)
             except Exception as e:
                 logger.debug("Plugin command dispatch failed (non-fatal): %s", e)
 
@@ -2948,6 +2958,12 @@ class GatewayRunner:
     
     async def _handle_help_command(self, event: MessageEvent) -> str:
         """Handle /help command - list available commands."""
+        try:
+            from hermes_cli.plugins import discover_plugins
+            discover_plugins()
+        except Exception:
+            pass
+
         from hermes_cli.commands import gateway_help_lines
         lines = [
             "📖 **Hermes Commands**\n",

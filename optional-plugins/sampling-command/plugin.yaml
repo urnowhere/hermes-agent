@@ -1,0 +1,4 @@
+name: sampling-command
+version: 1.0.0
+description: CLI /sampling slash command for live temperature/top_p session control
+author: Hermes Agent

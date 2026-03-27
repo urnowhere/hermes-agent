@@ -92,6 +92,25 @@ class TestCLIQuickCommands:
         printed = self._printed_plain(cli.console.print.call_args[0][0])
         assert printed == "overridden"
 
+    def test_plugin_command_dispatch_invokes_plugin_with_cli_context(self):
+        """Plugin slash commands should receive CLI runtime context."""
+        cli = self._make_cli({})
+        with patch("cli._get_plugin_cmd_handler_names", return_value={"plug"}), \
+             patch("hermes_cli.plugins.invoke_plugin_command", return_value="plugin-ok") as invoke_mock, \
+             patch("cli._cprint") as mock_cprint:
+            cli.process_command("/plug alpha")
+
+        invoke_mock.assert_called_once()
+        call_args, call_kwargs = invoke_mock.call_args
+        assert call_args[0] == "plug"
+        assert call_args[1] == "alpha"
+        context = call_kwargs.get("context", {})
+        assert context.get("surface") == "cli"
+        assert context.get("cli") is cli
+
+        printed = "\n".join(str(call) for call in mock_cprint.call_args_list)
+        assert "plugin-ok" in printed
+
     def test_unknown_command_still_shows_error(self):
         cli = self._make_cli({})
         with patch("cli._cprint") as mock_cprint:
@@ -186,3 +205,28 @@ class TestGatewayQuickCommands:
         event = self._make_event("limits")
         result = await runner._handle_message(event)
         assert result == "ok"
+
+    @pytest.mark.asyncio
+    async def test_gateway_plugin_command_dispatch_invokes_plugin_with_context(self):
+        from gateway.run import GatewayRunner
+
+        runner = GatewayRunner.__new__(GatewayRunner)
+        runner.config = {"quick_commands": {}}
+        runner._running_agents = {}
+        runner._pending_messages = {}
+        runner._is_user_authorized = MagicMock(return_value=True)
+
+        event = self._make_event("plug", "alpha")
+
+        with patch("hermes_cli.plugins.invoke_plugin_command", return_value="plugin-ok") as invoke_mock:
+            result = await runner._handle_message(event)
+
+        assert result == "plugin-ok"
+        invoke_mock.assert_called_once()
+        call_args, call_kwargs = invoke_mock.call_args
+        assert call_args[0] == "plug"
+        assert call_args[1] == "alpha"
+        context = call_kwargs.get("context", {})
+        assert context.get("surface") == "gateway"
+        assert context.get("runner") is runner
+        assert context.get("event") is event

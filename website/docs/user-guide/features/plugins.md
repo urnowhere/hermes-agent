@@ -72,18 +72,74 @@ def register(ctx):
     )
 ```
 
-The handler receives the argument string (everything after `/greet`) and returns a string to display. Registered commands automatically appear in `/help`, tab autocomplete, Telegram bot menu, and Slack subcommand mapping.
+The handler receives the argument string (everything after `/greet`) and may
+also accept optional runtime context:
+
+- `handler(args)`
+- `handler(args, context)`
+- `handler(args, *, context=...)`
+
+Registered commands automatically appear in `/help`, tab autocomplete,
+Telegram bot menu, and Slack subcommand mapping.
 
 | Parameter | Description |
 |-----------|-------------|
 | `name` | Command name without slash |
-| `handler` | Callable that takes `args: str` and returns `str | None` |
+| `handler` | Callable that takes `args: str` and optionally `context`, returning `str | None` |
 | `description` | Shown in `/help` |
 | `args_hint` | Usage hint, e.g. `"[name]"` |
 | `aliases` | Tuple of alternative names |
 | `cli_only` | Only available in CLI |
 | `gateway_only` | Only available in messaging platforms |
 | `gateway_config_gate` | Config dotpath (e.g. `"display.my_option"`). When set on a `cli_only` command, the command becomes available in the gateway if the config value is truthy. |
+
+Example `/sampling` command (CLI-only, live session updates):
+
+```python
+def set_sampling(args, context=None):
+    context = context or {}
+    if context.get("surface") != "cli":
+        return "This command is CLI-only"
+
+    cli = context.get("cli")
+    if not cli:
+        return "Missing CLI context"
+
+    temp_raw, top_p_raw = args.split()
+    temp = None if temp_raw == "default" else float(temp_raw)
+    top_p = None if top_p_raw == "default" else float(top_p_raw)
+
+    cli.temperature = temp
+    cli.top_p = top_p
+    if getattr(cli, "agent", None):
+        cli.agent.temperature = temp
+        cli.agent.top_p = top_p
+
+    return f"Sampling updated: temperature={temp}, top_p={top_p}"
+
+
+def register(ctx):
+    ctx.register_command(
+        name="sampling",
+        handler=set_sampling,
+        description="Set session temperature/top_p",
+        args_hint="<temperature|default> <top_p|default>",
+        cli_only=True,
+    )
+```
+
+A full working plugin implementation is included at:
+
+- `optional-plugins/sampling-command/plugin.yaml`
+- `optional-plugins/sampling-command/__init__.py`
+
+Install it into your user plugin directory:
+
+```bash
+mkdir -p ~/.hermes/plugins/sampling-command
+cp optional-plugins/sampling-command/plugin.yaml ~/.hermes/plugins/sampling-command/
+cp optional-plugins/sampling-command/__init__.py ~/.hermes/plugins/sampling-command/
+```
 
 ## Managing plugins
 

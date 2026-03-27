@@ -424,6 +424,8 @@ class AIAgent:
         checkpoints_enabled: bool = False,
         checkpoint_max_snapshots: int = 50,
         pass_session_id: bool = False,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
     ):
         """
         Initialize the AI Agent.
@@ -489,6 +491,8 @@ class AIAgent:
         self.background_review_callback = None  # Optional sync callback for gateway delivery
         self.skip_context_files = skip_context_files
         self.pass_session_id = pass_session_id
+        self.temperature = temperature
+        self.top_p = top_p
         self.log_prefix_chars = log_prefix_chars
         self.log_prefix = f"{log_prefix} " if log_prefix else ""
         # Store effective base URL for feature detection (prompt caching, reasoning, etc.)
@@ -3048,7 +3052,7 @@ class AIAgent:
 
         allowed_keys = {
             "model", "instructions", "input", "tools", "store",
-            "reasoning", "include", "max_output_tokens", "temperature",
+            "reasoning", "include", "max_output_tokens", "temperature", "top_p",
             "tool_choice", "parallel_tool_calls", "prompt_cache_key",
         }
         normalized: Dict[str, Any] = {
@@ -3067,13 +3071,18 @@ class AIAgent:
         if isinstance(include, list):
             normalized["include"] = include
 
-        # Pass through max_output_tokens and temperature
+        # Pass through max_output_tokens and sampling parameters.
         max_output_tokens = api_kwargs.get("max_output_tokens")
         if isinstance(max_output_tokens, (int, float)) and max_output_tokens > 0:
             normalized["max_output_tokens"] = int(max_output_tokens)
         temperature = api_kwargs.get("temperature")
         if isinstance(temperature, (int, float)):
             normalized["temperature"] = float(temperature)
+        top_p = api_kwargs.get("top_p")
+        if isinstance(top_p, (int, float)):
+            top_p_value = float(top_p)
+            if 0 < top_p_value <= 1:
+                normalized["top_p"] = top_p_value
 
         # Pass through tool_choice, parallel_tool_calls, prompt_cache_key
         for passthrough_key in ("tool_choice", "parallel_tool_calls", "prompt_cache_key"):
@@ -4339,7 +4348,7 @@ class AIAgent:
         if self.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_kwargs
             anthropic_messages = self._prepare_anthropic_messages_for_api(api_messages)
-            return build_anthropic_kwargs(
+            kwargs = build_anthropic_kwargs(
                 model=self.model,
                 messages=anthropic_messages,
                 tools=self.tools,
@@ -4348,6 +4357,15 @@ class AIAgent:
                 is_oauth=self._is_anthropic_oauth,
                 preserve_dots=self._anthropic_preserve_dots(),
             )
+
+            # Respect adapter-enforced temperature (e.g. older Anthropic thinking
+            # mode requires temperature=1). Only inject our override when adapter
+            # didn't already set one.
+            if self.temperature is not None and "temperature" not in kwargs:
+                kwargs["temperature"] = self.temperature
+            if self.top_p is not None:
+                kwargs["top_p"] = self.top_p
+            return kwargs
 
         if self.api_mode == "codex_responses":
             instructions = ""
@@ -4401,6 +4419,11 @@ class AIAgent:
 
             if self.max_tokens is not None:
                 kwargs["max_output_tokens"] = self.max_tokens
+
+            if self.temperature is not None:
+                kwargs["temperature"] = self.temperature
+            if self.top_p is not None:
+                kwargs["top_p"] = self.top_p
 
             return kwargs
 
@@ -4463,6 +4486,11 @@ class AIAgent:
 
         if self.max_tokens is not None:
             api_kwargs.update(self._max_tokens_param(self.max_tokens))
+
+        if self.temperature is not None:
+            api_kwargs["temperature"] = self.temperature
+        if self.top_p is not None:
+            api_kwargs["top_p"] = self.top_p
 
         extra_body = {}
 
@@ -6764,6 +6792,35 @@ class AIAgent:
                         'invalid api key', 'invalid_api_key', 'authentication',
                         'unauthorized', 'forbidden', 'not found',
                     ])) and not is_context_length_error
+
+                    # Some providers/models reject sampling params (temperature/top_p),
+                    # especially on reasoning-first model families. Retry once without
+                    # sampling before treating the request as fatal.
+                    _sampling_rejected = (
+                        ("temperature" in api_kwargs or "top_p" in api_kwargs)
+                        and any(
+                            phrase in error_msg.lower()
+                            for phrase in (
+                                "temperature",
+                                "top_p",
+                                "unsupported parameter",
+                                "unsupported field",
+                                "does not support sampling",
+                                "doesn't support sampling",
+                            )
+                        )
+                    )
+                    if _sampling_rejected:
+                        api_kwargs.pop("temperature", None)
+                        api_kwargs.pop("top_p", None)
+                        self.temperature = None
+                        self.top_p = None
+                        retry_count += 1
+                        self._vprint(
+                            f"{self.log_prefix}⚠️  Model rejected sampling params; retrying without temperature/top_p.",
+                            force=True,
+                        )
+                        continue
 
                     if is_client_error:
                         # Try fallback before aborting — a different provider

@@ -19,8 +19,11 @@ from hermes_cli.plugins import (
     PluginManifest,
     get_plugin_manager,
     get_plugin_tool_names,
+    get_plugin_command_names,
+    get_plugin_command_handler,
     discover_plugins,
     invoke_hook,
+    invoke_plugin_command,
 )
 
 
@@ -42,6 +45,23 @@ def _make_plugin_dir(base: Path, name: str, *, register_body: str = "pass",
         f"def register(ctx):\n    {register_body}\n"
     )
     return plugin_dir
+
+
+@pytest.fixture(autouse=True)
+def _restore_command_registry_after_each_test():
+    """Keep command-registry state isolated across plugin tests."""
+    import hermes_cli.commands as commands_mod
+    import hermes_cli.plugins as plugins_mod
+
+    snapshot = list(commands_mod.COMMAND_REGISTRY)
+    token_snapshot = set(plugins_mod._REGISTERED_PLUGIN_COMMAND_TOKENS)
+    try:
+        yield
+    finally:
+        commands_mod.COMMAND_REGISTRY[:] = snapshot
+        commands_mod.rebuild_lookups()
+        plugins_mod._REGISTERED_PLUGIN_COMMAND_TOKENS.clear()
+        plugins_mod._REGISTERED_PLUGIN_COMMAND_TOKENS.update(token_snapshot)
 
 
 # ── TestPluginDiscovery ────────────────────────────────────────────────────
@@ -364,10 +384,137 @@ class TestPluginManagerList:
             assert "enabled" in p
             assert "tools" in p
             assert "hooks" in p
+            assert "commands" in p
 
 
+class TestPluginCommands:
+    """Tests for plugin slash command registration and invocation."""
 
-# NOTE: TestPluginCommands removed – register_command() was never implemented
-# in PluginContext (hermes_cli/plugins.py).  The tests referenced _plugin_commands,
-# commands_registered, get_plugin_command_handler, and GATEWAY_KNOWN_COMMANDS
-# integration — all of which are unimplemented features.
+    def test_register_command_exposes_handler_alias_and_registry(self, tmp_path, monkeypatch):
+        plugins_dir = tmp_path / "hermes_test" / "plugins"
+        _make_plugin_dir(
+            plugins_dir,
+            "cmd_plugin",
+            register_body='ctx.register_command("hello", lambda args: f"hello {args or \'world\'}", description="Say hello", aliases=("hi",), args_hint="[name]")',
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_test"))
+
+        mgr = PluginManager()
+        mgr.discover_and_load()
+
+        import hermes_cli.plugins as plugins_mod
+        monkeypatch.setattr(plugins_mod, "_plugin_manager", mgr)
+
+        from hermes_cli.commands import resolve_command
+
+        assert resolve_command("hello") is not None
+        assert resolve_command("hi") is not None
+        assert resolve_command("hi").name == "hello"
+
+        names = get_plugin_command_names()
+        assert "hello" in names
+        assert "hi" in names
+
+        handler = get_plugin_command_handler("hello")
+        assert handler is not None
+        assert handler("Nastya") == "hello Nastya"
+
+        assert invoke_plugin_command("hi", "Nastya") == "hello Nastya"
+
+    def test_invoke_plugin_command_passes_context_when_supported(self, tmp_path, monkeypatch):
+        plugins_dir = tmp_path / "hermes_test" / "plugins"
+        _make_plugin_dir(
+            plugins_dir,
+            "ctx_plugin",
+            register_body='ctx.register_command("ctx", lambda args, context: context.get("surface", "none"))',
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_test"))
+
+        mgr = PluginManager()
+        mgr.discover_and_load()
+
+        import hermes_cli.plugins as plugins_mod
+        monkeypatch.setattr(plugins_mod, "_plugin_manager", mgr)
+
+        result = invoke_plugin_command("ctx", context={"surface": "cli"})
+        assert result == "cli"
+
+    def test_invoke_plugin_command_preserves_args_only_handlers(self, tmp_path, monkeypatch):
+        plugins_dir = tmp_path / "hermes_test" / "plugins"
+        _make_plugin_dir(
+            plugins_dir,
+            "args_plugin",
+            register_body='ctx.register_command("plain", lambda args: f"plain:{args}")',
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_test"))
+
+        mgr = PluginManager()
+        mgr.discover_and_load()
+
+        import hermes_cli.plugins as plugins_mod
+        monkeypatch.setattr(plugins_mod, "_plugin_manager", mgr)
+
+        result = invoke_plugin_command("plain", "x", context={"surface": "cli"})
+        assert result == "plain:x"
+
+    def test_register_command_conflicting_with_builtin_disables_plugin(self, tmp_path, monkeypatch):
+        plugins_dir = tmp_path / "hermes_test" / "plugins"
+        _make_plugin_dir(
+            plugins_dir,
+            "bad_cmd",
+            register_body='ctx.register_command("help", lambda args: "nope")',
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_test"))
+
+        mgr = PluginManager()
+        mgr.discover_and_load()
+
+        assert "bad_cmd" in mgr._plugins
+        assert mgr._plugins["bad_cmd"].enabled is False
+        assert mgr._plugins["bad_cmd"].error is not None
+        assert "conflicts" in mgr._plugins["bad_cmd"].error.lower()
+
+
+class TestSamplingPluginExample:
+    def test_example_plugin_updates_cli_and_agent_sampling(self, tmp_path, monkeypatch):
+        repo_root = Path(__file__).resolve().parents[1]
+        source = repo_root / "optional-plugins" / "sampling-command"
+        assert source.exists()
+
+        plugins_dir = tmp_path / "hermes_test" / "plugins" / "sampling-command"
+        plugins_dir.mkdir(parents=True, exist_ok=True)
+        for filename in ("plugin.yaml", "__init__.py"):
+            (plugins_dir / filename).write_text((source / filename).read_text())
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_test"))
+
+        mgr = PluginManager()
+        mgr.discover_and_load()
+
+        import hermes_cli.plugins as plugins_mod
+        monkeypatch.setattr(plugins_mod, "_plugin_manager", mgr)
+
+        cli_stub = types.SimpleNamespace(
+            temperature=None,
+            top_p=None,
+            agent=types.SimpleNamespace(temperature=None, top_p=None),
+        )
+
+        result = invoke_plugin_command(
+            "sampling",
+            "0.7 0.95",
+            context={"surface": "cli", "cli": cli_stub},
+        )
+        assert "Sampling updated" in result
+        assert cli_stub.temperature == pytest.approx(0.7)
+        assert cli_stub.top_p == pytest.approx(0.95)
+        assert cli_stub.agent.temperature == pytest.approx(0.7)
+        assert cli_stub.agent.top_p == pytest.approx(0.95)
+
+        status = invoke_plugin_command(
+            "sampling",
+            "",
+            context={"surface": "cli", "cli": cli_stub},
+        )
+        assert "temperature: 0.7" in status
+        assert "top_p:       0.95" in status

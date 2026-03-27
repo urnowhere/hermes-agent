@@ -120,6 +120,48 @@ def _parse_reasoning_config(effort: str) -> dict | None:
     return result
 
 
+def _parse_temperature(value: Any) -> Optional[float]:
+    """Parse temperature from env/config/command input.
+
+    Accepts numbers >= 0 and reset tokens (default/none/off/auto/null).
+    Returns None for reset/default.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in {"default", "none", "off", "auto", "null", ""}:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring invalid temperature value: %r", value)
+        return None
+    if parsed < 0:
+        logger.warning("Ignoring temperature < 0: %r", value)
+        return None
+    return parsed
+
+
+def _parse_top_p(value: Any) -> Optional[float]:
+    """Parse top_p from env/config/command input.
+
+    Accepts numbers in (0, 1] and reset tokens (default/none/off/auto/null).
+    Returns None for reset/default.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in {"default", "none", "off", "auto", "null", ""}:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring invalid top_p value: %r", value)
+        return None
+    if parsed <= 0 or parsed > 1:
+        logger.warning("Ignoring top_p outside (0, 1]: %r", value)
+        return None
+    return parsed
+
+
 def load_cli_config() -> Dict[str, Any]:
     """
     Load CLI configuration from config files.
@@ -182,6 +224,8 @@ def load_cli_config() -> Dict[str, Any]:
             "system_prompt": "",
             "prefill_messages_file": "",
             "reasoning_effort": "",
+            "temperature": None,
+            "top_p": None,
             "personalities": {
                 "helpful": "You are a helpful, friendly AI assistant.",
                 "concise": "You are a concise assistant. Keep responses brief and to the point.",
@@ -898,12 +942,20 @@ from agent.skill_commands import (
 
 _skill_commands = scan_skill_commands()
 
+# Eager plugin discovery keeps plugin slash commands visible in /help,
+# autocomplete, and dispatch from the start of a CLI session.
+try:
+    from hermes_cli.plugins import discover_plugins as _discover_plugins
+    _discover_plugins()
+except Exception:
+    pass
+
 
 def _get_plugin_cmd_handler_names() -> set:
     """Return plugin command names (without slash prefix) for dispatch matching."""
     try:
-        from hermes_cli.plugins import get_plugin_manager
-        return set(get_plugin_manager()._plugin_commands.keys())
+        from hermes_cli.plugins import get_plugin_command_names
+        return set(get_plugin_command_names())
     except Exception:
         return set()
 
@@ -1160,6 +1212,15 @@ class HermesCLI:
         # Reasoning config (OpenRouter reasoning effort level)
         self.reasoning_config = _parse_reasoning_config(
             CLI_CONFIG["agent"].get("reasoning_effort", "")
+        )
+
+        # Session sampling controls. These can be overridden live by plugin
+        # slash commands (e.g. /sampling) and are passed into new agent routes.
+        self.temperature = _parse_temperature(
+            os.getenv("HERMES_TEMPERATURE", CLI_CONFIG["agent"].get("temperature"))
+        )
+        self.top_p = _parse_top_p(
+            os.getenv("HERMES_TOP_P", CLI_CONFIG["agent"].get("top_p"))
         )
         
         # OpenRouter provider routing preferences
@@ -2036,6 +2097,8 @@ class HermesCLI:
                 ephemeral_system_prompt=self.system_prompt if self.system_prompt else None,
                 prefill_messages=self.prefill_messages or None,
                 reasoning_config=self.reasoning_config,
+                temperature=self.temperature,
+                top_p=self.top_p,
                 providers_allowed=self._providers_only,
                 providers_ignored=self._providers_ignore,
                 providers_order=self._providers_order,
@@ -3807,7 +3870,8 @@ class HermesCLI:
                         version = f" v{p['version']}" if p["version"] else ""
                         tools = f"{p['tools']} tools" if p["tools"] else ""
                         hooks = f"{p['hooks']} hooks" if p["hooks"] else ""
-                        parts = [x for x in [tools, hooks] if x]
+                        commands = f"{p.get('commands', 0)} commands" if p.get("commands") else ""
+                        parts = [x for x in [tools, hooks, commands] if x]
                         detail = f" ({', '.join(parts)})" if parts else ""
                         error = f" — {p['error']}" if p["error"] else ""
                         print(f"  {status} {p['name']}{version}{detail}{error}")
@@ -3874,16 +3938,33 @@ class HermesCLI:
                     self.console.print(f"[bold red]Quick command '{base_cmd}' has unsupported type (supported: 'exec', 'alias')[/]")
             # Check for plugin-registered slash commands
             elif base_cmd.lstrip("/") in _get_plugin_cmd_handler_names():
-                from hermes_cli.plugins import get_plugin_command_handler
-                plugin_handler = get_plugin_command_handler(base_cmd.lstrip("/"))
-                if plugin_handler:
-                    user_args = cmd_original[len(base_cmd):].strip()
-                    try:
-                        result = plugin_handler(user_args)
-                        if result:
-                            _cprint(str(result))
-                    except Exception as e:
-                        _cprint(f"\033[1;31mPlugin command error: {e}{_RST}")
+                from hermes_cli.plugins import invoke_plugin_command
+                user_args = cmd_original[len(base_cmd):].strip()
+                try:
+                    result = invoke_plugin_command(
+                        base_cmd.lstrip("/"),
+                        user_args,
+                        context={
+                            "surface": "cli",
+                            "cli": self,
+                            "session_id": getattr(self, "session_id", None),
+                            "agent": getattr(self, "agent", None),
+                        },
+                    )
+
+                    # CLI command path is sync; allow async handlers via asyncio.run fallback.
+                    import asyncio as _asyncio
+                    if _asyncio.iscoroutine(result):
+                        try:
+                            result = _asyncio.run(result)
+                        except RuntimeError:
+                            _cprint("\033[1;31mPlugin command returned a coroutine while an event loop is active.\033[0m")
+                            result = None
+
+                    if result is not None and result != "":
+                        _cprint(str(result))
+                except Exception as e:
+                    _cprint(f"\033[1;31mPlugin command error: {e}{_RST}")
             # Check for skill slash commands (/gif-search, /axolotl, etc.)
             elif base_cmd in _skill_commands:
                 user_instruction = cmd_original[len(base_cmd):].strip()

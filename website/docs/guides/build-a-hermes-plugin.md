@@ -234,8 +234,74 @@ def register(ctx):
 - Called exactly once at startup
 - `ctx.register_tool()` puts your tool in the registry — the model sees it immediately
 - `ctx.register_hook()` subscribes to lifecycle events
-- `ctx.register_command()` — _planned but not yet implemented_
+- `ctx.register_command()` adds a plugin slash command (CLI + gateway)
 - If this function crashes, the plugin is disabled but Hermes continues fine
+
+### Optional: add a `/sampling` slash command
+
+Plugin command handlers receive the command argument string and can optionally
+accept runtime `context`:
+
+```python
+def _set_sampling(args: str, context: dict | None = None) -> str:
+    context = context or {}
+    if context.get("surface") != "cli":
+        return "This plugin command currently supports CLI sessions only."
+
+    cli = context.get("cli")
+    if cli is None:
+        return "Missing CLI context."
+
+    parts = args.split()
+    if len(parts) != 2:
+        return "Usage: /sampling <temperature|default> <top_p|default>"
+
+    def parse_value(raw: str, *, minimum: float, maximum: float | None = None):
+        if raw.lower() in {"default", "none", "off", "auto", "null"}:
+            return None
+        value = float(raw)
+        if value < minimum:
+            raise ValueError("value too small")
+        if maximum is not None and value > maximum:
+            raise ValueError("value too large")
+        return value
+
+    try:
+        temperature = parse_value(parts[0], minimum=0.0)
+        top_p = parse_value(parts[1], minimum=0.0, maximum=1.0)
+        if top_p == 0.0:
+            raise ValueError("top_p must be > 0 unless default")
+    except ValueError as exc:
+        return f"Invalid sampling values: {exc}"
+
+    cli.temperature = temperature
+    cli.top_p = top_p
+    if getattr(cli, "agent", None):
+        cli.agent.temperature = temperature
+        cli.agent.top_p = top_p
+
+    return f"Sampling updated: temperature={temperature}, top_p={top_p}"
+
+
+def register(ctx):
+    # ... register tools/hooks ...
+    ctx.register_command(
+        name="sampling",
+        handler=_set_sampling,
+        description="Set session temperature/top_p",
+        args_hint="<temperature|default> <top_p|default>",
+        cli_only=True,
+    )
+```
+
+That command now works as `/sampling 0.7 0.95` and can update the current
+running CLI session immediately.
+
+If you want a ready-to-use implementation instead of copy/pasting, use the
+shipped example plugin in this repo:
+
+- `optional-plugins/sampling-command/plugin.yaml`
+- `optional-plugins/sampling-command/__init__.py`
 
 ## Step 6: Test it
 
