@@ -52,13 +52,15 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
         if identifier_path.is_absolute():
             try:
                 normalized = str(identifier_path.resolve().relative_to(SKILLS_DIR.resolve()))
-            except Exception:
+            except Exception as e:
+                logger.debug("Could not resolve skill path %s: %s", identifier_path, e)
                 normalized = raw_identifier
         else:
             normalized = raw_identifier.lstrip("/")
 
         loaded_skill = json.loads(skill_view(normalized, task_id=task_id))
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to load skill %s: %s", raw_identifier, e)
         return None
 
     if not loaded_skill.get("success"):
@@ -70,7 +72,8 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
     if skill_path:
         try:
             skill_dir = SKILLS_DIR / Path(skill_path).parent
-        except Exception:
+        except Exception as e:
+            logger.debug("Could not resolve skill directory for %s: %s", skill_path, e)
             skill_dir = None
 
     return loaded_skill, skill_dir, skill_name
@@ -188,10 +191,11 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
                     "skill_md_path": str(skill_md),
                     "skill_dir": str(skill_md.parent),
                 }
-            except Exception:
+            except Exception as e:
+                logger.debug("Skipping skill %s: %s", skill_md, e)
                 continue
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to scan skill commands: %s", e)
     return _skill_commands
 
 
