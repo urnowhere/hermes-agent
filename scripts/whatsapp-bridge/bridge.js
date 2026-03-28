@@ -241,16 +241,15 @@ async function startSocket() {
         hasMedia = true;
         mediaType = msg.message.pttMessage ? 'ptt' : 'audio';
         try {
-          const audioMsg = msg.message.pttMessage || msg.message.audioMessage;
           const buf = await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
-          const mime = audioMsg.mimetype || 'audio/ogg';
-          const ext = mime.includes('ogg') ? '.ogg' : mime.includes('mp4') ? '.m4a' : '.ogg';
-          mkdirSync(AUDIO_CACHE_DIR, { recursive: true });
-          const filePath = path.join(AUDIO_CACHE_DIR, `aud_${randomBytes(6).toString('hex')}${ext}`);
+          const audioCacheDir = path.join(process.env.HOME || '~', '.hermes', 'audio_cache');
+          mkdirSync(audioCacheDir, { recursive: true });
+          const filePath = path.join(audioCacheDir, `audio_${randomBytes(6).toString('hex')}.ogg`);
           writeFileSync(filePath, buf);
           mediaUrls.push(filePath);
+          console.log(`[bridge] Cached voice message: ${filePath}`);
         } catch (err) {
-          console.error('[bridge] Failed to download audio:', err.message);
+          console.error('[bridge] Failed to download voice:', err.message);
         }
       } else if (msg.message.documentMessage) {
         body = msg.message.documentMessage.caption || '';
@@ -437,7 +436,14 @@ app.post('/send-media', async (req, res) => {
         break;
     }
 
-    const sent = await sock.sendMessage(chatId, msgPayload);
+    // Add timeout to prevent indefinite hangs on media upload
+    const SEND_TIMEOUT_MS = 60000;
+    const sent = await Promise.race([
+      sock.sendMessage(chatId, msgPayload),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`sendMessage timed out after ${SEND_TIMEOUT_MS / 1000}s`)), SEND_TIMEOUT_MS)
+      ),
+    ]);
 
     // Track sent message ID to prevent echo-back loops
     if (sent?.key?.id) {
