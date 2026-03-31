@@ -7627,6 +7627,18 @@ class AIAgent:
             except Exception:
                 pass
 
+        # Notify plugins before compression
+        try:
+            from hermes_cli.plugins import invoke_hook as _invoke_hook
+
+            _invoke_hook(
+                "pre_compact",
+                session_id=self.session_id,
+                project_dir=str(Path.cwd()),
+            )
+        except Exception:
+            pass
+
         compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic)
 
         todo_snapshot = self._todo_store.format_for_injection()
@@ -7699,6 +7711,20 @@ class AIAgent:
             self.session_id or "none", _pre_msg_count, len(compressed),
             f"{_compressed_est:,}",
         )
+
+        # Notify plugins after compression
+        try:
+            from hermes_cli.plugins import invoke_hook as _invoke_hook
+
+            _invoke_hook(
+                "post_compact",
+                session_id=self.session_id,
+                project_dir=str(Path.cwd()),
+            )
+        except Exception:
+            pass
+
+
         return compressed, new_system_prompt
 
     def _execute_tool_calls(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
