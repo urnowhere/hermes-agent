@@ -1543,6 +1543,13 @@ class GatewayRunner:
                 return None
             return WeComAdapter(config)
 
+        elif platform == Platform.MAX:
+            from gateway.platforms.max import MaxAdapter, check_max_requirements
+            if not check_max_requirements():
+                logger.warning("MAX: aiohttp not installed or MAX_BOT_TOKEN not set")
+                return None
+            return MaxAdapter(config)
+
         elif platform == Platform.MATTERMOST:
             from gateway.platforms.mattermost import MattermostAdapter, check_mattermost_requirements
             if not check_mattermost_requirements():
@@ -1595,6 +1602,11 @@ class GatewayRunner:
             return True
 
         user_id = source.user_id
+        # Allow messages from home channel even without user_id (e.g. MAX channels)
+        if not user_id and source.chat_id:
+            hc = self.config.platforms.get(source.platform)
+            if hc and hasattr(hc, "home_channel") and hc.home_channel and str(hc.home_channel.chat_id) == str(source.chat_id):
+                return True
         if not user_id:
             return False
 
@@ -1611,6 +1623,7 @@ class GatewayRunner:
             Platform.DINGTALK: "DINGTALK_ALLOWED_USERS",
             Platform.FEISHU: "FEISHU_ALLOWED_USERS",
             Platform.WECOM: "WECOM_ALLOWED_USERS",
+            Platform.MAX: "MAX_ALLOWED_USERS",
         }
         platform_allow_all_map = {
             Platform.TELEGRAM: "TELEGRAM_ALLOW_ALL_USERS",
@@ -1625,6 +1638,7 @@ class GatewayRunner:
             Platform.DINGTALK: "DINGTALK_ALLOW_ALL_USERS",
             Platform.FEISHU: "FEISHU_ALLOW_ALL_USERS",
             Platform.WECOM: "WECOM_ALLOW_ALL_USERS",
+            Platform.MAX: "MAX_ALLOW_ALL_USERS",
         }
 
         # Per-platform allow-all flag (e.g., DISCORD_ALLOW_ALL_USERS=true)

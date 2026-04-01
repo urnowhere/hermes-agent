@@ -66,6 +66,7 @@ class Platform(Enum):
     WEBHOOK = "webhook"
     FEISHU = "feishu"
     WECOM = "wecom"
+    MAX = "max"
 
 
 @dataclass
