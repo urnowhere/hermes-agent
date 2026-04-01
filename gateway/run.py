@@ -3474,6 +3474,13 @@ class GatewayRunner:
                 return None
             return YuanbaoAdapter(config)
 
+        elif platform == Platform.LIVEKIT:
+            from gateway.platforms.livekit import LiveKitAdapter, check_livekit_requirements
+            if not check_livekit_requirements():
+                logger.warning("LiveKit: livekit SDK not installed or LIVEKIT_URL/API_KEY/API_SECRET not set")
+                return None
+            return LiveKitAdapter(config)
+
         return None
     def _is_user_authorized(self, source: SessionSource) -> bool:
         """
@@ -3516,6 +3523,7 @@ class GatewayRunner:
             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOWED_USERS",
             Platform.QQBOT: "QQ_ALLOWED_USERS",
             Platform.YUANBAO: "YUANBAO_ALLOWED_USERS",
+            Platform.LIVEKIT: "LIVEKIT_ALLOWED_USERS",
         }
         platform_group_user_env_map = {
             Platform.TELEGRAM: "TELEGRAM_GROUP_ALLOWED_USERS",
@@ -3542,6 +3550,7 @@ class GatewayRunner:
             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOW_ALL_USERS",
             Platform.QQBOT: "QQ_ALLOW_ALL_USERS",
             Platform.YUANBAO: "YUANBAO_ALLOW_ALL_USERS",
+            Platform.LIVEKIT: "LIVEKIT_ALLOW_ALL_USERS",
         }
 
         # Plugin platforms: check the registry for auth env var names

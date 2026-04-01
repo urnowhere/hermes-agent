@@ -22,6 +22,25 @@ from hermes_cli.vercel_auth import describe_vercel_auth
 from hermes_constants import OPENROUTER_MODELS_URL
 from tools.tool_backend_helpers import managed_nous_tools_enabled
 
+# Shared platform registry — used by both `hermes status` and `hermes config`
+MESSAGING_PLATFORMS = {
+    "Telegram": ("TELEGRAM_BOT_TOKEN", "TELEGRAM_HOME_CHANNEL"),
+    "Discord": ("DISCORD_BOT_TOKEN", "DISCORD_HOME_CHANNEL"),
+    "WhatsApp": ("WHATSAPP_ENABLED", None),
+    "Signal": ("SIGNAL_HTTP_URL", "SIGNAL_HOME_CHANNEL"),
+    "Slack": ("SLACK_BOT_TOKEN", None),
+    "Email": ("EMAIL_ADDRESS", "EMAIL_HOME_ADDRESS"),
+    "SMS": ("TWILIO_ACCOUNT_SID", "SMS_HOME_CHANNEL"),
+    "Mattermost": ("MATTERMOST_URL", None),
+    "Matrix": ("MATRIX_HOMESERVER_URL", None),
+    "DingTalk": ("DINGTALK_CLIENT_ID", None),
+    "Feishu": ("FEISHU_APP_ID", "FEISHU_HOME_CHANNEL"),
+    "WeCom": ("WECOM_BOT_ID", "WECOM_HOME_CHANNEL"),
+    "Weixin": ("WEIXIN_ACCOUNT_ID", "WEIXIN_HOME_CHANNEL"),
+    "BlueBubbles": ("BLUEBUBBLES_SERVER_URL", "BLUEBUBBLES_HOME_CHANNEL"),
+    "LiveKit": ("LIVEKIT_URL", None),
+}
+
 def check_mark(ok: bool) -> str:
     if ok:
         return color("✓", Colors.GREEN)
@@ -383,6 +402,7 @@ def show_status(args):
         "BlueBubbles": ("BLUEBUBBLES_SERVER_URL", "BLUEBUBBLES_HOME_CHANNEL"),
         "QQBot": ("QQ_APP_ID", "QQ_HOME_CHANNEL"),
         "Yuanbao": ("YUANBAO_APP_ID", "YUANBAO_HOME_CHANNEL"),
+        "LiveKit": ("LIVEKIT_URL", None),
     }
 
     for name, (token_var, home_var) in platforms.items():
