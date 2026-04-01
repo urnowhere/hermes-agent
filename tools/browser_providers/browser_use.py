@@ -40,12 +40,17 @@ class BrowserUseProvider(CloudBrowserProvider):
         }
 
     def create_session(self, task_id: str) -> Dict[str, object]:
-        response = requests.post(
-            f"{_BASE_URL}/browsers",
-            headers=self._headers(),
-            json={},
-            timeout=30,
-        )
+        # FIX: wrap network call to surface connection errors as RuntimeError
+        # instead of letting raw requests exceptions propagate.
+        try:
+            response = requests.post(
+                f"{_BASE_URL}/browsers",
+                headers=self._headers(),
+                json={},
+                timeout=30,
+            )
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Browser Use API connection failed: {exc}") from exc
 
         if not response.ok:
             raise RuntimeError(
