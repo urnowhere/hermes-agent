@@ -290,6 +290,12 @@ TOOLSETS = {
         "tools": _HERMES_CORE_TOOLS,
         "includes": []
     },
+
+    "hermes-sidecar": {
+        "description": "Browser sidecar toolset - full Hermes tools for browser-native sessions",
+        "tools": _HERMES_CORE_TOOLS,
+        "includes": []
+    },
     
     "hermes-telegram": {
         "description": "Telegram bot toolset - full access for personal use (terminal has safety checks)",

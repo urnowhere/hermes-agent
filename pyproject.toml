@@ -32,6 +32,10 @@ dependencies = [
   "fal-client>=0.13.1,<1",
   # Text-to-speech (Edge TTS is free, no API key needed)
   "edge-tts>=7.2.7,<8",
+  # Browser sidecar transcript fetches
+  "youtube-transcript-api>=1.2.0,<2",
+  # Browser sidecar PDF extraction and preview image rendering
+  "pymupdf>=1.25.5,<2",
   # Skills Hub (GitHub App JWT auth — optional, only needed for bot identity)
   "PyJWT[crypto]>=2.12.0,<3",  # CVE-2026-32597
 ]

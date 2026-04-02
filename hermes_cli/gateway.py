@@ -1,7 +1,7 @@
 """
 Gateway subcommand for hermes CLI.
 
-Handles: hermes gateway [run|start|stop|restart|status|install|uninstall|setup]
+Handles: hermes gateway [run|start|stop|restart|status|install|uninstall|setup|browser-token]
 """
 
 import asyncio
@@ -117,6 +117,40 @@ def is_macos() -> bool:
 
 def is_windows() -> bool:
     return sys.platform == 'win32'
+
+
+def print_browser_bridge_token() -> None:
+    """Print the current profile's browser bridge token and setup hints."""
+    from gateway.browser_bridge import (
+        BrowserBridgeConfig,
+        get_browser_bridge_setup_details,
+        get_browser_bridge_token_hint,
+        resolve_browser_bridge_token,
+    )
+
+    cfg = BrowserBridgeConfig.from_env()
+    token = resolve_browser_bridge_token(create_if_missing=True)
+    details = get_browser_bridge_setup_details(
+        host=cfg.host,
+        port=cfg.port,
+        enabled=cfg.enabled,
+    )
+
+    print()
+    print("Hermes browser sidecar token")
+    print("=" * 32)
+    print(f"Token file: {get_browser_bridge_token_hint()}")
+    print(f"Bridge URL: {details['bridge_url']}")
+    print(f"Bridge root: {details['bridge_root_url']}")
+    print()
+    print("Paste this token into the extension options:")
+    print(token)
+    print()
+    print("If the gateway is not running yet, start it with:")
+    print("  hermes gateway start")
+    print("  hermes gateway run")
+    print()
+    print("The browser sidecar only listens on localhost by default.")
 
 
 # =============================================================================
@@ -751,7 +785,10 @@ def systemd_restart(system: bool = False):
     if system:
         _require_root_for_system_service("restart")
     refresh_systemd_unit_if_needed(system=system)
-    subprocess.run(_systemctl_cmd(system) + ["restart", get_service_name()], check=True)
+    subprocess.run(_systemctl_cmd(system) + ["stop", get_service_name()], check=True)
+    _wait_for_gateway_exit()
+    kill_gateway_processes()
+    subprocess.run(_systemctl_cmd(system) + ["start", get_service_name()], check=True)
     print(f"✓ {_service_scope_label(system).capitalize()} service restarted")
 
 
@@ -1899,6 +1936,10 @@ def gateway_command(args):
 
     if subcmd == "setup":
         gateway_setup()
+        return
+
+    if subcmd == "browser-token":
+        print_browser_bridge_token()
         return
 
     # Service management commands

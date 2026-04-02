@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Hermes Sidecar Options</title>
+    <link rel="icon" type="image/png" sizes="32x32" href="icons/nous-32.png">
+    <link rel="stylesheet" href="options.css">
+  </head>
+  <body>
+    <main class="app">
+      <header class="hero">
+        <p class="eyebrow">Hermes Agent</p>
+        <h1>Sidecar settings</h1>
+        <p class="subhead">Keep the sidecar polished without touching Hermes profile config. Everything here stays in extension storage.</p>
+      </header>
+
+      <section class="card">
+        <div class="section-head">
+          <div>
+            <h2>Bridge</h2>
+            <p class="section-copy">Connect this browser extension to your local Hermes gateway.</p>
+          </div>
+          <div class="section-head-actions">
+            <button id="health-button" class="ghost-button" type="button">Check bridge</button>
+            <p id="bridge-status-text" class="bridge-status-text">Not checked yet.</p>
+          </div>
+        </div>
+        <label class="field">
+          <span class="field-label">Bridge URL</span>
+          <input id="bridge-url" type="url" spellcheck="false" placeholder="http://127.0.0.1:8765/inject">
+        </label>
+        <label class="field">
+          <span class="field-label">Bridge token</span>
+          <input id="bridge-token" type="password" spellcheck="false" placeholder="Paste the value from hermes gateway browser-token">
+        </label>
+        <p id="bridge-setup-copy" class="field-help">
+          If you do not have a token yet, run <code>hermes gateway browser-token</code>. Hermes keeps a profile-scoped token file for the active profile.
+        </p>
+      </section>
+
+      <section class="card">
+        <div class="section-head">
+          <div>
+            <h2>Defaults</h2>
+            <p class="section-copy">Choose what a new sidecar turn includes by default.</p>
+          </div>
+        </div>
+        <label class="checkbox-row">
+          <input id="share-page-by-default" type="checkbox">
+          <span>Use the current page by default</span>
+        </label>
+        <label class="checkbox-row">
+          <input id="include-transcript" type="checkbox">
+          <span>Include a YouTube transcript once per video when available</span>
+        </label>
+      </section>
+
+      <section class="card">
+        <div class="section-head">
+          <div>
+            <h2>Voice input</h2>
+            <p class="section-copy">Grant microphone access here so the sidecar can record more smoothly. Hermes still handles STT and TTS on the gateway side.</p>
+          </div>
+        </div>
+        <div class="field-actions-row">
+          <button id="enable-microphone-button" class="ghost-button" type="button">Enable microphone</button>
+          <p id="microphone-status-text" class="section-copy">Not checked yet.</p>
+        </div>
+        <label class="field">
+          <span class="field-label">Audio input device</span>
+          <select id="audio-input-device-select">
+            <option value="">System default microphone</option>
+          </select>
+        </label>
+      </section>
+
+      <section class="card">
+        <div class="section-head">
+          <div>
+            <h2>Appearance</h2>
+            <p class="section-copy">Choose a built-in theme or create your own palette for the popup, sidepanel, and options page.</p>
+          </div>
+        </div>
+        <label class="field">
+          <span class="field-label">Theme</span>
+          <select id="theme-select"></select>
+        </label>
+        <p id="theme-description" class="theme-note">Loading theme library...</p>
+
+        <div class="editor-block">
+          <div class="editor-head">
+            <div>
+              <h3>Custom themes</h3>
+              <p class="section-copy">Add named themes and tune each palette directly instead of editing raw JSON.</p>
+            </div>
+            <button id="add-theme-button" class="ghost-button" type="button">Add theme</button>
+          </div>
+          <div id="custom-theme-list" class="prompt-list"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="section-head">
+          <div>
+            <h2>Sidecar tools</h2>
+            <p class="section-copy">Control the helper UI shown in the side panel, including challenge mode and reusable quick prompts.</p>
+          </div>
+        </div>
+        <label class="checkbox-row">
+          <input id="show-quick-prompts" type="checkbox">
+          <span>Show quick prompt buttons in the sidecar</span>
+        </label>
+        <label class="checkbox-row">
+          <input id="show-challenge-mode" type="checkbox">
+          <span>Show the challenge mode toggle in the sidecar</span>
+        </label>
+
+        <div class="editor-block">
+          <div class="editor-head">
+            <div>
+              <h3>Challenge mode</h3>
+              <p class="section-copy">Rename the toggle and control the instruction Hermes appends when it is enabled.</p>
+            </div>
+          </div>
+          <label class="field">
+            <span class="field-label">Button label</span>
+            <input id="challenge-mode-label" type="text" maxlength="60" spellcheck="false" placeholder="Challenge my framing">
+          </label>
+          <label class="field">
+            <span class="field-label">Instruction prompt</span>
+            <textarea id="challenge-mode-prompt" rows="4" spellcheck="true"></textarea>
+          </label>
+        </div>
+
+        <div class="editor-block">
+          <div class="editor-head">
+            <div>
+              <h3>Quick prompts</h3>
+              <p class="section-copy">Add, rename, remove, and reorder the prompt buttons that can send instantly from the sidecar.</p>
+            </div>
+            <button id="add-quick-prompt-button" class="ghost-button" type="button">Add prompt</button>
+          </div>
+          <div id="quick-prompt-list" class="prompt-list"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="section-head">
+          <div>
+            <h2>Activity log</h2>
+            <p class="section-copy">Control how much gateway progress appears in the collapsible sidepanel activity log.</p>
+          </div>
+        </div>
+        <label class="field">
+          <span class="field-label">Log level</span>
+          <select id="sidecar-activity-log-level">
+            <option value="minimal">Minimal</option>
+            <option value="normal">Normal</option>
+            <option value="verbose">Verbose</option>
+          </select>
+        </label>
+        <label class="checkbox-row">
+          <input id="activity-log-panel-open" type="checkbox">
+          <span>Start with the Activity log expanded</span>
+        </label>
+      </section>
+
+      <section class="card actions-card">
+        <button id="save-button" class="primary-button" type="button">Save settings</button>
+        <p id="status-text" class="status-text" role="status" aria-live="polite">Ready.</p>
+      </section>
+    </main>
+    <script src="theme.js"></script>
+    <script src="options.js"></script>
+  </body>
+</html>

@@ -27,6 +27,12 @@ fal-client
 # Text-to-speech (Edge TTS is free, no API key needed)
 edge-tts
 
+# Browser sidecar transcript fetches
+youtube-transcript-api>=1.2.0
+
+# Browser sidecar PDF extraction and preview image rendering
+PyMuPDF>=1.25.5
+
 # Optional: For cron expression parsing (cronjob scheduling)
 croniter
 

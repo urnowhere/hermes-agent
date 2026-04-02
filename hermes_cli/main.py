@@ -4037,6 +4037,10 @@ For more help on a command:
 
     # gateway setup
     gateway_setup = gateway_subparsers.add_parser("setup", help="Configure messaging platforms")
+    gateway_browser_token = gateway_subparsers.add_parser(
+        "browser-token",
+        help="Show or create the browser sidecar bridge token",
+    )
 
     gateway_parser.set_defaults(func=cmd_gateway)
     

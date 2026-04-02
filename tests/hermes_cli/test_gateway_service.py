@@ -68,13 +68,18 @@ class TestSystemdServiceRefresh:
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
         monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
+        monkeypatch.setattr(gateway_cli, "_wait_for_gateway_exit", lambda timeout=10.0, force_after=5.0: calls.append(["wait"]))
+        monkeypatch.setattr(gateway_cli, "kill_gateway_processes", lambda force=False: calls.append(["kill", force]) or 0)
 
         gateway_cli.systemd_restart()
 
         assert unit_path.read_text(encoding="utf-8") == "new unit\n"
-        assert calls[:2] == [
+        assert calls[:5] == [
             ["systemctl", "--user", "daemon-reload"],
-            ["systemctl", "--user", "restart", gateway_cli.get_service_name()],
+            ["systemctl", "--user", "stop", gateway_cli.get_service_name()],
+            ["wait"],
+            ["kill", False],
+            ["systemctl", "--user", "start", gateway_cli.get_service_name()],
         ]
 
 
@@ -125,6 +130,29 @@ class TestGatewayStopCleanup:
 
         assert service_calls == ["stop"]
         assert kill_calls == [False]
+
+    def test_restart_sweeps_manual_gateway_processes_during_service_restart(self, tmp_path, monkeypatch):
+        unit_path = tmp_path / "hermes-gateway.service"
+        unit_path.write_text("unit\n", encoding="utf-8")
+
+        monkeypatch.setattr(gateway_cli, "is_linux", lambda: True)
+        monkeypatch.setattr(gateway_cli, "is_macos", lambda: False)
+        monkeypatch.setattr(gateway_cli, "get_systemd_unit_path", lambda system=False: unit_path)
+
+        restart_calls = []
+        kill_calls = []
+
+        monkeypatch.setattr(gateway_cli, "systemd_restart", lambda system=False: restart_calls.append(system))
+        monkeypatch.setattr(
+            gateway_cli,
+            "kill_gateway_processes",
+            lambda force=False: kill_calls.append(force) or 0,
+        )
+
+        gateway_cli.gateway_command(SimpleNamespace(gateway_command="restart", system=False))
+
+        assert restart_calls == [False]
+        assert kill_calls == []
 
 
 class TestLaunchdServiceRecovery:
@@ -282,6 +310,14 @@ class TestGatewaySystemServiceRouting:
             raise AssertionError("Expected gateway_command to exit when service restart fails")
 
         assert run_calls == []
+
+    def test_gateway_browser_token_dispatches_to_helper(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(gateway_cli, "print_browser_bridge_token", lambda: calls.append("token"))
+
+        gateway_cli.gateway_command(SimpleNamespace(gateway_command="browser-token"))
+
+        assert calls == ["token"]
 
 
 class TestDetectVenvDir:

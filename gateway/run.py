@@ -14,8 +14,11 @@ Usage:
 """
 
 import asyncio
+import base64
+import contextlib
 import json
 import logging
+import mimetypes
 import os
 import re
 import shlex
@@ -225,6 +228,38 @@ from gateway.session import (
 )
 from gateway.delivery import DeliveryRouter
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType
+from gateway.browser_bridge import (
+    BrowserBridgeConfig,
+    BrowserBridgeServer,
+    build_bridge_chat_id,
+    build_browser_chat_message,
+    build_browser_context_message,
+    fetch_pdf_page_images,
+    fetch_pdf_text,
+)
+
+
+_DEFAULT_SIDECAR_SYNC_TIMEOUT_SECONDS = 300.0
+
+
+def _load_sidecar_sync_timeout_seconds() -> float:
+    raw = (os.getenv("HERMES_BROWSER_SIDECAR_SYNC_TIMEOUT_SECONDS") or "").strip()
+    if not raw:
+        return _DEFAULT_SIDECAR_SYNC_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "Invalid HERMES_BROWSER_SIDECAR_SYNC_TIMEOUT_SECONDS=%r. Falling back to %.1f.",
+            raw,
+            _DEFAULT_SIDECAR_SYNC_TIMEOUT_SECONDS,
+        )
+        return _DEFAULT_SIDECAR_SYNC_TIMEOUT_SECONDS
+    return value if value > 0 else _DEFAULT_SIDECAR_SYNC_TIMEOUT_SECONDS
+
+
+_BROWSER_SIDECAR_SYNC_TIMEOUT_SECONDS = _load_sidecar_sync_timeout_seconds()
+_BROWSER_BRIDGE_PROGRESS_EVENT_CAP = 128
 
 
 def _normalize_whatsapp_identifier(value: str) -> str:
@@ -276,6 +311,23 @@ logger = logging.getLogger(__name__)
 # session from bypassing the "already running" guard during the async gap
 # between the guard check and actual agent creation.
 _AGENT_PENDING_SENTINEL = object()
+
+
+class BrowserBridgeTranscriptUnavailable(Exception):
+    """Raised when a YouTube transcript exists but can't be fetched usefully."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        video_id: str = "",
+        requested_language: str = "",
+        available_languages: Optional[List[str]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.video_id = video_id
+        self.requested_language = requested_language
+        self.available_languages = list(available_languages or [])
 
 
 def _resolve_runtime_agent_kwargs() -> dict:
@@ -467,6 +519,12 @@ class GatewayRunner:
         # Key: session_key, Value: {"command": str, "pattern_key": str, ...}
         self._pending_approvals: Dict[str, Dict[str, Any]] = {}
 
+        # Browser extension sidecar bridge state
+        self._browser_bridge: Optional[BrowserBridgeServer] = None
+        self._browser_bridge_tasks: Dict[str, asyncio.Task] = {}
+        self._browser_bridge_progress: Dict[str, Dict[str, Any]] = {}
+        self._browser_bridge_pending_interrupts: set[str] = set()
+
         # Track platforms that failed to connect for background reconnection.
         # Key: Platform enum, Value: {"config": platform_config, "attempts": int, "next_retry": float}
         self._failed_platforms: Dict[Platform, Dict[str, Any]] = {}
@@ -621,6 +679,882 @@ class GatewayRunner:
         disabled_chats.update(
             chat_id for chat_id, mode in self._voice_mode.items() if mode == "off"
         )
+
+    # -- Browser sidecar bridge ----------------------------------------
+
+    def _build_browser_bridge_source(
+        self,
+        browser_label: str,
+        client_session_id: str = "",
+    ) -> SessionSource:
+        label = self._normalize_browser_bridge_display_label(browser_label)
+        return SessionSource(
+            platform=Platform.LOCAL,
+            chat_id=build_bridge_chat_id(label, client_session_id),
+            chat_name=label,
+            chat_type="dm",
+            user_id="browser-sidecar",
+            user_name=label,
+        )
+
+    @staticmethod
+    def _normalize_browser_bridge_display_label(browser_label: str) -> str:
+        label = str(browser_label or "").strip()
+        if not label or label.lower() == "chrome extension":
+            return "Hermes Sidecar"
+        return label
+
+    @staticmethod
+    def _is_browser_bridge_source(source: Optional[SessionSource]) -> bool:
+        return bool(source and str(source.chat_id or "").startswith("browser-bridge:"))
+
+    def _append_browser_bridge_progress_event(
+        self,
+        session_key: str,
+        detail: str,
+        *,
+        limit: int = _BROWSER_BRIDGE_PROGRESS_EVENT_CAP,
+    ) -> List[str]:
+        state = dict(self._browser_bridge_progress.get(session_key, {}))
+        recent_events = list(state.get("recent_events") or [])
+        text = str(detail or "").strip()
+        if text and (not recent_events or recent_events[-1] != text):
+            recent_events.append(text)
+        while len(recent_events) > max(1, int(limit)):
+            recent_events.pop(0)
+        state["recent_events"] = recent_events
+        self._browser_bridge_progress[session_key] = state
+        return recent_events
+
+    def _set_browser_bridge_progress(
+        self,
+        session_key: str,
+        *,
+        running: bool,
+        detail: str = "",
+        error: str = "",
+        interrupt_requested: bool = False,
+        recent_events: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        state = dict(self._browser_bridge_progress.get(session_key, {}))
+        now = time.time()
+        if running and not state.get("started_at"):
+            state["started_at"] = now
+        if not running:
+            state["finished_at"] = now
+        state["running"] = bool(running)
+        state["detail"] = str(detail or state.get("detail") or "").strip()
+        state["error"] = str(error or "").strip()
+        state["interrupt_requested"] = bool(interrupt_requested)
+        if recent_events is not None:
+            state["recent_events"] = list(recent_events)
+        else:
+            state["recent_events"] = list(state.get("recent_events") or [])
+        if not running and not state["detail"]:
+            state["detail"] = "Reply ready."
+        self._browser_bridge_progress[session_key] = state
+        return state
+
+    def _get_browser_bridge_progress_snapshot(self, session_key: str) -> Dict[str, Any]:
+        state = dict(self._browser_bridge_progress.get(session_key, {}))
+        task = self._browser_bridge_tasks.get(session_key)
+        if task and task.done():
+            self._browser_bridge_tasks.pop(session_key, None)
+            if state.get("running"):
+                state["running"] = False
+                state["detail"] = state.get("detail") or "Reply ready."
+                state["finished_at"] = time.time()
+                self._browser_bridge_progress[session_key] = state
+
+        started_at = state.get("started_at")
+        finished_at = state.get("finished_at")
+        elapsed = 0
+        if isinstance(started_at, (int, float)):
+            end = (
+                finished_at
+                if isinstance(finished_at, (int, float)) and not state.get("running")
+                else time.time()
+            )
+            elapsed = max(0, int(end - started_at))
+
+        recent = list(state.get("recent_events") or [])
+        return {
+            "running": bool(state.get("running")),
+            "detail": str(state.get("detail") or "").strip(),
+            "error": str(state.get("error") or "").strip(),
+            "interrupt_requested": bool(state.get("interrupt_requested")),
+            "elapsed_seconds": elapsed,
+            "recent_events": recent,
+            "activity_log": list(recent),
+        }
+
+    @staticmethod
+    def _extract_browser_bridge_content(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: List[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    text = item.get("text") or item.get("content")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "\n".join(part for part in parts if part).strip()
+        if isinstance(content, dict):
+            text = content.get("text") or content.get("content")
+            if isinstance(text, str):
+                return text
+        return str(content or "").strip()
+
+    @staticmethod
+    def _extract_browser_bridge_label(message: str, prefix: str) -> str:
+        for line in str(message or "").splitlines():
+            if line.startswith(prefix):
+                return line[len(prefix):].strip()
+        return ""
+
+    def _normalize_browser_bridge_public_host(self, host: str) -> str:
+        normalized = str(host or "").strip()
+        if normalized in {"0.0.0.0", "::", "[::]"}:
+            return "127.0.0.1"
+        return normalized or "127.0.0.1"
+
+    def _build_browser_bridge_media_url(self, media_path: str) -> str:
+        from urllib.parse import quote
+
+        bridge = self._browser_bridge
+        if not bridge:
+            return ""
+        try:
+            resolved = Path(media_path).expanduser().resolve()
+        except Exception:
+            return ""
+        if not resolved.exists() or not resolved.is_file():
+            return ""
+        mime_type = mimetypes.guess_type(str(resolved))[0] or ""
+        if not mime_type.startswith("image/"):
+            return ""
+        host = self._normalize_browser_bridge_public_host(bridge.config.host)
+        token = quote(bridge.config.token, safe="")
+        encoded_path = quote(str(resolved), safe="")
+        return f"http://{host}:{bridge.config.port}/media?path={encoded_path}&token={token}"
+
+    @staticmethod
+    def _extract_youtube_video_id(url_or_id: str) -> str:
+        from urllib.parse import parse_qs, urlparse
+
+        value = str(url_or_id or "").strip()
+        if not value:
+            return ""
+
+        patterns = (
+            r"(?:v=|youtu\.be/|shorts/|embed/|live/)([a-zA-Z0-9_-]{11})",
+            r"^([a-zA-Z0-9_-]{11})$",
+        )
+        pending = [value]
+        seen = set()
+        while pending:
+            candidate = str(pending.pop(0) or "").strip()
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            for pattern in patterns:
+                match = re.search(pattern, candidate)
+                if match:
+                    return match.group(1)
+            parsed = urlparse(candidate)
+            host = parsed.netloc.lower()
+            if not host:
+                continue
+            query = parse_qs(parsed.query or "", keep_blank_values=False)
+            pending.extend(query.get("v", []))
+            path_parts = [part for part in parsed.path.split("/") if part]
+            if "youtu.be" in host and path_parts:
+                pending.append(path_parts[0])
+            if (
+                ("youtube.com" in host or "youtube-nocookie.com" in host)
+                and len(path_parts) >= 2
+                and path_parts[0] in {"embed", "shorts", "live"}
+            ):
+                pending.append(path_parts[1])
+        return ""
+
+    @classmethod
+    def _fetch_bridge_youtube_transcript(
+        cls,
+        url_or_id: str,
+        language: str = "",
+    ) -> Dict[str, Any]:
+        video_id = cls._extract_youtube_video_id(url_or_id)
+        if not video_id:
+            raise ValueError("Could not determine a YouTube video ID.")
+
+        from youtube_transcript_api import YouTubeTranscriptApi
+
+        def _clean_language(value: str) -> str:
+            return str(value or "").strip().replace("_", "-")
+
+        requested_language = _clean_language(language)
+        api = YouTubeTranscriptApi()
+        transcript_list = None
+        available_codes: List[str] = []
+        try:
+            if hasattr(api, "list"):
+                transcript_list = api.list(video_id)
+                available_codes = [
+                    str(getattr(transcript, "language_code", "") or "").strip()
+                    for transcript in list(transcript_list)
+                    if str(getattr(transcript, "language_code", "") or "").strip()
+                ]
+        except Exception as exc:
+            raise BrowserBridgeTranscriptUnavailable(
+                str(exc).strip() or exc.__class__.__name__,
+                video_id=video_id,
+                requested_language=requested_language,
+                available_languages=available_codes,
+            ) from exc
+
+        preferred_languages: List[str] = []
+        if requested_language:
+            preferred_languages.append(requested_language)
+            base = requested_language.lower().split("-", 1)[0]
+            for code in available_codes:
+                lowered = code.lower()
+                if lowered == requested_language.lower():
+                    preferred_languages.append(code)
+                elif lowered.split("-", 1)[0] == base:
+                    preferred_languages.append(code)
+        else:
+            preferred_languages.extend(["en", "en-US"])
+            for code in available_codes:
+                if code.lower().split("-", 1)[0] == "en":
+                    preferred_languages.append(code)
+        deduped_languages: List[str] = []
+        for code in preferred_languages:
+            cleaned = _clean_language(code)
+            if cleaned and cleaned not in deduped_languages:
+                deduped_languages.append(cleaned)
+
+        def _extract_segments(fetched: Any) -> List[str]:
+            segments: List[str] = []
+            for segment in fetched:
+                if isinstance(segment, dict):
+                    text = str(segment.get("text") or "").strip()
+                else:
+                    text = str(getattr(segment, "text", "") or "").strip()
+                if text:
+                    segments.append(text)
+            return segments
+
+        try:
+            matched_language = ""
+            if transcript_list is not None:
+                chosen = transcript_list.find_transcript(deduped_languages or available_codes or ["en"])
+                matched_language = str(getattr(chosen, "language_code", "") or "").strip()
+                segments = _extract_segments(chosen.fetch())
+            elif hasattr(api, "fetch"):
+                kwargs = {"languages": deduped_languages} if deduped_languages else {}
+                segments = _extract_segments(api.fetch(video_id, **kwargs))
+                matched_language = deduped_languages[0] if deduped_languages else ""
+            else:
+                raw_segments = (
+                    YouTubeTranscriptApi.get_transcript(video_id, languages=deduped_languages)
+                    if deduped_languages
+                    else YouTubeTranscriptApi.get_transcript(video_id)
+                )
+                segments = [
+                    str(segment.get("text") or "").strip()
+                    for segment in raw_segments
+                    if isinstance(segment, dict) and str(segment.get("text") or "").strip()
+                ]
+                matched_language = deduped_languages[0] if deduped_languages else ""
+        except Exception as exc:
+            raise BrowserBridgeTranscriptUnavailable(
+                str(exc).strip() or exc.__class__.__name__,
+                video_id=video_id,
+                requested_language=requested_language,
+                available_languages=available_codes,
+            ) from exc
+
+        transcript_text = " ".join(segments).strip()
+        return {
+            "video_id": video_id,
+            "language": matched_language or requested_language or (available_codes[0] if available_codes else ""),
+            "segment_count": len(segments),
+            "transcript_text": transcript_text,
+            "char_count": len(transcript_text),
+            "available_languages": available_codes,
+        }
+
+    def _serialize_browser_bridge_history(self, history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        result: List[Dict[str, Any]] = []
+        for message in history:
+            role = str(message.get("role") or "")
+            if role not in {"user", "assistant"}:
+                continue
+            content = self._extract_browser_bridge_content(message.get("content"))
+            if not content.strip():
+                continue
+
+            media_paths = re.findall(r"MEDIA:(\S+)", content)
+            cleaned_content = re.sub(r"\n?MEDIA:\S+\s*", "\n", content).strip()
+            images = []
+            for raw_path in media_paths:
+                media_url = self._build_browser_bridge_media_url(raw_path.strip().rstrip('",}'))
+                if not media_url:
+                    continue
+                images.append(
+                    {
+                        "source": "local",
+                        "media_url": media_url,
+                        "mime_type": mimetypes.guess_type(raw_path)[0] or "image/png",
+                        "alt_text": Path(raw_path).name,
+                        "local_path": raw_path,
+                    }
+                )
+
+            kind = "chat"
+            page_title = ""
+            page_url = ""
+            display_content = cleaned_content
+            if role == "user" and content.startswith("[Injected browser context from the local Chrome extension]"):
+                kind = "page_context"
+                page_title = self._extract_browser_bridge_label(content, "- Title:")
+                page_url = self._extract_browser_bridge_label(content, "- URL:")
+                if "User request:" in content:
+                    request_chunk = content.split("User request:", 1)[1].strip()
+                    display_content = request_chunk.split("\n\n", 1)[0].strip()
+                if not display_content:
+                    display_content = "Shared browser page context."
+
+            timestamp = message.get("timestamp")
+            if isinstance(timestamp, (int, float)):
+                timestamp_iso = datetime.fromtimestamp(timestamp).isoformat()
+            else:
+                timestamp_iso = str(timestamp or "").strip()
+
+            result.append(
+                {
+                    "role": role,
+                    "kind": kind,
+                    "display_content": display_content,
+                    "content": cleaned_content,
+                    "page_title": page_title,
+                    "page_url": page_url,
+                    "images": images,
+                    "timestamp": timestamp_iso,
+                }
+            )
+        return result
+
+    def _get_browser_bridge_session_snapshot(self, source: SessionSource) -> Dict[str, Any]:
+        session_entry = self.session_store.get_or_create_session(source)
+        history = self.session_store.load_transcript(session_entry.session_id)
+        progress = self._get_browser_bridge_progress_snapshot(session_entry.session_key)
+        return {
+            "session_key": session_entry.session_key,
+            "session_id": session_entry.session_id,
+            "browser_label": self._normalize_browser_bridge_display_label(
+                source.chat_name or source.user_name or "Hermes Sidecar"
+            ),
+            "messages": self._serialize_browser_bridge_history(history),
+            "progress": progress,
+            "can_send": True,
+        }
+
+    def _list_browser_bridge_sessions(
+        self,
+        *,
+        limit: int = 25,
+        preferred_session_key: str = "",
+    ) -> Dict[str, Any]:
+        self.session_store._ensure_loaded()
+        entries = [
+            entry
+            for entry in self.session_store._entries.values()
+            if self._is_browser_bridge_source(entry.origin)
+        ]
+        entries.sort(key=lambda item: item.updated_at, reverse=True)
+        sessions = []
+        for entry in entries[: max(1, min(limit, 100))]:
+            history = self.session_store.load_transcript(entry.session_id)
+            rich = self._serialize_browser_bridge_history(history)
+            last_message = rich[-1] if rich else {}
+            progress = self._get_browser_bridge_progress_snapshot(entry.session_key)
+            sessions.append(
+                {
+                    "session_key": entry.session_key,
+                    "session_id": entry.session_id,
+                    "browser_label": self._normalize_browser_bridge_display_label(
+                        (entry.origin.chat_name or entry.origin.user_name or "Hermes Sidecar")
+                        if entry.origin
+                        else "Hermes Sidecar"
+                    ),
+                    "updated_at": entry.updated_at.isoformat() if entry.updated_at else "",
+                    "created_at": entry.created_at.isoformat() if entry.created_at else "",
+                    "message_count": len(rich),
+                    "last_message_role": last_message.get("role") or "",
+                    "last_message_preview": (last_message.get("display_content") or "")[:140],
+                    "running": bool(progress.get("running")),
+                    "can_send": True,
+                    "is_browser_session": True,
+                }
+            )
+
+        active_session_key = str(preferred_session_key or "").strip()
+        if active_session_key and not any(s["session_key"] == active_session_key for s in sessions):
+            active_session_key = ""
+        if not active_session_key and sessions:
+            active_session_key = sessions[0]["session_key"]
+        return {"active_session_key": active_session_key, "sessions": sessions}
+
+    def _get_browser_bridge_source_for_session(
+        self,
+        session_key: str,
+        fallback_source: SessionSource,
+    ) -> SessionSource:
+        self.session_store._ensure_loaded()
+        entry = self.session_store._entries.get(session_key)
+        if entry and self._is_browser_bridge_source(entry.origin):
+            return entry.origin
+        return fallback_source
+
+    def _extract_browser_bridge_image_attachments(
+        self,
+        payload: Dict[str, Any],
+    ) -> tuple[List[str], List[str]]:
+        attachments = payload.get("attachments")
+        if not isinstance(attachments, list):
+            return [], []
+
+        target_dir = _hermes_home / "browser_bridge_uploads"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        media_urls: List[str] = []
+        media_types: List[str] = []
+        for item in attachments:
+            if not isinstance(item, dict):
+                continue
+            data_url = str(item.get("data_url") or "").strip()
+            if not data_url:
+                continue
+            mime_type = str(item.get("mime_type") or "image/png").strip().lower()
+            if not mime_type.startswith("image/"):
+                continue
+            try:
+                encoded = data_url.split(",", 1)[1] if data_url.startswith("data:") and "," in data_url else data_url
+                raw_bytes = base64.b64decode(encoded, validate=False)
+            except Exception:
+                continue
+            ext = mimetypes.guess_extension(mime_type) or ".png"
+            out_path = target_dir / f"sidecar_{uuid.uuid4().hex[:12]}{ext}"
+            try:
+                out_path.write_bytes(raw_bytes)
+            except Exception:
+                continue
+            media_urls.append(str(out_path))
+            media_types.append(mime_type)
+        return media_urls, media_types
+
+    def _get_browser_bridge_pdf_url(self, page_payload: Dict[str, Any] | None) -> str:
+        if not isinstance(page_payload, dict):
+            return ""
+
+        metadata = page_payload.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        candidates = (
+            metadata.get("pdfUrl"),
+            metadata.get("embeddedPdfUrl"),
+            page_payload.get("url"),
+        )
+        for candidate in candidates:
+            url = str(candidate or "").strip()
+            if not url or url.startswith("blob:"):
+                continue
+            if url.lower().endswith(".pdf") or ".pdf?" in url.lower():
+                return url
+        return ""
+
+    def _extract_browser_bridge_pdf_attachments(
+        self,
+        page_payload: Dict[str, Any] | None,
+    ) -> tuple[List[str], List[str]]:
+        pdf_url = self._get_browser_bridge_pdf_url(page_payload)
+        if not pdf_url:
+            return [], []
+
+        target_dir = _hermes_home / "browser_bridge_uploads"
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        media_urls: List[str] = []
+        media_types: List[str] = []
+        for index, image_bytes in enumerate(fetch_pdf_page_images(pdf_url), start=1):
+            if not image_bytes:
+                continue
+            out_path = target_dir / f"sidecar_pdf_{uuid.uuid4().hex[:12]}_{index}.png"
+            try:
+                out_path.write_bytes(image_bytes)
+            except Exception:
+                continue
+            media_urls.append(str(out_path))
+            media_types.append("image/png")
+        return media_urls, media_types
+
+    async def _handle_browser_bridge_request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        route = str(payload.get("_bridge_route") or "").strip()
+        if route == "/session":
+            return await self._handle_browser_bridge_session(payload)
+        return await self._handle_browser_bridge_payload(payload)
+
+    async def _handle_browser_bridge_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        source = self._build_browser_bridge_source(
+            self._normalize_browser_bridge_display_label(payload.get("browserLabel") or ""),
+            str(payload.get("clientSessionId") or "").strip(),
+        )
+        message = build_browser_context_message(payload)
+        event = MessageEvent(text=message, source=source, message_type=MessageType.TEXT)
+        await self._handle_message(event)
+        snapshot = self._get_browser_bridge_session_snapshot(source)
+        snapshot["accepted"] = True
+        snapshot["detail"] = "Page context queued."
+        return snapshot
+
+    async def _handle_browser_bridge_session(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        action = str(payload.get("action") or "state").strip().lower()
+        browser_label = self._normalize_browser_bridge_display_label(payload.get("browserLabel") or "")
+        client_session_id = str(payload.get("clientSessionId") or "").strip()
+        selected_session_key = str(payload.get("sessionKey") or "").strip()
+        source = self._build_browser_bridge_source(browser_label, client_session_id)
+        if selected_session_key:
+            source = self._get_browser_bridge_source_for_session(selected_session_key, source)
+
+        if action == "fetch_transcript":
+            target = str(payload.get("url") or payload.get("video_id") or "").strip()
+            language = str(payload.get("language") or "").strip()
+            if not target:
+                raise ValueError("fetch_transcript requires a YouTube URL or video_id.")
+            try:
+                result = await asyncio.to_thread(
+                    self._fetch_bridge_youtube_transcript,
+                    target,
+                    language,
+                )
+            except BrowserBridgeTranscriptUnavailable as exc:
+                return {
+                    "available": False,
+                    "video_id": exc.video_id or self._extract_youtube_video_id(target),
+                    "language": exc.requested_language,
+                    "transcript_text": "",
+                    "char_count": 0,
+                    "segment_count": 0,
+                    "error": str(exc),
+                    "available_languages": exc.available_languages,
+                }
+            return {"available": True, **result}
+
+        if action == "fetch_pdf_text":
+            target = str(payload.get("url") or "").strip()
+            if not target:
+                raise ValueError("fetch_pdf_text requires a PDF url.")
+            pdf_text = await asyncio.to_thread(fetch_pdf_text, target)
+            return {
+                "pdf_text": pdf_text,
+                "char_count": len(pdf_text),
+            }
+
+        if action == "fetch_pdf_preview_info":
+            target = str(payload.get("url") or "").strip()
+            if not target:
+                raise ValueError("fetch_pdf_preview_info requires a PDF url.")
+            images = await asyncio.to_thread(fetch_pdf_page_images, target)
+            return {
+                "image_count": len(images),
+            }
+
+        if action == "tts":
+            text = str(payload.get("text") or "").strip()
+            if not text:
+                raise ValueError("Text is required for tts.")
+            from tools.tts_tool import text_to_speech_tool
+
+            raw = await asyncio.to_thread(text_to_speech_tool, text)
+            parsed = json.loads(raw) if isinstance(raw, str) else {}
+            if not parsed.get("success"):
+                raise ValueError(parsed.get("error") or "TTS generation failed.")
+            file_path = str(parsed.get("file_path") or "").strip()
+            if not file_path:
+                media_tag = str(parsed.get("media_tag") or "")
+                match = re.search(r"MEDIA:(\S+)", media_tag)
+                file_path = match.group(1) if match else ""
+            if not file_path:
+                raise ValueError("TTS output path missing.")
+            audio_path = Path(file_path).expanduser()
+            if not audio_path.exists():
+                raise ValueError("TTS output file is missing.")
+            audio_bytes = audio_path.read_bytes()
+            mime_type = mimetypes.guess_type(str(audio_path))[0] or "audio/mpeg"
+            return {
+                "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
+                "mime_type": mime_type,
+                "provider": str(parsed.get("provider") or "").strip(),
+            }
+
+        if action == "transcribe_audio":
+            raw_audio = str(payload.get("audio_base64") or "").strip()
+            if not raw_audio:
+                raise ValueError("audio_base64 is required for transcribe_audio.")
+            mime_type = str(payload.get("mime_type") or "audio/webm").strip().lower()
+            if raw_audio.startswith("data:") and "," in raw_audio:
+                _, raw_audio = raw_audio.split(",", 1)
+            try:
+                audio_bytes = base64.b64decode(raw_audio, validate=False)
+            except Exception as exc:
+                raise ValueError("Invalid audio_base64 payload.") from exc
+            ext_map = {
+                "audio/webm": ".webm",
+                "audio/ogg": ".ogg",
+                "audio/mpeg": ".mp3",
+                "audio/mp3": ".mp3",
+                "audio/wav": ".wav",
+                "audio/x-wav": ".wav",
+                "audio/mp4": ".m4a",
+            }
+            ext = ext_map.get(mime_type) or mimetypes.guess_extension(mime_type) or ".webm"
+            if ext == ".weba":
+                ext = ".webm"
+            upload_dir = _hermes_home / "browser_bridge_uploads"
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            audio_path = upload_dir / f"sidecar_audio_{uuid.uuid4().hex[:12]}{ext}"
+            audio_path.write_bytes(audio_bytes)
+
+            from tools.transcription_tools import transcribe_audio
+
+            result = await asyncio.to_thread(transcribe_audio, str(audio_path))
+            if not result.get("success"):
+                raise ValueError(result.get("error") or "Audio transcription failed.")
+            return {
+                "transcript": str(result.get("transcript") or "").strip(),
+                "provider": str(result.get("provider") or "").strip(),
+            }
+
+        if action == "list":
+            return self._list_browser_bridge_sessions(
+                limit=int(payload.get("limit") or 25),
+                preferred_session_key=selected_session_key,
+            )
+
+        if action == "state":
+            return self._get_browser_bridge_session_snapshot(source)
+
+        if action == "reset":
+            session_entry = self.session_store.get_or_create_session(source)
+            self.session_store.reset_session(session_entry.session_key)
+            self._browser_bridge_progress.pop(session_entry.session_key, None)
+            self._browser_bridge_pending_interrupts.discard(session_entry.session_key)
+            return self._get_browser_bridge_session_snapshot(source)
+
+        if action == "interrupt":
+            session_entry = self.session_store.get_or_create_session(source)
+            task = self._browser_bridge_tasks.get(session_entry.session_key)
+            if task and not task.done():
+                self._browser_bridge_pending_interrupts.add(session_entry.session_key)
+                running_agent = self._running_agents.get(session_entry.session_key)
+                if running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
+                    running_agent.interrupt("Browser sidecar requested interrupt.")
+                self._set_browser_bridge_progress(
+                    session_entry.session_key,
+                    running=True,
+                    detail="Interrupt requested. Hermes will stop after the current step.",
+                    interrupt_requested=True,
+                    recent_events=self._append_browser_bridge_progress_event(
+                        session_entry.session_key,
+                        "Interrupt requested.",
+                    ),
+                )
+                snapshot = self._get_browser_bridge_session_snapshot(source)
+                snapshot["interrupt_requested"] = True
+                snapshot["detail"] = "Interrupt requested. Hermes will stop after the current step."
+                return snapshot
+            snapshot = self._get_browser_bridge_session_snapshot(source)
+            snapshot["interrupt_requested"] = False
+            snapshot["detail"] = "No active Hermes turn to interrupt."
+            return snapshot
+
+        if action in {"send", "send_async"}:
+            return await self._handle_browser_bridge_send(
+                payload,
+                source,
+                async_mode=(action == "send_async"),
+            )
+
+        raise ValueError(f"Unsupported browser bridge action: {action}")
+
+    async def _handle_browser_bridge_send(
+        self,
+        payload: Dict[str, Any],
+        source: SessionSource,
+        *,
+        async_mode: bool,
+    ) -> Dict[str, Any]:
+        session_entry = self.session_store.get_or_create_session(source)
+        session_key = session_entry.session_key
+        existing_task = self._browser_bridge_tasks.get(session_key)
+        if existing_task and not existing_task.done():
+            snapshot = self._get_browser_bridge_session_snapshot(source)
+            snapshot["accepted"] = False
+            snapshot["busy"] = True
+            snapshot["detail"] = "Hermes is already working on this sidecar session."
+            return snapshot
+
+        page_payload = payload.get("pageContext")
+        if not isinstance(page_payload, dict):
+            page_payload = None
+        user_message = str(payload.get("message") or payload.get("note") or "").strip()
+        media_urls, media_types = self._extract_browser_bridge_image_attachments(payload)
+        pdf_media_urls, pdf_media_types = await asyncio.to_thread(
+            self._extract_browser_bridge_pdf_attachments,
+            page_payload,
+        )
+        if pdf_media_urls:
+            media_urls.extend(pdf_media_urls)
+            media_types.extend(pdf_media_types)
+        if not user_message and not page_payload and media_urls:
+            user_message = "Please analyze the attached image(s)."
+        message = build_browser_chat_message(user_message, page_payload)
+        if not message.strip():
+            raise ValueError("Sidecar message is empty.")
+
+        async def _run_turn() -> None:
+            self._set_browser_bridge_progress(
+                session_key,
+                running=True,
+                detail="Hermes is thinking...",
+                recent_events=self._append_browser_bridge_progress_event(
+                    session_key,
+                    "Turn started.",
+                ),
+            )
+            try:
+                is_slash_command_turn = message.strip().startswith("/")
+                history_len_before = 0
+                if is_slash_command_turn:
+                    try:
+                        history_len_before = len(self.session_store.load_transcript(session_entry.session_id))
+                    except Exception:
+                        history_len_before = 0
+
+                event = MessageEvent(
+                    text=message,
+                    message_type=MessageType.PHOTO if media_urls else MessageType.TEXT,
+                    source=source,
+                    media_urls=media_urls,
+                    media_types=media_types,
+                )
+                command_result = await self._handle_message(event)
+                if is_slash_command_turn:
+                    try:
+                        history_len_after = len(self.session_store.load_transcript(session_entry.session_id))
+                    except Exception:
+                        history_len_after = history_len_before
+                    transcript_already_updated = history_len_after > history_len_before
+                    result_text = str(command_result or "").strip()
+                    if result_text and not transcript_already_updated:
+                        ts = datetime.now().isoformat()
+                        self.session_store.append_to_transcript(
+                            session_entry.session_id,
+                            {"role": "user", "content": message, "timestamp": ts},
+                        )
+                        self.session_store.append_to_transcript(
+                            session_entry.session_id,
+                            {"role": "assistant", "content": result_text, "timestamp": ts},
+                        )
+
+                interrupted = session_key in self._browser_bridge_pending_interrupts
+                if interrupted:
+                    self._browser_bridge_pending_interrupts.discard(session_key)
+                self._set_browser_bridge_progress(
+                    session_key,
+                    running=False,
+                    detail="Interrupted." if interrupted else "Reply ready.",
+                    interrupt_requested=False,
+                    recent_events=self._append_browser_bridge_progress_event(
+                        session_key,
+                        "Interrupted." if interrupted else "Turn finished.",
+                    ),
+                )
+            except asyncio.CancelledError:
+                self._browser_bridge_pending_interrupts.discard(session_key)
+                self._set_browser_bridge_progress(
+                    session_key,
+                    running=False,
+                    detail="Interrupted.",
+                    interrupt_requested=False,
+                    recent_events=self._append_browser_bridge_progress_event(
+                        session_key,
+                        "Interrupted.",
+                    ),
+                )
+                raise
+            except Exception as exc:
+                logger.exception("Browser sidecar turn failed")
+                self._browser_bridge_pending_interrupts.discard(session_key)
+                self._set_browser_bridge_progress(
+                    session_key,
+                    running=False,
+                    detail="Sidecar turn failed.",
+                    error=str(exc),
+                    interrupt_requested=False,
+                    recent_events=self._append_browser_bridge_progress_event(
+                        session_key,
+                        f"Error: {exc}",
+                    ),
+                )
+            finally:
+                self._browser_bridge_tasks.pop(session_key, None)
+
+        task = asyncio.create_task(_run_turn(), name=f"browser-bridge-{session_key}")
+        self._browser_bridge_tasks[session_key] = task
+
+        if async_mode:
+            snapshot = self._get_browser_bridge_session_snapshot(source)
+            snapshot["accepted"] = True
+            snapshot["busy"] = True
+            snapshot["detail"] = "Turn accepted."
+            return snapshot
+
+        try:
+            await asyncio.wait_for(task, timeout=_BROWSER_SIDECAR_SYNC_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            if not task.done():
+                task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+            self._browser_bridge_pending_interrupts.discard(session_key)
+            self._set_browser_bridge_progress(
+                session_key,
+                running=False,
+                detail="Sidecar turn timed out.",
+                error=(
+                    "Sidecar turn exceeded "
+                    f"{_BROWSER_SIDECAR_SYNC_TIMEOUT_SECONDS:g} seconds and was cancelled."
+                ),
+                interrupt_requested=False,
+                recent_events=self._append_browser_bridge_progress_event(
+                    session_key,
+                    f"Timed out after {_BROWSER_SIDECAR_SYNC_TIMEOUT_SECONDS:g} seconds.",
+                ),
+            )
+            raise TimeoutError(
+                f"Sidecar turn exceeded {_BROWSER_SIDECAR_SYNC_TIMEOUT_SECONDS:g} seconds."
+            )
+
+        snapshot = self._get_browser_bridge_session_snapshot(source)
+        snapshot["accepted"] = True
+        snapshot["busy"] = False
+        return snapshot
 
     # -----------------------------------------------------------------
 
@@ -1206,6 +2140,17 @@ class GatewayRunner:
             write_runtime_status(gateway_state="running", exit_reason=None)
         except Exception:
             pass
+
+        try:
+            self._browser_bridge = BrowserBridgeServer(
+                loop=asyncio.get_running_loop(),
+                handle_payload=self._handle_browser_bridge_request,
+                config=BrowserBridgeConfig.from_env(),
+            )
+            self._browser_bridge.start()
+        except Exception as e:
+            logger.warning("Failed to start browser bridge: %s", e)
+            self._browser_bridge = None
         
         # Emit gateway:startup hook
         hook_count = len(self.hooks.loaded_hooks)
@@ -1417,6 +2362,21 @@ class GatewayRunner:
         logger.info("Stopping gateway...")
         self._running = False
 
+        browser_bridge = getattr(self, "_browser_bridge", None)
+        if browser_bridge:
+            try:
+                browser_bridge.stop()
+            except Exception as e:
+                logger.debug("Failed stopping browser bridge: %s", e)
+            self._browser_bridge = None
+        for session_key, task in list(getattr(self, "_browser_bridge_tasks", {}).items()):
+            if not task.done():
+                task.cancel()
+            self._browser_bridge_tasks.pop(session_key, None)
+        pending_interrupts = getattr(self, "_browser_bridge_pending_interrupts", None)
+        if pending_interrupts is not None:
+            pending_interrupts.clear()
+
         for session_key, agent in list(self._running_agents.items()):
             if agent is _AGENT_PENDING_SENTINEL:
                 continue
@@ -1594,6 +2554,12 @@ class GatewayRunner:
         4. Global allow-all (GATEWAY_ALLOW_ALL_USERS=true)
         5. Default: deny
         """
+        # Browser sidecar requests are already authenticated by the localhost
+        # bridge bearer token, so they should not also require a messaging
+        # platform allowlist entry for the synthetic local user identity.
+        if self._is_browser_bridge_source(source):
+            return True
+
         # Home Assistant events are system-generated (state changes), not
         # user-initiated messages.  The HASS_TOKEN already authenticates the
         # connection, so HA events are always authorized.
@@ -5343,6 +6309,8 @@ class GatewayRunner:
 
         from hermes_cli.tools_config import _get_platform_tools
         enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+        if self._is_browser_bridge_source(source) and "hermes-sidecar" not in enabled_toolsets:
+            enabled_toolsets.append("hermes-sidecar")
 
         # Apply tool preview length config (0 = no limit)
         try:
@@ -5365,12 +6333,31 @@ class GatewayRunner:
             or "all"
         )
         tool_progress_enabled = progress_mode != "off"
+        _bridge_sidecar = self._is_browser_bridge_source(source)
         
         # Queue for progress messages (thread-safe)
         progress_queue = queue.Queue() if tool_progress_enabled else None
         last_tool = [None]  # Mutable container for tracking in closure
         last_progress_msg = [None]  # Track last message for dedup
         repeat_count = [0]  # How many times the same message repeated
+
+        def _push_recent_event(detail: str) -> None:
+            text = (detail or "").strip()
+            if not text or not session_key or not _bridge_sidecar:
+                return
+            ts = datetime.now().strftime("%H:%M:%S")
+            bridge_line = f"[{ts}] {text}"
+            bridge_events = self._append_browser_bridge_progress_event(
+                session_key,
+                bridge_line,
+                limit=_BROWSER_BRIDGE_PROGRESS_EVENT_CAP,
+            )
+            self._set_browser_bridge_progress(
+                session_key,
+                running=True,
+                detail=text[:500],
+                recent_events=bridge_events,
+            )
         
         def progress_callback(tool_name: str, preview: str = None, args: dict = None):
             """Callback invoked by agent when a tool is called."""
@@ -5393,6 +6380,7 @@ class GatewayRunner:
                 if len(args_str) > 200:
                     args_str = args_str[:197] + "..."
                 msg = f"{emoji} {tool_name}({list(args.keys())})\n{args_str}"
+                _push_recent_event(msg)
                 progress_queue.put(msg)
                 return
             
@@ -5405,6 +6393,7 @@ class GatewayRunner:
                 msg = f"{emoji} {tool_name}: \"{preview}\""
             else:
                 msg = f"{emoji} {tool_name}..."
+            _push_recent_event(msg)
             
             # Dedup: collapse consecutive identical progress messages.
             # Common with execute_code where models iterate with the same
