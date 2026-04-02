@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 from hermes_constants import get_hermes_home
+from agent.message_content import image_path_to_data_url
 
 
 # ---------------------------------------------------------------------------
@@ -502,17 +503,9 @@ class ShellFileOperations(FileOperations):
             # Still try to read, but warn
             pass
         
-        # Images are never inlined — redirect to the vision tool
+        # Images can be returned as base64 payloads for native multimodal models.
         if self._is_image(path):
-            return ReadResult(
-                is_image=True,
-                is_binary=True,
-                file_size=file_size,
-                hint=(
-                    "Image file detected. Automatically redirected to vision_analyze tool. "
-                    "Use vision_analyze with this file path to inspect the image contents."
-                ),
-            )
+            return self._read_image(path)
         
         # Read a sample to check for binary content
         sample_cmd = f"head -c 1000 {self._escape_shell_arg(path)} 2>/dev/null"
@@ -555,9 +548,10 @@ class ShellFileOperations(FileOperations):
             hint=hint
         )
     
-    # Images larger than this are too expensive to inline as base64 in the
-    # conversation context. Return metadata only and suggest vision_analyze.
-    MAX_IMAGE_BYTES = 512 * 1024  # 512 KB
+    # Images larger than this are too expensive/risky to inline as base64 in
+    # the conversation context. Keep this aligned with the practical per-image
+    # limit expected by multimodal APIs when using data URLs.
+    MAX_IMAGE_BYTES = 20 * 1024 * 1024  # 20 MB
 
     def _read_image(self, path: str) -> ReadResult:
         """Read an image file, returning base64 content."""
@@ -575,22 +569,31 @@ class ShellFileOperations(FileOperations):
                 is_binary=True,
                 file_size=file_size,
                 hint=(
-                    f"Image is too large to inline ({file_size:,} bytes). "
-                    "Use vision_analyze to inspect the image, or reference it by path."
+                    f"Image is too large to inline ({file_size:,} bytes; max inline size is {self.MAX_IMAGE_BYTES:,} bytes). "
+                    "Do not keep trying read_file or terminal commands to inspect the image contents. "
+                    "Instead, tell the user directly that the image is too large to attach and ask them to send a smaller image or a cropped version."
                 ),
             )
         
-        # Get base64 content
-        b64_cmd = f"base64 -w 0 {self._escape_shell_arg(path)} 2>/dev/null"
-        b64_result = self._exec(b64_cmd, timeout=30)
-        
-        if b64_result.exit_code != 0:
+        # Use the same Python-side image reading/data-url path as Gateway so
+        # read_file(image) and inbound gateway images behave consistently.
+        data_url = image_path_to_data_url(path)
+        if not data_url:
             return ReadResult(
                 is_image=True,
                 is_binary=True,
                 file_size=file_size,
-                error=f"Failed to read image: {b64_result.stdout}"
+                error=(
+                    "Failed to read image data for inline attachment. "
+                    "Do not try terminal, OCR, PIL, or other fallback inspection steps. "
+                    "Instead, tell the user directly that this image could not be attached in the current environment."
+                ),
+                hint=(
+                    "Stop here and inform the user that Hermes could not attach this image. "
+                    "Ask for a smaller image, a re-upload, or a different file if they want further analysis."
+                ),
             )
+        _, _, base64_content = data_url.partition(",")
         
         # Try to get dimensions (requires ImageMagick)
         dimensions = None
@@ -617,7 +620,7 @@ class ShellFileOperations(FileOperations):
             is_image=True,
             is_binary=True,
             file_size=file_size,
-            base64_content=b64_result.stdout,
+            base64_content=base64_content,
             mime_type=mime_type,
             dimensions=dimensions
         )

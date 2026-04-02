@@ -2688,7 +2688,7 @@ class TestAnthropicImageFallback:
         assert isinstance(transformed[0]["content"], str)
         assert "A cat sitting on a chair." in transformed[0]["content"]
         assert "Can you see this now?" in transformed[0]["content"]
-        assert "vision_analyze with image_url: https://example.com/cat.png" in transformed[0]["content"]
+        assert "use read_file with path: https://example.com/cat.png" in transformed[0]["content"]
 
     def test_build_api_kwargs_reuses_cached_image_analysis_for_duplicate_images(self, agent):
         agent.api_mode = "anthropic_messages"
@@ -2721,6 +2721,185 @@ class TestAnthropicImageFallback:
             agent._build_api_kwargs(api_messages)
 
         assert mock_vision.await_count == 1
+
+
+class TestNativeMultimodalRouting:
+    def test_native_vision_models_hide_auxiliary_vision_tool(self):
+        with (
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch(
+                "run_agent.get_tool_definitions",
+                side_effect=lambda **kwargs: _make_tool_defs(
+                    "web_search",
+                    *(["vision_analyze"] if not kwargs.get("omit_vision_analyze") else []),
+                ),
+            ) as mock_get_tools,
+            patch(
+                "agent.model_metadata.get_model_capabilities",
+                return_value={"supports_vision": True, "supports_audio": False},
+            ),
+        ):
+            agent = AIAgent(
+                model="gpt-5.4",
+                api_key="test-key-1234567890",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+        assert "vision_analyze" not in agent.valid_tool_names
+        assert mock_get_tools.call_args.kwargs["omit_vision_analyze"] is True
+
+    def test_read_file_image_result_builds_native_followup_for_vision_models(self, agent):
+        agent.api_mode = "chat_completions"
+        agent._supports_native_vision = True
+
+        tool_content, followup = agent._process_read_file_image_result(
+            "read_file",
+            json.dumps(
+                {
+                    "is_image": True,
+                    "path": "/tmp/cat.png",
+                    "mime_type": "image/png",
+                    "base64_content": "QUFBQQ==",
+                    "dimensions": "64x64",
+                    "file_size": 4,
+                }
+            ),
+        )
+
+        assert "[omitted from tool text output]" in tool_content
+        assert followup is not None
+        assert followup["role"] == "user"
+        assert followup["content"][1]["type"] == "image_url"
+        assert followup["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+    def test_read_file_image_result_stays_in_tool_output_for_responses(self, agent):
+        agent.api_mode = "codex_responses"
+        agent._supports_native_vision = True
+
+        tool_content, followup = agent._process_read_file_image_result(
+            "read_file",
+            json.dumps(
+                {
+                    "is_image": True,
+                    "path": "/tmp/cat.png",
+                    "mime_type": "image/png",
+                    "base64_content": "QUFBQQ==",
+                }
+            ),
+        )
+
+        assert isinstance(tool_content, list)
+        assert tool_content[0]["type"] == "text"
+        assert tool_content[1]["type"] == "image_url"
+        assert followup is None
+
+    def test_read_file_image_result_is_processed_before_string_truncation(self, agent):
+        agent.api_mode = "codex_responses"
+        agent._supports_native_vision = True
+        huge_b64 = "A" * 150_000
+
+        tool_content, followup = agent._process_read_file_image_result(
+            "read_file",
+            json.dumps(
+                {
+                    "is_image": True,
+                    "path": "/tmp/cat.png",
+                    "mime_type": "image/png",
+                    "base64_content": huge_b64,
+                }
+            ),
+        )
+
+        assert isinstance(tool_content, list)
+        assert tool_content[1]["type"] == "image_url"
+        assert followup is None
+
+    def test_read_file_image_result_auto_analyzes_without_native_vision(self, agent):
+        agent.api_mode = "chat_completions"
+        agent._supports_native_vision = False
+
+        with patch.object(agent, "_describe_image_for_anthropic_fallback", return_value="[auto analysis]"):
+            tool_content, followup = agent._process_read_file_image_result(
+                "read_file",
+                json.dumps(
+                    {
+                        "is_image": True,
+                        "path": "/tmp/cat.png",
+                        "mime_type": "image/png",
+                        "base64_content": "QUFBQQ==",
+                    }
+                ),
+            )
+
+        assert "[auto analysis]" in tool_content
+        assert "[omitted from tool text output]" in tool_content
+        assert followup is None
+
+    def test_read_file_image_failure_tells_model_not_to_try_other_methods(self, agent):
+        agent.api_mode = "chat_completions"
+        agent._supports_native_vision = False
+
+        tool_content, followup = agent._process_read_file_image_result(
+            "read_file",
+            json.dumps(
+                {
+                    "is_image": True,
+                    "file_size": 123,
+                    "error": "Failed to read image data for inline attachment.",
+                }
+            ),
+        )
+
+        assert "Do not try terminal, OCR, PIL, tesseract, file, or other fallback inspection methods" in tool_content
+        assert followup is None
+
+    def test_chat_completions_build_api_kwargs_preserves_multimodal_content(self, agent):
+        agent.api_mode = "chat_completions"
+        api_messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe this image"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA", "detail": "auto"}},
+            ],
+        }]
+
+        kwargs = agent._build_api_kwargs(api_messages)
+        assert kwargs["messages"][0]["content"][0]["type"] == "text"
+        assert kwargs["messages"][0]["content"][1]["type"] == "image_url"
+
+    def test_responses_build_api_kwargs_preserves_multimodal_content(self, agent):
+        agent.api_mode = "codex_responses"
+        api_messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe this image"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA", "detail": "auto"}},
+            ],
+        }]
+
+        kwargs = agent._build_api_kwargs(api_messages)
+        assert kwargs["input"][0]["content"][0]["type"] == "input_text"
+        assert kwargs["input"][0]["content"][1]["type"] == "input_image"
+
+    def test_responses_tool_output_preserves_multimodal_content(self, agent):
+        agent.api_mode = "codex_responses"
+        api_messages = [{
+            "role": "tool",
+            "tool_call_id": "call_123",
+            "content": [
+                {"type": "text", "text": "Image loaded from read_file."},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA", "detail": "auto"}},
+            ],
+        }]
+
+        kwargs = agent._build_api_kwargs(api_messages)
+        output = kwargs["input"][0]["output"]
+        assert isinstance(output, list)
+        assert output[0]["type"] == "input_text"
+        assert output[1]["type"] == "input_image"
 
 
 class TestFallbackAnthropicProvider:

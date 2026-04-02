@@ -1027,9 +1027,14 @@ def convert_messages_to_anthropic(
 
         if role == "tool":
             # Sanitize tool_use_id and ensure non-empty content
-            result_content = content if isinstance(content, str) else json.dumps(content)
-            if not result_content:
-                result_content = "(no output)"
+            if isinstance(content, list):
+                result_content = _convert_content_to_anthropic(content)
+                if not result_content:
+                    result_content = [{"type": "text", "text": "(no output)"}]
+            else:
+                result_content = content if isinstance(content, str) else json.dumps(content)
+                if not result_content:
+                    result_content = "(no output)"
             tool_result = {
                 "type": "tool_result",
                 "tool_use_id": _sanitize_tool_id(m.get("tool_call_id", "")),

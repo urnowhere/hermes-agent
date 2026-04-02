@@ -767,7 +767,7 @@ KAWAII_GENERIC = [
 # Cute tool message (completion line that replaces the spinner)
 # =========================================================================
 
-def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]:
+def _detect_tool_failure(tool_name: str, result: object | None) -> tuple[bool, str]:
     """Inspect a tool result string for signs of failure.
 
     Returns ``(is_failure, suffix)`` where *suffix* is an informational tag
@@ -777,9 +777,17 @@ def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]
     if result is None:
         return False, ""
 
+    if isinstance(result, str):
+        result_text = result
+    else:
+        try:
+            result_text = json.dumps(result, ensure_ascii=False)
+        except (TypeError, ValueError):
+            result_text = str(result)
+
     if tool_name == "terminal":
         try:
-            data = json.loads(result)
+            data = json.loads(result_text)
             exit_code = data.get("exit_code")
             if exit_code is not None and exit_code != 0:
                 return True, f" [exit {exit_code}]"
@@ -790,15 +798,15 @@ def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]
     # Memory-specific: distinguish "full" from real errors
     if tool_name == "memory":
         try:
-            data = json.loads(result)
+            data = json.loads(result_text)
             if data.get("success") is False and "exceed the limit" in data.get("error", ""):
                 return True, " [full]"
         except (json.JSONDecodeError, TypeError, AttributeError):
             logger.debug("Could not parse memory result as JSON for capacity check")
 
     # Generic heuristic for non-terminal tools
-    lower = result[:500].lower()
-    if '"error"' in lower or '"failed"' in lower or result.startswith("Error"):
+    lower = result_text[:500].lower()
+    if '"error"' in lower or '"failed"' in lower or result_text.startswith("Error"):
         return True, " [error]"
 
     return False, ""

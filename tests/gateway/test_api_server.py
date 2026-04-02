@@ -548,6 +548,27 @@ class TestChatCompletionsEndpoint:
             assert "usage" in data
 
     @pytest.mark.asyncio
+    async def test_chat_completions_preserve_multimodal_content_arrays(self, adapter):
+        """Structured chat content should reach the agent unchanged."""
+        mock_result = {"final_response": "Done", "messages": [], "api_calls": 1}
+        multimodal = [
+            {"type": "text", "text": "Describe this image"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA", "detail": "auto"}},
+        ]
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": multimodal}]},
+                )
+
+            assert resp.status == 200
+            assert mock_run.call_args.kwargs["user_message"] == multimodal
+
+    @pytest.mark.asyncio
     async def test_system_prompt_extracted(self, adapter):
         """System messages from the client are passed as ephemeral_system_prompt."""
         mock_result = {
@@ -707,6 +728,27 @@ class TestResponsesEndpoint:
             # Last message is user_message, rest are history
             assert call_kwargs["user_message"] == "What is 2+2?"
             assert len(call_kwargs["conversation_history"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_responses_preserve_multimodal_content_arrays(self, adapter):
+        """Structured Responses input should reach the agent unchanged."""
+        mock_result = {"final_response": "Done", "messages": [], "api_calls": 1}
+        multimodal = [
+            {"type": "input_text", "text": "Describe this image"},
+            {"type": "input_image", "image_url": "data:image/png;base64,AAAA", "detail": "auto"},
+        ]
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                resp = await cli.post(
+                    "/v1/responses",
+                    json={"model": "hermes-agent", "input": [{"role": "user", "content": multimodal}]},
+                )
+
+            assert resp.status == 200
+            assert mock_run.call_args.kwargs["user_message"] == multimodal
 
     @pytest.mark.asyncio
     async def test_instructions_as_ephemeral_prompt(self, adapter):

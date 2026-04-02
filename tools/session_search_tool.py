@@ -22,6 +22,7 @@ import logging
 from typing import Dict, Any, List, Optional, Union
 
 from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
+from agent.message_content import content_to_text
 MAX_SESSION_CHARS = 100_000
 MAX_SUMMARY_TOKENS = 10000
 
@@ -57,7 +58,11 @@ def _format_conversation(messages: List[Dict[str, Any]]) -> str:
     parts = []
     for msg in messages:
         role = msg.get("role", "unknown").upper()
-        content = msg.get("content") or ""
+        content = content_to_text(
+            msg.get("content"),
+            image_placeholder="[image]",
+            fallback_json=True,
+        )
         tool_name = msg.get("tool_name")
 
         if role == "TOOL" and tool_name:

@@ -218,6 +218,50 @@ class TestShellFileOpsHelpers:
     def test_is_image(self, file_ops):
         assert file_ops._is_image("photo.png") is True
         assert file_ops._is_image("pic.jpg") is True
+
+
+class TestShellFileReadImages:
+    def test_read_file_routes_images_to_image_reader(self, file_ops):
+        image_result = ReadResult(
+            is_image=True,
+            is_binary=True,
+            file_size=123,
+            base64_content="QUFBQQ==",
+            mime_type="image/png",
+        )
+        file_ops._exec = MagicMock(return_value=MagicMock(exit_code=0, stdout="123"))
+        file_ops._read_image = MagicMock(return_value=image_result)
+
+        result = file_ops.read_file("/tmp/test.png")
+
+        file_ops._read_image.assert_called_once_with("/tmp/test.png")
+        assert result.is_image is True
+        assert result.base64_content == "QUFBQQ=="
+
+    def test_read_image_returns_user_facing_hint_when_too_large(self, file_ops):
+        oversized = file_ops.MAX_IMAGE_BYTES + 1
+        file_ops._exec = MagicMock(return_value=MagicMock(exit_code=0, stdout=str(oversized)))
+
+        result = file_ops._read_image("/tmp/huge.png")
+
+        assert result.is_image is True
+        assert result.base64_content is None
+        assert "too large to inline" in (result.hint or "")
+        assert "Do not keep trying read_file or terminal commands" in (result.hint or "")
+
+    def test_read_image_failure_tells_model_to_stop_retrying(self, file_ops):
+        file_ops._exec = MagicMock(
+            side_effect=[
+                MagicMock(exit_code=0, stdout="123"),
+                MagicMock(exit_code=1, stdout=""),
+            ]
+        )
+
+        result = file_ops._read_image("/tmp/fail.png")
+
+        assert result.is_image is True
+        assert "Do not try terminal, OCR, PIL, or other fallback inspection steps" in (result.error or "")
+        assert "Stop here and inform the user" in (result.hint or "")
         assert file_ops._is_image("icon.ico") is True
         assert file_ops._is_image("data.pdf") is False
         assert file_ops._is_image("code.py") is False

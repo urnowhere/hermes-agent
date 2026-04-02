@@ -235,6 +235,7 @@ def get_tool_definitions(
     enabled_toolsets: List[str] = None,
     disabled_toolsets: List[str] = None,
     quiet_mode: bool = False,
+    omit_vision_analyze: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Get tool definitions for model API calls with toolset-based filtering.
@@ -245,6 +246,9 @@ def get_tool_definitions(
         enabled_toolsets: Only include tools from these toolsets.
         disabled_toolsets: Exclude tools from these toolsets (if enabled_toolsets is None).
         quiet_mode: Suppress status prints.
+        omit_vision_analyze: Hide the auxiliary `vision_analyze` tool from
+            the model-facing tool surface. Use this when the current model
+            accepts native image input directly.
 
     Returns:
         Filtered list of OpenAI-format tool definitions.
@@ -300,6 +304,13 @@ def get_tool_definitions(
 
     # Ask the registry for schemas (only returns tools whose check_fn passes)
     filtered_tools = registry.get_definitions(tools_to_include, quiet=quiet_mode)
+
+    if omit_vision_analyze:
+        filtered_tools = [
+            tool
+            for tool in filtered_tools
+            if tool.get("function", {}).get("name") != "vision_analyze"
+        ]
 
     # The set of tool names that actually passed check_fn filtering.
     # Use this (not tools_to_include) for any downstream schema that references

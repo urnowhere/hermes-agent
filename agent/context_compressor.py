@@ -17,6 +17,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from agent.auxiliary_client import call_llm
+from agent.message_content import content_to_text
 from agent.model_metadata import (
     get_model_context_length,
     estimate_messages_tokens_rough,
@@ -171,7 +172,11 @@ class ContextCompressor:
             msg = result[i]
             if msg.get("role") != "tool":
                 continue
-            content = msg.get("content", "")
+            content = content_to_text(
+                msg.get("content", ""),
+                image_placeholder="[image]",
+                fallback_json=True,
+            )
             if not content or content == _PRUNED_TOOL_PLACEHOLDER:
                 continue
             # Only prune if the content is substantial (>200 chars)
@@ -206,7 +211,11 @@ class ContextCompressor:
         parts = []
         for msg in turns:
             role = msg.get("role", "unknown")
-            content = msg.get("content") or ""
+            content = content_to_text(
+                msg.get("content"),
+                image_placeholder="[image]",
+                fallback_json=True,
+            )
 
             # Tool results: keep more content than before (3000 chars)
             if role == "tool":
@@ -510,7 +519,11 @@ Write only the summary body. Do not include any preamble or prefix."""
 
         for i in range(n - 1, head_end - 1, -1):
             msg = messages[i]
-            content = msg.get("content") or ""
+            content = content_to_text(
+                msg.get("content"),
+                image_placeholder="[image]",
+                fallback_json=True,
+            )
             msg_tokens = len(content) // _CHARS_PER_TOKEN + 10  # +10 for role/metadata
             # Include tool call arguments in estimate
             for tc in msg.get("tool_calls") or []:
@@ -617,7 +630,7 @@ Write only the summary body. Do not include any preamble or prefix."""
             msg = messages[i].copy()
             if i == 0 and msg.get("role") == "system" and self.compression_count == 0:
                 msg["content"] = (
-                    (msg.get("content") or "")
+                    content_to_text(msg.get("content"), image_placeholder="[image]", fallback_json=True)
                     + "\n\n[Note: Some earlier conversation turns have been compacted into a handoff summary to preserve context space. The current session state may still reflect earlier work, so build on that summary and state rather than re-doing work.]"
                 )
             compressed.append(msg)
@@ -653,7 +666,11 @@ Write only the summary body. Do not include any preamble or prefix."""
         for i in range(compress_end, n_messages):
             msg = messages[i].copy()
             if _merge_summary_into_tail and i == compress_end:
-                original = msg.get("content") or ""
+                original = content_to_text(
+                    msg.get("content"),
+                    image_placeholder="[image]",
+                    fallback_json=True,
+                )
                 msg["content"] = summary + "\n\n" + original
                 _merge_summary_into_tail = False
             compressed.append(msg)

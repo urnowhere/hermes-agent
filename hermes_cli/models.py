@@ -14,6 +14,9 @@ import urllib.error
 from difflib import get_close_matches
 from typing import Any, Optional
 
+# In-memory cache for full model catalog data with capabilities
+_MODEL_CATALOG_CACHE: dict[str, list[dict[str, Any]]] = {}
+
 COPILOT_BASE_URL = "https://api.githubcopilot.com"
 COPILOT_MODELS_URL = f"{COPILOT_BASE_URL}/models"
 COPILOT_EDITOR_VERSION = "vscode/1.104.1"
@@ -1293,3 +1296,28 @@ def validate_requested_model(
             f"If the service isn't down, this model may not be valid."
         ),
     }
+
+
+def get_model_capabilities(provider: Optional[str], model: str) -> dict[str, bool]:
+    """Query model capabilities from cached catalog data.
+    
+    Returns dict with keys: supports_vision, supports_audio
+    Falls back to empty capabilities if not found in cache.
+    """
+    normalized = normalize_provider(provider)
+    catalog = _MODEL_CATALOG_CACHE.get(normalized, [])
+    
+    for item in catalog:
+        item_id = str(item.get("id", "")).lower()
+        if item_id == model.lower():
+            # Extract from OpenRouter-style architecture.input_modalities
+            arch = item.get("architecture", {})
+            if isinstance(arch, dict):
+                mods = arch.get("input_modalities", [])
+                if isinstance(mods, list):
+                    return {
+                        "supports_vision": "image" in mods,
+                        "supports_audio": "audio" in mods,
+                    }
+    
+    return {"supports_vision": False, "supports_audio": False}

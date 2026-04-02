@@ -13,6 +13,7 @@ Coverage levels:
 import os
 import time
 import tempfile
+import base64
 
 import pytest
 import yaml
@@ -58,9 +59,17 @@ class TestEstimateTokensRough:
         assert long > short
 
     def test_unicode_multibyte(self):
-        """Unicode chars are still 1 Python char each — 4 chars/token holds."""
+        """Non-ASCII text should be estimated conservatively, not //4."""
         text = "你好世界"  # 4 CJK characters
-        assert estimate_tokens_rough(text) == 1
+        assert estimate_tokens_rough(text) == 4
+
+    def test_japanese_text_not_severely_underestimated(self):
+        text = "これは日本語の文章です"
+        assert estimate_tokens_rough(text) == len(text)
+
+    def test_mixed_ascii_and_cjk_uses_conservative_max(self):
+        text = "hello你好"
+        assert estimate_tokens_rough(text) == 3
 
 
 class TestEstimateMessagesTokensRough:
@@ -71,7 +80,7 @@ class TestEstimateMessagesTokensRough:
         """Verify against known str(msg) length."""
         msg = {"role": "user", "content": "a" * 400}
         result = estimate_messages_tokens_rough([msg])
-        expected = len(str(msg)) // 4
+        expected = estimate_tokens_rough(str(msg))
         assert result == expected
 
     def test_multiple_messages_additive(self):
@@ -80,7 +89,7 @@ class TestEstimateMessagesTokensRough:
             {"role": "assistant", "content": "Hi there, how can I help?"},
         ]
         result = estimate_messages_tokens_rough(msgs)
-        expected = sum(len(str(m)) for m in msgs) // 4
+        expected = estimate_tokens_rough("".join(str(m) for m in msgs))
         assert result == expected
 
     def test_tool_call_message(self):
@@ -89,7 +98,7 @@ class TestEstimateMessagesTokensRough:
                "tool_calls": [{"id": "1", "function": {"name": "terminal", "arguments": "{}"}}]}
         result = estimate_messages_tokens_rough([msg])
         assert result > 0
-        assert result == len(str(msg)) // 4
+        assert result == estimate_tokens_rough(str(msg))
 
     def test_message_with_list_content(self):
         """Vision messages with multimodal content arrays."""
@@ -98,7 +107,50 @@ class TestEstimateMessagesTokensRough:
             {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
         ]}
         result = estimate_messages_tokens_rough([msg])
-        assert result == len(str(msg)) // 4
+        expected = estimate_tokens_rough(str({"role": "user", "content": "describe\n[image]"})) + 1600
+        assert result == expected
+
+    def test_message_with_low_detail_image_uses_gpt54_budget(self):
+        png_bytes = (
+            b"\x89PNG\r\n\x1a\n"
+            b"\x00\x00\x00\rIHDR"
+            b"\x00\x00\x04\x00"  # width = 1024
+            b"\x00\x00\x04\x00"  # height = 1024
+            b"\x08\x02\x00\x00\x00"
+        )
+        data_url = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+        msg = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "describe"},
+                {"type": "image_url", "image_url": {"url": data_url, "detail": "low"}},
+            ],
+        }
+
+        result = estimate_messages_tokens_rough([msg])
+        expected = estimate_tokens_rough(str({"role": "user", "content": "describe\n[image]"})) + 256
+        assert result == expected
+
+    def test_message_with_large_high_detail_image_uses_patch_count(self):
+        png_bytes = (
+            b"\x89PNG\r\n\x1a\n"
+            b"\x00\x00\x00\rIHDR"
+            b"\x00\x00\x07\x08"  # width = 1800
+            b"\x00\x00\x09\x60"  # height = 2400
+            b"\x08\x02\x00\x00\x00"
+        )
+        data_url = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+        msg = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "describe"},
+                {"type": "image_url", "image_url": {"url": data_url, "detail": "high"}},
+            ],
+        }
+
+        result = estimate_messages_tokens_rough([msg])
+        expected = estimate_tokens_rough(str({"role": "user", "content": "describe\n[image]"})) + 2451
+        assert result == expected
 
 
 # =========================================================================
@@ -633,3 +685,75 @@ class TestContextLengthCache:
         with patch("agent.model_metadata._get_context_cache_path", return_value=cache_file):
             save_context_length(model, url, 200000)
             assert get_cached_context_length(model, url) == 200000
+
+
+# =========================================================================
+# Model capabilities
+# =========================================================================
+
+class TestModelCapabilities:
+    def test_extract_vision_capability(self):
+        """Test that vision capability is extracted from OpenRouter data."""
+        from agent.model_metadata import get_model_capabilities
+        
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "data": [
+                {
+                    "id": "test/vision-model",
+                    "context_length": 128000,
+                    "architecture": {
+                        "input_modalities": ["text", "image"]
+                    }
+                }
+            ]
+        }
+        
+        with patch("agent.model_metadata.requests.get", return_value=mock_response):
+            caps = get_model_capabilities("test/vision-model")
+            assert caps["supports_vision"] is True
+            assert caps["supports_audio"] is False
+    
+    def test_extract_audio_capability(self):
+        """Test that audio capability is extracted from OpenRouter data."""
+        from agent.model_metadata import get_model_capabilities
+        
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "data": [
+                {
+                    "id": "test/audio-model",
+                    "context_length": 128000,
+                    "architecture": {
+                        "input_modalities": ["text", "audio"]
+                    }
+                }
+            ]
+        }
+        
+        with patch("agent.model_metadata.requests.get", return_value=mock_response):
+            caps = get_model_capabilities("test/audio-model")
+            assert caps["supports_vision"] is False
+            assert caps["supports_audio"] is True
+    
+    def test_no_capabilities(self):
+        """Test model with no multimodal capabilities."""
+        from agent.model_metadata import get_model_capabilities
+        
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "data": [
+                {
+                    "id": "test/text-only",
+                    "context_length": 128000,
+                    "architecture": {
+                        "input_modalities": ["text"]
+                    }
+                }
+            ]
+        }
+        
+        with patch("agent.model_metadata.requests.get", return_value=mock_response):
+            caps = get_model_capabilities("test/text-only")
+            assert caps["supports_vision"] is False
+            assert caps["supports_audio"] is False

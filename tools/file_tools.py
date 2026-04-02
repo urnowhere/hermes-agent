@@ -7,7 +7,7 @@ import logging
 import os
 import threading
 from pathlib import Path
-from tools.file_operations import ShellFileOperations
+from tools.file_operations import IMAGE_EXTENSIONS, ShellFileOperations
 from agent.redact import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
@@ -68,6 +68,17 @@ _BLOCKED_DEVICE_PATHS = frozenset({
     # fd aliases
     "/dev/fd/0", "/dev/fd/1", "/dev/fd/2",
 })
+
+
+def _is_likely_image_path(filepath: str) -> bool:
+    """Return True when the path looks like an image file.
+
+    Image reads must not use the generic dedup stub, because the earlier
+    `read_file` result may have been transformed into a synthetic multimodal
+    follow-up rather than remaining available as reusable tool text.
+    """
+    ext = Path(os.path.expanduser(filepath)).suffix.lower()
+    return ext in IMAGE_EXTENSIONS
 
 
 def _is_blocked_device(filepath: str) -> bool:
@@ -326,7 +337,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
             })
             cached_mtime = task_data.get("dedup", {}).get(dedup_key)
 
-        if cached_mtime is not None:
+        if cached_mtime is not None and not _is_likely_image_path(path):
             try:
                 current_mtime = os.path.getmtime(resolved_str)
                 if current_mtime == cached_mtime:
@@ -403,7 +414,8 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
             #    the agent last read it (external edit, concurrent agent, etc.).
             try:
                 _mtime_now = os.path.getmtime(resolved_str)
-                task_data["dedup"][dedup_key] = _mtime_now
+                if not (result_dict.get("is_image") or result_dict.get("is_binary")):
+                    task_data["dedup"][dedup_key] = _mtime_now
                 task_data.setdefault("read_timestamps", {})[resolved_str] = _mtime_now
             except OSError:
                 pass  # Can't stat — skip tracking for this entry
@@ -727,7 +739,7 @@ def _check_file_reqs():
 
 READ_FILE_SCHEMA = {
     "name": "read_file",
-    "description": "Read a text file with line numbers and pagination. Use this instead of cat/head/tail in terminal. Output format: 'LINE_NUM|CONTENT'. Suggests similar filenames if not found. Use offset and limit for large files. Reads exceeding ~100K characters are rejected; use offset and limit to read specific sections of large files. NOTE: Cannot read images or binary files — use vision_analyze for images.",
+    "description": "Read a file from the workspace. For text files, returns line-numbered content in 'LINE_NUM|CONTENT' format with pagination support. For image files, returns image metadata and image data that Hermes can attach to native multimodal models. Use this instead of cat/head/tail in terminal, including for image inspection. Suggests similar filenames if not found. Use offset and limit for large text files. Reads exceeding ~100K characters are rejected; use offset and limit to read specific text ranges.",
     "parameters": {
         "type": "object",
         "properties": {

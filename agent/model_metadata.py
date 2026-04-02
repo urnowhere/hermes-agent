@@ -8,6 +8,9 @@ import logging
 import os
 import re
 import time
+import base64
+import math
+import struct
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -15,6 +18,7 @@ from urllib.parse import urlparse
 import requests
 import yaml
 
+from agent.message_content import content_to_text
 from hermes_constants import OPENROUTER_MODELS_URL
 
 logger = logging.getLogger(__name__)
@@ -79,6 +83,7 @@ CONTEXT_PROBE_TIERS = [
 
 # Default context length when no detection method succeeds.
 DEFAULT_FALLBACK_CONTEXT = CONTEXT_PROBE_TIERS[0]
+_ROUGH_IMAGE_TOKEN_FALLBACK = 1600
 
 # Thin fallback defaults — only broad model family patterns.
 # These fire only when provider is unknown AND models.dev/OpenRouter/Anthropic
@@ -386,11 +391,15 @@ def fetch_model_metadata(force_refresh: bool = False) -> Dict[str, Dict[str, Any
         cache = {}
         for model in data.get("data", []):
             model_id = model.get("id", "")
+            arch = model.get("architecture", {})
+            input_mods = arch.get("input_modalities", []) if isinstance(arch, dict) else []
             entry = {
                 "context_length": model.get("context_length", 128000),
                 "max_completion_tokens": model.get("top_provider", {}).get("max_completion_tokens", 4096),
                 "name": model.get("name", model_id),
                 "pricing": model.get("pricing", {}),
+                "supports_vision": "image" in input_mods,
+                "supports_audio": "audio" in input_mods,
             }
             _add_model_aliases(cache, model_id, entry)
             canonical = model.get("canonical_slug", "")
@@ -896,16 +905,224 @@ def get_model_context_length(
 
 
 def estimate_tokens_rough(text: str) -> int:
-    """Rough token estimate (~4 chars/token) for pre-flight checks."""
+    """Conservative rough token estimate for mixed-language text.
+
+    ASCII-heavy text is estimated at roughly 4 chars/token. Non-ASCII text is
+    treated more conservatively at roughly 1 char/token to avoid severe
+    undercounting for CJK, Persian, Arabic, and similar scripts.
+    """
     if not text:
         return 0
-    return len(text) // 4
+    ascii_chars = sum(1 for ch in text if ord(ch) < 128)
+    non_ascii_chars = len(text) - ascii_chars
+    estimate = max(len(text) // 4, (ascii_chars // 4) + non_ascii_chars)
+    return max(1, estimate)
+
+
+def _parse_png_dimensions(data: bytes) -> Optional[tuple[int, int]]:
+    if len(data) < 24 or not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return None
+    try:
+        width, height = struct.unpack(">II", data[16:24])
+    except struct.error:
+        return None
+    return (width, height) if width > 0 and height > 0 else None
+
+
+def _parse_gif_dimensions(data: bytes) -> Optional[tuple[int, int]]:
+    if len(data) < 10 or not data.startswith((b"GIF87a", b"GIF89a")):
+        return None
+    width, height = struct.unpack("<HH", data[6:10])
+    return (width, height) if width > 0 and height > 0 else None
+
+
+def _parse_bmp_dimensions(data: bytes) -> Optional[tuple[int, int]]:
+    if len(data) < 26 or not data.startswith(b"BM"):
+        return None
+    dib_header_size = struct.unpack("<I", data[14:18])[0]
+    if dib_header_size < 12:
+        return None
+    if dib_header_size >= 40 and len(data) >= 26:
+        width = struct.unpack("<i", data[18:22])[0]
+        height = abs(struct.unpack("<i", data[22:26])[0])
+    elif dib_header_size == 12 and len(data) >= 26:
+        width, height = struct.unpack("<HH", data[18:22])
+    else:
+        return None
+    return (width, height) if width > 0 and height > 0 else None
+
+
+def _parse_webp_dimensions(data: bytes) -> Optional[tuple[int, int]]:
+    if len(data) < 30 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
+        return None
+    chunk = data[12:16]
+    try:
+        if chunk == b"VP8 " and len(data) >= 30:
+            width, height = struct.unpack("<HH", data[26:30])
+            return (width & 0x3FFF, height & 0x3FFF)
+        if chunk == b"VP8L" and len(data) >= 25:
+            bits = struct.unpack("<I", data[21:25])[0]
+            width = (bits & 0x3FFF) + 1
+            height = ((bits >> 14) & 0x3FFF) + 1
+            return (width, height)
+        if chunk == b"VP8X" and len(data) >= 30:
+            width = 1 + int.from_bytes(data[24:27], "little")
+            height = 1 + int.from_bytes(data[27:30], "little")
+            return (width, height)
+    except Exception:
+        return None
+    return None
+
+
+def _parse_jpeg_dimensions(data: bytes) -> Optional[tuple[int, int]]:
+    if len(data) < 4 or not data.startswith(b"\xff\xd8"):
+        return None
+    i = 2
+    size = len(data)
+    while i + 9 < size:
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        while i < size and data[i] == 0xFF:
+            i += 1
+        if i >= size:
+            break
+        marker = data[i]
+        i += 1
+        if marker in {0xD8, 0xD9}:
+            continue
+        if i + 1 >= size:
+            break
+        seglen = struct.unpack(">H", data[i:i + 2])[0]
+        if seglen < 2 or i + seglen > size:
+            break
+        if marker in {
+            0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+            0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF,
+        } and seglen >= 7:
+            height = struct.unpack(">H", data[i + 3:i + 5])[0]
+            width = struct.unpack(">H", data[i + 5:i + 7])[0]
+            return (width, height) if width > 0 and height > 0 else None
+        i += seglen
+    return None
+
+
+def _image_dimensions_from_bytes(data: bytes) -> Optional[tuple[int, int]]:
+    for parser in (
+        _parse_png_dimensions,
+        _parse_jpeg_dimensions,
+        _parse_gif_dimensions,
+        _parse_bmp_dimensions,
+        _parse_webp_dimensions,
+    ):
+        dims = parser(data)
+        if dims:
+            return dims
+    return None
+
+
+def _load_image_dimensions(image_ref: str) -> Optional[tuple[int, int]]:
+    ref = str(image_ref or "").strip()
+    if not ref:
+        return None
+    try:
+        if ref.startswith("data:"):
+            _, _, encoded = ref.partition(",")
+            if not encoded:
+                return None
+            return _image_dimensions_from_bytes(base64.b64decode(encoded, validate=False))
+        path = Path(ref).expanduser()
+        if path.exists() and path.is_file():
+            return _image_dimensions_from_bytes(path.read_bytes())
+    except Exception:
+        return None
+    return None
+
+
+def _estimate_gpt54_image_tokens(width: int, height: int, detail: str = "auto") -> int:
+    if width <= 0 or height <= 0:
+        return _ROUGH_IMAGE_TOKEN_FALLBACK
+
+    detail_norm = str(detail or "auto").strip().lower()
+    if detail_norm == "low":
+        return 256
+
+    patch_budget = 10_000 if detail_norm == "original" else 2_500
+    max_dimension = 6_000 if detail_norm == "original" else 2_048
+
+    scale = min(1.0, max_dimension / max(width, height))
+    scaled_width = max(1, int(math.floor(width * scale)))
+    scaled_height = max(1, int(math.floor(height * scale)))
+
+    patch_count = math.ceil(scaled_width / 32) * math.ceil(scaled_height / 32)
+    if patch_count > patch_budget:
+        shrink_factor = math.sqrt((32 * 32 * patch_budget) / (scaled_width * scaled_height))
+        width_ratio = (scaled_width * shrink_factor) / 32
+        height_ratio = (scaled_height * shrink_factor) / 32
+        adjusted = shrink_factor * min(
+            math.floor(width_ratio) / width_ratio if width_ratio else 1.0,
+            math.floor(height_ratio) / height_ratio if height_ratio else 1.0,
+        )
+        scaled_width = max(1, int(math.floor(scaled_width * adjusted)))
+        scaled_height = max(1, int(math.floor(scaled_height * adjusted)))
+        patch_count = math.ceil(scaled_width / 32) * math.ceil(scaled_height / 32)
+
+    return min(patch_count, patch_budget)
+
+
+def estimate_image_tokens_rough(image_ref: str, detail: str = "auto") -> int:
+    dims = _load_image_dimensions(image_ref)
+    if not dims:
+        return _ROUGH_IMAGE_TOKEN_FALLBACK
+    return _estimate_gpt54_image_tokens(dims[0], dims[1], detail=detail)
+
+
+def _estimate_content_image_tokens(content: Any) -> int:
+    if not isinstance(content, list):
+        return 0
+    total = 0
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        ptype = part.get("type")
+        if ptype == "image_url":
+            image_data = part.get("image_url", {})
+            image_ref = image_data.get("url", "") if isinstance(image_data, dict) else str(image_data or "")
+            detail = image_data.get("detail", "auto") if isinstance(image_data, dict) else "auto"
+            total += estimate_image_tokens_rough(image_ref, detail)
+        elif ptype == "input_image":
+            image_ref = part.get("image_url") or part.get("file_id") or ""
+            total += estimate_image_tokens_rough(str(image_ref or ""), str(part.get("detail", "auto")))
+        elif ptype == "image":
+            source = part.get("source", {}) if isinstance(part.get("source"), dict) else {}
+            if source.get("type") == "base64" and source.get("data"):
+                media_type = source.get("media_type") or "image/jpeg"
+                image_ref = f"data:{media_type};base64,{source['data']}"
+                total += estimate_image_tokens_rough(image_ref, "auto")
+            else:
+                total += _ROUGH_IMAGE_TOKEN_FALLBACK
+    return total
 
 
 def estimate_messages_tokens_rough(messages: List[Dict[str, Any]]) -> int:
     """Rough token estimate for a message list (pre-flight only)."""
-    total_chars = sum(len(str(msg)) for msg in messages)
-    return total_chars // 4
+    total_text_parts: List[str] = []
+    total_image_tokens = 0
+    for msg in messages:
+        if not isinstance(msg, dict):
+            total_text_parts.append(str(msg))
+            continue
+        msg_copy = dict(msg)
+        content = msg_copy.get("content")
+        if content is not None and not isinstance(content, str):
+            total_image_tokens += _estimate_content_image_tokens(content)
+            msg_copy["content"] = content_to_text(
+                content,
+                image_placeholder="[image]",
+                fallback_json=True,
+            )
+        total_text_parts.append(str(msg_copy))
+    return estimate_tokens_rough("".join(total_text_parts)) + total_image_tokens
 
 
 def estimate_request_tokens_rough(
@@ -921,11 +1138,40 @@ def estimate_request_tokens_rough(
     tools enabled, schemas alone can add 20-30K tokens — a significant
     blind spot when only counting messages.
     """
-    total_chars = 0
+    text_parts: List[str] = []
     if system_prompt:
-        total_chars += len(system_prompt)
+        text_parts.append(system_prompt)
     if messages:
-        total_chars += sum(len(str(msg)) for msg in messages)
+        for msg in messages:
+            if isinstance(msg, dict) and not isinstance(msg.get("content"), str):
+                text_parts.append(
+                    str(
+                        {
+                            **msg,
+                            "content": content_to_text(
+                                msg.get("content"),
+                                image_placeholder="[image]",
+                                fallback_json=True,
+                            ),
+                        }
+                    )
+                )
+            else:
+                text_parts.append(str(msg))
     if tools:
-        total_chars += len(str(tools))
-    return total_chars // 4
+        text_parts.append(str(tools))
+    return estimate_tokens_rough("".join(text_parts))
+
+
+def get_model_capabilities(model: str, provider: Optional[str] = None) -> Dict[str, bool]:
+    """Get multimodal capabilities for a model.
+    
+    Returns dict with keys: supports_vision, supports_audio
+    Checks OpenRouter cache first, falls back to False if not found.
+    """
+    metadata = fetch_model_metadata()
+    entry = metadata.get(model.lower(), {})
+    return {
+        "supports_vision": entry.get("supports_vision", False),
+        "supports_audio": entry.get("supports_audio", False),
+    }

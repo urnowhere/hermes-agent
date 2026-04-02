@@ -26,6 +26,8 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
+from agent.message_content import content_to_text
+
 try:
     from aiohttp import web
     AIOHTTP_AVAILABLE = True
@@ -470,28 +472,29 @@ class APIServerAdapter(BasePlatformAdapter):
 
         # Extract system message (becomes ephemeral system prompt layered ON TOP of core)
         system_prompt = None
-        conversation_messages: List[Dict[str, str]] = []
+        conversation_messages: List[Dict[str, Any]] = []
 
         for msg in messages:
             role = msg.get("role", "")
             content = msg.get("content", "")
             if role == "system":
                 # Accumulate system messages
+                content_text = content_to_text(content, image_placeholder="[image]", fallback_json=True)
                 if system_prompt is None:
-                    system_prompt = content
+                    system_prompt = content_text
                 else:
-                    system_prompt = system_prompt + "\n" + content
+                    system_prompt = system_prompt + "\n" + content_text
             elif role in ("user", "assistant"):
                 conversation_messages.append({"role": role, "content": content})
 
         # Extract the last user message as the primary input
-        user_message = ""
+        user_message: Any = ""
         history = []
         if conversation_messages:
             user_message = conversation_messages[-1].get("content", "")
             history = conversation_messages[:-1]
 
-        if not user_message:
+        if not content_to_text(user_message, image_placeholder="[image]", fallback_json=True).strip():
             return web.json_response(
                 {"error": {"message": "No user message found in messages", "type": "invalid_request_error"}},
                 status=400,
@@ -760,7 +763,7 @@ class APIServerAdapter(BasePlatformAdapter):
             # No error if conversation doesn't exist yet — it's a new conversation
 
         # Normalize input to message list
-        input_messages: List[Dict[str, str]] = []
+        input_messages: List[Dict[str, Any]] = []
         if isinstance(raw_input, str):
             input_messages = [{"role": "user", "content": raw_input}]
         elif isinstance(raw_input, list):
@@ -770,23 +773,12 @@ class APIServerAdapter(BasePlatformAdapter):
                 elif isinstance(item, dict):
                     role = item.get("role", "user")
                     content = item.get("content", "")
-                    # Handle content that may be a list of content parts
-                    if isinstance(content, list):
-                        text_parts = []
-                        for part in content:
-                            if isinstance(part, dict) and part.get("type") == "input_text":
-                                text_parts.append(part.get("text", ""))
-                            elif isinstance(part, dict) and part.get("type") == "output_text":
-                                text_parts.append(part.get("text", ""))
-                            elif isinstance(part, str):
-                                text_parts.append(part)
-                        content = "\n".join(text_parts)
                     input_messages.append({"role": role, "content": content})
         else:
             return web.json_response(_openai_error("'input' must be a string or array"), status=400)
 
         # Reconstruct conversation history from previous_response_id
-        conversation_history: List[Dict[str, str]] = []
+        conversation_history: List[Dict[str, Any]] = []
         if previous_response_id:
             stored = self._response_store.get(previous_response_id)
             if stored is None:
@@ -802,7 +794,7 @@ class APIServerAdapter(BasePlatformAdapter):
 
         # Last input message is the user_message
         user_message = input_messages[-1].get("content", "") if input_messages else ""
-        if not user_message:
+        if not content_to_text(user_message, image_placeholder="[image]", fallback_json=True).strip():
             return web.json_response(_openai_error("No user message found in input"), status=400)
 
         # Truncation support
@@ -1220,8 +1212,8 @@ class APIServerAdapter(BasePlatformAdapter):
 
     async def _run_agent(
         self,
-        user_message: str,
-        conversation_history: List[Dict[str, str]],
+        user_message: Any,
+        conversation_history: List[Dict[str, Any]],
         ephemeral_system_prompt: Optional[str] = None,
         session_id: Optional[str] = None,
         stream_delta_callback=None,

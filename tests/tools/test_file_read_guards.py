@@ -30,23 +30,32 @@ from tools.file_tools import (
 
 class _FakeReadResult:
     """Minimal stand-in for FileOperations.read_file return value."""
-    def __init__(self, content="line1\nline2\n", total_lines=2, file_size=100):
+    def __init__(
+        self,
+        content="line1\nline2\n",
+        total_lines=2,
+        file_size=100,
+        **extra,
+    ):
         self.content = content
         self._total_lines = total_lines
         self._file_size = file_size
+        self._extra = extra
 
     def to_dict(self):
-        return {
+        result = {
             "content": self.content,
             "total_lines": self._total_lines,
             "file_size": self._file_size,
         }
+        result.update(self._extra)
+        return result
 
 
-def _make_fake_ops(content="hello\n", total_lines=1, file_size=6):
+def _make_fake_ops(content="hello\n", total_lines=1, file_size=6, **extra):
     fake = MagicMock()
     fake.read_file = lambda path, offset=1, limit=500: _FakeReadResult(
-        content=content, total_lines=total_lines, file_size=file_size,
+        content=content, total_lines=total_lines, file_size=file_size, **extra,
     )
     return fake
 
@@ -213,6 +222,31 @@ class TestFileDedup(unittest.TestCase):
 
         r2 = json.loads(read_file_tool(self._tmpfile, task_id="task_b"))
         self.assertNotEqual(r2.get("dedup"), True)
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_image_reads_are_not_deduped(self, mock_ops):
+        """Image reads must return a fresh payload, not a dedup stub."""
+        image_path = os.path.join(self._tmpdir, "dedup_test.png")
+        with open(image_path, "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\n")
+
+        mock_ops.return_value = _make_fake_ops(
+            content="",
+            file_size=8,
+            is_binary=True,
+            is_image=True,
+            base64_content="QUFBQQ==",
+            mime_type="image/png",
+        )
+
+        r1 = json.loads(read_file_tool(image_path, task_id="img"))
+        self.assertTrue(r1.get("is_image"))
+        self.assertEqual(r1.get("base64_content"), "QUFBQQ==")
+
+        r2 = json.loads(read_file_tool(image_path, task_id="img"))
+        self.assertNotEqual(r2.get("dedup"), True)
+        self.assertTrue(r2.get("is_image"))
+        self.assertEqual(r2.get("base64_content"), "QUFBQQ==")
 
 
 # ---------------------------------------------------------------------------

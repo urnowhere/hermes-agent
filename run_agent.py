@@ -88,6 +88,11 @@ from agent.model_metadata import (
     save_context_length,
 )
 from agent.context_compressor import ContextCompressor
+from agent.message_content import (
+    content_has_image_parts,
+    content_to_text,
+    convert_content_to_responses_input,
+)
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, DEVELOPER_ROLE_MODELS
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
@@ -933,11 +938,22 @@ class AIAgent:
                 print(f"🔄 Fallback chain ({len(self._fallback_chain)} providers): " +
                       " → ".join(f"{f['model']} ({f['provider']})" for f in self._fallback_chain))
 
+        # Hide the auxiliary image tool when the model already accepts native
+        # image input. That prevents the tool loop from re-routing images back
+        # through vision_analyze after multimodal content has already been passed.
+        from agent.model_metadata import get_model_capabilities
+
+        supports_native_vision = bool(
+            get_model_capabilities(self.model, provider=self.provider).get("supports_vision")
+        )
+        self._supports_native_vision = supports_native_vision
+
         # Get available tools with filtering
         self.tools = get_tool_definitions(
             enabled_toolsets=enabled_toolsets,
             disabled_toolsets=disabled_toolsets,
             quiet_mode=self.quiet_mode,
+            omit_vision_analyze=True,
         )
         
         # Show tool configuration and store valid tool names for validation
@@ -1884,10 +1900,11 @@ class AIAgent:
                     if msg.get("reasoning") and msg["reasoning"].strip():
                         content = f"<think>\n{msg['reasoning']}\n</think>\n"
                     
-                    if msg.get("content") and msg["content"].strip():
+                    _assistant_text = content_to_text(msg.get("content"), fallback_json=True)
+                    if _assistant_text.strip():
                         # Convert any <REASONING_SCRATCHPAD> tags to <think> tags
                         # (used when native thinking is disabled and model reasons via XML)
-                        content += convert_scratchpad_to_think(msg["content"]) + "\n"
+                        content += convert_scratchpad_to_think(_assistant_text) + "\n"
                     
                     # Add tool calls wrapped in XML tags
                     for tool_call in msg["tool_calls"]:
@@ -1968,7 +1985,7 @@ class AIAgent:
                     
                     # Convert any <REASONING_SCRATCHPAD> tags to <think> tags
                     # (used when native thinking is disabled and model reasons via XML)
-                    raw_content = msg["content"] or ""
+                    raw_content = content_to_text(msg.get("content"), fallback_json=True)
                     content += convert_scratchpad_to_think(raw_content)
                     
                     # Ensure every gpt turn has a <think> block (empty if no reasoning)
@@ -1983,7 +2000,7 @@ class AIAgent:
             elif msg["role"] == "user":
                 trajectory.append({
                     "from": "human",
-                    "value": msg["content"]
+                    "value": content_to_text(msg.get("content"), fallback_json=True)
                 })
             
             i += 1
@@ -2152,9 +2169,6 @@ class AIAgent:
 
             self._vprint(f"{self.log_prefix}🧾 Request debug dump written to: {dump_file}")
 
-            if env_var_enabled("HERMES_DUMP_REQUEST_STDOUT"):
-                print(json.dumps(dump_payload, ensure_ascii=False, indent=2, default=str))
-
             return dump_file
         except Exception as dump_error:
             if self.verbose_logging:
@@ -2162,9 +2176,9 @@ class AIAgent:
             return None
 
     @staticmethod
-    def _clean_session_content(content: str) -> str:
+    def _clean_session_content(content: Any) -> Any:
         """Convert REASONING_SCRATCHPAD to think tags and clean up whitespace."""
-        if not content:
+        if not isinstance(content, str) or not content:
             return content
         content = convert_scratchpad_to_think(content)
         content = re.sub(r'\n+(<think>)', r'\n\1', content)
@@ -2393,10 +2407,17 @@ class AIAgent:
 
         # Rebuild tool surface after Honcho context injection. Tool availability
         # is check_fn-gated and may change once session context is attached.
+        from agent.model_metadata import get_model_capabilities
+
+        supports_native_vision = bool(
+            get_model_capabilities(self.model, provider=self.provider).get("supports_vision")
+        )
+        self._supports_native_vision = supports_native_vision
         self.tools = get_tool_definitions(
             enabled_toolsets=enabled_toolsets,
             disabled_toolsets=disabled_toolsets,
             quiet_mode=True,
+            omit_vision_analyze=True,
         )
         self.valid_tool_names = {
             tool["function"]["name"] for tool in self.tools
@@ -2998,7 +3019,10 @@ class AIAgent:
 
             if role in {"user", "assistant"}:
                 content = msg.get("content", "")
-                content_text = str(content) if content is not None else ""
+                content_text = (
+                    content if isinstance(content, str)
+                    else content_to_text(content, image_placeholder="[image]", fallback_json=True)
+                )
 
                 if role == "assistant":
                     # Replay encrypted reasoning items from previous turns
@@ -3064,7 +3088,7 @@ class AIAgent:
                             })
                     continue
 
-                items.append({"role": role, "content": content_text})
+                items.append({"role": role, "content": convert_content_to_responses_input(content)})
                 continue
 
             if role == "tool":
@@ -3075,10 +3099,15 @@ class AIAgent:
                         call_id = raw_tool_call_id.strip()
                 if not isinstance(call_id, str) or not call_id.strip():
                     continue
+                output = msg.get("content", "")
+                if output is None:
+                    output = ""
+                elif not isinstance(output, str):
+                    output = convert_content_to_responses_input(output)
                 items.append({
                     "type": "function_call_output",
                     "call_id": call_id,
-                    "output": str(msg.get("content", "") or ""),
+                    "output": output,
                 })
 
         return items
@@ -3125,8 +3154,11 @@ class AIAgent:
                 output = item.get("output", "")
                 if output is None:
                     output = ""
-                if not isinstance(output, str):
-                    output = str(output)
+                elif not isinstance(output, str):
+                    if isinstance(output, list):
+                        output = convert_content_to_responses_input(output)
+                    else:
+                        output = str(output)
 
                 normalized.append(
                     {
@@ -3157,8 +3189,8 @@ class AIAgent:
                 content = item.get("content", "")
                 if content is None:
                     content = ""
-                if not isinstance(content, str):
-                    content = str(content)
+                elif not isinstance(content, str):
+                    content = convert_content_to_responses_input(content)
 
                 normalized.append({"role": role, "content": content})
                 continue
@@ -4769,12 +4801,7 @@ class AIAgent:
 
     @staticmethod
     def _content_has_image_parts(content: Any) -> bool:
-        if not isinstance(content, list):
-            return False
-        for part in content:
-            if isinstance(part, dict) and part.get("type") in {"image_url", "input_image"}:
-                return True
-        return False
+        return content_has_image_parts(content)
 
     @staticmethod
     def _materialize_data_url_for_vision(image_url: str) -> tuple[str, Optional[Path]]:
@@ -4842,11 +4869,106 @@ class AIAgent:
         note = f"[The {role_label} attached an image. Here's what it contains:\n{description}]"
         if vision_source and not str(image_url or "").startswith("data:"):
             note += (
-                f"\n[If you need a closer look, use vision_analyze with image_url: {vision_source}]"
+                f"\n[If you need to inspect the original file again, use read_file with path: {vision_source}]"
             )
 
         self._anthropic_image_fallback_cache[cache_key] = note
         return note
+
+    def _process_read_file_image_result(
+        self,
+        function_name: str,
+        function_result: str,
+    ) -> tuple[Any, Optional[Dict[str, Any]]]:
+        """Normalize read_file(image) results for the active model capability.
+
+        Returns:
+            (tool_content_text, optional_followup_message)
+
+        - Native-vision models get a synthetic multimodal follow-up message.
+        - Non-vision models get automatic auxiliary vision analysis appended
+          into the tool result text.
+        - In all cases, inline base64 is removed from the textual tool result to
+          avoid blowing up the context window.
+        """
+        if function_name != "read_file":
+            return function_result, None
+
+        try:
+            payload = json.loads(function_result)
+        except Exception:
+            return function_result, None
+        if not isinstance(payload, dict) or not payload.get("is_image"):
+            return function_result, None
+
+        if payload.get("error") and not payload.get("base64_content"):
+            payload = dict(payload)
+            payload["next_step"] = (
+                "Do not try terminal, OCR, PIL, tesseract, file, or other fallback inspection methods. "
+                "Tell the user directly that Hermes could not attach or inspect this image in the current environment."
+            )
+            return json.dumps(payload, ensure_ascii=False), None
+
+        base64_content = payload.get("base64_content")
+        mime_type = payload.get("mime_type") or "image/jpeg"
+        if not isinstance(base64_content, str) or not base64_content.strip():
+            return function_result, None
+
+        path = str(payload.get("path") or "").strip()
+        dimensions = str(payload.get("dimensions") or "").strip()
+        file_size = payload.get("file_size")
+        data_url = f"data:{mime_type};base64,{base64_content}"
+
+        payload = dict(payload)
+        payload["base64_content"] = "[omitted from tool text output]"
+
+        if not getattr(self, "_supports_native_vision", False):
+            analysis_note = self._describe_image_for_anthropic_fallback(data_url, "tool")
+            if path:
+                analysis_note += f"\n[Original image path: {path}]"
+            payload["analysis"] = analysis_note
+            return json.dumps(payload, ensure_ascii=False), None
+
+        intro_bits = ["read_file loaded an image file for inspection."]
+        if path:
+            intro_bits.append(f"Path: {path}.")
+        if dimensions:
+            intro_bits.append(f"Dimensions: {dimensions}.")
+        if isinstance(file_size, int) and file_size > 0:
+            intro_bits.append(f"Size: {file_size:,} bytes.")
+        intro_text = " ".join(intro_bits)
+
+        if self.api_mode in {"codex_responses", "anthropic_messages"}:
+            return (
+                [
+                    {"type": "text", "text": intro_text},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": data_url,
+                            "detail": "auto",
+                        },
+                    },
+                ],
+                None,
+            )
+
+        return (
+            json.dumps(payload, ensure_ascii=False),
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"[{intro_text} Treat the attached image as the contents of that file, not as a new user request.]"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": data_url,
+                            "detail": "auto",
+                        },
+                    },
+                ],
+            },
+        )
 
     def _preprocess_anthropic_content(self, content: Any, role: str) -> Any:
         if not self._content_has_image_parts(content):
@@ -5203,7 +5325,7 @@ class AIAgent:
         # reasoning fields are present (some models/providers embed thinking
         # directly in the content rather than returning separate API fields).
         if not reasoning_text:
-            content = assistant_message.content or ""
+            content = content_to_text(getattr(assistant_message, "content", None), fallback_json=True)
             think_blocks = re.findall(r'<think>(.*?)</think>', content, flags=re.DOTALL)
             if think_blocks:
                 combined = "\n\n".join(b.strip() for b in think_blocks if b.strip())
@@ -5227,9 +5349,14 @@ class AIAgent:
                 except Exception:
                     pass
 
+        assistant_content = (
+            assistant_message.content
+            if getattr(assistant_message, "content", None) is not None
+            else ""
+        )
         msg = {
             "role": "assistant",
-            "content": assistant_message.content or "",
+            "content": assistant_content,
             "reasoning": reasoning_text,
             "finish_reason": finish_reason,
         }
@@ -5797,16 +5924,24 @@ class AIAgent:
                 # Shouldn't happen, but safety fallback
                 function_result = f"Error executing tool '{name}': thread did not return a result"
                 tool_duration = 0.0
+                function_name = name
             else:
                 function_name, function_args, function_result, tool_duration, is_error = r
 
-                if is_error:
-                    result_preview = function_result[:200] if len(function_result) > 200 else function_result
-                    logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
+            function_result, read_file_followup = self._process_read_file_image_result(name, function_result)
+            _result_text = (
+                function_result
+                if isinstance(function_result, str)
+                else content_to_text(function_result, image_placeholder="[image]", fallback_json=True)
+            )
 
-                if self.verbose_logging:
-                    logging.debug(f"Tool {function_name} completed in {tool_duration:.2f}s")
-                    logging.debug(f"Tool result ({len(function_result)} chars): {function_result}")
+            if r is not None and is_error:
+                result_preview = _result_text[:200] if len(_result_text) > 200 else _result_text
+                logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
+
+            if self.verbose_logging:
+                logging.debug(f"Tool {function_name} completed in {tool_duration:.2f}s")
+                logging.debug(f"Tool result ({len(_result_text)} chars): {_result_text}")
 
             # Print cute message per tool
             if self.quiet_mode:
@@ -5815,9 +5950,9 @@ class AIAgent:
             elif not self.quiet_mode:
                 if self.verbose_logging:
                     print(f"  ✅ Tool {i+1} completed in {tool_duration:.2f}s")
-                    print(f"     Result: {function_result}")
+                    print(f"     Result: {_result_text}")
                 else:
-                    response_preview = function_result[:self.log_prefix_chars] + "..." if len(function_result) > self.log_prefix_chars else function_result
+                    response_preview = _result_text[:self.log_prefix_chars] + "..." if len(_result_text) > self.log_prefix_chars else _result_text
                     print(f"  ✅ Tool {i+1} completed in {tool_duration:.2f}s - {response_preview}")
 
             if self.tool_complete_callback:
@@ -5828,7 +5963,7 @@ class AIAgent:
 
             # Truncate oversized results
             MAX_TOOL_RESULT_CHARS = 100_000
-            if len(function_result) > MAX_TOOL_RESULT_CHARS:
+            if isinstance(function_result, str) and len(function_result) > MAX_TOOL_RESULT_CHARS:
                 original_len = len(function_result)
                 function_result = (
                     function_result[:MAX_TOOL_RESULT_CHARS]
@@ -5843,12 +5978,16 @@ class AIAgent:
                 "tool_call_id": tc.id,
             }
             messages.append(tool_msg)
+            if read_file_followup:
+                messages.append(read_file_followup)
 
         # ── Budget pressure injection ────────────────────────────────────
         budget_warning = self._get_budget_warning(api_call_count)
         if budget_warning and messages and messages[-1].get("role") == "tool":
             last_content = messages[-1]["content"]
             try:
+                if not isinstance(last_content, str):
+                    raise TypeError
                 parsed = json.loads(last_content)
                 if isinstance(parsed, dict):
                     parsed["_budget_warning"] = budget_warning
@@ -5856,7 +5995,13 @@ class AIAgent:
                 else:
                     messages[-1]["content"] = last_content + f"\n\n{budget_warning}"
             except (json.JSONDecodeError, TypeError):
-                messages[-1]["content"] = last_content + f"\n\n{budget_warning}"
+                if isinstance(last_content, list):
+                    messages[-1]["content"] = [
+                        {"type": "text", "text": budget_warning},
+                        *last_content,
+                    ]
+                else:
+                    messages[-1]["content"] = str(last_content) + f"\n\n{budget_warning}"
             if not self.quiet_mode:
                 remaining = self.max_iterations - api_call_count
                 tier = "⚠️  WARNING" if remaining <= self.max_iterations * 0.1 else "💡 CAUTION"
@@ -6070,8 +6215,14 @@ class AIAgent:
                     logger.error("handle_function_call raised for %s: %s", function_name, tool_error, exc_info=True)
                 tool_duration = time.time() - tool_start_time
 
-            result_preview = function_result if self.verbose_logging else (
-                function_result[:200] if len(function_result) > 200 else function_result
+            function_result, read_file_followup = self._process_read_file_image_result(function_name, function_result)
+            _result_text = (
+                function_result
+                if isinstance(function_result, str)
+                else content_to_text(function_result, image_placeholder="[image]", fallback_json=True)
+            )
+            result_preview = _result_text if self.verbose_logging else (
+                _result_text[:200] if len(_result_text) > 200 else _result_text
             )
 
             # Log tool errors to the persistent error log so [error] tags
@@ -6082,7 +6233,7 @@ class AIAgent:
 
             if self.verbose_logging:
                 logging.debug(f"Tool {function_name} completed in {tool_duration:.2f}s")
-                logging.debug(f"Tool result ({len(function_result)} chars): {function_result}")
+                logging.debug(f"Tool result ({len(_result_text)} chars): {_result_text}")
 
             if self.tool_complete_callback:
                 try:
@@ -6095,7 +6246,7 @@ class AIAgent:
             # enough for any reasonable tool output but prevents catastrophic
             # context explosions (e.g. accidental base64 image dumps).
             MAX_TOOL_RESULT_CHARS = 100_000
-            if len(function_result) > MAX_TOOL_RESULT_CHARS:
+            if isinstance(function_result, str) and len(function_result) > MAX_TOOL_RESULT_CHARS:
                 original_len = len(function_result)
                 function_result = (
                     function_result[:MAX_TOOL_RESULT_CHARS]
@@ -6109,13 +6260,15 @@ class AIAgent:
                 "tool_call_id": tool_call.id
             }
             messages.append(tool_msg)
+            if read_file_followup:
+                messages.append(read_file_followup)
 
             if not self.quiet_mode:
                 if self.verbose_logging:
                     print(f"  ✅ Tool {i} completed in {tool_duration:.2f}s")
                     print(f"     Result: {function_result}")
                 else:
-                    response_preview = function_result[:self.log_prefix_chars] + "..." if len(function_result) > self.log_prefix_chars else function_result
+                    response_preview = _result_text[:self.log_prefix_chars] + "..." if len(_result_text) > self.log_prefix_chars else _result_text
                     print(f"  ✅ Tool {i} completed in {tool_duration:.2f}s - {response_preview}")
 
             if self._interrupt_requested and i < len(assistant_message.tool_calls):
@@ -6270,7 +6423,10 @@ class AIAgent:
                 codex_kwargs.pop("tools", None)
                 summary_response = self._run_codex_stream(codex_kwargs)
                 assistant_message, _ = self._normalize_codex_response(summary_response)
-                final_response = (assistant_message.content or "").strip() if assistant_message else ""
+                final_response = content_to_text(
+                    getattr(assistant_message, "content", None) if assistant_message else "",
+                    fallback_json=True,
+                ).strip()
             else:
                 summary_kwargs = {
                     "model": self.model,
@@ -6410,6 +6566,16 @@ class AIAgent:
             user_message = _sanitize_surrogates(user_message)
         if isinstance(persist_user_message, str):
             persist_user_message = _sanitize_surrogates(persist_user_message)
+        user_message_text = content_to_text(
+            user_message,
+            image_placeholder="[image]",
+            fallback_json=True,
+        )
+        persist_user_message_text = content_to_text(
+            persist_user_message,
+            image_placeholder="[image]",
+            fallback_json=True,
+        )
 
         # Store stream callback for _interruptible_api_call to pick up
         self._stream_callback = stream_callback
@@ -6475,6 +6641,9 @@ class AIAgent:
         # Preserve the original user message (no nudge injection).
         # Honcho should receive the actual user input, not system nudges.
         original_user_message = persist_user_message if persist_user_message is not None else user_message
+        original_user_message_text = (
+            persist_user_message_text if persist_user_message is not None else user_message_text
+        )
 
         # Track memory nudge trigger (turn-based, checked here).
         # Skill trigger is checked AFTER the agent loop completes, based on
@@ -6500,7 +6669,7 @@ class AIAgent:
         _recall_mode = (self._honcho_config.recall_mode if self._honcho_config else "hybrid")
         if self._honcho and self._honcho_session_key and _recall_mode != "tools":
             try:
-                prefetched_context = self._honcho_prefetch(original_user_message)
+                prefetched_context = self._honcho_prefetch(original_user_message_text)
                 if prefetched_context:
                     if not conversation_history:
                         self._honcho_context = prefetched_context
@@ -6516,7 +6685,9 @@ class AIAgent:
         self._persist_user_message_idx = current_turn_user_idx
         
         if not self.quiet_mode:
-            self._safe_print(f"💬 Starting conversation: '{user_message[:60]}{'...' if len(user_message) > 60 else ''}'")
+            self._safe_print(
+                f"💬 Starting conversation: '{user_message_text[:60]}{'...' if len(user_message_text) > 60 else ''}'"
+            )
         
         # ── System prompt (cached per session for prefix caching) ──
         # Built once on first call, reused for all subsequent calls.
@@ -6838,9 +7009,6 @@ class AIAgent:
                     if self.api_mode == "codex_responses":
                         api_kwargs = self._preflight_codex_api_kwargs(api_kwargs, allow_stream=False)
 
-                    if env_var_enabled("HERMES_DUMP_REQUESTS"):
-                        self._dump_api_request_debug(api_kwargs, reason="preflight")
-
                     # Always prefer the streaming path — even without stream
                     # consumers.  Streaming gives us fine-grained health
                     # checking (90s stale-stream detection, 60s read timeout)
@@ -7102,8 +7270,12 @@ class AIAgent:
                                 length_continue_retries += 1
                                 interim_msg = self._build_assistant_message(assistant_message, finish_reason)
                                 messages.append(interim_msg)
-                                if assistant_message.content:
-                                    truncated_response_prefix += assistant_message.content
+                                _trunc_text = content_to_text(
+                                    getattr(assistant_message, "content", None),
+                                    fallback_json=True,
+                                )
+                                if _trunc_text:
+                                    truncated_response_prefix += _trunc_text
 
                                 if length_continue_retries < 3:
                                     self._vprint(
@@ -7803,41 +7975,26 @@ class AIAgent:
                 else:
                     assistant_message = response.choices[0].message
                 
-                # Normalize content to string — some OpenAI-compatible servers
-                # (llama-server, etc.) return content as a dict or list instead
-                # of a plain string, which crashes downstream .strip() calls.
-                if assistant_message.content is not None and not isinstance(assistant_message.content, str):
-                    raw = assistant_message.content
-                    if isinstance(raw, dict):
-                        assistant_message.content = raw.get("text", "") or raw.get("content", "") or json.dumps(raw)
-                    elif isinstance(raw, list):
-                        # Multimodal content list — extract text parts
-                        parts = []
-                        for part in raw:
-                            if isinstance(part, str):
-                                parts.append(part)
-                            elif isinstance(part, dict) and part.get("type") == "text":
-                                parts.append(part.get("text", ""))
-                            elif isinstance(part, dict) and "text" in part:
-                                parts.append(str(part["text"]))
-                        assistant_message.content = "\n".join(parts)
-                    else:
-                        assistant_message.content = str(raw)
+                assistant_content_text = content_to_text(
+                    getattr(assistant_message, "content", None),
+                    image_placeholder="[image]",
+                    fallback_json=True,
+                )
 
                 # Handle assistant response
-                if assistant_message.content and not self.quiet_mode:
+                if assistant_content_text and not self.quiet_mode:
                     if self.verbose_logging:
-                        self._vprint(f"{self.log_prefix}🤖 Assistant: {assistant_message.content}")
+                        self._vprint(f"{self.log_prefix}🤖 Assistant: {assistant_content_text}")
                     else:
-                        self._vprint(f"{self.log_prefix}🤖 Assistant: {assistant_message.content[:100]}{'...' if len(assistant_message.content) > 100 else ''}")
+                        self._vprint(f"{self.log_prefix}🤖 Assistant: {assistant_content_text[:100]}{'...' if len(assistant_content_text) > 100 else ''}")
 
                 # Notify progress callback of model's thinking (used by subagent
                 # delegation to relay the child's reasoning to the parent display).
                 # Guard: only fire for subagents (_delegate_depth >= 1) to avoid
                 # spamming gateway platforms with the main agent's every thought.
-                if (assistant_message.content and self.tool_progress_callback
+                if (assistant_content_text and self.tool_progress_callback
                         and getattr(self, '_delegate_depth', 0) > 0):
-                    _think_text = assistant_message.content.strip()
+                    _think_text = assistant_content_text.strip()
                     # Strip reasoning XML tags that shouldn't leak to parent display
                     _think_text = re.sub(
                         r'</?(?:REASONING_SCRATCHPAD|think|reasoning)>', '', _think_text
@@ -7851,7 +8008,7 @@ class AIAgent:
                 
                 # Check for incomplete <REASONING_SCRATCHPAD> (opened but never closed)
                 # This means the model ran out of output tokens mid-reasoning — retry up to 2 times
-                if has_incomplete_scratchpad(assistant_message.content or ""):
+                if has_incomplete_scratchpad(assistant_content_text):
                     if not hasattr(self, '_incomplete_scratchpad_retries'):
                         self._incomplete_scratchpad_retries = 0
                     self._incomplete_scratchpad_retries += 1
@@ -7890,7 +8047,7 @@ class AIAgent:
                     self._codex_incomplete_retries += 1
 
                     interim_msg = self._build_assistant_message(assistant_message, finish_reason)
-                    interim_has_content = bool((interim_msg.get("content") or "").strip())
+                    interim_has_content = bool(content_to_text(interim_msg.get("content")).strip())
                     interim_has_reasoning = bool(interim_msg.get("reasoning", "").strip()) if isinstance(interim_msg.get("reasoning"), str) else False
                     interim_has_codex_reasoning = bool(interim_msg.get("codex_reasoning_items"))
 
@@ -7907,7 +8064,7 @@ class AIAgent:
                             isinstance(last_msg, dict)
                             and last_msg.get("role") == "assistant"
                             and last_msg.get("finish_reason") == "incomplete"
-                            and (last_msg.get("content") or "") == (interim_msg.get("content") or "")
+                            and content_to_text(last_msg.get("content")) == content_to_text(interim_msg.get("content"))
                             and (last_msg.get("reasoning") or "") == (interim_msg.get("reasoning") or "")
                             and last_codex_items == interim_codex_items
                         )
@@ -8074,7 +8231,7 @@ class AIAgent:
                     # as a fallback final response. Common pattern: model delivers its
                     # answer and calls memory/skill tools as a side-effect in the same
                     # turn. If the follow-up turn after tools is empty, we use this.
-                    turn_content = assistant_message.content or ""
+                    turn_content = assistant_content_text
                     if turn_content and self._has_content_after_think_block(turn_content):
                         self._last_content_with_tools = turn_content
                         # Only mute subsequent output when EVERY tool call in
@@ -8173,7 +8330,7 @@ class AIAgent:
                 
                 else:
                     # No tool calls - this is the final response
-                    final_response = assistant_message.content or ""
+                    final_response = assistant_content_text
                     
                     # Check if response only has think block with no actual content after it
                     if not self._has_content_after_think_block(final_response):
@@ -8288,7 +8445,7 @@ class AIAgent:
                         and self.valid_tool_names
                         and codex_ack_continuations < 2
                         and self._looks_like_codex_intermediate_ack(
-                            user_message=user_message,
+                            user_message=user_message_text,
                             assistant_content=final_response,
                             messages=messages,
                         )
@@ -8391,7 +8548,7 @@ class AIAgent:
         completed = final_response is not None and api_call_count < self.max_iterations
 
         # Save trajectory if enabled
-        self._save_trajectory(messages, user_message, completed)
+        self._save_trajectory(messages, user_message_text, completed)
 
         # Clean up VM and browser for this task after conversation completes
         self._cleanup_task_resources(effective_task_id)
@@ -8401,8 +8558,8 @@ class AIAgent:
 
         # Sync conversation to Honcho for user modeling
         if final_response and not interrupted and sync_honcho:
-            self._honcho_sync(original_user_message, final_response)
-            self._queue_honcho_prefetch(original_user_message)
+            self._honcho_sync(original_user_message_text, final_response)
+            self._queue_honcho_prefetch(original_user_message_text)
 
         # Plugin hook: post_llm_call
         # Fired once per turn after the tool-calling loop completes.
@@ -8414,7 +8571,7 @@ class AIAgent:
                 _invoke_hook(
                     "post_llm_call",
                     session_id=self.session_id,
-                    user_message=original_user_message,
+                    user_message=original_user_message_text,
                     assistant_response=final_response,
                     conversation_history=list(messages),
                     model=self.model,

@@ -359,6 +359,22 @@ class TestReadFile:
         assert result.error is None
         _assert_clean(result.content)
 
+    def test_image_returns_base64_payload(self, ops, tmp_path):
+        image_path = tmp_path / "pixel.png"
+        image_path.write_bytes(
+            b"\x89PNG\r\n\x1a\n"
+            b"\x00\x00\x00\rIHDR"
+            b"\x00\x00\x00\x01"
+            b"\x00\x00\x00\x01"
+            b"\x08\x02\x00\x00\x00"
+            b"\x90wS\xde"
+        )
+        result = ops.read_file(str(image_path))
+        assert result.error is None
+        assert result.is_image is True
+        assert result.mime_type == "image/png"
+        assert result.base64_content
+
 
 # ── write_file ───────────────────────────────────────────────────────────
 

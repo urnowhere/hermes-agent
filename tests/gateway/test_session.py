@@ -903,3 +903,21 @@ class TestRewriteTranscriptPreservesReasoning:
         assert after[0].get("reasoning") == "I need to think step by step."
         assert after[0].get("reasoning_details") == [{"type": "summary", "text": "step by step"}]
         assert after[0].get("codex_reasoning_items") == [{"id": "r1", "type": "reasoning"}]
+
+
+class TestStructuredContentRoundTrip:
+    def test_structured_content_survives_db_round_trip(self, tmp_path):
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "test.db")
+        session_id = "multimodal-roundtrip"
+        db.create_session(session_id=session_id, source="cli")
+
+        content = [
+            {"type": "text", "text": "Describe this image"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA", "detail": "auto"}},
+        ]
+        db.append_message(session_id=session_id, role="user", content=content)
+
+        loaded = db.get_messages_as_conversation(session_id)
+        assert loaded[0]["content"] == content

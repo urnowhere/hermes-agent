@@ -23,6 +23,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
+from agent.message_content import deserialize_message_content, serialize_message_content
 from hermes_constants import get_hermes_home
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 
@@ -32,7 +33,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -74,6 +75,7 @@ CREATE TABLE IF NOT EXISTS messages (
     session_id TEXT NOT NULL REFERENCES sessions(id),
     role TEXT NOT NULL,
     content TEXT,
+    content_json TEXT,
     tool_call_id TEXT,
     tool_calls TEXT,
     tool_name TEXT,
@@ -330,6 +332,12 @@ class SessionDB:
                     except sqlite3.OperationalError:
                         pass  # Column already exists
                 cursor.execute("UPDATE schema_version SET version = 6")
+            if current_version < 7:
+                try:
+                    cursor.execute('ALTER TABLE messages ADD COLUMN "content_json" TEXT')
+                except sqlite3.OperationalError:
+                    pass
+                cursor.execute("UPDATE schema_version SET version = 7")
 
         # Unique title index — always ensure it exists (safe to run after migrations
         # since the title column is guaranteed to exist at this point)
@@ -859,7 +867,7 @@ class SessionDB:
         self,
         session_id: str,
         role: str,
-        content: str = None,
+        content: Any = None,
         tool_name: str = None,
         tool_calls: Any = None,
         tool_call_id: str = None,
@@ -876,6 +884,7 @@ class SessionDB:
         if role is 'tool' or tool_calls is present).
         """
         # Serialize structured fields to JSON before entering the write txn
+        content_text, content_json = serialize_message_content(content)
         reasoning_details_json = (
             json.dumps(reasoning_details)
             if reasoning_details else None
@@ -893,14 +902,15 @@ class SessionDB:
 
         def _do(conn):
             cursor = conn.execute(
-                """INSERT INTO messages (session_id, role, content, tool_call_id,
+                """INSERT INTO messages (session_id, role, content, content_json, tool_call_id,
                    tool_calls, tool_name, timestamp, token_count, finish_reason,
                    reasoning, reasoning_details, codex_reasoning_items)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     role,
-                    content,
+                    content_text,
+                    content_json,
                     tool_call_id,
                     tool_calls_json,
                     tool_name,
@@ -941,6 +951,10 @@ class SessionDB:
         result = []
         for row in rows:
             msg = dict(row)
+            msg["content"] = deserialize_message_content(
+                msg.get("content"),
+                msg.get("content_json"),
+            )
             if msg.get("tool_calls"):
                 try:
                     msg["tool_calls"] = json.loads(msg["tool_calls"])
@@ -956,7 +970,7 @@ class SessionDB:
         """
         with self._lock:
             cursor = self._conn.execute(
-                "SELECT role, content, tool_call_id, tool_calls, tool_name, "
+                "SELECT role, content, content_json, tool_call_id, tool_calls, tool_name, "
                 "reasoning, reasoning_details, codex_reasoning_items "
                 "FROM messages WHERE session_id = ? ORDER BY timestamp, id",
                 (session_id,),
@@ -964,7 +978,10 @@ class SessionDB:
             rows = cursor.fetchall()
         messages = []
         for row in rows:
-            msg = {"role": row["role"], "content": row["content"]}
+            msg = {
+                "role": row["role"],
+                "content": deserialize_message_content(row["content"], row["content_json"]),
+            }
             if row["tool_call_id"]:
                 msg["tool_call_id"] = row["tool_call_id"]
             if row["tool_name"]:

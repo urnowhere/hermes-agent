@@ -612,6 +612,35 @@ class TestConvertMessages:
         assert user_msg["content"][0]["type"] == "tool_result"
         assert user_msg["content"][0]["tool_use_id"] == "tc_1"
 
+    def test_converts_multimodal_tool_results(self):
+        messages = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "tc_1", "function": {"name": "read_file", "arguments": "{}"}},
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "tc_1",
+                "content": [
+                    {"type": "text", "text": "Image loaded from read_file."},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,QUFBQQ==", "detail": "auto"},
+                    },
+                ],
+            },
+        ]
+        _, result = convert_messages_to_anthropic(messages)
+        user_msg = [m for m in result if m["role"] == "user"][0]
+        tool_block = user_msg["content"][0]
+        assert tool_block["type"] == "tool_result"
+        assert isinstance(tool_block["content"], list)
+        assert tool_block["content"][0]["type"] == "text"
+        assert tool_block["content"][1]["type"] == "image"
+
     def test_merges_consecutive_tool_results(self):
         messages = [
             {
