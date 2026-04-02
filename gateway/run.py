@@ -6019,19 +6019,34 @@ class GatewayRunner:
             # Use session_key (not source.chat_id) to match adapter's storage keys.
             pending = None
             if result and adapter and session_key:
+                # Fetch accumulated string messages from the gateway queue
+                gateway_pending_text = self._pending_messages.pop(session_key, None)
+                
                 if result.get("interrupted"):
                     # Interrupted — consume the interrupt message
                     pending_event = adapter.get_pending_message(session_key)
-                    if pending_event:
+                    
+                    if pending_event and pending_event.text:
                         pending = pending_event.text
+                        # Merge both queues if both have pending content
+                        if gateway_pending_text:
+                            pending = f"{gateway_pending_text}\n{pending}"
+                    elif gateway_pending_text:
+                        pending = gateway_pending_text
                     elif result.get("interrupt_message"):
                         pending = result.get("interrupt_message")
                 else:
-                    # Normal completion — check for /queue'd messages that were
-                    # stored without triggering an interrupt.
+                    # Normal completion — check for /queue'd messages
                     pending_event = adapter.get_pending_message(session_key)
-                    if pending_event:
+                    
+                    if pending_event and pending_event.text:
                         pending = pending_event.text
+                        if gateway_pending_text:
+                            pending = f"{gateway_pending_text}\n{pending}"
+                    elif gateway_pending_text:
+                        pending = gateway_pending_text
+                    
+                    if pending:
                         logger.debug("Processing queued message after agent completion: '%s...'", pending[:40])
             
             if pending:
