@@ -2429,6 +2429,7 @@ class GatewayRunner:
             "WEIXIN_ALLOWED_USERS",
             "BLUEBUBBLES_ALLOWED_USERS",
             "QQ_ALLOWED_USERS",
+            "SIMPLEX_ALLOWED_USERS",
             "YUANBAO_ALLOWED_USERS",
             "GATEWAY_ALLOWED_USERS",
         )
@@ -2444,6 +2445,7 @@ class GatewayRunner:
             "WEIXIN_ALLOW_ALL_USERS",
             "BLUEBUBBLES_ALLOW_ALL_USERS",
             "QQ_ALLOW_ALL_USERS",
+            "SIMPLEX_ALLOW_ALL_USERS",
             "YUANBAO_ALLOW_ALL_USERS",
         )
         # Also pick up plugin-registered platforms — each entry can declare
@@ -3896,6 +3898,13 @@ class GatewayRunner:
                 return None
             return QQAdapter(config)
 
+        elif platform == Platform.SIMPLEX:
+            from gateway.platforms.simplex import SimplexAdapter, check_simplex_requirements
+            if not check_simplex_requirements():
+                logger.warning("SimpleX: SIMPLEX_WS_URL not configured")
+                return None
+            return SimplexAdapter(config)
+
         elif platform == Platform.YUANBAO:
             from gateway.platforms.yuanbao import YuanbaoAdapter, WEBSOCKETS_AVAILABLE
             if not WEBSOCKETS_AVAILABLE:
@@ -3944,6 +3953,7 @@ class GatewayRunner:
             Platform.WEIXIN: "WEIXIN_ALLOWED_USERS",
             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOWED_USERS",
             Platform.QQBOT: "QQ_ALLOWED_USERS",
+            Platform.SIMPLEX: "SIMPLEX_ALLOWED_USERS",
             Platform.YUANBAO: "YUANBAO_ALLOWED_USERS",
         }
         platform_group_user_env_map = {
@@ -3970,6 +3980,7 @@ class GatewayRunner:
             Platform.WEIXIN: "WEIXIN_ALLOW_ALL_USERS",
             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOW_ALL_USERS",
             Platform.QQBOT: "QQ_ALLOW_ALL_USERS",
+            Platform.SIMPLEX: "SIMPLEX_ALLOW_ALL_USERS",
             Platform.YUANBAO: "YUANBAO_ALLOW_ALL_USERS",
         }
         # Bots admitted by {PLATFORM}_ALLOW_BOTS bypass the human allowlist (#4466).

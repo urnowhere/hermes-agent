@@ -6,7 +6,7 @@ description: "Chat with Hermes from Telegram, Discord, Slack, WhatsApp, Signal, 
 
 # Messaging Gateway
 
-Chat with Hermes from Telegram, Discord, Slack, WhatsApp, Signal, SMS, Email, Home Assistant, Mattermost, Matrix, DingTalk, Feishu/Lark, WeCom, Weixin, BlueBubbles (iMessage), QQ, Yuanbao, or your browser. The gateway is a single background process that connects to all your configured platforms, handles sessions, runs cron jobs, and delivers voice messages.
+Chat with Hermes from Telegram, Discord, Slack, WhatsApp, Signal, SimpleX, SMS, Email, Home Assistant, Mattermost, Matrix, DingTalk, Feishu/Lark, WeCom, Weixin, BlueBubbles (iMessage), QQ, Yuanbao, or your browser. The gateway is a single background process that connects to all your configured platforms, handles sessions, runs cron jobs, and delivers voice messages.
 
 For the full voice feature set — including CLI microphone mode, spoken replies in messaging, and Discord voice-channel conversations — see [Voice Mode](/docs/user-guide/features/voice-mode) and [Use Voice Mode with Hermes](/docs/guides/use-voice-mode-with-hermes).
 
@@ -19,6 +19,7 @@ For the full voice feature set — including CLI microphone mode, spoken replies
 | Slack | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | WhatsApp | — | ✅ | ✅ | — | — | ✅ | ✅ |
 | Signal | — | ✅ | ✅ | — | — | ✅ | ✅ |
+| SimpleX | — | ✅ | ✅ | — | — | — | — |
 | SMS | — | — | — | — | — | — | — |
 | Email | — | ✅ | ✅ | ✅ | — | — | — |
 | Home Assistant | — | — | — | — | — | — | — |
@@ -46,6 +47,7 @@ flowchart TB
             wa[WhatsApp]
             sl[Slack]
             sig[Signal]
+            sx[SimpleX]
             sms[SMS]
             em[Email]
             ha[Home Assistant]
@@ -73,6 +75,7 @@ flowchart TB
     wa --> store
     sl --> store
     sig --> store
+    sx --> store
     sms --> store
     em --> store
     ha --> store
@@ -380,6 +383,7 @@ Each platform has its own toolset:
 | WhatsApp | `hermes-whatsapp` | Full tools including terminal |
 | Slack | `hermes-slack` | Full tools including terminal |
 | Signal | `hermes-signal` | Full tools including terminal |
+| SimpleX | `hermes-simplex` | Full tools including terminal |
 | SMS | `hermes-sms` | Full tools including terminal |
 | Email | `hermes-email` | Full tools including terminal |
 | Home Assistant | `hermes-homeassistant` | Full tools + HA device control (ha_list_entities, ha_get_state, ha_call_service, ha_list_services) |
@@ -403,6 +407,7 @@ Each platform has its own toolset:
 - [Slack Setup](slack.md)
 - [WhatsApp Setup](whatsapp.md)
 - [Signal Setup](signal.md)
+- [SimpleX Setup](simplex.md)
 - [SMS Setup (Twilio)](sms.md)
 - [Email Setup](email.md)
 - [Home Assistant Integration](homeassistant.md)
