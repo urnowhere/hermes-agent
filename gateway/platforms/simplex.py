@@ -288,10 +288,7 @@ class SimplexAdapter(BasePlatformAdapter):
 
             elapsed = time.time() - self._last_ws_activity
             if elapsed > HEALTH_CHECK_STALE_THRESHOLD:
-                logger.warning(
-                    "SimpleX: WS idle for %.0fs, forcing reconnect", elapsed
-                )
-                self._force_reconnect()
+                logger.debug("SimpleX: WS idle for %.0fs (no user messages, connection healthy via ping/pong)", elapsed)
 
     def _force_reconnect(self) -> None:
         """Force WebSocket reconnection by closing the current connection."""
