@@ -40,7 +40,7 @@ MAX_MESSAGE_LENGTH = 8000  # SimpleX message size limit
 WS_RETRY_DELAY_INITIAL = 2.0
 WS_RETRY_DELAY_MAX = 60.0
 HEALTH_CHECK_INTERVAL = 30.0  # seconds between health checks
-HEALTH_CHECK_STALE_THRESHOLD = 120.0  # seconds without WS activity before concern
+HEALTH_CHECK_STALE_THRESHOLD = 300.0  # seconds without WS activity before concern
 
 
 # ---------------------------------------------------------------------------
