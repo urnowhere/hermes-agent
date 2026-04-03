@@ -10,6 +10,15 @@ Hermes connects to SimpleX Chat through the [simplex-chat](https://simplex.chat/
 
 SimpleX Chat is the first messenger with no user identifiers — not even random numbers. It uses pairwise per-queue identifiers and routes messages through relay servers, providing strong metadata privacy. This makes it an excellent choice for privacy-sensitive agent deployments.
 
+## Why SimpleX Works Well for Bots
+
+- No user accounts required. Bot-to-bot or bot-to-user connections work through one-time invite links.
+- Only explicitly invited contacts can reach the bot, which eliminates the usual spam and unsolicited bot traffic.
+- No CAPTCHA or phone-number onboarding flow, so automation is simpler.
+- No SIM card to provision, rotate, or keep alive.
+- End-to-end encrypted, without depending on a single operator.
+- Lower operational dependence on specific server operators or domain names than more centralized messaging setups. If infrastructure changes, you can accept a new invite link and continue.
+
 :::info Dependency
 The SimpleX adapter requires the `websockets` Python package. Install it with: `pip install websockets` (or `uv pip install websockets`).
 :::
