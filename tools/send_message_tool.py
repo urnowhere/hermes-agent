@@ -329,6 +329,13 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         match = _WEIXIN_TARGET_RE.fullmatch(target_ref)
         if match:
             return match.group(1), None, True
+    if platform_name == "simplex":
+        # SimpleX chat_id is either a numeric contact ID or "group:<N>"
+        if target_ref.startswith("group:"):
+            return target_ref, None, True
+        if target_ref.lstrip("-").isdigit():
+            return target_ref, None, True
+        return None, None, False
     if platform_name == "yuanbao":
         match = _YUANBAO_TARGET_RE.fullmatch(target_ref)
         if match:
@@ -472,10 +479,12 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             logger.debug("Failed to apply Slack mrkdwn formatting in _send_to_platform", exc_info=True)
 
     # Platform message length limits (from adapter class attributes)
+    from gateway.platforms.simplex import SimplexAdapter as _SimplexAdapter
     _MAX_LENGTHS = {
         Platform.TELEGRAM: TelegramAdapter.MAX_MESSAGE_LENGTH if _telegram_available else 4096,
         Platform.DISCORD: DiscordAdapter.MAX_MESSAGE_LENGTH,
         Platform.SLACK: SlackAdapter.MAX_MESSAGE_LENGTH,
+        Platform.SIMPLEX: _SimplexAdapter.MAX_MESSAGE_LENGTH,
     }
     if _feishu_available:
         _MAX_LENGTHS[Platform.FEISHU] = FeishuAdapter.MAX_MESSAGE_LENGTH
@@ -557,6 +566,10 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             last_result = result
         return last_result
 
+    # --- SimpleX: supports text + voice/file media via WebSocket adapter ---
+    if platform == Platform.SIMPLEX:
+        return await _send_simplex(pconfig.extra, chat_id, message, chunks, media_files)
+
     # --- Signal: native attachment support via JSON-RPC attachments param ---
     if platform == Platform.SIGNAL and media_files:
         last_result = None
@@ -592,7 +605,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     if media_files and not message.strip():
         return {
             "error": (
-                f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal and yuanbao; "
+                f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, simplex, weixin, signal and yuanbao; "
                 f"target {platform.value} had only media attachments"
             )
         }
@@ -600,7 +613,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     if media_files:
         warning = (
             f"MEDIA attachments were omitted for {platform.value}; "
-            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal and yuanbao"
+            "native send_message media delivery is currently only supported for telegram, discord, matrix, simplex, weixin, signal and yuanbao"
         )
 
     last_result = None
@@ -1743,40 +1756,68 @@ registry.register(
     emoji="📨",
 )
 
-async def _send_simplex(extra, chat_id, message):
-    """Send via SimpleX Chat WebSocket API (one-shot connection)."""
-    import asyncio
+async def _send_simplex(extra, chat_id, message, chunks, media_files):
+    """Send text and/or media to SimpleX Chat via a short-lived WebSocket connection.
+
+    Creates a transient SimplexAdapter, sends all content, then disconnects.
+    SimpleX-chat supports multiple simultaneous WebSocket clients.
+    """
     try:
-        import websockets
-    except ImportError:
-        return {"error": "websockets not installed. Run: pip install websockets"}
+        from gateway.platforms.simplex import SimplexAdapter
+        from gateway.config import PlatformConfig
+    except ImportError as e:
+        return {"error": f"SimpleX adapter unavailable: {e}"}
+
+    pconfig = PlatformConfig()
+    pconfig.extra = dict(extra or {})
+    adapter = SimplexAdapter(pconfig)
+
     try:
-        ws_url = extra.get("ws_url") or os.getenv("SIMPLEX_WS_URL", "")
-        if not ws_url:
-            return {"error": "SimpleX not configured (SIMPLEX_WS_URL required)"}
+        connected = await adapter.connect()
+        if not connected:
+            return {"error": "SimpleX: failed to connect to simplex-chat WebSocket"}
 
-        if chat_id.startswith("group:"):
-            group_id = chat_id[6:]
-            command = f"#{group_id} {message}"
-        else:
-            command = f"@{chat_id} {message}"
+        last_result = None
 
-        corr_id = f"send_{int(time.time() * 1000)}"
-        payload = json.dumps({"corrId": corr_id, "cmd": command})
+        # Send text chunks
+        for chunk in chunks:
+            if chunk.strip():
+                send_result = await adapter.send(chat_id, chunk)
+                last_result = (
+                    {"success": True, "platform": "simplex", "chat_id": chat_id}
+                    if send_result.success
+                    else {"error": send_result.error or "SimpleX send failed"}
+                )
+                if last_result.get("error"):
+                    return last_result
 
-        async with websockets.connect(ws_url, open_timeout=10, close_timeout=5) as ws:
-            await ws.send(payload)
-            # Wait for correlated response
-            try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=15.0)
-                data = json.loads(raw)
-                resp = data.get("resp", {})
-                resp_type = resp.get("type", "")
-                if "error" in resp_type.lower():
-                    return {"error": f"SimpleX error: {resp.get('chatError', resp)}"}
-            except asyncio.TimeoutError:
-                pass  # No response is acceptable for simplex-chat
+        # Send media files
+        for media_path, is_voice in (media_files or []):
+            if not os.path.exists(media_path):
+                logger.warning("SimpleX: media file not found, skipping: %s", media_path)
+                continue
+            ext = os.path.splitext(media_path)[1].lower()
+            if is_voice and ext in _VOICE_EXTS:
+                send_result = await adapter.send_voice(chat_id, media_path)
+            elif ext in _AUDIO_EXTS:
+                send_result = await adapter.send_voice(chat_id, media_path)
+            elif ext in _IMAGE_EXTS:
+                send_result = await adapter.send_image(chat_id, f"file://{media_path}")
+            else:
+                send_result = await adapter.send_document(chat_id, media_path)
+            last_result = (
+                {"success": True, "platform": "simplex", "chat_id": chat_id}
+                if send_result.success
+                else {"error": send_result.error or "SimpleX media send failed"}
+            )
+            if last_result.get("error"):
+                return last_result
 
-        return {"success": True, "platform": "simplex", "chat_id": chat_id}
+        return last_result or {"success": True, "platform": "simplex", "chat_id": chat_id}
     except Exception as e:
         return {"error": f"SimpleX send failed: {e}"}
+    finally:
+        try:
+            await adapter.disconnect()
+        except Exception:
+            pass

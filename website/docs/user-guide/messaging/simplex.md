@@ -164,11 +164,17 @@ The adapter supports sending and receiving:
 - **Audio** — MP3, OGG, WAV, M4A (voice messages transcribed if Whisper is configured)
 - **Documents** — PDF and other file types
 
+### Voice Messages
+
+SimpleX voice messages are fully supported:
+- **Inbound**: Voice notes are received via file transfer, transcribed via STT (if configured), and delivered as text to the agent.
+- **Outbound**: When the agent generates TTS audio, it is sent as a native SimpleX voice note (plays inline in the app, not as a downloadable file).
+
 ### Health Monitoring
 
 The adapter monitors the WebSocket connection and automatically reconnects if:
 - The connection drops (with exponential backoff: 2s → 60s, with jitter)
-- No activity is detected for 120 seconds (forces reconnect)
+- WebSocket ping/pong keepalives (20s interval) detect stale connections
 
 ### Contact ID Redaction
 
