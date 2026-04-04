@@ -1687,7 +1687,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
             # Expand ~ to home directory
             script_path = os.path.expanduser(script_path)
-            script = Path(script_path)
+            script = _Path(script_path)
 
             if not script.exists():
                 logger.warning(
@@ -1708,7 +1708,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     capture_output=True,
                     text=True,
                     timeout=timeout,
-                    env={**os.environ, "HOME": str(Path.home())},
+                    env={**os.environ, "HOME": str(_Path.home())},
                 )
                 logger.info(
                     "[%s] [%s] script output: %s",
