@@ -1732,6 +1732,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     timeout,
                     script,
                 )
+                matched = True  # Route was matched; timeout is a handled error
             except Exception as e:
                 logger.error(
                     "[%s] [%s] script error: %s",
