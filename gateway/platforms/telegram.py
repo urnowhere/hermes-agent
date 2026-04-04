@@ -1629,7 +1629,33 @@ class TelegramAdapter(BasePlatformAdapter):
         await self.handle_message(event)
 
     async def _handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle inline button callback queries from Telegram."""
+        """Handle inline button callback queries from Telegram.
+        
+        Routes callbacks to user-defined scripts based on prefix matching.
+        Scripts are configured in config.yaml under platforms.telegram.extra.callback_routes:
+        
+            platforms:
+              telegram:
+                extra:
+                  callback_routes:
+                    - prefix: "bni_"
+                      script: ~/.agent/scripts/bni-callback-handler.py
+                      name: "BNI Visitor Outreach"
+                    - prefix: "rt_"
+                      script: ~/.agent/scripts/transcript-callback-handler.py
+                      name: "Transcript Routing"
+        
+        Each route must define:
+          - prefix (str): callback_data prefix to match (e.g. "bni_", "rt_")
+          - script (str): path to executable script (supports ~ expansion)
+        
+        Optional fields:
+          - name (str): human-readable label for logging
+          - timeout (int): seconds before script is killed (default: 30)
+        
+        The script receives --callback "<full_callback_data>" as arguments
+        and runs with HOME set to the user's home directory.
+        """
         query = update.callback_query
         if not query:
             return
@@ -1637,83 +1663,92 @@ class TelegramAdapter(BasePlatformAdapter):
         callback_data = query.data or ""
         logger.info("[%s] Callback query received: %s", self.name, callback_data)
 
-        # Route bni_* callbacks to bni-callback-handler.py
-        if callback_data.startswith("bni_"):
-            import subprocess
-            import os
-            from pathlib import Path
+        # Load routes from config (same pattern as dm_topics / supergroup_topics)
+        callback_routes: List[Dict[str, Any]] = (
+            self.config.extra.get("callback_routes", [])
+            if getattr(self.config, "extra", None) is not None
+            else []
+        )
 
-            script = Path.home() / ".agent/scripts/bni-callback-handler.py"
-            if script.exists():
-                try:
-                    result = subprocess.run(
-                        ["python3", str(script), "--callback", callback_data],
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                        env={**os.environ, "HOME": str(Path.home())},
-                    )
-                    logger.info(
-                        "[%s] bni-callback-handler output: %s",
-                        self.name,
-                        result.stdout.strip() or "(no output)",
-                    )
-                    if result.stderr:
-                        logger.warning(
-                            "[%s] bni-callback-handler stderr: %s",
-                            self.name,
-                            result.stderr.strip(),
-                        )
-                except Exception as e:
-                    logger.error("[%s] bni-callback-handler error: %s", self.name, e)
-            else:
+        matched = False
+        for route in callback_routes:
+            prefix = route.get("prefix", "")
+            if not prefix or not callback_data.startswith(prefix):
+                continue
+
+            script_path = route.get("script", "")
+            if not script_path:
                 logger.warning(
-                    "[%s] bni-callback-handler.py not found at %s",
+                    "[%s] Callback route '%s' has no script defined",
                     self.name,
+                    route.get("name", prefix),
+                )
+                continue
+
+            # Expand ~ to home directory
+            script_path = os.path.expanduser(script_path)
+            script = Path(script_path)
+
+            if not script.exists():
+                logger.warning(
+                    "[%s] Callback script not found for prefix '%s': %s",
+                    self.name,
+                    prefix,
                     script,
                 )
+                continue
 
-        # Route rt_* callbacks (routing approval) to the transcript processor's callback handler
-        elif callback_data.startswith("rt_"):
-            import subprocess
-            import os
-            from pathlib import Path
+            name = route.get("name", prefix)
+            timeout = route.get("timeout", 30)
 
-            script = Path.home() / ".agent/scripts/transcript-callback-handler.py"
-            if script.exists():
-                try:
-                    result = subprocess.run(
-                        ["python3", str(script), "--callback", callback_data],
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                        env={**os.environ, "HOME": str(Path.home())},
-                    )
-                    logger.info(
-                        "[%s] transcript-callback-handler output: %s",
-                        self.name,
-                        result.stdout.strip() or "(no output)",
-                    )
-                    if result.stderr:
-                        logger.warning(
-                            "[%s] transcript-callback-handler stderr: %s",
-                            self.name,
-                            result.stderr.strip(),
-                        )
-                except Exception as e:
-                    logger.error("[%s] transcript-callback-handler error: %s", self.name, e)
-            else:
-                logger.warning(
-                    "[%s] transcript-callback-handler.py not found at %s",
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ["python3", str(script), "--callback", callback_data],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    env={**os.environ, "HOME": str(Path.home())},
+                )
+                logger.info(
+                    "[%s] [%s] script output: %s",
                     self.name,
+                    name,
+                    result.stdout.strip() or "(no output)",
+                )
+                if result.stderr:
+                    logger.warning(
+                        "[%s] [%s] script stderr: %s",
+                        self.name,
+                        name,
+                        result.stderr.strip(),
+                    )
+                matched = True
+            except subprocess.TimeoutExpired:
+                logger.warning(
+                    "[%s] [%s] script timed out after %ds: %s",
+                    self.name,
+                    name,
+                    timeout,
                     script,
                 )
+            except Exception as e:
+                logger.error(
+                    "[%s] [%s] script error: %s",
+                    self.name,
+                    name,
+                    e,
+                )
+                matched = True  # Error was handled, not unknown
 
-        else:
+            break  # Only first matching prefix fires
+
+        if not matched:
             logger.info(
-                "[%s] Unknown callback prefix, answering query: %s",
+                "[%s] No callback route matched: %s (configured prefixes: %s)",
                 self.name,
                 callback_data,
+                [r.get("prefix") for r in callback_routes],
             )
 
         # Always answer the callback to dismiss the loading spinner
