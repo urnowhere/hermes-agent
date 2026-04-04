@@ -63,6 +63,7 @@ class Platform(Enum):
     WEBHOOK = "webhook"
     FEISHU = "feishu"
     WECOM = "wecom"
+    SIMPLEX = "simplex"
 
 
 @dataclass
@@ -285,6 +286,9 @@ class GatewayConfig:
                 connected.append(platform)
             # WeCom uses extra dict for bot credentials
             elif platform == Platform.WECOM and config.extra.get("bot_id"):
+                connected.append(platform)
+            # SimpleX uses extra dict for config (ws_url)
+            elif platform == Platform.SIMPLEX and config.extra.get("ws_url"):
                 connected.append(platform)
         return connected
     
@@ -902,6 +906,24 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
                 chat_id=wecom_home,
                 name=os.getenv("WECOM_HOME_CHANNEL_NAME", "Home"),
             )
+
+    # SimpleX Chat
+    simplex_ws_url = os.getenv("SIMPLEX_WS_URL")
+    if simplex_ws_url:
+        if Platform.SIMPLEX not in config.platforms:
+            config.platforms[Platform.SIMPLEX] = PlatformConfig()
+        config.platforms[Platform.SIMPLEX].enabled = True
+        config.platforms[Platform.SIMPLEX].extra.update({
+            "ws_url": simplex_ws_url,
+            "auto_accept": os.getenv("SIMPLEX_AUTO_ACCEPT", "true").lower() in ("true", "1", "yes"),
+        })
+    simplex_home = os.getenv("SIMPLEX_HOME_CHANNEL")
+    if simplex_home and Platform.SIMPLEX in config.platforms:
+        config.platforms[Platform.SIMPLEX].home_channel = HomeChannel(
+            platform=Platform.SIMPLEX,
+            chat_id=simplex_home,
+            name=os.getenv("SIMPLEX_HOME_CHANNEL_NAME", "Home"),
+        )
 
     # Session settings
     idle_minutes = os.getenv("SESSION_IDLE_MINUTES")
