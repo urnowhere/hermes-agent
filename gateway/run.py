@@ -464,7 +464,9 @@ class GatewayRunner:
         # Load ephemeral config from config.yaml / env vars.
         # Both are injected at API-call time only and never persisted.
         self._prefill_messages = self._load_prefill_messages()
-        self._ephemeral_system_prompt = self._load_ephemeral_system_prompt()
+        _base_ephemeral = self._load_ephemeral_system_prompt()
+        self._ephemeral_system_prompt = _base_ephemeral
+        self._base_ephemeral_system_prompt = _base_ephemeral
         self._reasoning_config = self._load_reasoning_config()
         self._show_reasoning = self._load_show_reasoning()
         self._provider_routing = self._load_provider_routing()
@@ -896,6 +898,35 @@ class GatewayRunner:
         except Exception:
             pass
         return ""
+
+    def _resolve_personality_prompt(self, name: str) -> str:
+        """Look up a personality by name from self.config (already loaded).
+
+        Reads from ``agent.personalities`` in config.yaml.  Supports both
+        plain-string values and dict values with ``system_prompt``,
+        ``tone``, and ``style`` keys.
+
+        Returns the resolved prompt string, or ``""`` if the personality
+        is not found or the name is empty.
+        """
+        if not name:
+            return ""
+        personalities = self.config.get("agent", {}).get("personalities", {})
+        if name not in personalities:
+            return ""
+        value = personalities[name]
+
+        def _resolve(val):
+            if isinstance(val, dict):
+                parts = [val.get("system_prompt", "")]
+                if val.get("tone"):
+                    parts.append(f'Tone: {val["tone"]}')
+                if val.get("style"):
+                    parts.append(f'Style: {val["style"]}')
+                return "\n".join(p for p in parts if p)
+            return str(val)
+
+        return _resolve(value)
 
     @staticmethod
     def _load_reasoning_config() -> dict | None:
@@ -2243,6 +2274,27 @@ class GatewayRunner:
             except Exception as e:
                 logger.warning("[Gateway] Failed to auto-load topic skill '%s': %s", event.auto_skill, e)
 
+        # Auto-apply topic personality on new sessions (e.g., "marvin", "helpful")
+        # Mirrors the /personality command behavior but driven by topic config.
+        if _is_new_session and getattr(event, "topic_personality", None):
+            _personality_name = event.topic_personality
+            _topic_prompt = self._resolve_personality_prompt(_personality_name)
+            if _topic_prompt:
+                # Layer topic personality on top of any base ephemeral prompt.
+                # self._base_ephemeral_system_prompt is preserved separately so
+                # subsequent messages in the same session retain the base.
+                _base = self._base_ephemeral_system_prompt or ""
+                self._ephemeral_system_prompt = (_base + "\n\n" + _topic_prompt).strip()
+                logger.info(
+                    "[Gateway] Applied topic personality '%s' for session %s (thread %s)",
+                    _personality_name, session_key, getattr(event.source, "thread_id", None),
+                )
+            else:
+                logger.warning(
+                    "[Gateway] Topic personality '%s' not found in config",
+                    _personality_name,
+                )
+
         # Load conversation history from transcript
         history = self.session_store.load_transcript(session_entry.session_id)
         
@@ -3336,6 +3388,7 @@ class GatewayRunner:
             except Exception as e:
                 return f"⚠️ Failed to save personality change: {e}"
             self._ephemeral_system_prompt = ""
+            self._base_ephemeral_system_prompt = ""
             return "🎭 Personality cleared — using base agent behavior.\n_(takes effect on next message)_"
         elif args in personalities:
             new_prompt = _resolve_prompt(personalities[args])
@@ -3350,7 +3403,9 @@ class GatewayRunner:
                 return f"⚠️ Failed to save personality change: {e}"
 
             # Update in-memory so it takes effect on the very next message.
+            # Sync _base so topic personalities continue to layer correctly.
             self._ephemeral_system_prompt = new_prompt
+            self._base_ephemeral_system_prompt = new_prompt
 
             return f"🎭 Personality set to **{args}**\n_(takes effect on next message)_"
 
