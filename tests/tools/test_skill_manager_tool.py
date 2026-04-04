@@ -24,6 +24,7 @@ from tools.skill_manager_tool import (
     VALID_NAME_RE,
     ALLOWED_SUBDIRS,
     MAX_NAME_LENGTH,
+    SKILL_MANAGE_SCHEMA,
 )
 
 
@@ -566,3 +567,17 @@ class TestSecurityScanGate:
 
         with patch("hermes_cli.config.load_config", side_effect=RuntimeError("boom")):
             assert _guard_agent_created_enabled() is False
+
+
+# ---------------------------------------------------------------------------
+# Schema content
+# ---------------------------------------------------------------------------
+
+
+class TestSkillManageSchema:
+    def test_schema_mentions_state_path_guidance(self):
+        """Schema description must guide the agent to use writable state paths."""
+        desc = SKILL_MANAGE_SCHEMA["description"]
+        assert "state" in desc.lower()
+        assert "read-only" in desc.lower() or "writable" in desc.lower()
+        assert "HERMES_HOME" in desc or "get_hermes_home" in desc or "get_skill_state_dir" in desc
