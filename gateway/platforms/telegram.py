@@ -22,6 +22,7 @@ try:
         Application,
         CommandHandler,
         MessageHandler as TelegramMessageHandler,
+        CallbackQueryHandler,
         ContextTypes,
         filters,
     )
@@ -147,6 +148,8 @@ class TelegramAdapter(BasePlatformAdapter):
         self._dm_topics: Dict[str, int] = {}
         # DM Topics config from extra.dm_topics
         self._dm_topics_config: List[Dict[str, Any]] = self.config.extra.get("dm_topics", [])
+        # Supergroup Topics config from extra.supergroup_topics
+        self._supergroup_topics_config: List[Dict[str, Any]] = self.config.extra.get("supergroup_topics", [])
 
     def _fallback_ips(self) -> list[str]:
         """Return validated fallback IPs from config (populated by _apply_env_overrides)."""
@@ -543,6 +546,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Document.ALL | filters.Sticker.ALL,
                 self._handle_media_message
             ))
+            self._app.add_handler(CallbackQueryHandler(self._handle_callback_query))
             
             # Start polling — retry initialize() for transient TLS resets
             try:
@@ -1505,12 +1509,35 @@ class TelegramAdapter(BasePlatformAdapter):
         cleaned = re.sub(rf"(?i)@{username}\b[,:\-]*\s*", "", text).strip()
         return cleaned or text
 
+    def _topic_require_mention(self, message: Message) -> bool:
+        """Check per-topic require_mention override for supergroup topics.
+
+        Returns False (mention not required) if the topic config explicitly sets
+        require_mention: false. Otherwise falls back to the global setting.
+        """
+        thread_id_raw = message.message_thread_id
+        if not thread_id_raw:
+            return None  # no override available
+
+        chat_id = str(getattr(message.chat, "id", ""))
+        thread_id_str = str(thread_id_raw)
+
+        topic_info = self._get_supergroup_topic_info(chat_id, thread_id_str)
+        if topic_info is not None and "require_mention" in topic_info:
+            configured = topic_info.get("require_mention")
+            if isinstance(configured, str):
+                return configured.lower() not in ("false", "0", "no", "off")
+            return bool(configured)
+
+        return None  # no override, use global
+
     def _should_process_message(self, message: Message, *, is_command: bool = False) -> bool:
         """Apply Telegram group trigger rules.
 
         DMs remain unrestricted. Group/supergroup messages are accepted when:
         - the chat is explicitly allowlisted in ``free_response_chats``
         - ``require_mention`` is disabled
+        - the topic config explicitly sets ``require_mention: false`` for this thread
         - the message is a command
         - the message replies to the bot
         - the bot is @mentioned
@@ -1518,7 +1545,15 @@ class TelegramAdapter(BasePlatformAdapter):
         """
         if not self._is_group_chat(message):
             return True
-        if str(getattr(getattr(message, "chat", None), "id", "")) in self._telegram_free_response_chats():
+
+        # Check per-topic require_mention override first
+        topic_rm = self._topic_require_mention(message)
+        if topic_rm is False:
+            return True
+        if topic_rm is True:
+            # Topic explicitly requires mention — skip free_response_chats override
+            pass
+        elif str(getattr(getattr(message, "chat", None), "id", "")) in self._telegram_free_response_chats():
             return True
         if not self._telegram_require_mention():
             return True
@@ -1592,6 +1627,100 @@ class TelegramAdapter(BasePlatformAdapter):
         event = self._build_message_event(msg, MessageType.LOCATION)
         event.text = "\n".join(parts)
         await self.handle_message(event)
+
+    async def _handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle inline button callback queries from Telegram."""
+        query = update.callback_query
+        if not query:
+            return
+
+        callback_data = query.data or ""
+        logger.info("[%s] Callback query received: %s", self.name, callback_data)
+
+        # Route bni_* callbacks to bni-callback-handler.py
+        if callback_data.startswith("bni_"):
+            import subprocess
+            import os
+            from pathlib import Path
+
+            script = Path.home() / ".agent/scripts/bni-callback-handler.py"
+            if script.exists():
+                try:
+                    result = subprocess.run(
+                        ["python3", str(script), "--callback", callback_data],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                        env={**os.environ, "HOME": str(Path.home())},
+                    )
+                    logger.info(
+                        "[%s] bni-callback-handler output: %s",
+                        self.name,
+                        result.stdout.strip() or "(no output)",
+                    )
+                    if result.stderr:
+                        logger.warning(
+                            "[%s] bni-callback-handler stderr: %s",
+                            self.name,
+                            result.stderr.strip(),
+                        )
+                except Exception as e:
+                    logger.error("[%s] bni-callback-handler error: %s", self.name, e)
+            else:
+                logger.warning(
+                    "[%s] bni-callback-handler.py not found at %s",
+                    self.name,
+                    script,
+                )
+
+        # Route rt_* callbacks (routing approval) to the transcript processor's callback handler
+        elif callback_data.startswith("rt_"):
+            import subprocess
+            import os
+            from pathlib import Path
+
+            script = Path.home() / ".agent/scripts/transcript-callback-handler.py"
+            if script.exists():
+                try:
+                    result = subprocess.run(
+                        ["python3", str(script), "--callback", callback_data],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                        env={**os.environ, "HOME": str(Path.home())},
+                    )
+                    logger.info(
+                        "[%s] transcript-callback-handler output: %s",
+                        self.name,
+                        result.stdout.strip() or "(no output)",
+                    )
+                    if result.stderr:
+                        logger.warning(
+                            "[%s] transcript-callback-handler stderr: %s",
+                            self.name,
+                            result.stderr.strip(),
+                        )
+                except Exception as e:
+                    logger.error("[%s] transcript-callback-handler error: %s", self.name, e)
+            else:
+                logger.warning(
+                    "[%s] transcript-callback-handler.py not found at %s",
+                    self.name,
+                    script,
+                )
+
+        else:
+            logger.info(
+                "[%s] Unknown callback prefix, answering query: %s",
+                self.name,
+                callback_data,
+            )
+
+        # Always answer the callback to dismiss the loading spinner
+        try:
+            await query.answer()
+        except Exception as e:
+            logger.warning("[%s] Could not answer callback query: %s", self.name, e)
 
     # ------------------------------------------------------------------
     # Text message aggregation (handles Telegram client-side splits)
@@ -2059,6 +2188,23 @@ class TelegramAdapter(BasePlatformAdapter):
 
         return None
 
+    def _get_supergroup_topic_info(self, chat_id: str, thread_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Look up supergroup topic config by chat_id and thread_id.
+
+        Returns the topic config dict (name, skill, etc.) if this thread_id
+        matches a known supergroup topic, or None.
+        """
+        if not thread_id:
+            return None
+
+        for chat_entry in self._supergroup_topics_config:
+            if str(chat_entry.get("chat_id")) == chat_id:
+                for t in chat_entry.get("topics", []):
+                    if str(t.get("thread_id")) == thread_id:
+                        return t
+
+        return None
+
     def _cache_dm_topic_from_message(self, chat_id: str, thread_id: str, topic_name: str) -> None:
         """Cache a thread_id -> topic_name mapping discovered from an incoming message."""
         cache_key = f"{chat_id}:{topic_name}"
@@ -2086,6 +2232,7 @@ class TelegramAdapter(BasePlatformAdapter):
         thread_id_str = str(thread_id_raw) if thread_id_raw else None
         chat_topic = None
         topic_skill = None
+        topic_personality = None
 
         if chat_type == "dm" and thread_id_str:
             topic_info = self._get_dm_topic_info(str(chat.id), thread_id_str)
@@ -2100,6 +2247,18 @@ class TelegramAdapter(BasePlatformAdapter):
                     self._cache_dm_topic_from_message(str(chat.id), thread_id_str, created_name)
                     if not chat_topic:
                         chat_topic = created_name
+
+        # Resolve supergroup topic name and skill binding
+        if chat_type == "group" and thread_id_str:
+            topic_info = self._get_supergroup_topic_info(str(chat.id), thread_id_str)
+            if topic_info:
+                chat_topic = topic_info.get("name")
+                topic_skill = topic_info.get("skill")
+                topic_personality = topic_info.get("personality")
+
+        # DMs default to marvin personality unless explicitly configured
+        if chat_type == "dm" and topic_personality is None:
+            topic_personality = "marvin"
 
         # Build source
         source = self.build_source(
@@ -2128,5 +2287,6 @@ class TelegramAdapter(BasePlatformAdapter):
             reply_to_message_id=reply_to_id,
             reply_to_text=reply_to_text,
             auto_skill=topic_skill,
+            topic_personality=topic_personality,
             timestamp=message.date,
         )
