@@ -189,6 +189,9 @@ def cronjob(
                 base_url=_normalize_optional_job_value(base_url, strip_trailing_slash=True),
                 script=_normalize_optional_job_value(script),
             )
+            message = f"Cron job '{job['name']}' created."
+            if job.get("delivery_note"):
+                message += " " + job["delivery_note"]
             return json.dumps(
                 {
                     "success": True,
@@ -201,7 +204,7 @@ def cronjob(
                     "deliver": job.get("deliver", "local"),
                     "next_run_at": job["next_run_at"],
                     "job": _format_job(job),
-                    "message": f"Cron job '{job['name']}' created.",
+                    "message": message,
                 },
                 indent=2,
             )
