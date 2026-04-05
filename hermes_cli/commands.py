@@ -86,6 +86,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                cli_only=True),
     CommandDef("provider", "Show available providers and current provider",
                "Configuration"),
+    CommandDef("model", "Show or change the current model/provider",
+               "Configuration", args_hint="[provider:model-name]"),
     CommandDef("prompt", "View/set custom system prompt", "Configuration",
                cli_only=True, args_hint="[text]", subcommands=("clear",)),
     CommandDef("personality", "Set a predefined personality", "Configuration",

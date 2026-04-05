@@ -3585,6 +3585,68 @@ class HermesCLI:
 
         print("  To change model or provider, use: hermes model")
 
+    def _handle_model_command(self, cmd: str):
+        """Handle the /model command to view or change model/provider."""
+        from hermes_cli.model_switch import switch_model, switch_to_custom_provider
+
+        parts = cmd.split(maxsplit=1)
+        raw_arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if not raw_arg:
+            self._show_model_and_providers()
+            return
+
+        if raw_arg.lower() == "custom":
+            result = switch_to_custom_provider()
+            if not result.success:
+                print(f"  {result.error_message}")
+                return
+
+            self.model = result.model
+            self.requested_provider = "custom"
+            self.provider = "custom"
+            self._explicit_base_url = result.base_url
+            self._explicit_api_key = result.api_key
+
+            save_config_value("model.default", result.model)
+            save_config_value("model.provider", "custom")
+            save_config_value("model.base_url", result.base_url)
+            save_config_value("model.api_key", result.api_key)
+
+            print(f"  Switched to custom endpoint model: {result.model}")
+            return
+
+        current_provider = self.provider or self.requested_provider or "openrouter"
+        result = switch_model(
+            raw_input=raw_arg,
+            current_provider=current_provider,
+            current_base_url=self._explicit_base_url,
+            current_api_key=self._explicit_api_key,
+        )
+
+        if not result.success:
+            print(f"  {result.error_message}")
+            return
+
+        self.model = result.new_model
+        self.requested_provider = result.target_provider
+        self.provider = result.target_provider
+        self._explicit_base_url = result.base_url
+        self._explicit_api_key = result.api_key
+
+        if result.persist:
+            save_config_value("model.default", result.new_model)
+            save_config_value("model.provider", result.target_provider)
+            if result.base_url:
+                save_config_value("model.base_url", result.base_url)
+            if result.api_key:
+                save_config_value("model.api_key", result.api_key)
+
+        provider_note = f" via {result.provider_label}" if result.provider_label else ""
+        print(f"  Switched to {result.new_model}{provider_note}")
+        if result.warning_message:
+            print(f"  {result.warning_message}")
+
     def _handle_prompt_command(self, cmd: str):
         """Handle the /prompt command to view or set system prompt."""
         parts = cmd.split(maxsplit=1)
@@ -4136,6 +4198,8 @@ class HermesCLI:
             self._handle_resume_command(cmd_original)
         elif canonical == "provider":
             self._show_model_and_providers()
+        elif canonical == "model":
+            self._handle_model_command(cmd_original)
         elif canonical == "prompt":
             # Use original case so prompt text isn't lowercased
             self._handle_prompt_command(cmd_original)
