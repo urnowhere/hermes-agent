@@ -88,6 +88,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "openai/gpt-5.4-nano",
     ],
     "openai-codex": [
+        "gpt-5.4",
         "gpt-5.3-codex",
         "gpt-5.2-codex",
         "gpt-5.1-codex-mini",
@@ -301,6 +302,8 @@ _PROVIDER_ALIASES = {
     "aigateway": "ai-gateway",
     "vercel": "ai-gateway",
     "vercel-ai-gateway": "ai-gateway",
+    "codex": "openai-codex",
+    "openai": "openai-codex",
     "kilo": "kilocode",
     "kilo-code": "kilocode",
     "kilo-gateway": "kilocode",
@@ -450,6 +453,15 @@ def curated_models_for_provider(provider: Optional[str]) -> list[tuple[str, str]
     return [(m, "") for m in models]
 
 
+# Short model aliases — bare names that resolve to a specific provider+model.
+# Lets users type `/model sonnet` instead of `/model claude-sonnet-4-6`.
+_MODEL_SHORTCUTS: dict[str, tuple[str, str]] = {
+    "sonnet": ("anthropic", "claude-sonnet-4-6"),
+    "opus": ("anthropic", "claude-opus-4-6"),
+    "haiku": ("anthropic", "claude-haiku-4-5"),
+}
+
+
 def detect_provider_for_model(
     model_name: str,
     current_provider: str,
@@ -471,6 +483,11 @@ def detect_provider_for_model(
         return None
 
     name_lower = name.lower()
+
+    # --- Quick model shortcuts (e.g. "sonnet" → claude-sonnet-4-6) ---
+    shortcut = _MODEL_SHORTCUTS.get(name_lower)
+    if shortcut:
+        return shortcut
 
     # --- Step 0: bare provider name typed as model ---
     # If someone types `/model nous` or `/model anthropic`, treat it as a

@@ -1222,8 +1222,19 @@ class BasePlatformAdapter(ABC):
                         except OSError:
                             pass
 
-                # Send the text portion
-                if text_content:
+                # Determine early if text will be attached as a voice caption
+                # so we can skip the separate text message.
+                _AUDIO_EXTS_PRE = {'.ogg', '.opus', '.mp3', '.wav', '.m4a'}
+                _voice_files_pre = [m for m in media_files if Path(m[0]).suffix.lower() in _AUDIO_EXTS_PRE and m[1]]
+                _text_as_voice_caption = (
+                    bool(_voice_files_pre)
+                    and bool(text_content)
+                    and len(_voice_files_pre) == 1
+                    and len(text_content) <= 1024
+                )
+
+                # Send the text portion (skip if it will be sent as voice caption)
+                if text_content and not _text_as_voice_caption:
                     logger.info("[%s] Sending response (%d chars) to %s", self.name, len(text_content), event.source.chat_id)
                     result = await self._send_with_retry(
                         chat_id=event.source.chat_id,
@@ -1269,6 +1280,16 @@ class BasePlatformAdapter(ABC):
                 _VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'}
                 _IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
 
+                # If there's exactly one voice media and text fits in a caption
+                # (1024 chars for Telegram), attach text as caption instead of
+                # sending it separately.  We flag this so the text send above
+                # can be skipped when appropriate in future iterations, but for
+                # now we attach it as caption on the voice message.
+                _voice_caption: Optional[str] = None
+                _voice_files = [m for m in media_files if Path(m[0]).suffix.lower() in _AUDIO_EXTS and m[1]]
+                if _voice_files and text_content and len(_voice_files) == 1 and len(text_content) <= 1024:
+                    _voice_caption = text_content
+
                 for media_path, is_voice in media_files:
                     if human_delay > 0:
                         await asyncio.sleep(human_delay)
@@ -1278,6 +1299,7 @@ class BasePlatformAdapter(ABC):
                             media_result = await self.send_voice(
                                 chat_id=event.source.chat_id,
                                 audio_path=media_path,
+                                caption=_voice_caption,
                                 metadata=_thread_metadata,
                             )
                         elif ext in _VIDEO_EXTS:
