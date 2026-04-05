@@ -271,6 +271,88 @@ def _expand_whatsapp_auth_aliases(identifier: str) -> set:
 
 logger = logging.getLogger(__name__)
 
+
+def _ensure_gateway_run_id(event: Optional[MessageEvent]) -> Optional[str]:
+    if event is None:
+        return None
+    existing = getattr(event, "run_id", None)
+    if existing:
+        return existing
+    run_id = f"gw_{uuid.uuid4().hex[:12]}"
+    setattr(event, "run_id", run_id)
+    return run_id
+
+
+def _build_gateway_disposition_context(
+    disposition: str,
+    *,
+    source: Optional[SessionSource] = None,
+    session_key: Optional[str] = None,
+    event: Optional[MessageEvent] = None,
+    reason: Optional[str] = None,
+) -> dict[str, Any]:
+    context: dict[str, Any] = {"disposition": disposition}
+    if source is not None:
+        if getattr(source, "platform", None):
+            context["platform"] = source.platform.value
+        if getattr(source, "chat_id", None):
+            context["chat_id"] = source.chat_id
+        if getattr(source, "user_id", None):
+            context["user_id"] = source.user_id
+    if session_key:
+        context["session_key"] = session_key
+    if event is not None and getattr(event, "message_id", None):
+        context["message_id"] = event.message_id
+    run_id = _ensure_gateway_run_id(event)
+    if run_id:
+        context["run_id"] = run_id
+    if event is not None:
+        cmd = event.get_command() if hasattr(event, "get_command") else None
+        if cmd:
+            context["command"] = cmd
+    if reason:
+        context["reason"] = reason
+    return context
+
+
+def _log_gateway_disposition(
+    disposition: str,
+    *,
+    source: Optional[SessionSource] = None,
+    session_key: Optional[str] = None,
+    event: Optional[MessageEvent] = None,
+    reason: Optional[str] = None,
+) -> dict[str, Any]:
+    context = _build_gateway_disposition_context(
+        disposition,
+        source=source,
+        session_key=session_key,
+        event=event,
+        reason=reason,
+    )
+    parts = ["gateway_disposition"] + [f"{k}={v}" for k, v in context.items()]
+    logger.info(" ".join(parts))
+    return context
+
+
+def _build_run_state_context(
+    state: str,
+    *,
+    source: Optional[SessionSource] = None,
+    session_key: Optional[str] = None,
+    event: Optional[MessageEvent] = None,
+    reason: Optional[str] = None,
+) -> dict[str, Any]:
+    context = _build_gateway_disposition_context(
+        state,
+        source=source,
+        session_key=session_key,
+        event=event,
+        reason=reason,
+    )
+    context["state"] = state
+    return context
+
 # Sentinel placed into _running_agents immediately when a session starts
 # processing, *before* any await.  Prevents a second message for the same
 # session from bypassing the "already running" guard during the async gap
@@ -493,6 +575,7 @@ class GatewayRunner:
         self._running_agents: Dict[str, Any] = {}
         self._running_agents_ts: Dict[str, float] = {}  # start timestamp per session
         self._pending_messages: Dict[str, str] = {}  # Queued messages during interrupt
+        self._gateway_run_states: Dict[str, Dict[str, Any]] = {}
 
         # Cache AIAgent instances per session to preserve prompt caching.
         # Without this, a new AIAgent is created per message, rebuilding the
@@ -1707,6 +1790,13 @@ class GatewayRunner:
         7. Return response
         """
         source = event.source
+        run_id = _ensure_gateway_run_id(event)
+        await self._update_gateway_run_state(
+            "received",
+            source=source,
+            event=event,
+            reason="message_received",
+        )
 
         # Check if user is authorized
         if not self._is_user_authorized(source):
@@ -1718,6 +1808,18 @@ class GatewayRunner:
                 # prevent spamming the user with repeated messages when
                 # multiple DMs arrive in quick succession.
                 if self.pairing_store._is_rate_limited(platform_name, source.user_id):
+                    _log_gateway_disposition(
+                        "unauthorized_rate_limited",
+                        source=source,
+                        event=event,
+                        reason="pairing_rate_limited",
+                    )
+                    await self._update_gateway_run_state(
+                        "unauthorized_rate_limited",
+                        source=source,
+                        event=event,
+                        reason="pairing_rate_limited",
+                    )
                     return None
                 code = self.pairing_store.generate_code(
                     platform_name, source.user_id, source.user_name or ""
@@ -1894,6 +1996,20 @@ class GatewayRunner:
                             adapter._pending_messages[_quick_key] = event
                     else:
                         adapter._pending_messages[_quick_key] = event
+                _log_gateway_disposition(
+                    "queued_without_interrupt",
+                    source=source,
+                    session_key=_quick_key,
+                    event=event,
+                    reason="photo_follow_up_active_run",
+                )
+                await self._update_gateway_run_state(
+                    "queued",
+                    source=source,
+                    session_key=_quick_key,
+                    event=event,
+                    reason="photo_follow_up_active_run",
+                )
                 return None
 
             running_agent = self._running_agents.get(_quick_key)
@@ -1917,6 +2033,20 @@ class GatewayRunner:
                 self._pending_messages[_quick_key] += "\n" + event.text
             else:
                 self._pending_messages[_quick_key] = event.text
+            _log_gateway_disposition(
+                "interrupt_requested",
+                source=source,
+                session_key=_quick_key,
+                event=event,
+                reason="active_run_interrupted_by_new_input",
+            )
+            await self._update_gateway_run_state(
+                "interrupted",
+                source=source,
+                session_key=_quick_key,
+                event=event,
+                reason="active_run_interrupted_by_new_input",
+            )
             return None
 
         # Check for commands
@@ -2168,6 +2298,15 @@ class GatewayRunner:
     async def _handle_message_with_agent(self, event, source, _quick_key: str):
         """Inner handler that runs under the _running_agents sentinel guard."""
 
+        run_id = _ensure_gateway_run_id(event)
+
+        await self._update_gateway_run_state(
+            "running",
+            source=source,
+            event=event,
+            reason="agent_handler_entered",
+        )
+
         # Get or create session
         session_entry = self.session_store.get_or_create_session(source)
         session_key = session_entry.session_key
@@ -2183,8 +2322,9 @@ class GatewayRunner:
                 "user_id": source.user_id,
                 "session_id": session_entry.session_id,
                 "session_key": session_key,
+                "run_id": run_id,
             })
-        
+
         # Build session context
         context = build_session_context(source, self.config, session_entry)
         
@@ -2701,6 +2841,7 @@ class GatewayRunner:
                 "platform": source.platform.value if source.platform else "",
                 "user_id": source.user_id,
                 "session_id": session_entry.session_id,
+                "run_id": run_id,
                 "message": message_text[:500],
             }
             await self.hooks.emit("agent:start", hook_ctx)
@@ -2753,6 +2894,13 @@ class GatewayRunner:
 
             # Surface error details when the agent failed silently (final_response=None)
             if not response and agent_result.get("failed"):
+                await self._update_gateway_run_state(
+                    "failed",
+                    source=source,
+                    session_key=session_key,
+                    event=event,
+                    reason=str(agent_result.get("error", "unknown error"))[:160],
+                )
                 error_detail = agent_result.get("error", "unknown error")
                 error_str = str(error_detail).lower()
 
@@ -2802,6 +2950,13 @@ class GatewayRunner:
                 **hook_ctx,
                 "response": (response or "")[:500],
             })
+            await self._update_gateway_run_state(
+                "completed",
+                source=source,
+                session_key=session_key,
+                event=event,
+                reason="agent_completed",
+            )
             
             # Check for pending process watchers (check_interval on background processes)
             try:
@@ -2915,6 +3070,13 @@ class GatewayRunner:
             # when already_sent is True, so media files would never be
             # delivered without this.
             if agent_result.get("already_sent"):
+                await self._update_gateway_run_state(
+                    "streamed_already_sent",
+                    source=source,
+                    session_key=session_key,
+                    event=event,
+                    reason="stream_consumer_delivered_response",
+                )
                 if response:
                     _media_adapter = self.adapters.get(source.platform)
                     if _media_adapter:
@@ -4041,6 +4203,7 @@ class GatewayRunner:
             local_files, _ = adapter.extract_local_files(cleaned)
 
             _thread_meta = {"thread_id": event.source.thread_id} if event.source.thread_id else None
+            _partial_failure = False
 
             _AUDIO_EXTS = {'.ogg', '.opus', '.mp3', '.wav', '.m4a'}
             _VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'}
@@ -4050,52 +4213,72 @@ class GatewayRunner:
                 try:
                     ext = Path(media_path).suffix.lower()
                     if ext in _AUDIO_EXTS:
-                        await adapter.send_voice(
+                        result = await adapter.send_voice(
                             chat_id=event.source.chat_id,
                             audio_path=media_path,
                             metadata=_thread_meta,
                         )
                     elif ext in _VIDEO_EXTS:
-                        await adapter.send_video(
+                        result = await adapter.send_video(
                             chat_id=event.source.chat_id,
                             video_path=media_path,
                             metadata=_thread_meta,
                         )
                     elif ext in _IMAGE_EXTS:
-                        await adapter.send_image_file(
+                        result = await adapter.send_image_file(
                             chat_id=event.source.chat_id,
                             image_path=media_path,
                             metadata=_thread_meta,
                         )
                     else:
-                        await adapter.send_document(
+                        result = await adapter.send_document(
                             chat_id=event.source.chat_id,
                             file_path=media_path,
                             metadata=_thread_meta,
                         )
+                    if result is not None and not getattr(result, 'success', False):
+                        _partial_failure = True
                 except Exception as e:
+                    _partial_failure = True
                     logger.warning("[%s] Post-stream media delivery failed: %s", adapter.name, e)
 
             for file_path in local_files:
                 try:
                     ext = Path(file_path).suffix.lower()
                     if ext in _IMAGE_EXTS:
-                        await adapter.send_image_file(
+                        result = await adapter.send_image_file(
                             chat_id=event.source.chat_id,
                             image_path=file_path,
                             metadata=_thread_meta,
                         )
                     else:
-                        await adapter.send_document(
+                        result = await adapter.send_document(
                             chat_id=event.source.chat_id,
                             file_path=file_path,
                             metadata=_thread_meta,
                         )
+                    if result is not None and not getattr(result, 'success', False):
+                        _partial_failure = True
                 except Exception as e:
+                    _partial_failure = True
                     logger.warning("[%s] Post-stream file delivery failed: %s", adapter.name, e)
+
+            if _partial_failure:
+                await self._update_gateway_run_state(
+                    'partial_failure',
+                    source=event.source,
+                    event=event,
+                    reason='post_stream_media_partial_failure',
+                )
 
         except Exception as e:
             logger.warning("Post-stream media extraction failed: %s", e)
+            await self._update_gateway_run_state(
+                'partial_failure',
+                source=event.source,
+                event=event,
+                reason='post_stream_media_extraction_failed',
+            )
 
     async def _handle_rollback_command(self, event: MessageEvent) -> str:
         """Handle /rollback command — list or restore filesystem checkpoints."""
@@ -5865,6 +6048,35 @@ class GatewayRunner:
             with _lock:
                 self._agent_cache.pop(session_key, None)
 
+    async def _update_gateway_run_state(
+        self,
+        state: str,
+        *,
+        source: Optional[SessionSource] = None,
+        session_key: Optional[str] = None,
+        event: Optional[MessageEvent] = None,
+        reason: Optional[str] = None,
+    ) -> dict[str, Any]:
+        context = _build_run_state_context(
+            state,
+            source=source,
+            session_key=session_key,
+            event=event,
+            reason=reason,
+        )
+        run_id = context.get("run_id")
+        store = getattr(self, "_gateway_run_states", None)
+        if store is None:
+            store = {}
+            self._gateway_run_states = store
+        if run_id:
+            current = store.get(run_id, {}).copy()
+            current.update(context)
+            current["updated_at"] = datetime.now().isoformat()
+            store[run_id] = current
+        await self.hooks.emit("gateway:state", context)
+        return context
+
     async def _run_agent(
         self,
         message: str,
@@ -6397,6 +6609,18 @@ class GatewayRunner:
                 """
                 cmd = approval_data.get("command", "")
                 desc = approval_data.get("description", "dangerous command")
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self._update_gateway_run_state(
+                            "awaiting_approval",
+                            source=source,
+                            session_key=session_key,
+                            reason="dangerous_command_requires_approval",
+                        ),
+                        _loop_for_step,
+                    ).result(timeout=15)
+                except Exception:
+                    pass
 
                 # Prefer button-based approval when the adapter supports it.
                 # Check the *class* for the method, not the instance — avoids
@@ -6665,6 +6889,12 @@ class GatewayRunner:
                 logger.error(
                     "Agent execution timed out after %.0fs for session %s",
                     _agent_timeout, session_key,
+                )
+                await self._update_gateway_run_state(
+                    "timed_out",
+                    source=source,
+                    session_key=session_key,
+                    reason=f"agent_timeout:{int(_agent_timeout or 0)}s",
                 )
                 # Interrupt the agent if it's still running so the thread
                 # pool worker is freed.

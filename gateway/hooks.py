@@ -8,6 +8,7 @@ Hooks are discovered from ~/.hermes/hooks/ directories, each containing:
 
 Events:
   - gateway:startup     -- Gateway process starts
+  - gateway:state       -- Structured runtime state/disposition event for queueing, timeouts, approvals, delivery issues
   - session:start       -- New session created (first message of a new session)
   - session:end         -- Session ends (user ran /new or /reset)
   - session:reset       -- Session reset completed (new session entry created)
