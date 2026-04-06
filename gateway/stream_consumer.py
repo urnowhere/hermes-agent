@@ -88,9 +88,11 @@ class GatewayStreamConsumer:
 
     async def run(self) -> None:
         """Async task that drains the queue and edits the platform message."""
-        # Platform message length limit — leave room for cursor + formatting
+        # Platform message length limit — leave room for cursor, formatting,
+        # and MDv2 escape character inflation (special chars each add 1 byte).
+        # Use 75% of the raw limit as a conservative safe ceiling.
         _raw_limit = getattr(self.adapter, "MAX_MESSAGE_LENGTH", 4096)
-        _safe_limit = max(500, _raw_limit - len(self.cfg.cursor) - 100)
+        _safe_limit = max(500, int(_raw_limit * 0.75))
 
         try:
             while True:
@@ -123,26 +125,63 @@ class GatewayStreamConsumer:
                         len(self._accumulated) > _safe_limit
                         and self._message_id is not None
                     ):
-                        split_at = self._accumulated.rfind("\n", 0, _safe_limit)
+                        split_at = self._accumulated.rfind(\"\\n\", 0, _safe_limit)
                         if split_at < _safe_limit // 2:
                             split_at = _safe_limit
                         chunk = self._accumulated[:split_at]
-                        await self._send_or_edit(chunk)
-                        self._accumulated = self._accumulated[split_at:].lstrip("\n")
+                        # Bypass _edit_supported — must cleanly finalize this
+                        # chunk without cursor regardless of earlier edit failures.
+                        # Retry once on exception to cover transient failures.
+                        for _attempt in range(2):
+                            try:
+                                await self.adapter.edit_message(
+                                    chat_id=self.chat_id,
+                                    message_id=self._message_id,
+                                    content=chunk,
+                                    metadata=self.metadata,
+                                )
+                                break
+                            except Exception:
+                                if _attempt == 0:
+                                    await asyncio.sleep(0.5)
+                                # second attempt failed — cursor stays in this chunk
+                        self._accumulated = self._accumulated[split_at:].lstrip(\"\\n\")
                         self._message_id = None
-                        self._last_sent_text = ""
+                        self._last_sent_text = \"\"
 
-                    display_text = self._accumulated
-                    if not got_done:
-                        display_text += self.cfg.cursor
+                    if got_done:
+                        # Final delivery — strip cursor, bypass _edit_supported
+                        # so a disabled flag from a failed overflow edit doesn't
+                        # leave the cursor stuck in the last message.
+                        if self._message_id is not None:
+                            for _attempt in range(2):
+                                try:
+                                    await self.adapter.edit_message(
+                                        chat_id=self.chat_id,
+                                        message_id=self._message_id,
+                                        content=self._accumulated,
+                                        metadata=self.metadata,
+                                    )
+                                    self._already_sent = True
+                                    break
+                                except Exception:
+                                    if _attempt == 0:
+                                        await asyncio.sleep(0.5)
+                        else:
+                            result = await self.adapter.send(
+                                chat_id=self.chat_id,
+                                content=self._accumulated,
+                                metadata=self.metadata,
+                            )
+                            if result.success:
+                                self._already_sent = True
+                        return
 
+                    display_text = self._accumulated + self.cfg.cursor
                     await self._send_or_edit(display_text)
                     self._last_edit_time = time.monotonic()
 
                 if got_done:
-                    # Final edit without cursor
-                    if self._accumulated and self._message_id:
-                        await self._send_or_edit(self._accumulated)
                     return
 
                 await asyncio.sleep(0.05)  # Small yield to not busy-loop
@@ -196,11 +235,13 @@ class GatewayStreamConsumer:
                     # Skip if text is identical to what we last sent
                     if text == self._last_sent_text:
                         return
-                    # Edit existing message
+                    # Edit existing message — pass metadata so overflow chunks
+                    # preserve the thread_id and land in the correct topic.
                     result = await self.adapter.edit_message(
                         chat_id=self.chat_id,
                         message_id=self._message_id,
                         content=text,
+                        metadata=self.metadata,
                     )
                     if result.success:
                         self._already_sent = True

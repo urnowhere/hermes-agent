@@ -899,10 +899,13 @@ class TelegramAdapter(BasePlatformAdapter):
         chat_id: str,
         message_id: str,
         content: str,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Edit a previously sent Telegram message."""
         if not self._bot:
             return SendResult(success=False, error="Not connected")
+        thread_id = (metadata or {}).get("thread_id")
+        effective_thread_id = int(thread_id) if thread_id else None
         try:
             formatted = self.format_message(content)
             try:
@@ -929,19 +932,54 @@ class TelegramAdapter(BasePlatformAdapter):
             if "not modified" in err_str:
                 return SendResult(success=True, message_id=message_id)
             # Message too long — content exceeded 4096 chars (e.g. during
-            # streaming).  Truncate and succeed so the stream consumer can
-            # split the overflow into a new message instead of dying.
+            # streaming).  Split into chunks: edit the existing message with
+            # the first chunk, then send the rest as new messages.
+            # Use a reduced limit to leave headroom for MDv2 escape inflation.
             if "message_too_long" in err_str or "too long" in err_str:
-                truncated = content[: self.MAX_MESSAGE_LENGTH - 20] + "…"
-                try:
-                    await self._bot.edit_message_text(
-                        chat_id=int(chat_id),
-                        message_id=int(message_id),
-                        text=truncated,
-                    )
-                except Exception:
-                    pass  # best-effort truncation
-                return SendResult(success=True, message_id=message_id)
+                safe_chunk_limit = int(self.MAX_MESSAGE_LENGTH * 0.8)
+                chunks = self.truncate_message(content, safe_chunk_limit)
+                last_message_id = message_id
+                for i, chunk in enumerate(chunks):
+                    try:
+                        if i == 0:
+                            try:
+                                await self._bot.edit_message_text(
+                                    chat_id=int(chat_id),
+                                    message_id=int(message_id),
+                                    text=self.format_message(chunk),
+                                    parse_mode=ParseMode.MARKDOWN_V2,
+                                )
+                            except Exception:
+                                await self._bot.edit_message_text(
+                                    chat_id=int(chat_id),
+                                    message_id=int(message_id),
+                                    text=chunk,
+                                )
+                        else:
+                            # Send remaining chunks as new messages.
+                            # Preserve thread_id so messages land in the
+                            # correct topic/thread, not the main chat.
+                            try:
+                                msg = await self._bot.send_message(
+                                    chat_id=int(chat_id),
+                                    text=self.format_message(chunk),
+                                    parse_mode=ParseMode.MARKDOWN_V2,
+                                    message_thread_id=effective_thread_id,
+                                )
+                            except Exception:
+                                msg = await self._bot.send_message(
+                                    chat_id=int(chat_id),
+                                    text=chunk,
+                                    message_thread_id=effective_thread_id,
+                                )
+                            if msg:
+                                last_message_id = str(msg.message_id)
+                    except Exception as chunk_err:
+                        logger.warning(
+                            "[%s] Failed to send overflow chunk %d: %s",
+                            self.name, i, chunk_err,
+                        )
+                return SendResult(success=True, message_id=last_message_id)
             # Flood control / RetryAfter — short waits are retried inline,
             # long waits return a failure immediately so streaming can fall back
             # to a normal final send instead of leaving a truncated partial.
@@ -1350,6 +1388,11 @@ class TelegramAdapter(BasePlatformAdapter):
         """
         if not content:
             return content
+
+        # Normalize line endings — Close.com, GHL, and other API responses
+        # frequently return \r\n (Windows) or bare \r (old Mac). Telegram
+        # renders \r as a literal character, producing visible artifacts.
+        content = content.replace('\r\n', '\n').replace('\r', '\n')
 
         placeholders: dict = {}
         counter = [0]
