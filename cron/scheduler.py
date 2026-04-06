@@ -531,6 +531,18 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         except Exception as e:
             logger.warning("Job '%s': failed to load config.yaml, using defaults: %s", job_id, e)
 
+        # Initialize MCP servers so cron jobs can use MCP tools.
+        # This mirrors the initialization done in cli.py for interactive sessions.
+        # The MCP event loop is shared across all cron job runs in the same process.
+        try:
+            from tools.mcp_tool import discover_mcp_tools, _ensure_mcp_loop
+            _ensure_mcp_loop()
+            mcp_tool_names = discover_mcp_tools()
+            if mcp_tool_names:
+                logger.info("Job '%s': discovered %d MCP tools", job_id, len(mcp_tool_names))
+        except Exception as e:
+            logger.warning("Job '%s': failed to initialize MCP servers: %s", job_id, e)
+
         # Reasoning config from env or config.yaml
         from hermes_constants import parse_reasoning_effort
         effort = os.getenv("HERMES_REASONING_EFFORT", "")
