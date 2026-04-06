@@ -79,6 +79,7 @@ from tools.browser_tool import cleanup_browser
 from hermes_constants import OPENROUTER_BASE_URL
 
 # Agent internals extracted to agent/ package for modularity
+from agent.memory_manager import build_memory_context_block
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY,
     PLATFORM_HINTS,
@@ -108,6 +109,7 @@ from agent.prompt_builder import (
     TOOL_USE_ENFORCEMENT_MODELS,
     DEVELOPER_ROLE_MODELS,
     GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
+    OPENAI_MODEL_EXECUTION_GUIDANCE,
 )
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.display import (
@@ -747,85 +749,31 @@ class AIAgent:
         # status_callback for gateway platforms.  Does NOT inject into messages.
         self._context_pressure_warned = False
 
-        # Persistent error log -- always writes WARNING+ to ~/.hermes/logs/errors.log
-        # so tool failures, API errors, etc. are inspectable after the fact.
-        # In gateway mode, each incoming message creates a new AIAgent instance,
-        # while the root logger is process-global. Re-adding the same errors.log
-        # handler would cause each warning/error line to be written multiple times.
-        from logging.handlers import RotatingFileHandler
+        # Activity tracking — updated on each API call, tool execution, and
+        # stream chunk.  Used by the gateway timeout handler to report what the
+        # agent was doing when it was killed, and by the "still working"
+        # notifications to show progress.
+        self._last_activity_ts: float = time.time()
+        self._last_activity_desc: str = "initializing"
+        self._current_tool: str | None = None
+        self._api_call_count: int = 0
 
-        root_logger = logging.getLogger()
-        error_log_dir = _hermes_home / "logs"
-        error_log_path = error_log_dir / "errors.log"
-        resolved_error_log_path = error_log_path.resolve()
-        has_errors_log_handler = any(
-            isinstance(handler, RotatingFileHandler)
-            and Path(getattr(handler, "baseFilename", "")).resolve()
-            == resolved_error_log_path
-            for handler in root_logger.handlers
-        )
-        from agent.redact import RedactingFormatter
+        # Centralized logging — agent.log (INFO+) and errors.log (WARNING+)
+        # both live under ~/.hermes/logs/.  Idempotent, so gateway mode
+        # (which creates a new AIAgent per message) won't duplicate handlers.
+        from hermes_logging import setup_logging, setup_verbose_logging
 
-        if not has_errors_log_handler:
-            error_log_dir.mkdir(parents=True, exist_ok=True)
-            error_file_handler = RotatingFileHandler(
-                error_log_path,
-                maxBytes=2 * 1024 * 1024,
-                backupCount=2,
-            )
-            error_file_handler.setLevel(logging.WARNING)
-            error_file_handler.setFormatter(
-                RedactingFormatter(
-                    "%(asctime)s %(levelname)s %(name)s: %(message)s",
-                )
-            )
-            root_logger.addHandler(error_file_handler)
+        setup_logging(hermes_home=_hermes_home)
 
         if self.verbose_logging:
-            logging.basicConfig(
-                level=logging.DEBUG,
-                format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-                datefmt="%H:%M:%S",
-            )
-            for handler in logging.getLogger().handlers:
-                handler.setFormatter(
-                    RedactingFormatter(
-                        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-                        datefmt="%H:%M:%S",
-                    )
-                )
-            # Keep third-party libraries at WARNING level to reduce noise
-            # We have our own retry and error logging that's more informative
-            logging.getLogger("openai").setLevel(logging.WARNING)
-            logging.getLogger("openai._base_client").setLevel(logging.WARNING)
-            logging.getLogger("httpx").setLevel(logging.WARNING)
-            logging.getLogger("httpcore").setLevel(logging.WARNING)
-            logging.getLogger("asyncio").setLevel(logging.WARNING)
-            # Suppress Modal/gRPC related debug spam
-            logging.getLogger("hpack").setLevel(logging.WARNING)
-            logging.getLogger("hpack.hpack").setLevel(logging.WARNING)
-            logging.getLogger("grpc").setLevel(logging.WARNING)
-            logging.getLogger("modal").setLevel(logging.WARNING)
-            logging.getLogger("rex-deploy").setLevel(
-                logging.INFO
-            )  # Keep INFO for sandbox status
+            setup_verbose_logging()
             logger.info("Verbose logging enabled (third-party library logs suppressed)")
         else:
-            # Set logging to INFO level for important messages only
-            logging.basicConfig(
-                level=logging.INFO,
-                format="%(asctime)s - %(levelname)s - %(message)s",
-                datefmt="%H:%M:%S",
-            )
-            # Suppress noisy library logging
-            logging.getLogger("openai").setLevel(logging.ERROR)
-            logging.getLogger("openai._base_client").setLevel(logging.ERROR)
-            logging.getLogger("httpx").setLevel(logging.ERROR)
-            logging.getLogger("httpcore").setLevel(logging.ERROR)
             if self.quiet_mode:
                 # In quiet mode (CLI default), suppress all tool/infra log
-                # noise. The TUI has its own rich display for status; logger
-                # INFO/WARNING messages just clutter it.
+                # noise on the *console*. The TUI has its own rich display
+                # for status; logger INFO/WARNING messages just clutter it.
+                # File handlers (agent.log, errors.log) still capture everything.
                 for quiet_logger in [
                     "tools",  # all tools.* (terminal, browser, web, file, etc.)
                     "run_agent",  # agent runner internals
@@ -2638,6 +2586,24 @@ class AIAgent:
 
         return context
 
+    def _usage_summary_for_api_request_hook(
+        self, response: Any
+    ) -> Optional[Dict[str, Any]]:
+        """Token buckets for ``post_api_request`` plugins (no raw ``response`` object)."""
+        if response is None:
+            return None
+        raw_usage = getattr(response, "usage", None)
+        if not raw_usage:
+            return None
+        from dataclasses import asdict
+
+        cu = normalize_usage(raw_usage, provider=self.provider, api_mode=self.api_mode)
+        summary = asdict(cu)
+        summary.pop("raw_usage", None)
+        summary["prompt_tokens"] = cu.prompt_tokens
+        summary["total_tokens"] = cu.total_tokens
+        return summary
+
     def _dump_api_request_debug(
         self,
         api_kwargs: Dict[str, Any],
@@ -2865,6 +2831,29 @@ class AIAgent:
         self._interrupt_message = None
         _set_interrupt(False)
 
+    def _touch_activity(self, desc: str) -> None:
+        """Update the last-activity timestamp and description (thread-safe)."""
+        self._last_activity_ts = time.time()
+        self._last_activity_desc = desc
+
+    def get_activity_summary(self) -> dict:
+        """Return a snapshot of the agent's current activity for diagnostics.
+
+        Called by the gateway timeout handler to report what the agent was doing
+        when it was killed, and by the periodic "still working" notifications.
+        """
+        elapsed = time.time() - self._last_activity_ts
+        return {
+            "last_activity_ts": self._last_activity_ts,
+            "last_activity_desc": self._last_activity_desc,
+            "seconds_since_activity": round(elapsed, 1),
+            "current_tool": self._current_tool,
+            "api_call_count": self._api_call_count,
+            "max_iterations": self.max_iterations,
+            "budget_used": self.iteration_budget.used,
+            "budget_max": self.iteration_budget.max_total,
+        }
+
     def shutdown_memory_provider(self, messages: list = None) -> None:
         """Shut down the memory provider — call at actual session boundaries.
 
@@ -3004,11 +2993,15 @@ class AIAgent:
                 _inject = any(p in model_lower for p in TOOL_USE_ENFORCEMENT_MODELS)
             if _inject:
                 prompt_parts.append(TOOL_USE_ENFORCEMENT_GUIDANCE)
+                _model_lower = (self.model or "").lower()
                 # Google model operational guidance (conciseness, absolute
                 # paths, parallel tool calls, verify-before-edit, etc.)
-                _model_lower = (self.model or "").lower()
                 if "gemini" in _model_lower or "gemma" in _model_lower:
                     prompt_parts.append(GOOGLE_MODEL_OPERATIONAL_GUIDANCE)
+                # OpenAI GPT/Codex execution discipline (tool persistence,
+                # prerequisite checks, verification, anti-hallucination).
+                if "gpt" in _model_lower or "codex" in _model_lower:
+                    prompt_parts.append(OPENAI_MODEL_EXECUTION_GUIDANCE)
 
         # so it can refer the user to them rather than reinventing answers.
 
@@ -4788,6 +4781,7 @@ class AIAgent:
             # Reset stale-stream timer so the detector measures from this
             # attempt's start, not a previous attempt's last chunk.
             last_chunk_time["t"] = time.time()
+            self._touch_activity("waiting for provider response (streaming)")
             stream = request_client_holder["client"].chat.completions.create(
                 **stream_kwargs
             )
@@ -4810,8 +4804,12 @@ class AIAgent:
             # knows whether reasoning was already displayed during streaming.
             self._reasoning_deltas_fired = False
 
+            _first_chunk_seen = False
             for chunk in stream:
                 last_chunk_time["t"] = time.time()
+                if not _first_chunk_seen:
+                    _first_chunk_seen = True
+                    self._touch_activity("receiving stream response")
 
                 if self._interrupt_requested:
                     break
@@ -5206,10 +5204,22 @@ class AIAgent:
             # Detect stale streams: connections kept alive by SSE pings
             # but delivering no real chunks.  Kill the client so the
             # inner retry loop can start a fresh connection.
-            if time.time() - last_chunk_time["t"] > _stream_stale_timeout:
+            _stale_elapsed = time.time() - last_chunk_time["t"]
+            if _stale_elapsed > _stream_stale_timeout:
+                _est_ctx = sum(len(str(v)) for v in api_kwargs.get("messages", [])) // 4
                 logger.warning(
-                    "Stream stale for %.0fs — no chunks received. Killing connection.",
+                    "Stream stale for %.0fs (threshold %.0fs) — no chunks received. "
+                    "model=%s context=~%s tokens. Killing connection.",
+                    _stale_elapsed,
                     _stream_stale_timeout,
+                    api_kwargs.get("model", "unknown"),
+                    f"{_est_ctx:,}",
+                )
+                self._emit_status(
+                    f"⚠️ No response from provider for {int(_stale_elapsed)}s "
+                    f"(model: {api_kwargs.get('model', 'unknown')}, "
+                    f"context: ~{_est_ctx:,} tokens). "
+                    f"Reconnecting..."
                 )
                 try:
                     rc = request_client_holder.get("client")
@@ -5760,11 +5770,13 @@ class AIAgent:
         return transformed
 
     def _anthropic_preserve_dots(self) -> bool:
-        """True when using Alibaba/DashScope anthropic-compatible endpoint (model names keep dots, e.g. qwen3.5-plus)."""
-        if (getattr(self, "provider", "") or "").lower() == "alibaba":
+        """True when using an anthropic-compatible endpoint that preserves dots in model names.
+        Alibaba/DashScope keeps dots (e.g. qwen3.5-plus).
+        OpenCode Go keeps dots (e.g. minimax-m2.7)."""
+        if (getattr(self, "provider", "") or "").lower() in {"alibaba", "opencode-go"}:
             return True
         base = (getattr(self, "base_url", "") or "").lower()
-        return "dashscope" in base or "aliyuncs" in base
+        return "dashscope" in base or "aliyuncs" in base or "opencode.ai/zen/go" in base
 
     def _build_api_kwargs(self, api_messages: list) -> dict:
         """Build the keyword arguments dict for the active API mode."""
@@ -6409,6 +6421,14 @@ class AIAgent:
         Returns:
             (compressed_messages, new_system_prompt) tuple
         """
+        _pre_msg_count = len(messages)
+        logger.info(
+            "context compression started: session=%s messages=%d tokens=~%s model=%s",
+            self.session_id or "none",
+            _pre_msg_count,
+            f"{approx_tokens:,}" if approx_tokens else "unknown",
+            self.model,
+        )
         # Pre-compression memory flush: let the model save memories before they're lost
         self.flush_memories(messages, min_turns=0)
 
@@ -6499,6 +6519,13 @@ class AIAgent:
         except Exception:
             pass
 
+        logger.info(
+            "context compression done: session=%s messages=%d->%d tokens=~%s",
+            self.session_id or "none",
+            _pre_msg_count,
+            len(compressed),
+            f"{_compressed_est:,}",
+        )
         return compressed, new_system_prompt
 
     def _execute_tool_calls(
@@ -6531,7 +6558,11 @@ class AIAgent:
             self._executing_tools = False
 
     def _invoke_tool(
-        self, function_name: str, function_args: dict, effective_task_id: str
+        self,
+        function_name: str,
+        function_args: dict,
+        effective_task_id: str,
+        tool_call_id: Optional[str] = None,
     ) -> str:
         """Invoke a single tool and return the result string. No display logic.
 
@@ -6612,6 +6643,8 @@ class AIAgent:
                 function_name,
                 function_args,
                 effective_task_id,
+                tool_call_id=tool_call_id,
+                session_id=self.session_id or "",
                 enabled_tools=list(self.valid_tool_names)
                 if self.valid_tool_names
                 else None,
@@ -6739,7 +6772,7 @@ class AIAgent:
             start = time.time()
             try:
                 result = self._invoke_tool(
-                    function_name, function_args, effective_task_id
+                    function_name, function_args, effective_task_id, tool_call.id
                 )
             except Exception as tool_error:
                 result = f"Error executing tool '{function_name}': {tool_error}"
@@ -6751,6 +6784,17 @@ class AIAgent:
                 )
             duration = time.time() - start
             is_error, _ = _detect_tool_failure(function_name, result)
+            if is_error:
+                logger.info(
+                    "tool %s failed (%.2fs): %s", function_name, duration, result[:200]
+                )
+            else:
+                logger.info(
+                    "tool %s completed (%.2fs, %d chars)",
+                    function_name,
+                    duration,
+                    len(result),
+                )
             results[index] = (function_name, function_args, result, duration, is_error)
 
         # Start spinner for CLI mode (skip when TUI handles tool progress)
@@ -6861,6 +6905,9 @@ class AIAgent:
                         f"  ✅ Tool {i + 1} completed in {tool_duration:.2f}s - {response_preview}"
                     )
 
+            self._current_tool = None
+            self._touch_activity(f"tool completed: {name} ({tool_duration:.1f}s)")
+
             if self.tool_complete_callback:
                 try:
                     self.tool_complete_callback(tc.id, name, args, function_result)
@@ -6966,6 +7013,9 @@ class AIAgent:
                     print(
                         f"  📞 Tool {i}: {function_name}({list(function_args.keys())}) - {args_preview}"
                     )
+
+            self._current_tool = function_name
+            self._touch_activity(f"executing tool: {function_name}")
 
             if self.tool_progress_callback:
                 try:
@@ -7191,6 +7241,8 @@ class AIAgent:
                         function_name,
                         function_args,
                         effective_task_id,
+                        tool_call_id=tool_call.id,
+                        session_id=self.session_id or "",
                         enabled_tools=list(self.valid_tool_names)
                         if self.valid_tool_names
                         else None,
@@ -7224,6 +7276,8 @@ class AIAgent:
                         function_name,
                         function_args,
                         effective_task_id,
+                        tool_call_id=tool_call.id,
+                        session_id=self.session_id or "",
                         enabled_tools=list(self.valid_tool_names)
                         if self.valid_tool_names
                         else None,
@@ -7260,6 +7314,13 @@ class AIAgent:
                     tool_duration,
                     result_preview,
                 )
+            else:
+                logger.info(
+                    "tool %s completed (%.2fs, %d chars)",
+                    function_name,
+                    tool_duration,
+                    len(function_result),
+                )
 
             if self.tool_progress_callback:
                 try:
@@ -7273,6 +7334,11 @@ class AIAgent:
                     )
                 except Exception as cb_err:
                     logging.debug(f"Tool progress callback error: {cb_err}")
+
+            self._current_tool = None
+            self._touch_activity(
+                f"tool completed: {function_name} ({tool_duration:.1f}s)"
+            )
 
             if self.verbose_logging:
                 logging.debug(f"Tool {function_name} completed in {tool_duration:.2f}s")
@@ -7724,6 +7790,21 @@ class AIAgent:
         # calls so that nudge logic accumulates correctly in CLI mode.
         self.iteration_budget = IterationBudget(self.max_iterations)
 
+        # Log conversation turn start for debugging/observability
+        _msg_preview = (
+            (user_message[:80] + "...") if len(user_message) > 80 else user_message
+        )
+        _msg_preview = _msg_preview.replace("\n", " ")
+        logger.info(
+            "conversation turn: session=%s model=%s provider=%s platform=%s history=%d msg=%r",
+            self.session_id or "none",
+            self.model,
+            self.provider or "unknown",
+            self.platform or "unknown",
+            len(conversation_history or []),
+            _msg_preview,
+        )
+
         # Initialize conversation (copy to avoid mutating the caller's list)
         messages = list(conversation_history) if conversation_history else []
 
@@ -7977,6 +8058,8 @@ class AIAgent:
                 break
 
             api_call_count += 1
+            self._api_call_count = api_call_count
+            self._touch_activity(f"starting API call #{api_call_count}")
             if not self.iteration_budget.consume():
                 if not self.quiet_mode:
                     self._safe_print(
@@ -8040,7 +8123,9 @@ class AIAgent:
                 if idx == current_turn_user_idx and msg.get("role") == "user":
                     _injections = []
                     if _ext_prefetch_cache:
-                        _injections.append(_ext_prefetch_cache)
+                        _fenced = build_memory_context_block(_ext_prefetch_cache)
+                        if _fenced:
+                            _injections.append(_fenced)
                     if _plugin_user_context:
                         _injections.append(_plugin_user_context)
                     if _injections:
@@ -8190,6 +8275,28 @@ class AIAgent:
                         api_kwargs = self._preflight_codex_api_kwargs(
                             api_kwargs, allow_stream=False
                         )
+
+                    try:
+                        from hermes_cli.plugins import invoke_hook as _invoke_hook
+
+                        _invoke_hook(
+                            "pre_api_request",
+                            task_id=effective_task_id,
+                            session_id=self.session_id or "",
+                            platform=self.platform or "",
+                            model=self.model,
+                            provider=self.provider,
+                            base_url=self.base_url,
+                            api_mode=self.api_mode,
+                            api_call_count=api_call_count,
+                            message_count=len(api_messages),
+                            tool_count=len(self.tools or []),
+                            approx_input_tokens=approx_tokens,
+                            request_char_count=total_chars,
+                            max_tokens=self.max_tokens,
+                        )
+                    except Exception:
+                        pass
 
                     if env_var_enabled("HERMES_DUMP_REQUESTS"):
                         self._dump_api_request_debug(api_kwargs, reason="preflight")
@@ -8680,6 +8787,22 @@ class AIAgent:
                             canonical_usage.reasoning_tokens
                         )
 
+                        # Log API call details for debugging/observability
+                        _cache_pct = ""
+                        if canonical_usage.cache_read_tokens and prompt_tokens:
+                            _cache_pct = f" cache={canonical_usage.cache_read_tokens}/{prompt_tokens} ({100 * canonical_usage.cache_read_tokens / prompt_tokens:.0f}%)"
+                        logger.info(
+                            "API call #%d: model=%s provider=%s in=%d out=%d total=%d latency=%.1fs%s",
+                            self.session_api_calls,
+                            self.model,
+                            self.provider or "unknown",
+                            prompt_tokens,
+                            completion_tokens,
+                            total_tokens,
+                            api_duration,
+                            _cache_pct,
+                        )
+
                         cost_result = estimate_usage_cost(
                             self.model,
                             canonical_usage,
@@ -8769,6 +8892,7 @@ class AIAgent:
                                 )
 
                     has_retried_429 = False  # Reset on success
+                    self._touch_activity(f"API call #{api_call_count} completed")
                     break  # Success, exit retry loop
 
                 except InterruptedError:
@@ -9270,8 +9394,8 @@ class AIAgent:
                                 "error": f"Context length exceeded: max compression attempts ({max_compression_attempts}) reached.",
                                 "partial": True,
                             }
-                        self._vprint(
-                            f"{self.log_prefix}   🗜️  Context compression attempt {compression_attempts}/{max_compression_attempts}..."
+                        self._emit_status(
+                            f"🗜️ Context too large (~{approx_tokens:,} tokens) — compressing ({compression_attempts}/{max_compression_attempts})..."
                         )
 
                         original_len = len(messages)
@@ -9386,6 +9510,10 @@ class AIAgent:
                             reason="non_retryable_client_error",
                             error=api_error,
                         )
+                        self._emit_status(
+                            f"❌ Non-retryable error (HTTP {status_code}): "
+                            f"{self._summarize_api_error(api_error)}"
+                        )
                         self._vprint(
                             f"{self.log_prefix}❌ Non-retryable client error (HTTP {status_code}). Aborting.",
                             force=True,
@@ -9478,14 +9606,12 @@ class AIAgent:
                             continue
                         _final_summary = self._summarize_api_error(api_error)
                         if is_rate_limited:
-                            self._vprint(
-                                f"{self.log_prefix}❌ Rate limit persisted after {max_retries} retries. Please try again later.",
-                                force=True,
+                            self._emit_status(
+                                f"❌ Rate limited after {max_retries} retries — {_final_summary}"
                             )
                         else:
-                            self._vprint(
-                                f"{self.log_prefix}❌ Max retries ({max_retries}) exceeded. Giving up.",
-                                force=True,
+                            self._emit_status(
+                                f"❌ API failed after {max_retries} retries — {_final_summary}"
                             )
                         self._vprint(
                             f"{self.log_prefix}   💀 Final error: {_final_summary}",
@@ -9684,6 +9810,34 @@ class AIAgent:
                         assistant_message.content = "\n".join(parts)
                     else:
                         assistant_message.content = str(raw)
+
+                try:
+                    from hermes_cli.plugins import invoke_hook as _invoke_hook
+
+                    _assistant_tool_calls = (
+                        getattr(assistant_message, "tool_calls", None) or []
+                    )
+                    _assistant_text = assistant_message.content or ""
+                    _invoke_hook(
+                        "post_api_request",
+                        task_id=effective_task_id,
+                        session_id=self.session_id or "",
+                        platform=self.platform or "",
+                        model=self.model,
+                        provider=self.provider,
+                        base_url=self.base_url,
+                        api_mode=self.api_mode,
+                        api_call_count=api_call_count,
+                        api_duration=api_duration,
+                        finish_reason=finish_reason,
+                        message_count=len(api_messages),
+                        response_model=getattr(response, "model", None),
+                        usage=self._usage_summary_for_api_request_hook(response),
+                        assistant_content_chars=len(_assistant_text),
+                        assistant_tool_call_count=len(_assistant_tool_calls),
+                    )
+                except Exception:
+                    pass
 
                 # Handle assistant response
                 if assistant_message.content and not self.quiet_mode:
