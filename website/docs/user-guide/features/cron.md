@@ -218,13 +218,27 @@ Cronjob Response: Morning feeds
 Note: The agent cannot see this message, and therefore cannot respond to it.
 ```
 
-To deliver the raw agent output without the wrapper, set `cron.wrap_response` to `false`:
+To deliver the raw agent output without the wrapper, set `cron.wrap_response` to `false` globally:
 
 ```yaml
 # ~/.hermes/config.yaml
 cron:
   wrap_response: false
 ```
+
+You can also override this per-job at creation time. The per-job setting takes precedence over the global config:
+
+```text
+Create a cron job that runs every morning at 9am, delivers to telegram, and set wrap_response to false
+```
+
+Existing jobs can be updated to change their wrapping behavior:
+
+```text
+Update cron job abc123 and set wrap_response to true
+```
+
+When a job has `wrap_response` set, that value is used. When it is not set (the default), the global `cron.wrap_response` config is used.
 
 ### Silent suppression
 

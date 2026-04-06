@@ -3941,6 +3941,7 @@ class HermesCLI:
                 "all": False,
                 "prompt": None,
                 "schedule": None,
+                "wrap_response": None,
                 "positionals": [],
             }
             i = 0
@@ -3980,6 +3981,19 @@ class HermesCLI:
                 elif token == "--schedule" and i + 1 < len(tokens):
                     opts["schedule"] = tokens[i + 1]
                     i += 2
+                elif token == "--wrap-response" and i + 1 < len(tokens):
+                    val = tokens[i + 1].lower()
+                    if val in {"true", "1", "yes", "on"}:
+                        opts["wrap_response"] = True
+                    elif val in {"false", "0", "no", "off"}:
+                        opts["wrap_response"] = False
+                    else:
+                        print("(._.) --wrap-response must be true or false")
+                        return None
+                    i += 2
+                elif token == "--no-wrap":
+                    opts["wrap_response"] = False
+                    i += 1
                 else:
                     opts["positionals"].append(token)
                     i += 1
@@ -3995,8 +4009,8 @@ class HermesCLI:
             print()
             print("  Commands:")
             print("    /cron list")
-            print('    /cron add "every 2h" "Check server status" [--skill blogwatcher]')
-            print('    /cron edit <job_id> --schedule "every 4h" --prompt "New task"')
+            print('    /cron add "every 2h" "Check server status" [--skill blogwatcher] [--no-wrap]')
+            print('    /cron edit <job_id> --schedule "every 4h" --prompt "New task" [--wrap-response true]')
             print("    /cron edit <job_id> --skill blogwatcher --skill find-nearby")
             print("    /cron edit <job_id> --remove-skill blogwatcher")
             print("    /cron edit <job_id> --clear-skills")
@@ -4072,6 +4086,7 @@ class HermesCLI:
                 deliver=opts["deliver"],
                 repeat=opts["repeat"],
                 skills=skills or None,
+                wrap_response=opts["wrap_response"],
             )
             if result.get("success"):
                 print(f"(^_^)b Created job: {result['job_id']}")
@@ -4118,6 +4133,7 @@ class HermesCLI:
                 deliver=opts["deliver"],
                 repeat=opts["repeat"],
                 skills=final_skills,
+                wrap_response=opts["wrap_response"],
             )
             if result.get("success"):
                 job = result["job"]

@@ -155,6 +155,7 @@ def cronjob(
     model: Optional[str] = None,
     provider: Optional[str] = None,
     base_url: Optional[str] = None,
+    wrap_response: Optional[bool] = None,
     reason: Optional[str] = None,
     script: Optional[str] = None,
     task_id: str = None,
@@ -188,6 +189,7 @@ def cronjob(
                 provider=_normalize_optional_job_value(provider),
                 base_url=_normalize_optional_job_value(base_url, strip_trailing_slash=True),
                 script=_normalize_optional_job_value(script),
+                wrap_response=wrap_response,
             )
             return json.dumps(
                 {
@@ -273,6 +275,8 @@ def cronjob(
             if script is not None:
                 # Pass empty string to clear an existing script
                 updates["script"] = _normalize_optional_job_value(script) if script else None
+            if wrap_response is not None:
+                updates["wrap_response"] = wrap_response
             if repeat is not None:
                 # Normalize: treat 0 or negative as None (infinite)
                 normalized_repeat = None if repeat <= 0 else repeat
@@ -412,6 +416,10 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
                 "items": {"type": "string"},
                 "description": "Optional ordered list of skills to load before executing the cron prompt. On update, pass an empty array to clear attached skills."
             },
+            "wrap_response": {
+                "type": "boolean",
+                "description": "Optional per-job override for delivery wrapping. When true, delivered output includes a header/footer. When false, raw output is delivered. Omit to use the global cron.wrap_response config."
+            },
             "reason": {
                 "type": "string",
                 "description": "Optional pause reason"
@@ -467,6 +475,7 @@ registry.register(
         model=args.get("model"),
         provider=args.get("provider"),
         base_url=args.get("base_url"),
+        wrap_response=args.get("wrap_response"),
         reason=args.get("reason"),
         script=args.get("script"),
         task_id=kw.get("task_id"),
