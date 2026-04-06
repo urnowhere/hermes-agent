@@ -45,7 +45,7 @@ def _ensure_telegram_mock():
     telegram_mod.constants.ChatType.CHANNEL = "channel"
     telegram_mod.constants.ChatType.PRIVATE = "private"
 
-    for name in ("telegram", "telegram.ext", "telegram.constants"):
+    for name in ("telegram", "telegram.ext", "telegram.constants", "telegram.request"):
         sys.modules.setdefault(name, telegram_mod)
 
 
@@ -236,15 +236,16 @@ class TestDocumentDownloadBlock:
         assert "Please summarize" in event.text
 
     @pytest.mark.asyncio
-    async def test_unsupported_type_rejected(self, adapter):
+    async def test_zip_document_cached(self, adapter):
+        """A .zip upload should be cached as a supported document."""
         doc = _make_document(file_name="archive.zip", mime_type="application/zip", file_size=100)
         msg = _make_message(document=doc)
         update = _make_update(msg)
 
         await adapter._handle_media_message(update, MagicMock())
         event = adapter.handle_message.call_args[0][0]
-        assert "Unsupported document type" in event.text
-        assert ".zip" in event.text
+        assert event.media_urls and event.media_urls[0].endswith("archive.zip")
+        assert event.media_types == ["application/zip"]
 
     @pytest.mark.asyncio
     async def test_oversized_file_rejected(self, adapter):
@@ -557,6 +558,25 @@ class TestSendDocument:
         call_kwargs = connected_adapter._bot.send_document.call_args[1]
         assert call_kwargs["reply_to_message_id"] == 50
 
+    @pytest.mark.asyncio
+    async def test_send_document_thread_id(self, connected_adapter, tmp_path):
+        """metadata thread_id is forwarded as message_thread_id (required for Telegram forum groups)."""
+        test_file = tmp_path / "report.pdf"
+        test_file.write_bytes(b"%PDF-1.4 data")
+
+        mock_msg = MagicMock()
+        mock_msg.message_id = 103
+        connected_adapter._bot.send_document = AsyncMock(return_value=mock_msg)
+
+        await connected_adapter.send_document(
+            chat_id="12345",
+            file_path=str(test_file),
+            metadata={"thread_id": "789"},
+        )
+
+        call_kwargs = connected_adapter._bot.send_document.call_args[1]
+        assert call_kwargs["message_thread_id"] == 789
+
 
 class TestTelegramPhotoBatching:
     @pytest.mark.asyncio
@@ -654,3 +674,22 @@ class TestSendVideo:
 
         assert result.success is False
         assert "Not connected" in result.error
+
+    @pytest.mark.asyncio
+    async def test_send_video_thread_id(self, connected_adapter, tmp_path):
+        """metadata thread_id is forwarded as message_thread_id (required for Telegram forum groups)."""
+        test_file = tmp_path / "clip.mp4"
+        test_file.write_bytes(b"\x00\x00\x00\x1c" + b"ftyp" + b"\x00" * 100)
+
+        mock_msg = MagicMock()
+        mock_msg.message_id = 201
+        connected_adapter._bot.send_video = AsyncMock(return_value=mock_msg)
+
+        await connected_adapter.send_video(
+            chat_id="12345",
+            video_path=str(test_file),
+            metadata={"thread_id": "789"},
+        )
+
+        call_kwargs = connected_adapter._bot.send_video.call_args[1]
+        assert call_kwargs["message_thread_id"] == 789

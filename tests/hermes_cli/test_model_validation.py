@@ -9,7 +9,9 @@ from hermes_cli.models import (
     fetch_api_models,
     github_model_reasoning_efforts,
     normalize_copilot_model_id,
+    normalize_opencode_model_id,
     normalize_provider,
+    opencode_model_api_mode,
     parse_model_input,
     probe_api_models,
     provider_label,
@@ -91,6 +93,31 @@ class TestParseModelInput:
         provider, model = parse_model_input("http://localhost:8080/model", "openrouter")
         assert provider == "openrouter"
         assert model == "http://localhost:8080/model"
+
+    def test_custom_colon_model_single(self):
+        """custom:model-name → anonymous custom provider."""
+        provider, model = parse_model_input("custom:qwen-2.5", "openrouter")
+        assert provider == "custom"
+        assert model == "qwen-2.5"
+
+    def test_custom_triple_syntax(self):
+        """custom:name:model → named custom provider."""
+        provider, model = parse_model_input("custom:local-server:qwen-2.5", "openrouter")
+        assert provider == "custom:local-server"
+        assert model == "qwen-2.5"
+
+    def test_custom_triple_spaces(self):
+        """Triple syntax should handle whitespace."""
+        provider, model = parse_model_input("custom: my-server : my-model ", "openrouter")
+        assert provider == "custom:my-server"
+        assert model == "my-model"
+
+    def test_custom_triple_empty_model_falls_back(self):
+        """custom:name: with no model → treated as custom:name (bare)."""
+        provider, model = parse_model_input("custom:name:", "openrouter")
+        # Empty model after second colon → no triple match, falls through
+        assert provider == "custom"
+        assert model == "name:"
 
 
 # -- curated_models_for_provider ---------------------------------------------
@@ -313,6 +340,28 @@ class TestCopilotNormalization:
             "capabilities": {"type": "chat"},
         }]
         assert copilot_model_api_mode("gpt-5.4", catalog=catalog) == "codex_responses"
+
+    def test_normalize_opencode_model_id_strips_provider_prefix(self):
+        assert normalize_opencode_model_id("opencode-go", "opencode-go/kimi-k2.5") == "kimi-k2.5"
+        assert normalize_opencode_model_id("opencode-zen", "opencode-zen/claude-sonnet-4-6") == "claude-sonnet-4-6"
+        assert normalize_opencode_model_id("opencode-go", "glm-5") == "glm-5"
+
+    def test_opencode_zen_api_modes_match_docs(self):
+        assert opencode_model_api_mode("opencode-zen", "gpt-5.4") == "codex_responses"
+        assert opencode_model_api_mode("opencode-zen", "gpt-5.3-codex") == "codex_responses"
+        assert opencode_model_api_mode("opencode-zen", "opencode-zen/gpt-5.4") == "codex_responses"
+        assert opencode_model_api_mode("opencode-zen", "claude-sonnet-4-6") == "anthropic_messages"
+        assert opencode_model_api_mode("opencode-zen", "opencode-zen/claude-sonnet-4-6") == "anthropic_messages"
+        assert opencode_model_api_mode("opencode-zen", "gemini-3-flash") == "chat_completions"
+        assert opencode_model_api_mode("opencode-zen", "minimax-m2.5") == "chat_completions"
+
+    def test_opencode_go_api_modes_match_docs(self):
+        assert opencode_model_api_mode("opencode-go", "glm-5") == "chat_completions"
+        assert opencode_model_api_mode("opencode-go", "opencode-go/glm-5") == "chat_completions"
+        assert opencode_model_api_mode("opencode-go", "kimi-k2.5") == "chat_completions"
+        assert opencode_model_api_mode("opencode-go", "opencode-go/kimi-k2.5") == "chat_completions"
+        assert opencode_model_api_mode("opencode-go", "minimax-m2.5") == "anthropic_messages"
+        assert opencode_model_api_mode("opencode-go", "opencode-go/minimax-m2.5") == "anthropic_messages"
 
 
 # -- validate — format checks -----------------------------------------------

@@ -23,6 +23,7 @@ from tools.delegate_tool import (
     MAX_DEPTH,
     check_delegate_requirements,
     delegate_task,
+    _build_child_agent,
     _build_child_system_prompt,
     _strip_blocked_tools,
     _resolve_delegation_credentials,
@@ -33,7 +34,7 @@ def _make_mock_parent(depth=0):
     """Create a mock parent agent with the fields delegate_task expects."""
     parent = MagicMock()
     parent.base_url = "https://openrouter.ai/api/v1"
-    parent.api_key = "parent-key"
+    parent.api_key="***"
     parent.provider = "openrouter"
     parent.api_mode = "chat_completions"
     parent.model = "anthropic/claude-sonnet-4"
@@ -46,6 +47,9 @@ def _make_mock_parent(depth=0):
     parent._delegate_depth = depth
     parent._active_children = []
     parent._active_children_lock = threading.Lock()
+    parent._print_fn = None
+    parent.tool_progress_callback = None
+    parent.thinking_callback = None
     return parent
 
 
@@ -227,7 +231,7 @@ class TestDelegateTask(unittest.TestCase):
     def test_child_inherits_runtime_credentials(self):
         parent = _make_mock_parent(depth=0)
         parent.base_url = "https://chatgpt.com/backend-api/codex"
-        parent.api_key = "codex-token"
+        parent.api_key="***"
         parent.provider = "openai-codex"
         parent.api_mode = "codex_responses"
 
@@ -247,6 +251,49 @@ class TestDelegateTask(unittest.TestCase):
             self.assertEqual(kwargs["api_key"], parent.api_key)
             self.assertEqual(kwargs["provider"], parent.provider)
             self.assertEqual(kwargs["api_mode"], parent.api_mode)
+
+    def test_child_inherits_parent_print_fn(self):
+        parent = _make_mock_parent(depth=0)
+        sink = MagicMock()
+        parent._print_fn = sink
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="Keep stdout clean",
+                context=None,
+                toolsets=None,
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+            )
+
+        self.assertIs(mock_child._print_fn, sink)
+
+    def test_child_uses_thinking_callback_when_progress_callback_available(self):
+        parent = _make_mock_parent(depth=0)
+        parent.tool_progress_callback = MagicMock()
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="Avoid raw child spinners",
+                context=None,
+                toolsets=None,
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+            )
+
+        self.assertTrue(callable(mock_child.thinking_callback))
+        mock_child.thinking_callback("deliberating...")
+        parent.tool_progress_callback.assert_not_called()
 
 
 class TestToolNamePreservation(unittest.TestCase):
@@ -290,6 +337,58 @@ class TestToolNamePreservation(unittest.TestCase):
             self.assertEqual(result["results"][0]["status"], "error")
 
         self.assertEqual(model_tools._last_resolved_tool_names, original_tools)
+
+    def test_build_child_agent_does_not_raise_name_error(self):
+        """Regression: _build_child_agent must not reference _saved_tool_names.
+
+        The bug introduced by the e7844e9c merge conflict: line 235 inside
+        _build_child_agent read `list(_saved_tool_names)` where that variable
+        is only defined later in _run_single_child.  Calling _build_child_agent
+        standalone (without _run_single_child's scope) must never raise NameError.
+        """
+        parent = _make_mock_parent(depth=0)
+
+        with patch("run_agent.AIAgent"):
+            try:
+                _build_child_agent(
+                    task_index=0,
+                    goal="regression check",
+                    context=None,
+                    toolsets=None,
+                    model=None,
+                    max_iterations=10,
+                    parent_agent=parent,
+                )
+            except NameError as exc:
+                self.fail(
+                    f"_build_child_agent raised NameError — "
+                    f"_saved_tool_names leaked back into wrong scope: {exc}"
+                )
+
+    def test_saved_tool_names_set_on_child_before_run(self):
+        """_run_single_child must set _delegate_saved_tool_names on the child
+        from model_tools._last_resolved_tool_names before run_conversation."""
+        import model_tools
+
+        parent = _make_mock_parent(depth=0)
+        expected_tools = ["read_file", "web_search", "execute_code"]
+        model_tools._last_resolved_tool_names = list(expected_tools)
+
+        captured = {}
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+
+            def capture_and_return(user_message):
+                captured["saved"] = list(mock_child._delegate_saved_tool_names)
+                return {"final_response": "ok", "completed": True, "api_calls": 1}
+
+            mock_child.run_conversation.side_effect = capture_and_return
+            MockAgent.return_value = mock_child
+
+            delegate_task(goal="capture test", parent_agent=parent)
+
+        self.assertEqual(captured["saved"], expected_tools)
 
 
 class TestDelegateObservability(unittest.TestCase):
@@ -540,7 +639,14 @@ class TestDelegationCredentialResolution(unittest.TestCase):
             "model": "qwen2.5-coder",
             "base_url": "http://localhost:1234/v1",
         }
-        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "env-openrouter-key"}, clear=False):
+        with patch.dict(
+            os.environ,
+            {
+                "OPENROUTER_API_KEY": "env-openrouter-key",
+                "OPENAI_API_KEY": "",
+            },
+            clear=False,
+        ):
             with self.assertRaises(ValueError) as ctx:
                 _resolve_delegation_credentials(cfg, parent)
         self.assertIn("OPENAI_API_KEY", str(ctx.exception))

@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 """
-Terminal Tool Module (mini-swe-agent backend)
+Terminal Tool Module
 
-A terminal tool that executes commands using mini-swe-agent's execution environments.
-Supports local execution, Docker containers, and Modal cloud sandboxes.
+A terminal tool that executes commands in local, Docker, Modal, SSH, Singularity, and Daytona environments.
+Supports local execution, containerized backends, and Modal cloud sandboxes, including managed gateway mode.
 
 Environment Selection (via TERMINAL_ENV environment variable):
 - "local": Execute directly on the host machine (default, fastest)
 - "docker": Execute in Docker containers (isolated, requires Docker)
-- "modal": Execute in Modal cloud sandboxes (scalable, requires Modal account)
+- "modal": Execute in Modal cloud sandboxes (direct Modal or managed gateway)
 
 Features:
 - Multiple execution backends (local, docker, modal)
 - Background task support
 - VM/container lifecycle management
 - Automatic cleanup after inactivity
+
+Cloud sandbox note:
+- Persistent filesystems preserve working state across sandbox recreation
+- Persistent filesystems do NOT guarantee the same live sandbox or long-running processes survive cleanup, idle reaping, or Hermes exit
 
 Usage:
     from terminal_tool import terminal_tool
@@ -31,15 +35,12 @@ import json
 import logging
 import os
 import platform
-import signal
-import sys
+import re
 import time
 import threading
 import atexit
 import shutil
 import subprocess
-import tempfile
-import uuid
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -51,14 +52,13 @@ logger = logging.getLogger(__name__)
 # The terminal tool polls this during command execution so it can kill
 # long-running subprocesses immediately instead of blocking until timeout.
 # ---------------------------------------------------------------------------
-from tools.interrupt import set_interrupt as set_interrupt_event, is_interrupted, _interrupt_event
+from tools.interrupt import is_interrupted, _interrupt_event  # noqa: F401 — re-exported
+# display_hermes_home imported lazily at call site (stale-module safety during hermes update)
 
 
-# Add mini-swe-agent to path if not installed. In git worktrees the populated
-# submodule may live in the main checkout rather than the worktree itself.
-from minisweagent_path import ensure_minisweagent_on_path
-
-ensure_minisweagent_on_path(Path(__file__).resolve().parent.parent)
+def ensure_minisweagent_on_path(_repo_root: Path | None = None) -> None:
+    """Backward-compatible no-op after minisweagent_path.py removal."""
+    return
 
 
 # =============================================================================
@@ -67,6 +67,12 @@ ensure_minisweagent_on_path(Path(__file__).resolve().parent.parent)
 
 # Singularity helpers (scratch dir, SIF cache) now live in tools/environments/singularity.py
 from tools.environments.singularity import _get_scratch_dir
+from tools.tool_backend_helpers import (
+    coerce_modal_mode,
+    has_direct_modal_credentials,
+    managed_nous_tools_enabled,
+    resolve_modal_backend_state,
+)
 
 
 # Disk usage warning threshold (in GB)
@@ -75,9 +81,9 @@ DISK_USAGE_WARNING_THRESHOLD_GB = float(os.getenv("TERMINAL_DISK_WARNING_GB", "5
 
 def _check_disk_usage_warning():
     """Check if total disk usage exceeds warning threshold."""
-    scratch_dir = _get_scratch_dir()
-    
     try:
+        scratch_dir = _get_scratch_dir()
+
         # Get total size of hermes directories
         total_bytes = 0
         import glob
@@ -98,6 +104,7 @@ def _check_disk_usage_warning():
         
         return False
     except Exception as e:
+        logger.debug("Disk usage warning check failed: %s", e, exc_info=True)
         return False
 
 
@@ -130,11 +137,8 @@ def set_approval_callback(cb):
 
 # Dangerous command detection + approval now consolidated in tools/approval.py
 from tools.approval import (
-    detect_dangerous_command as _detect_dangerous_command,
     check_dangerous_command as _check_dangerous_command_impl,
     check_all_command_guards as _check_all_guards_impl,
-    load_permanent_allowlist as _load_permanent_allowlist,
-    DANGEROUS_PATTERNS,
 )
 
 
@@ -170,7 +174,8 @@ def _handle_sudo_failure(output: str, env_type: str) -> str:
     
     for failure in sudo_failures:
         if failure in output:
-            return output + "\n\n💡 Tip: To enable sudo over messaging, add SUDO_PASSWORD to ~/.hermes/.env on the agent machine."
+            from hermes_constants import display_hermes_home as _dhh
+            return output + f"\n\n💡 Tip: To enable sudo over messaging, add SUDO_PASSWORD to {_dhh()}/.env on the agent machine."
     
     return output
 
@@ -374,10 +379,12 @@ from tools.environments.singularity import SingularityEnvironment as _Singularit
 from tools.environments.ssh import SSHEnvironment as _SSHEnvironment
 from tools.environments.docker import DockerEnvironment as _DockerEnvironment
 from tools.environments.modal import ModalEnvironment as _ModalEnvironment
+from tools.environments.managed_modal import ManagedModalEnvironment as _ManagedModalEnvironment
+from tools.managed_tool_gateway import is_managed_tool_gateway_ready
 
 
 # Tool description for LLM
-TERMINAL_TOOL_DESCRIPTION = """Execute shell commands on a Linux environment. Filesystem persists between calls.
+TERMINAL_TOOL_DESCRIPTION = """Execute shell commands on a Linux environment. Filesystem usually persists between calls.
 
 Do NOT use cat/head/tail to read files — use read_file instead.
 Do NOT use grep/rg/find to search — use search_files instead.
@@ -393,6 +400,7 @@ Working directory: Use 'workdir' for per-command cwd.
 PTY mode: Set pty=true for interactive CLI tools (Codex, Claude Code, Python REPL).
 
 Do NOT use vim/nano/interactive tools without pty=true — they hang without a pseudo-terminal. Pipe git output to cat if it might page.
+Important: cloud sandboxes may be cleaned up, idled out, or recreated between turns. Persistent filesystem means files can resume later; it does NOT guarantee a continuously running machine or surviving background processes. Use terminal sandboxes for task work, not durable hosting.
 """
 
 # Global state for environment lifecycle management
@@ -495,15 +503,18 @@ def _get_env_config() -> Dict[str, Any]:
             host_cwd = candidate
             cwd = "/workspace"
     elif env_type in ("modal", "docker", "singularity", "daytona") and cwd:
-        # Host paths that won't exist inside containers
-        if any(cwd.startswith(p) for p in host_prefixes) and cwd != default_cwd:
+        # Host paths and relative paths that won't work inside containers
+        is_host_path = any(cwd.startswith(p) for p in host_prefixes)
+        is_relative = not os.path.isabs(cwd)  # e.g. "." or "src/"
+        if (is_host_path or is_relative) and cwd != default_cwd:
             logger.info("Ignoring TERMINAL_CWD=%r for %s backend "
-                        "(host path won't exist in sandbox). Using %r instead.",
+                        "(host/relative path won't work in sandbox). Using %r instead.",
                         cwd, env_type, default_cwd)
             cwd = default_cwd
 
     return {
         "env_type": env_type,
+        "modal_mode": coerce_modal_mode(os.getenv("TERMINAL_MODAL_MODE", "auto")),
         "docker_image": os.getenv("TERMINAL_DOCKER_IMAGE", default_image),
         "docker_forward_env": _parse_env_var("TERMINAL_DOCKER_FORWARD_ENV", "[]", json.loads, "valid JSON"),
         "singularity_image": os.getenv("TERMINAL_SINGULARITY_IMAGE", f"docker://{default_image}"),
@@ -536,13 +547,22 @@ def _get_env_config() -> Dict[str, Any]:
     }
 
 
+def _get_modal_backend_state(modal_mode: object | None) -> Dict[str, Any]:
+    """Resolve direct vs managed Modal backend selection."""
+    return resolve_modal_backend_state(
+        modal_mode,
+        has_direct=has_direct_modal_credentials(),
+        managed_ready=is_managed_tool_gateway_ready("modal"),
+    )
+
+
 def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
                         ssh_config: dict = None, container_config: dict = None,
                         local_config: dict = None,
                         task_id: str = "default",
                         host_cwd: str = None):
     """
-    Create an execution environment from mini-swe-agent.
+    Create an execution environment for sandboxed command execution.
     
     Args:
         env_type: One of "local", "docker", "singularity", "modal", "daytona", "ssh"
@@ -564,6 +584,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
     persistent = cc.get("container_persistent", True)
     volumes = cc.get("docker_volumes", [])
     docker_forward_env = cc.get("docker_forward_env", [])
+    docker_env = cc.get("docker_env", {})
 
     if env_type == "local":
         lc = local_config or {}
@@ -579,6 +600,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
             host_cwd=host_cwd,
             auto_mount_cwd=cc.get("docker_mount_cwd_to_workspace", False),
             forward_env=docker_forward_env,
+            env=docker_env,
         )
     
     elif env_type == "singularity":
@@ -601,7 +623,39 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
                     sandbox_kwargs["ephemeral_disk"] = disk
             except Exception:
                 pass
-        
+
+        modal_state = _get_modal_backend_state(cc.get("modal_mode"))
+
+        if modal_state["selected_backend"] == "managed":
+            return _ManagedModalEnvironment(
+                image=image, cwd=cwd, timeout=timeout,
+                modal_sandbox_kwargs=sandbox_kwargs,
+                persistent_filesystem=persistent, task_id=task_id,
+            )
+
+        if modal_state["selected_backend"] != "direct":
+            if modal_state["managed_mode_blocked"]:
+                raise ValueError(
+                    "Modal backend is configured for managed mode, but "
+                    "HERMES_ENABLE_NOUS_MANAGED_TOOLS is not enabled and no direct "
+                    "Modal credentials/config were found. Enable the feature flag or "
+                    "choose TERMINAL_MODAL_MODE=direct/auto."
+                )
+            if modal_state["mode"] == "managed":
+                raise ValueError(
+                    "Modal backend is configured for managed mode, but the managed tool gateway is unavailable."
+                )
+            if modal_state["mode"] == "direct":
+                raise ValueError(
+                    "Modal backend is configured for direct mode, but no direct Modal credentials/config were found."
+                )
+            message = "Modal backend selected but no direct Modal credentials/config was found."
+            if managed_nous_tools_enabled():
+                message = (
+                    "Modal backend selected but no direct Modal credentials/config or managed tool gateway was found."
+                )
+            raise ValueError(message)
+
         return _ModalEnvironment(
             image=image, cwd=cwd, timeout=timeout,
             modal_sandbox_kwargs=sandbox_kwargs,
@@ -846,6 +900,78 @@ def _atexit_cleanup():
 atexit.register(_atexit_cleanup)
 
 
+# =============================================================================
+# Exit Code Context for Common CLI Tools
+# =============================================================================
+# Many Unix commands use non-zero exit codes for informational purposes, not
+# to indicate failure.  The model sees a raw exit_code=1 from `grep` and
+# wastes a turn investigating something that just means "no matches".
+# This lookup adds a human-readable note so the agent can move on.
+
+def _interpret_exit_code(command: str, exit_code: int) -> str | None:
+    """Return a human-readable note when a non-zero exit code is non-erroneous.
+
+    Returns None when the exit code is 0 or genuinely signals an error.
+    The note is appended to the tool result so the model doesn't waste
+    turns investigating expected exit codes.
+    """
+    if exit_code == 0:
+        return None
+
+    # Extract the last command in a pipeline/chain — that determines the
+    # exit code.  Handles  `cmd1 && cmd2`, `cmd1 | cmd2`, `cmd1; cmd2`.
+    # Deliberately simple: split on shell operators and take the last piece.
+    segments = re.split(r'\s*(?:\|\||&&|[|;])\s*', command)
+    last_segment = (segments[-1] if segments else command).strip()
+
+    # Get base command name (first word), stripping env var assignments
+    # like  VAR=val cmd ...
+    words = last_segment.split()
+    base_cmd = ""
+    for w in words:
+        if "=" in w and not w.startswith("-"):
+            continue  # skip VAR=val
+        base_cmd = w.split("/")[-1]  # handle /usr/bin/grep -> grep
+        break
+
+    if not base_cmd:
+        return None
+
+    # Command-specific semantics
+    semantics: dict[str, dict[int, str]] = {
+        # grep/rg/ag/ack: 1=no matches found (normal), 2+=real error
+        "grep":  {1: "No matches found (not an error)"},
+        "egrep": {1: "No matches found (not an error)"},
+        "fgrep": {1: "No matches found (not an error)"},
+        "rg":    {1: "No matches found (not an error)"},
+        "ag":    {1: "No matches found (not an error)"},
+        "ack":   {1: "No matches found (not an error)"},
+        # diff: 1=files differ (expected), 2+=real error
+        "diff":  {1: "Files differ (expected, not an error)"},
+        "colordiff": {1: "Files differ (expected, not an error)"},
+        # find: 1=some dirs inaccessible but results may still be valid
+        "find":  {1: "Some directories were inaccessible (partial results may still be valid)"},
+        # test/[: 1=condition is false (expected)
+        "test":  {1: "Condition evaluated to false (expected, not an error)"},
+        "[":     {1: "Condition evaluated to false (expected, not an error)"},
+        # curl: common non-error codes
+        "curl":  {
+            6: "Could not resolve host",
+            7: "Failed to connect to host",
+            22: "HTTP response code indicated error (e.g. 404, 500)",
+            28: "Operation timed out",
+        },
+        # git: 1 is context-dependent but often normal (e.g. git diff with changes)
+        "git":   {1: "Non-zero exit (often normal — e.g. 'git diff' returns 1 when files differ)"},
+    }
+
+    cmd_semantics = semantics.get(base_cmd)
+    if cmd_semantics and exit_code in cmd_semantics:
+        return cmd_semantics[exit_code]
+
+    return None
+
+
 def terminal_tool(
     command: str,
     background: bool = False,
@@ -857,7 +983,7 @@ def terminal_tool(
     pty: bool = False,
 ) -> str:
     """
-    Execute a command using mini-swe-agent's execution environments.
+    Execute a command in the configured terminal environment.
 
     Args:
         command: The command to execute
@@ -967,6 +1093,7 @@ def terminal_tool(
                                 "container_memory": config.get("container_memory", 5120),
                                 "container_disk": config.get("container_disk", 51200),
                                 "container_persistent": config.get("container_persistent", True),
+                                "modal_mode": config.get("modal_mode", "auto"),
                                 "docker_volumes": config.get("docker_volumes", []),
                                 "docker_mount_cwd_to_workspace": config.get("docker_mount_cwd_to_workspace", False),
                             }
@@ -992,7 +1119,7 @@ def terminal_tool(
                         return json.dumps({
                             "output": "",
                             "exit_code": -1,
-                            "error": f"Terminal tool disabled: mini-swe-agent not available ({e})",
+                            "error": f"Terminal tool disabled: environment creation failed ({e})",
                             "status": "disabled"
                         }, ensure_ascii=False)
 
@@ -1004,6 +1131,7 @@ def terminal_tool(
 
         # Pre-exec security checks (tirith + dangerous command detection)
         # Skip check if force=True (user has confirmed they want to run it)
+        approval_note = None
         if not force:
             approval = _check_all_guards(command, env_type)
             if not approval["approved"]:
@@ -1030,15 +1158,23 @@ def terminal_tool(
                     "error": approval.get("message", fallback_msg),
                     "status": "blocked"
                 }, ensure_ascii=False)
+            # Track whether approval was explicitly granted by the user
+            if approval.get("user_approved"):
+                desc = approval.get("description", "flagged as dangerous")
+                approval_note = f"Command required approval ({desc}) and was approved by the user."
+            elif approval.get("smart_approved"):
+                desc = approval.get("description", "flagged as dangerous")
+                approval_note = f"Command was flagged ({desc}) and auto-approved by smart approval."
 
         # Prepare command for execution
         if background:
             # Spawn a tracked background process via the process registry.
             # For local backends: uses subprocess.Popen with output buffering.
             # For non-local backends: runs inside the sandbox via env.execute().
+            from tools.approval import get_current_session_key
             from tools.process_registry import process_registry
 
-            session_key = os.getenv("HERMES_SESSION_KEY", "")
+            session_key = get_current_session_key(default="")
             effective_cwd = workdir or cwd
             try:
                 if env_type == "local":
@@ -1066,6 +1202,8 @@ def terminal_tool(
                     "exit_code": 0,
                     "error": None,
                 }
+                if approval_note:
+                    result_data["approval"] = approval_note
 
                 # Transparent timeout clamping note
                 max_timeout = effective_timeout
@@ -1168,47 +1306,54 @@ def terminal_tool(
                 )
                 output = output[:head_chars] + truncated_notice + output[-tail_chars:]
 
+            # Strip ANSI escape sequences so the model never sees terminal
+            # formatting — prevents it from copying escapes into file writes.
+            from tools.ansi_strip import strip_ansi
+            output = strip_ansi(output)
+
             # Redact secrets from command output (catches env/printenv leaking keys)
             from agent.redact import redact_sensitive_text
             output = redact_sensitive_text(output.strip()) if output else ""
 
-            return json.dumps({
+            # Interpret non-zero exit codes that aren't real errors
+            # (e.g. grep=1 means "no matches", diff=1 means "files differ")
+            exit_note = _interpret_exit_code(command, returncode)
+
+            result_dict = {
                 "output": output,
                 "exit_code": returncode,
-                "error": None
-            }, ensure_ascii=False)
+                "error": None,
+            }
+            if approval_note:
+                result_dict["approval"] = approval_note
+            if exit_note:
+                result_dict["exit_code_meaning"] = exit_note
+
+            return json.dumps(result_dict, ensure_ascii=False)
 
     except Exception as e:
+        import traceback
+        tb_str = traceback.format_exc()
+        logger.error("terminal_tool exception:\n%s", tb_str)
         return json.dumps({
             "output": "",
             "exit_code": -1,
             "error": f"Failed to execute command: {str(e)}",
+            "traceback": tb_str,
             "status": "error"
         }, ensure_ascii=False)
 
 
 def check_terminal_requirements() -> bool:
-    """Check if all requirements for the terminal tool are met.
-
-    Important: local and singularity backends now use Hermes' own environment
-    wrappers directly and do not require the ``minisweagent`` Python package to
-    be installed. Docker and Modal still rely on mini-swe-agent internals.
-    """
+    """Check if all requirements for the terminal tool are met."""
     config = _get_env_config()
     env_type = config["env_type"]
 
     try:
         if env_type == "local":
-            # Local execution uses Hermes' own LocalEnvironment wrapper and does
-            # not depend on minisweagent being importable.
             return True
 
         elif env_type == "docker":
-            ensure_minisweagent_on_path(Path(__file__).resolve().parent.parent)
-            if importlib.util.find_spec("minisweagent") is None:
-                logger.error("mini-swe-agent is required for docker terminal backend but is not importable")
-                return False
-            # Check if docker is available (use find_docker for macOS PATH issues)
             from tools.environments.docker import find_docker
             docker = find_docker()
             if not docker:
@@ -1225,7 +1370,6 @@ def check_terminal_requirements() -> bool:
             return False
 
         elif env_type == "ssh":
-            # Check that host and user are configured
             if not config.get("ssh_host") or not config.get("ssh_user"):
                 logger.error(
                     "SSH backend selected but TERMINAL_SSH_HOST and TERMINAL_SSH_USER "
@@ -1235,24 +1379,62 @@ def check_terminal_requirements() -> bool:
             return True
 
         elif env_type == "modal":
-            ensure_minisweagent_on_path(Path(__file__).resolve().parent.parent)
-            if importlib.util.find_spec("minisweagent") is None:
-                logger.error("mini-swe-agent is required for modal terminal backend but is not importable")
+            modal_state = _get_modal_backend_state(config.get("modal_mode"))
+            if modal_state["selected_backend"] == "managed":
+                return True
+
+            if modal_state["selected_backend"] != "direct":
+                if modal_state["managed_mode_blocked"]:
+                    logger.error(
+                        "Modal backend selected with TERMINAL_MODAL_MODE=managed, but "
+                        "HERMES_ENABLE_NOUS_MANAGED_TOOLS is not enabled and no direct "
+                        "Modal credentials/config were found. Enable the feature flag "
+                        "or choose TERMINAL_MODAL_MODE=direct/auto."
+                    )
+                    return False
+                if modal_state["mode"] == "managed":
+                    logger.error(
+                        "Modal backend selected with TERMINAL_MODAL_MODE=managed, but the managed "
+                        "tool gateway is unavailable. Configure the managed gateway or choose "
+                        "TERMINAL_MODAL_MODE=direct/auto."
+                    )
+                    return False
+                elif modal_state["mode"] == "direct":
+                    if managed_nous_tools_enabled():
+                        logger.error(
+                            "Modal backend selected with TERMINAL_MODAL_MODE=direct, but no direct "
+                            "Modal credentials/config were found. Configure Modal or choose "
+                            "TERMINAL_MODAL_MODE=managed/auto."
+                        )
+                    else:
+                        logger.error(
+                            "Modal backend selected with TERMINAL_MODAL_MODE=direct, but no direct "
+                            "Modal credentials/config were found. Configure Modal or choose "
+                            "TERMINAL_MODAL_MODE=auto."
+                        )
+                    return False
+                else:
+                    if managed_nous_tools_enabled():
+                        logger.error(
+                            "Modal backend selected but no direct Modal credentials/config or managed "
+                            "tool gateway was found. Configure Modal, set up the managed gateway, "
+                            "or choose a different TERMINAL_ENV."
+                        )
+                    else:
+                        logger.error(
+                            "Modal backend selected but no direct Modal credentials/config was found. "
+                            "Configure Modal or choose a different TERMINAL_ENV."
+                        )
+                    return False
+
+            if importlib.util.find_spec("modal") is None:
+                logger.error("modal is required for direct modal terminal backend: pip install modal")
                 return False
-            # Check for modal token
-            has_token = os.getenv("MODAL_TOKEN_ID") is not None
-            has_config = Path.home().joinpath(".modal.toml").exists()
-            if not (has_token or has_config):
-                logger.error(
-                    "Modal backend selected but no MODAL_TOKEN_ID environment variable "
-                    "or ~/.modal.toml config file was found. Configure Modal or choose "
-                    "a different TERMINAL_ENV."
-                )
-                return False
+
             return True
 
         elif env_type == "daytona":
-            from daytona import Daytona
+            from daytona import Daytona  # noqa: F401 — SDK presence check
             return os.getenv("DAYTONA_API_KEY") is not None
 
         else:
@@ -1269,11 +1451,11 @@ def check_terminal_requirements() -> bool:
 
 if __name__ == "__main__":
     # Simple test when run directly
-    print("Terminal Tool Module (mini-swe-agent backend)")
+    print("Terminal Tool Module")
     print("=" * 50)
     
     config = _get_env_config()
-    print(f"\nCurrent Configuration:")
+    print("\nCurrent Configuration:")
     print(f"  Environment type: {config['env_type']}")
     print(f"  Docker image: {config['docker_image']}")
     print(f"  Modal image: {config['modal_image']}")
@@ -1287,7 +1469,7 @@ if __name__ == "__main__":
 
     print("\n✅ All requirements met!")
     print("\nAvailable Tool:")
-    print("  - terminal_tool: Execute commands using mini-swe-agent environments")
+    print("  - terminal_tool: Execute commands in sandboxed environments")
 
     print("\nUsage Examples:")
     print("  # Execute a command")
@@ -1304,7 +1486,8 @@ if __name__ == "__main__":
     print(f"  TERMINAL_MODAL_IMAGE: {os.getenv('TERMINAL_MODAL_IMAGE', default_img)}")
     print(f"  TERMINAL_DAYTONA_IMAGE: {os.getenv('TERMINAL_DAYTONA_IMAGE', default_img)}")
     print(f"  TERMINAL_CWD: {os.getenv('TERMINAL_CWD', os.getcwd())}")
-    print(f"  TERMINAL_SANDBOX_DIR: {os.getenv('TERMINAL_SANDBOX_DIR', '~/.hermes/sandboxes')}")
+    from hermes_constants import display_hermes_home as _dhh
+    print(f"  TERMINAL_SANDBOX_DIR: {os.getenv('TERMINAL_SANDBOX_DIR', f'{_dhh()}/sandboxes')}")
     print(f"  TERMINAL_TIMEOUT: {os.getenv('TERMINAL_TIMEOUT', '60')}")
     print(f"  TERMINAL_LIFETIME_SECONDS: {os.getenv('TERMINAL_LIFETIME_SECONDS', '300')}")
 

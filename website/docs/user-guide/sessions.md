@@ -10,7 +10,7 @@ Hermes Agent automatically saves every conversation as a session. Sessions enabl
 
 ## How Sessions Work
 
-Every conversation — whether from the CLI, Telegram, Discord, WhatsApp, or Slack — is stored as a session with full message history. Sessions are tracked in two complementary systems:
+Every conversation — whether from the CLI, Telegram, Discord, Slack, WhatsApp, Signal, Matrix, or any other messaging platform — is stored as a session with full message history. Sessions are tracked in two complementary systems:
 
 1. **SQLite database** (`~/.hermes/state.db`) — structured session metadata with FTS5 full-text search
 2. **JSONL transcripts** (`~/.hermes/sessions/`) — raw conversation transcripts including tool calls (gateway)
@@ -34,8 +34,22 @@ Each session is tagged with its source platform:
 | `cli` | Interactive CLI (`hermes` or `hermes chat`) |
 | `telegram` | Telegram messenger |
 | `discord` | Discord server/DM |
-| `whatsapp` | WhatsApp messenger |
 | `slack` | Slack workspace |
+| `whatsapp` | WhatsApp messenger |
+| `signal` | Signal messenger |
+| `matrix` | Matrix rooms and DMs |
+| `mattermost` | Mattermost channels |
+| `email` | Email (IMAP/SMTP) |
+| `sms` | SMS via Twilio |
+| `dingtalk` | DingTalk messenger |
+| `feishu` | Feishu/Lark messenger |
+| `wecom` | WeCom (WeChat Work) |
+| `homeassistant` | Home Assistant conversation |
+| `webhook` | Incoming webhooks |
+| `api-server` | API server requests |
+| `acp` | ACP editor integration |
+| `cron` | Scheduled cron jobs |
+| `batch` | Batch processing runs |
 
 ## CLI Session Resume
 
@@ -114,7 +128,13 @@ Session IDs follow the format `YYYYMMDD_HHMMSS_<8-char-hex>`, e.g. `20250305_091
 
 Give sessions human-readable titles so you can find and resume them easily.
 
-### Setting a Title
+### Auto-Generated Titles
+
+Hermes automatically generates a short descriptive title (3–7 words) for each session after the first exchange. This runs in a background thread using a fast auxiliary model, so it adds no latency. You'll see auto-generated titles when browsing sessions with `hermes sessions list` or `hermes sessions browse`.
+
+Auto-titling only fires once per session and is skipped if you've already set a title manually.
+
+### Setting a Title Manually
 
 Use the `/title` slash command inside any chat session (CLI or gateway):
 
