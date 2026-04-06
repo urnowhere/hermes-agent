@@ -1861,6 +1861,7 @@ def select_provider_and_model(args=None):
         "ollama-cloud",
         "tencent-tokenhub",
         "lmstudio",
+        "deepinfra",
     ):
         _model_flow_api_key_provider(config, selected_provider, current_model)
 
