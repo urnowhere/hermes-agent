@@ -2054,8 +2054,9 @@ class GatewayRunner:
         if canonical == "verbose":
             return await self._handle_verbose_command(event)
 
-        if canonical == "caveman" or canonical == "cav":
+        if canonical == "caveman":
             return await self._handle_caveman_command(event)
+
         if canonical == "yolo":
             return await self._handle_yolo_command(event)
 
@@ -4754,47 +4755,56 @@ class GatewayRunner:
             return f"🧠 ✓ Reasoning effort set to `{effort}` (this session only)"
 
     async def _handle_caveman_command(self, event: MessageEvent) -> str:
-        """Handle /caveman — toggle caveman speak mode (compressed responses, ~75% fewer tokens)."""
-        import os
-        parts = event.text.strip().split()
+        """Handle /caveman — toggle caveman speak mode (compressed responses, fewer tokens)."""
+        from hermes_cli.commands import CAVEMAN_INTENSITY_RULES
+
+        text = (event.text or "").strip()
+        parts = text.split()
         intensity_arg = parts[1].lower() if len(parts) > 1 else None
-        valid_intensities = ("lite", "full", "ultra")
-        current = os.environ.get("HERMES_CAVEMAN_MODE")
+        valid_intensities = tuple(CAVEMAN_INTENSITY_RULES)
+
+        session_entry = self.session_store.get_or_create_session(event.source)
+        current = session_entry.caveman_mode
+
+        _sentinel = "[SYSTEM: CAVEMAN MODE"
 
         if current and not intensity_arg:
-            os.environ.pop("HERMES_CAVEMAN_MODE", None)
-            chat_id = event.source.chat_id if event.source else None
-            if chat_id:
-                session = self._sessions.get(chat_id)
-                if session:
-                    session.history.append({"role": "user", "content": "[CAVEMAN MODE OFF] Resume normal communication style immediately."})
-                    session.history.append({"role": "assistant", "content": "Normal mode restored."})
-            return "Caveman mode **OFF** — normal speak return."
+            session_entry.caveman_mode = None
+            # Strip caveman instruction from transcript (idempotent removal)
+            history = self.session_store.load_transcript(session_entry.session_id)
+            cleaned = [m for m in history if not (
+                isinstance(m.get("content"), str) and m["content"].startswith(_sentinel)
+            )]
+            if len(cleaned) != len(history):
+                self.session_store.rewrite_transcript(session_entry.session_id, cleaned)
+            return "Caveman mode **OFF** — Normal speech restored."
+
+        if intensity_arg and intensity_arg not in valid_intensities:
+            return (
+                f"Unknown intensity `{intensity_arg}`. "
+                f"Valid options: {', '.join(valid_intensities)}. Caveman mode unchanged."
+            )
 
         intensity = intensity_arg if intensity_arg in valid_intensities else "full"
-        os.environ["HERMES_CAVEMAN_MODE"] = intensity
+        session_entry.caveman_mode = intensity
         icons = {"lite": "🪶", "full": "🦴", "ultra": "🔥"}
-
-        intensity_rules = {
-            "lite": "Drop filler and pleasantries. Keep grammar. Professional but no fluff.",
-            "full": "Drop articles, use fragments. Classic caveman. [thing] [action] [reason].",
-            "ultra": "Max compression. Abbreviate. Arrow notation X→Y. One word if enough.",
-        }
-        rule = intensity_rules[intensity]
+        rule = CAVEMAN_INTENSITY_RULES.get(intensity, CAVEMAN_INTENSITY_RULES["full"])
         msg = (
-            f"[CAVEMAN MODE ON — intensity: {intensity}] "
+            f"[SYSTEM: CAVEMAN MODE ON — intensity: {intensity}] "
             f"Respond like smart caveman from now on. {rule} "
             f"Keep all technical accuracy. Code blocks unchanged. "
             f"Stay in caveman mode until user say /caveman again or 'normal mode'."
         )
-        chat_id = event.source.chat_id if event.source else None
-        if chat_id:
-            session = self._sessions.get(chat_id)
-            if session:
-                session.history.append({"role": "user", "content": msg})
-                session.history.append({"role": "assistant", "content": "UGH. Caveman understand."})
 
-        return f"{icons[intensity]} Caveman mode **ON** — intensity: {intensity}. ~75% fewer tokens."
+        # Inject idempotently: strip any previous caveman entry, then append fresh one
+        history = self.session_store.load_transcript(session_entry.session_id)
+        cleaned = [m for m in history if not (
+            isinstance(m.get("content"), str) and m["content"].startswith(_sentinel)
+        )]
+        cleaned.append({"role": "user", "content": msg})
+        self.session_store.rewrite_transcript(session_entry.session_id, cleaned)
+
+        return f"{icons[intensity]} Caveman mode **ON** — intensity: {intensity}. Fewer tokens."
 
     async def _handle_yolo_command(self, event: MessageEvent) -> str:
         """Handle /yolo — toggle dangerous command approval bypass."""

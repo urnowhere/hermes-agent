@@ -21,6 +21,18 @@ from prompt_toolkit.completion import Completer, Completion
 
 
 # ---------------------------------------------------------------------------
+# Shared constants
+# ---------------------------------------------------------------------------
+
+#: Intensity rules for /caveman mode — used by CLI and gateway.
+CAVEMAN_INTENSITY_RULES: dict[str, str] = {
+    "lite": "Drop filler and pleasantries. Keep grammar. Professional but no fluff.",
+    "full": "Drop articles, use fragments. Classic caveman. [thing] [action] [reason].",
+    "ultra": "Max compression. Abbreviate. Arrow notation X→Y. One word if enough.",
+}
+
+
+# ---------------------------------------------------------------------------
 # CommandDef dataclass
 # ---------------------------------------------------------------------------
 
@@ -103,7 +115,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
                subcommands=("none", "low", "minimal", "medium", "high", "xhigh", "show", "hide", "on", "off")),
     CommandDef("skin", "Show or change the display skin/theme", "Configuration",
                cli_only=True, args_hint="[name]"),
-    CommandDef("caveman", "Toggle caveman speak mode (compressed responses, ~75% fewer tokens)", "Configuration",
+    CommandDef("caveman", "Toggle caveman speak mode (compressed responses, fewer tokens)", "Configuration",
                aliases=("cav",), args_hint="[lite|full|ultra]"),
     CommandDef("voice", "Toggle voice mode", "Configuration",
                args_hint="[on|off|tts|status]", subcommands=("on", "off", "tts", "status")),

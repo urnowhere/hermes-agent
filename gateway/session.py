@@ -372,6 +372,10 @@ class SessionEntry:
     # Last API-reported prompt tokens (for accurate compression pre-check)
     last_prompt_tokens: int = 0
     
+    # Per-session caveman mode state (not persisted; reset on gateway restart).
+    # None means off; one of "lite", "full", "ultra" means on at that intensity.
+    caveman_mode: Optional[str] = None
+
     # Set when a session was created because the previous one expired;
     # consumed once by the message handler to inject a notice into context
     was_auto_reset: bool = False
