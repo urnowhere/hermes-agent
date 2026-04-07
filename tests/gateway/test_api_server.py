@@ -709,6 +709,57 @@ class TestResponsesEndpoint:
             assert len(call_kwargs["conversation_history"]) == 1
 
     @pytest.mark.asyncio
+    async def test_responses_input_preserves_function_call_transcript(self, adapter):
+        """Native Responses items should become internal assistant/tool transcript entries."""
+        mock_result = {"final_response": "Done", "messages": [], "api_calls": 1}
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                resp = await cli.post(
+                    "/v1/responses",
+                    json={
+                        "model": "hermes-agent",
+                        "input": [
+                            {"role": "user", "content": "Run terminal"},
+                            {
+                                "type": "function_call",
+                                "call_id": "call_abc123",
+                                "name": "terminal",
+                                "arguments": '{"command":"pwd"}',
+                            },
+                            {
+                                "type": "function_call_output",
+                                "call_id": "call_abc123",
+                                "output": "/tmp",
+                            },
+                            {"role": "user", "content": "What happened?"},
+                        ],
+                    },
+                )
+
+            assert resp.status == 200
+            call_kwargs = mock_run.call_args.kwargs
+            assert call_kwargs["user_message"] == "What happened?"
+            assert call_kwargs["conversation_history"] == [
+                {"role": "user", "content": "Run terminal"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_abc123",
+                            "call_id": "call_abc123",
+                            "type": "function",
+                            "function": {"name": "terminal", "arguments": '{"command":"pwd"}'},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_abc123", "content": "/tmp"},
+            ]
+
+    @pytest.mark.asyncio
     async def test_instructions_as_ephemeral_prompt(self, adapter):
         """The instructions field maps to ephemeral_system_prompt."""
         mock_result = {"final_response": "Ahoy!", "messages": [], "api_calls": 1}

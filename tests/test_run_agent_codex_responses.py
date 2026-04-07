@@ -598,6 +598,21 @@ def test_preflight_codex_api_kwargs_allows_reasoning_and_temperature(monkeypatch
     assert result["max_output_tokens"] == 4096
 
 
+def test_run_codex_stream_rejects_invalid_tool_role_input_without_preflight(monkeypatch):
+    agent = _build_agent(monkeypatch)
+
+    with pytest.raises(ValueError, match="unsupported item shape"):
+        agent._run_codex_stream(
+            {
+                "model": "gpt-5-codex",
+                "instructions": "You are Hermes.",
+                "input": [{"role": "tool", "content": "bad raw tool replay"}],
+                "tools": [],
+                "store": False,
+            }
+        )
+
+
 def test_run_conversation_codex_replay_payload_keeps_call_id(monkeypatch):
     agent = _build_agent(monkeypatch)
     responses = [_codex_tool_call_response(), _codex_message_response("done")]

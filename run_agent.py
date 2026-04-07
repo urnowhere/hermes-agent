@@ -92,6 +92,12 @@ from agent.context_compressor import ContextCompressor
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, DEVELOPER_ROLE_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
+from agent.responses_api import (
+    chat_messages_to_responses_input as shared_chat_messages_to_responses_input,
+    deterministic_call_id as shared_deterministic_call_id,
+    normalize_responses_input_items as shared_normalize_responses_input_items,
+    split_responses_tool_id as shared_split_responses_tool_id,
+)
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.display import (
     KawaiiSpinner, build_tool_preview as _build_tool_preview,
@@ -3042,33 +3048,13 @@ class AIAgent:
 
     @staticmethod
     def _deterministic_call_id(fn_name: str, arguments: str, index: int = 0) -> str:
-        """Generate a deterministic call_id from tool call content.
-
-        Used as a fallback when the API doesn't provide a call_id.
-        Deterministic IDs prevent cache invalidation — random UUIDs would
-        make every API call's prefix unique, breaking OpenAI's prompt cache.
-        """
-        import hashlib
-        seed = f"{fn_name}:{arguments}:{index}"
-        digest = hashlib.sha256(seed.encode("utf-8", errors="replace")).hexdigest()[:12]
-        return f"call_{digest}"
+        """Generate a deterministic call_id from tool call content."""
+        return shared_deterministic_call_id(fn_name, arguments, index)
 
     @staticmethod
     def _split_responses_tool_id(raw_id: Any) -> tuple[Optional[str], Optional[str]]:
         """Split a stored tool id into (call_id, response_item_id)."""
-        if not isinstance(raw_id, str):
-            return None, None
-        value = raw_id.strip()
-        if not value:
-            return None, None
-        if "|" in value:
-            call_id, response_item_id = value.split("|", 1)
-            call_id = call_id.strip() or None
-            response_item_id = response_item_id.strip() or None
-            return call_id, response_item_id
-        if value.startswith("fc_"):
-            return None, value
-        return value, None
+        return shared_split_responses_tool_id(raw_id)
 
     def _derive_responses_function_call_id(
         self,
@@ -3101,187 +3087,15 @@ class AIAgent:
 
     def _chat_messages_to_responses_input(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Convert internal chat-style messages to Responses input items."""
-        items: List[Dict[str, Any]] = []
-
-        for msg in messages:
-            if not isinstance(msg, dict):
-                continue
-            role = msg.get("role")
-            if role == "system":
-                continue
-
-            if role in {"user", "assistant"}:
-                content = msg.get("content", "")
-                content_text = str(content) if content is not None else ""
-
-                if role == "assistant":
-                    # Replay encrypted reasoning items from previous turns
-                    # so the API can maintain coherent reasoning chains.
-                    codex_reasoning = msg.get("codex_reasoning_items")
-                    has_codex_reasoning = False
-                    if isinstance(codex_reasoning, list):
-                        for ri in codex_reasoning:
-                            if isinstance(ri, dict) and ri.get("encrypted_content"):
-                                items.append(ri)
-                                has_codex_reasoning = True
-
-                    if content_text.strip():
-                        items.append({"role": "assistant", "content": content_text})
-                    elif has_codex_reasoning:
-                        # The Responses API requires a following item after each
-                        # reasoning item (otherwise: missing_following_item error).
-                        # When the assistant produced only reasoning with no visible
-                        # content, emit an empty assistant message as the required
-                        # following item.
-                        items.append({"role": "assistant", "content": ""})
-
-                    tool_calls = msg.get("tool_calls")
-                    if isinstance(tool_calls, list):
-                        for tc in tool_calls:
-                            if not isinstance(tc, dict):
-                                continue
-                            fn = tc.get("function", {})
-                            fn_name = fn.get("name")
-                            if not isinstance(fn_name, str) or not fn_name.strip():
-                                continue
-
-                            embedded_call_id, embedded_response_item_id = self._split_responses_tool_id(
-                                tc.get("id")
-                            )
-                            call_id = tc.get("call_id")
-                            if not isinstance(call_id, str) or not call_id.strip():
-                                call_id = embedded_call_id
-                            if not isinstance(call_id, str) or not call_id.strip():
-                                if (
-                                    isinstance(embedded_response_item_id, str)
-                                    and embedded_response_item_id.startswith("fc_")
-                                    and len(embedded_response_item_id) > len("fc_")
-                                ):
-                                    call_id = f"call_{embedded_response_item_id[len('fc_'):]}"
-                                else:
-                                    _raw_args = str(fn.get("arguments", "{}"))
-                                    call_id = self._deterministic_call_id(fn_name, _raw_args, len(items))
-                            call_id = call_id.strip()
-
-                            arguments = fn.get("arguments", "{}")
-                            if isinstance(arguments, dict):
-                                arguments = json.dumps(arguments, ensure_ascii=False)
-                            elif not isinstance(arguments, str):
-                                arguments = str(arguments)
-                            arguments = arguments.strip() or "{}"
-
-                            items.append({
-                                "type": "function_call",
-                                "call_id": call_id,
-                                "name": fn_name,
-                                "arguments": arguments,
-                            })
-                    continue
-
-                items.append({"role": role, "content": content_text})
-                continue
-
-            if role == "tool":
-                raw_tool_call_id = msg.get("tool_call_id")
-                call_id, _ = self._split_responses_tool_id(raw_tool_call_id)
-                if not isinstance(call_id, str) or not call_id.strip():
-                    if isinstance(raw_tool_call_id, str) and raw_tool_call_id.strip():
-                        call_id = raw_tool_call_id.strip()
-                if not isinstance(call_id, str) or not call_id.strip():
-                    continue
-                items.append({
-                    "type": "function_call_output",
-                    "call_id": call_id,
-                    "output": str(msg.get("content", "") or ""),
-                })
-
-        return items
+        return shared_chat_messages_to_responses_input(
+            messages,
+            reasoning_items_getter=lambda msg: msg.get("codex_reasoning_items"),
+            split_tool_id=self._split_responses_tool_id,
+            deterministic_id=self._deterministic_call_id,
+        )
 
     def _preflight_codex_input_items(self, raw_items: Any) -> List[Dict[str, Any]]:
-        if not isinstance(raw_items, list):
-            raise ValueError("Codex Responses input must be a list of input items.")
-
-        normalized: List[Dict[str, Any]] = []
-        for idx, item in enumerate(raw_items):
-            if not isinstance(item, dict):
-                raise ValueError(f"Codex Responses input[{idx}] must be an object.")
-
-            item_type = item.get("type")
-            if item_type == "function_call":
-                call_id = item.get("call_id")
-                name = item.get("name")
-                if not isinstance(call_id, str) or not call_id.strip():
-                    raise ValueError(f"Codex Responses input[{idx}] function_call is missing call_id.")
-                if not isinstance(name, str) or not name.strip():
-                    raise ValueError(f"Codex Responses input[{idx}] function_call is missing name.")
-
-                arguments = item.get("arguments", "{}")
-                if isinstance(arguments, dict):
-                    arguments = json.dumps(arguments, ensure_ascii=False)
-                elif not isinstance(arguments, str):
-                    arguments = str(arguments)
-                arguments = arguments.strip() or "{}"
-
-                normalized.append(
-                    {
-                        "type": "function_call",
-                        "call_id": call_id.strip(),
-                        "name": name.strip(),
-                        "arguments": arguments,
-                    }
-                )
-                continue
-
-            if item_type == "function_call_output":
-                call_id = item.get("call_id")
-                if not isinstance(call_id, str) or not call_id.strip():
-                    raise ValueError(f"Codex Responses input[{idx}] function_call_output is missing call_id.")
-                output = item.get("output", "")
-                if output is None:
-                    output = ""
-                if not isinstance(output, str):
-                    output = str(output)
-
-                normalized.append(
-                    {
-                        "type": "function_call_output",
-                        "call_id": call_id.strip(),
-                        "output": output,
-                    }
-                )
-                continue
-
-            if item_type == "reasoning":
-                encrypted = item.get("encrypted_content")
-                if isinstance(encrypted, str) and encrypted:
-                    reasoning_item = {"type": "reasoning", "encrypted_content": encrypted}
-                    item_id = item.get("id")
-                    if isinstance(item_id, str) and item_id:
-                        reasoning_item["id"] = item_id
-                    summary = item.get("summary")
-                    if isinstance(summary, list):
-                        reasoning_item["summary"] = summary
-                    else:
-                        reasoning_item["summary"] = []
-                    normalized.append(reasoning_item)
-                continue
-
-            role = item.get("role")
-            if role in {"user", "assistant"}:
-                content = item.get("content", "")
-                if content is None:
-                    content = ""
-                if not isinstance(content, str):
-                    content = str(content)
-
-                normalized.append({"role": role, "content": content})
-                continue
-
-            raise ValueError(
-                f"Codex Responses input[{idx}] has unsupported item shape (type={item_type!r}, role={role!r})."
-            )
-
-        return normalized
+        return shared_normalize_responses_input_items(raw_items)
 
     def _preflight_codex_api_kwargs(
         self,
@@ -3878,6 +3692,7 @@ class AIAgent:
         """Execute one streaming Responses API request and return the final response."""
         import httpx as _httpx
 
+        api_kwargs = self._preflight_codex_api_kwargs(api_kwargs, allow_stream=False)
         active_client = client or self._ensure_primary_openai_client(reason="codex_stream_direct")
         max_stream_retries = 1
         has_tool_calls = False

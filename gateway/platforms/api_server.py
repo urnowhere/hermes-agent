@@ -35,6 +35,7 @@ except ImportError:
     AIOHTTP_AVAILABLE = False
     web = None  # type: ignore[assignment]
 
+from agent.responses_api import responses_input_to_chat_messages
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter,
@@ -789,29 +790,23 @@ class APIServerAdapter(BasePlatformAdapter):
             previous_response_id = self._response_store.get_conversation(conversation)
             # No error if conversation doesn't exist yet — it's a new conversation
 
-        # Normalize input to message list
-        input_messages: List[Dict[str, str]] = []
+        # Normalize Responses input items into the agent's internal transcript format.
+        input_messages: List[Dict[str, Any]] = []
         if isinstance(raw_input, str):
             input_messages = [{"role": "user", "content": raw_input}]
         elif isinstance(raw_input, list):
+            request_items: List[Dict[str, Any]] = []
             for item in raw_input:
                 if isinstance(item, str):
-                    input_messages.append({"role": "user", "content": item})
+                    request_items.append({"role": "user", "content": item})
                 elif isinstance(item, dict):
-                    role = item.get("role", "user")
-                    content = item.get("content", "")
-                    # Handle content that may be a list of content parts
-                    if isinstance(content, list):
-                        text_parts = []
-                        for part in content:
-                            if isinstance(part, dict) and part.get("type") == "input_text":
-                                text_parts.append(part.get("text", ""))
-                            elif isinstance(part, dict) and part.get("type") == "output_text":
-                                text_parts.append(part.get("text", ""))
-                            elif isinstance(part, str):
-                                text_parts.append(part)
-                        content = "\n".join(text_parts)
-                    input_messages.append({"role": role, "content": content})
+                    request_items.append(item)
+                else:
+                    return web.json_response(_openai_error("'input' array items must be strings or objects"), status=400)
+            try:
+                input_messages = responses_input_to_chat_messages(request_items)
+            except ValueError as exc:
+                return web.json_response(_openai_error(str(exc)), status=400)
         else:
             return web.json_response(_openai_error("'input' must be a string or array"), status=400)
 
@@ -831,7 +826,10 @@ class APIServerAdapter(BasePlatformAdapter):
             conversation_history.append(msg)
 
         # Last input message is the user_message
-        user_message = input_messages[-1].get("content", "") if input_messages else ""
+        user_message = ""
+        if input_messages and input_messages[-1].get("role") == "user":
+            candidate = input_messages[-1].get("content", "")
+            user_message = candidate if isinstance(candidate, str) else str(candidate or "")
         if not user_message:
             return web.json_response(_openai_error("No user message found in input"), status=400)
 

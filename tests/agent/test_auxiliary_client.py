@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -701,6 +702,70 @@ class TestAuxiliaryPoolAwareness:
         assert call_kwargs["api_key"] == "gh-cli-token"
         assert call_kwargs["base_url"] == "https://api.githubcopilot.com"
         assert call_kwargs["default_headers"]["Editor-Version"]
+
+
+class TestCodexResponsesAdapter:
+    def test_adapter_converts_tool_messages_to_function_call_output(self):
+        captured = {}
+
+        final_response = SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    content=[SimpleNamespace(type="output_text", text="done")],
+                )
+            ],
+            usage=None,
+        )
+
+        class _FakeStream:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def __iter__(self):
+                return iter(())
+
+            def get_final_response(self):
+                return final_response
+
+        class _FakeResponses:
+            def stream(self, **kwargs):
+                captured["kwargs"] = kwargs
+                return _FakeStream()
+
+        fake_client = SimpleNamespace(responses=_FakeResponses())
+
+        from agent.auxiliary_client import _CodexCompletionsAdapter
+
+        adapter = _CodexCompletionsAdapter(fake_client, "gpt-5.3-codex")
+        adapter.create(
+            messages=[
+                {"role": "user", "content": "Run terminal"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "terminal", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": '{"ok":true}'},
+            ]
+        )
+
+        input_items = captured["kwargs"]["input"]
+        assert any(item.get("type") == "function_call" and item.get("call_id") == "call_1" for item in input_items)
+        assert any(
+            item.get("type") == "function_call_output" and item.get("call_id") == "call_1"
+            for item in input_items
+        )
+        assert not any(item.get("role") == "tool" for item in input_items)
 
     def test_vision_auto_uses_anthropic_when_no_higher_priority_backend(self, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-key")
