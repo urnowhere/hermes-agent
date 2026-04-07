@@ -4443,6 +4443,8 @@ class HermesCLI:
             self.console.print(f"  Status bar {state}")
         elif canonical == "verbose":
             self._toggle_verbose()
+        elif canonical == "caveman" or canonical == "cav":
+            self._toggle_caveman(cmd_original)
         elif canonical == "yolo":
             self._toggle_yolo()
         elif canonical == "reasoning":
@@ -5140,6 +5142,64 @@ class HermesCLI:
             "verbose": f"{_Colors.BOLD}{_Colors.GREEN}Tool progress: VERBOSE{_Colors.RESET} — full args, results, think blocks, and debug logs.",
         }
         _cprint(labels.get(self.tool_progress_mode, ""))
+
+    def _toggle_caveman(self, cmd: str = ""):
+        """Toggle caveman speak mode — compressed responses, ~75% fewer tokens.
+
+        Usage:
+            /caveman              Toggle on/off (default intensity: full)
+            /caveman lite         Turn on at lite intensity
+            /caveman full         Turn on at full intensity (default)
+            /caveman ultra        Turn on at ultra intensity
+        """
+        import os
+        parts = cmd.strip().split()
+        intensity_arg = parts[1].lower() if len(parts) > 1 else None
+        valid_intensities = ("lite", "full", "ultra")
+
+        current = os.environ.get("HERMES_CAVEMAN_MODE")
+
+        # Toggle off if already on and no intensity arg
+        if current and not intensity_arg:
+            os.environ.pop("HERMES_CAVEMAN_MODE", None)
+            self.console.print("  [bold]Caveman mode [red]OFF[/red][/bold] — normal speak return.")
+            # Inject stop instruction into conversation
+            self._inject_caveman_instruction("off", None)
+            return
+
+        intensity = intensity_arg if intensity_arg in valid_intensities else "full"
+        os.environ["HERMES_CAVEMAN_MODE"] = intensity
+        icons = {"lite": "🪶", "full": "🦴", "ultra": "🔥"}
+        self.console.print(
+            f"  {icons[intensity]} [bold]Caveman mode [green]ON[/green][/bold] "
+            f"— intensity: [bold]{intensity}[/bold]. ~75% fewer tokens."
+        )
+        self._inject_caveman_instruction("on", intensity)
+
+    def _inject_caveman_instruction(self, state: str, intensity):
+        """Inject a caveman mode instruction into the active conversation."""
+        if state == "on":
+            intensity_rules = {
+                "lite": "Drop filler and pleasantries. Keep grammar. Professional but no fluff.",
+                "full": "Drop articles, use fragments. Classic caveman. [thing] [action] [reason].",
+                "ultra": "Max compression. Abbreviate. Arrow notation X→Y. One word if enough.",
+            }
+            rule = intensity_rules.get(intensity, intensity_rules["full"])
+            msg = (
+                f"[CAVEMAN MODE ON — intensity: {intensity}] "
+                f"Respond like smart caveman from now on. {rule} "
+                f"Keep all technical accuracy. Code blocks unchanged. "
+                f"Stay in caveman mode until user say /caveman again or 'normal mode'."
+            )
+        else:
+            msg = "[CAVEMAN MODE OFF] Resume normal communication style immediately."
+
+        # Inject as a bracketed system note so it takes effect this turn
+        self.conversation_history.append({"role": "user", "content": msg})
+        self.conversation_history.append({
+            "role": "assistant",
+            "content": "UGH. Caveman understand." if state == "on" else "Normal mode restored.",
+        })
 
     def _toggle_yolo(self):
         """Toggle YOLO mode — skip all dangerous command approval prompts."""

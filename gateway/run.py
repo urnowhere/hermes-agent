@@ -2054,6 +2054,8 @@ class GatewayRunner:
         if canonical == "verbose":
             return await self._handle_verbose_command(event)
 
+        if canonical == "caveman" or canonical == "cav":
+            return await self._handle_caveman_command(event)
         if canonical == "yolo":
             return await self._handle_yolo_command(event)
 
@@ -4750,6 +4752,49 @@ class GatewayRunner:
             return f"🧠 ✓ Reasoning effort set to `{effort}` (saved to config)\n_(takes effect on next message)_"
         else:
             return f"🧠 ✓ Reasoning effort set to `{effort}` (this session only)"
+
+    async def _handle_caveman_command(self, event: MessageEvent) -> str:
+        """Handle /caveman — toggle caveman speak mode (compressed responses, ~75% fewer tokens)."""
+        import os
+        parts = event.text.strip().split()
+        intensity_arg = parts[1].lower() if len(parts) > 1 else None
+        valid_intensities = ("lite", "full", "ultra")
+        current = os.environ.get("HERMES_CAVEMAN_MODE")
+
+        if current and not intensity_arg:
+            os.environ.pop("HERMES_CAVEMAN_MODE", None)
+            chat_id = event.source.chat_id if event.source else None
+            if chat_id:
+                session = self._sessions.get(chat_id)
+                if session:
+                    session.history.append({"role": "user", "content": "[CAVEMAN MODE OFF] Resume normal communication style immediately."})
+                    session.history.append({"role": "assistant", "content": "Normal mode restored."})
+            return "Caveman mode **OFF** — normal speak return."
+
+        intensity = intensity_arg if intensity_arg in valid_intensities else "full"
+        os.environ["HERMES_CAVEMAN_MODE"] = intensity
+        icons = {"lite": "🪶", "full": "🦴", "ultra": "🔥"}
+
+        intensity_rules = {
+            "lite": "Drop filler and pleasantries. Keep grammar. Professional but no fluff.",
+            "full": "Drop articles, use fragments. Classic caveman. [thing] [action] [reason].",
+            "ultra": "Max compression. Abbreviate. Arrow notation X→Y. One word if enough.",
+        }
+        rule = intensity_rules[intensity]
+        msg = (
+            f"[CAVEMAN MODE ON — intensity: {intensity}] "
+            f"Respond like smart caveman from now on. {rule} "
+            f"Keep all technical accuracy. Code blocks unchanged. "
+            f"Stay in caveman mode until user say /caveman again or 'normal mode'."
+        )
+        chat_id = event.source.chat_id if event.source else None
+        if chat_id:
+            session = self._sessions.get(chat_id)
+            if session:
+                session.history.append({"role": "user", "content": msg})
+                session.history.append({"role": "assistant", "content": "UGH. Caveman understand."})
+
+        return f"{icons[intensity]} Caveman mode **ON** — intensity: {intensity}. ~75% fewer tokens."
 
     async def _handle_yolo_command(self, event: MessageEvent) -> str:
         """Handle /yolo — toggle dangerous command approval bypass."""
