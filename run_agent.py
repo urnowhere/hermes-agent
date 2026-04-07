@@ -7384,9 +7384,27 @@ class AIAgent:
                     error_details = []
                     if self.api_mode == "codex_responses":
                         output_items = getattr(response, "output", None) if response is not None else None
+                        _codex_resp_status = str(getattr(response, "status", "") or "").strip().lower() if response is not None else ""
                         if response is None:
                             response_invalid = True
                             error_details.append("response is None")
+                        elif _codex_resp_status in {"failed", "cancelled"}:
+                            # Provider returned a terminal failure (e.g. quota exhaustion).
+                            # Treat as invalid so the fallback chain is triggered instead of
+                            # letting the error bubble up outside the retry/fallback loop.
+                            _codex_error_obj = getattr(response, "error", None)
+                            _codex_error_msg = (
+                                _codex_error_obj.get("message") if isinstance(_codex_error_obj, dict)
+                                else str(_codex_error_obj) if _codex_error_obj
+                                else f"Responses API returned status '{_codex_resp_status}'"
+                            )
+                            logging.warning(
+                                "Codex response status='%s' (error=%s). Routing to fallback. %s",
+                                _codex_resp_status, _codex_error_msg,
+                                self._client_log_context(),
+                            )
+                            response_invalid = True
+                            error_details.append(f"response.status={_codex_resp_status}: {_codex_error_msg}")
                         elif not isinstance(output_items, list):
                             response_invalid = True
                             error_details.append("response.output is not a list")
