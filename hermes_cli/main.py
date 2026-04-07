@@ -3858,7 +3858,7 @@ def cmd_profile(args):
         list_profiles, create_profile, delete_profile, seed_profile_skills,
         get_active_profile, set_active_profile, get_active_profile_name,
         check_alias_collision, create_wrapper_script, remove_wrapper_script,
-        _is_wrapper_dir_in_path, _get_wrapper_dir,
+        _is_wrapper_dir_in_path, _get_wrapper_dir, _get_wrapper_path,
     )
     from hermes_constants import display_hermes_home
 
@@ -4013,7 +4013,7 @@ def cmd_profile(args):
         model, provider = _read_config_model(profile_dir)
         gw = _check_gateway_running(profile_dir)
         skills = _count_skills(profile_dir)
-        wrapper = _get_wrapper_dir() / name
+        wrapper = _get_wrapper_path(name)
 
         print(f"\nProfile: {name}")
         print(f"Path:    {profile_dir}")

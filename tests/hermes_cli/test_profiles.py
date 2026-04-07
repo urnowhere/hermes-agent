@@ -13,11 +13,13 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
+import hermes_cli.profiles as profiles_mod
 
 from hermes_cli.profiles import (
     validate_profile_name,
     get_profile_dir,
     create_profile,
+    create_wrapper_script,
     delete_profile,
     list_profiles,
     set_active_profile,
@@ -356,6 +358,35 @@ class TestAliasCollision:
         result = check_alias_collision("default")
         assert result is not None
         assert "reserved" in result.lower()
+
+
+class TestWindowsWrappers:
+    """Windows-specific alias wrapper behavior."""
+
+    def test_create_wrapper_script_uses_cmd_on_windows(self, profile_env, monkeypatch):
+        monkeypatch.setattr(profiles_mod, "_is_windows", lambda: True)
+
+        wrapper = create_wrapper_script("coder")
+
+        assert wrapper == profile_env / ".local" / "bin" / "coder.cmd"
+        assert wrapper.read_text() == "@echo off\nhermes -p coder %*\n"
+
+    def test_check_alias_collision_allows_existing_windows_wrapper(self, profile_env, monkeypatch):
+        monkeypatch.setattr(profiles_mod, "_is_windows", lambda: True)
+        wrapper = create_wrapper_script("coder")
+        monkeypatch.setattr(profiles_mod.shutil, "which", lambda _: str(wrapper))
+
+        assert check_alias_collision("coder") is None
+
+    def test_list_profiles_detects_windows_wrapper_alias(self, profile_env, monkeypatch):
+        monkeypatch.setattr(profiles_mod, "_is_windows", lambda: True)
+        create_profile("coder", no_alias=True)
+        wrapper = create_wrapper_script("coder")
+
+        profiles = list_profiles()
+        coder = next(p for p in profiles if p.name == "coder")
+
+        assert coder.alias_path == wrapper
 
 
 # ===================================================================
