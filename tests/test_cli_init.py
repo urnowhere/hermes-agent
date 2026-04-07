@@ -243,7 +243,67 @@ class TestHistoryDisplay:
 
         assert "Recent sessions" in output
         assert "Checking Running Hermes Agent" in output
-        assert "Use /resume <session id or title> to continue" in output
+        assert "Use /resume <number|session id|title> to continue" in output
+
+    def test_resume_without_target_uses_interactive_picker_when_tty(self):
+        cli = _make_cli()
+        cli.agent = None
+        cli.session_id = "current"
+        cli._session_db = MagicMock()
+        cli._session_db.list_sessions_rich.return_value = [
+            {
+                "id": "current",
+                "title": "Current",
+                "preview": "Current preview",
+                "last_active": 0,
+                "source": "cli",
+            },
+            {
+                "id": "picked_session",
+                "title": "Picked",
+                "preview": "picked preview",
+                "last_active": 0,
+                "source": "cli",
+            },
+        ]
+        cli._session_db.get_session.return_value = {"id": "picked_session", "title": "Picked"}
+        cli._session_db.get_messages_as_conversation.return_value = []
+
+        with patch("sys.stdin.isatty", return_value=True), \
+             patch("sys.stdout.isatty", return_value=True), \
+             patch("hermes_cli.main._session_browse_picker", return_value="picked_session"):
+            cli._handle_resume_command("/resume")
+
+        assert cli.session_id == "picked_session"
+        cli._session_db.end_session.assert_called_once()
+        cli._session_db.reopen_session.assert_called_once_with("picked_session")
+
+    def test_resume_numeric_index_resolves_to_recent_session(self):
+        cli = _make_cli()
+        cli.agent = None
+        cli.session_id = "current"
+        cli._session_db = MagicMock()
+        cli._session_db.list_sessions_rich.return_value = [
+            {
+                "id": "current",
+                "title": "Current",
+                "preview": "Current preview",
+                "last_active": 0,
+            },
+            {
+                "id": "target_session",
+                "title": "Target",
+                "preview": "target preview",
+                "last_active": 0,
+            },
+        ]
+        cli._session_db.get_session.return_value = {"id": "target_session", "title": "Target"}
+        cli._session_db.get_messages_as_conversation.return_value = []
+
+        cli._handle_resume_command("/resume 1")
+
+        assert cli.session_id == "target_session"
+        cli._session_db.get_session.assert_called_with("target_session")
 
 
 class TestRootLevelProviderOverride:

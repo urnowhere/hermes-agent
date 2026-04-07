@@ -3195,7 +3195,7 @@ class HermesCLI:
             return []
         return [s for s in sessions if s.get("id") != self.session_id]
 
-    def _show_recent_sessions(self, *, reason: str = "history", limit: int = 10) -> bool:
+    def _show_recent_sessions(self, *, reason: str = "history", limit: int = 10, numbered: bool = False) -> bool:
         """Render recent sessions inline from the active chat TUI.
 
         Returns True when something was shown, False if no session list was available.
@@ -3212,15 +3212,22 @@ class HermesCLI:
         else:
             print("  Recent sessions:")
         print()
-        print(f"  {'Title':<32} {'Preview':<40} {'Last Active':<13} {'ID'}")
-        print(f"  {'─' * 32} {'─' * 40} {'─' * 13} {'─' * 24}")
-        for session in sessions:
+        num_col = "# " if numbered else ""
+        num_rule = "── " if numbered else ""
+        print(f"  {num_col}{'Title':<32} {'Preview':<40} {'Last Active':<13} {'ID'}")
+        print(f"  {num_rule}{'─' * 32} {'─' * 40} {'─' * 13} {'─' * 24}")
+        for i, session in enumerate(sessions, start=1):
             title = (session.get("title") or "—")[:30]
             preview = (session.get("preview") or "")[:38]
             last_active = _relative_time(session.get("last_active"))
-            print(f"  {title:<32} {preview:<40} {last_active:<13} {session['id']}")
+            prefix = f"{i:<2}" if numbered else ""
+            spacer = " " if numbered else ""
+            print(f"  {prefix}{spacer}{title:<32} {preview:<40} {last_active:<13} {session['id']}")
         print()
-        print("  Use /resume <session id or title> to continue where you left off.")
+        if numbered:
+            print("  Use /resume <number|session id|title> to continue where you left off.")
+        else:
+            print("  Use /resume <session id or title> to continue where you left off.")
         print()
         return True
 
@@ -3346,26 +3353,69 @@ class HermesCLI:
         if not silent:
             print("(^_^)v New session started!")
 
+    def _resume_picker_enabled(self) -> bool:
+        """Return True when an interactive picker can run in this terminal."""
+        try:
+            return bool(sys.stdin.isatty() and sys.stdout.isatty())
+        except Exception:
+            return False
+
+    def _pick_recent_session_id(self, sessions: list[dict[str, Any]]) -> str | None:
+        """Open interactive session picker and return selected session ID."""
+        if not sessions or not self._resume_picker_enabled():
+            return None
+
+        try:
+            from hermes_cli.main import _session_browse_picker
+            selected = _session_browse_picker(sessions)
+            return selected or None
+        except Exception:
+            return None
+
+    def _resolve_numeric_resume_target(self, target: str, *, limit: int = 20) -> str | None:
+        """Resolve '/resume <number>' against recent session list."""
+        if not target.isdigit():
+            return None
+        idx = int(target)
+        if idx < 1:
+            return None
+        sessions = self._list_recent_sessions(limit=limit)
+        if idx > len(sessions):
+            return None
+        return sessions[idx - 1].get("id")
+
     def _handle_resume_command(self, cmd_original: str) -> None:
         """Handle /resume <session_id_or_title> — switch to a previous session mid-conversation."""
         parts = cmd_original.split(None, 1)
         target = parts[1].strip() if len(parts) > 1 else ""
 
         if not target:
-            _cprint("  Usage: /resume <session_id_or_title>")
-            if self._show_recent_sessions(reason="resume"):
+            sessions = self._list_recent_sessions(limit=20)
+            if sessions and self._resume_picker_enabled():
+                selected = self._pick_recent_session_id(sessions)
+                if not selected:
+                    _cprint("  Resume cancelled.")
+                    return
+                target = selected
+            else:
+                _cprint("  Usage: /resume <session_id_or_title>")
+                if self._show_recent_sessions(reason="resume", limit=20, numbered=True):
+                    return
+                _cprint("  Tip:   Use /history or `hermes sessions list` to find sessions.")
                 return
-            _cprint("  Tip:   Use /history or `hermes sessions list` to find sessions.")
-            return
 
         if not self._session_db:
             _cprint("  Session database not available.")
             return
 
-        # Resolve title or ID
-        from hermes_cli.main import _resolve_session_by_name_or_id
-        resolved = _resolve_session_by_name_or_id(target)
-        target_id = resolved or target
+        # Resolve title, session ID, or numeric index from recent-session list.
+        numeric_target = self._resolve_numeric_resume_target(target, limit=20)
+        if numeric_target:
+            target_id = numeric_target
+        else:
+            from hermes_cli.main import _resolve_session_by_name_or_id
+            resolved = _resolve_session_by_name_or_id(target)
+            target_id = resolved or target
 
         session_meta = self._session_db.get_session(target_id)
         if not session_meta:
