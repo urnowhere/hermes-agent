@@ -313,6 +313,7 @@ DEFAULT_CONFIG = {
             "model": "",           # e.g. "google/gemini-2.5-flash", "gpt-4o"
             "base_url": "",        # direct OpenAI-compatible endpoint (takes precedence over provider)
             "api_key": "",         # API key for base_url (falls back to OPENAI_API_KEY)
+            "api_mode": "",        # explicit transport for direct endpoints
             "timeout": 30,         # seconds — LLM API call timeout; increase for slow local vision models
             "download_timeout": 30,  # seconds — image HTTP download timeout; increase for slow connections
         },
@@ -321,6 +322,7 @@ DEFAULT_CONFIG = {
             "model": "",
             "base_url": "",
             "api_key": "",
+            "api_mode": "",
             "timeout": 360,        # seconds (6min) — per-attempt LLM summarization timeout; increase for slow local models
         },
         "compression": {
@@ -328,6 +330,7 @@ DEFAULT_CONFIG = {
             "model": "",
             "base_url": "",
             "api_key": "",
+            "api_mode": "",
             "timeout": 120,        # seconds — compression summarises large contexts; increase for local models
         },
         "session_search": {
@@ -335,6 +338,7 @@ DEFAULT_CONFIG = {
             "model": "",
             "base_url": "",
             "api_key": "",
+            "api_mode": "",
             "timeout": 30,
         },
         "skills_hub": {
@@ -342,6 +346,7 @@ DEFAULT_CONFIG = {
             "model": "",
             "base_url": "",
             "api_key": "",
+            "api_mode": "",
             "timeout": 30,
         },
         "approval": {
@@ -349,6 +354,7 @@ DEFAULT_CONFIG = {
             "model": "",           # fast/cheap model recommended (e.g. gemini-flash, haiku)
             "base_url": "",
             "api_key": "",
+            "api_mode": "",
             "timeout": 30,
         },
         "mcp": {
@@ -356,6 +362,7 @@ DEFAULT_CONFIG = {
             "model": "",
             "base_url": "",
             "api_key": "",
+            "api_mode": "",
             "timeout": 30,
         },
         "flush_memories": {
@@ -363,6 +370,7 @@ DEFAULT_CONFIG = {
             "model": "",
             "base_url": "",
             "api_key": "",
+            "api_mode": "",
             "timeout": 30,
         },
     },

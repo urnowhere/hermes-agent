@@ -622,6 +622,21 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertEqual(creds["api_key"], "local-key")
         self.assertEqual(creds["api_mode"], "chat_completions")
 
+    def test_direct_endpoint_honors_explicit_api_mode(self):
+        parent = _make_mock_parent(depth=0)
+        cfg = {
+            "model": "gpt-5.4",
+            "provider": "custom",
+            "base_url": "http://localhost:23000/v1",
+            "api_key": "local-key",
+            "api_mode": "codex_responses",
+        }
+        creds = _resolve_delegation_credentials(cfg, parent)
+        self.assertEqual(creds["provider"], "custom")
+        self.assertEqual(creds["base_url"], "http://localhost:23000/v1")
+        self.assertEqual(creds["api_key"], "local-key")
+        self.assertEqual(creds["api_mode"], "codex_responses")
+
     def test_direct_endpoint_falls_back_to_openai_api_key_env(self):
         parent = _make_mock_parent(depth=0)
         cfg = {
@@ -811,6 +826,42 @@ class TestDelegationProviderIntegration(unittest.TestCase):
             self.assertEqual(kwargs["base_url"], "http://localhost:1234/v1")
             self.assertEqual(kwargs["api_key"], "local-key")
             self.assertEqual(kwargs["api_mode"], "chat_completions")
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_direct_endpoint_explicit_api_mode_reaches_child_agent(self, mock_creds, mock_cfg):
+        mock_cfg.return_value = {
+            "max_iterations": 45,
+            "model": "gpt-5.4",
+            "provider": "custom",
+            "base_url": "http://localhost:23000/v1",
+            "api_key": "local-key",
+            "api_mode": "codex_responses",
+        }
+        mock_creds.return_value = {
+            "model": "gpt-5.4",
+            "provider": "custom",
+            "base_url": "http://localhost:23000/v1",
+            "api_key": "local-key",
+            "api_mode": "codex_responses",
+        }
+        parent = _make_mock_parent(depth=0)
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.run_conversation.return_value = {
+                "final_response": "done", "completed": True, "api_calls": 1
+            }
+            MockAgent.return_value = mock_child
+
+            delegate_task(goal="Direct responses endpoint test", parent_agent=parent)
+
+            _, kwargs = MockAgent.call_args
+            self.assertEqual(kwargs["model"], "gpt-5.4")
+            self.assertEqual(kwargs["provider"], "custom")
+            self.assertEqual(kwargs["base_url"], "http://localhost:23000/v1")
+            self.assertEqual(kwargs["api_key"], "local-key")
+            self.assertEqual(kwargs["api_mode"], "codex_responses")
 
     @patch("tools.delegate_tool._load_config")
     @patch("tools.delegate_tool._resolve_delegation_credentials")

@@ -257,3 +257,159 @@ class TestProviderPersistsAfterModelSave:
         assert model.get("provider") == "opencode-go"
         assert model.get("default") == "minimax-m2.5"
         assert model.get("api_mode") == "anthropic_messages"
+
+
+class TestCustomProviderApiModePersistence:
+    def test_model_flow_custom_persists_selected_responses_api_mode(self, config_home, monkeypatch):
+        from hermes_cli.main import _model_flow_custom
+        from hermes_cli.config import load_config
+
+        monkeypatch.setattr("hermes_cli.config.get_env_value", lambda key: "")
+        monkeypatch.setattr("hermes_cli.config.save_env_value", lambda key, value: None)
+        monkeypatch.setattr(
+            "hermes_cli.models.probe_api_models",
+            lambda api_key, base_url: {
+                "models": ["gpt-oss"],
+                "probed_url": "http://localhost:23000/v1/models",
+                "resolved_base_url": "http://localhost:23000/v1",
+                "suggested_base_url": None,
+                "used_fallback": False,
+            },
+        )
+        monkeypatch.setattr("hermes_cli.auth._save_model_choice", lambda model: None)
+        monkeypatch.setattr("hermes_cli.auth.deactivate_provider", lambda: None)
+        monkeypatch.setattr("getpass.getpass", lambda prompt="": "")
+
+        answers = iter([
+            "http://localhost:23000/v1",
+            "",
+            "",
+            "2",
+        ])
+        monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+
+        _model_flow_custom(load_config())
+
+        import yaml
+
+        config = yaml.safe_load((config_home / "config.yaml").read_text()) or {}
+        model = config.get("model") or {}
+        providers = config.get("custom_providers") or []
+        assert model.get("api_mode") == "codex_responses"
+        assert providers[0].get("api_mode") == "codex_responses"
+
+    def test_model_flow_custom_preserves_existing_explicit_api_mode_for_same_endpoint(self, config_home, monkeypatch):
+        from hermes_cli.main import _model_flow_custom
+        from hermes_cli.config import load_config
+
+        (config_home / "config.yaml").write_text(
+            "model:\n"
+            "  default: gpt-oss\n"
+            "  provider: custom\n"
+            "  base_url: http://localhost:23000/v1\n"
+            "  api_mode: codex_responses\n"
+        )
+
+        monkeypatch.setattr("hermes_cli.config.get_env_value", lambda key: "")
+        monkeypatch.setattr("hermes_cli.config.save_env_value", lambda key, value: None)
+        monkeypatch.setattr(
+            "hermes_cli.models.probe_api_models",
+            lambda api_key, base_url: {
+                "models": ["gpt-oss"],
+                "probed_url": "http://localhost:23000/v1/models",
+                "resolved_base_url": "http://localhost:23000/v1",
+                "suggested_base_url": None,
+                "used_fallback": False,
+            },
+        )
+        monkeypatch.setattr("hermes_cli.auth._save_model_choice", lambda model: None)
+        monkeypatch.setattr("hermes_cli.auth.deactivate_provider", lambda: None)
+        monkeypatch.setattr("getpass.getpass", lambda prompt="": "")
+
+        answers = iter([
+            "http://localhost:23000/v1",
+            "",
+            "",
+            "",
+        ])
+        monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+
+        _model_flow_custom(load_config())
+
+        import yaml
+
+        config = yaml.safe_load((config_home / "config.yaml").read_text()) or {}
+        model = config.get("model") or {}
+        assert model.get("api_mode") == "codex_responses"
+
+    def test_save_custom_provider_persists_explicit_api_mode(self, config_home):
+        from hermes_cli.main import _save_custom_provider
+
+        _save_custom_provider(
+            "http://localhost:23000/v1",
+            api_key="",
+            model="gpt-oss",
+            api_mode="codex_responses",
+        )
+
+        import yaml
+
+        config = yaml.safe_load((config_home / "config.yaml").read_text()) or {}
+        providers = config.get("custom_providers") or []
+        assert providers
+        assert providers[0]["base_url"] == "http://localhost:23000/v1"
+        assert providers[0]["api_mode"] == "codex_responses"
+
+    def test_named_custom_provider_activation_syncs_explicit_api_mode(self, config_home):
+        from hermes_cli.main import _model_flow_named_custom
+        from hermes_cli.config import load_config
+
+        with patch("hermes_cli.auth._save_model_choice"), patch("hermes_cli.auth.deactivate_provider"):
+            _model_flow_named_custom(
+                load_config(),
+                {
+                    "name": "Local Responses",
+                    "base_url": "http://localhost:23000/v1",
+                    "api_key": "",
+                    "model": "gpt-oss",
+                    "api_mode": "codex_responses",
+                },
+            )
+
+        import yaml
+
+        config = yaml.safe_load((config_home / "config.yaml").read_text()) or {}
+        model = config.get("model") or {}
+        assert model.get("provider") == "custom"
+        assert model.get("base_url") == "http://localhost:23000/v1"
+        assert model.get("api_mode") == "codex_responses"
+
+    def test_named_custom_provider_without_explicit_api_mode_clears_stale_mode(self, config_home):
+        from hermes_cli.main import _model_flow_named_custom
+        from hermes_cli.config import load_config
+
+        (config_home / "config.yaml").write_text(
+            "model:\n"
+            "  default: stale-model\n"
+            "  provider: custom\n"
+            "  base_url: http://localhost:23000/v1\n"
+            "  api_mode: codex_responses\n"
+        )
+
+        with patch("hermes_cli.auth._save_model_choice"), patch("hermes_cli.auth.deactivate_provider"):
+            _model_flow_named_custom(
+                load_config(),
+                {
+                    "name": "Local Default",
+                    "base_url": "http://localhost:23000/v1",
+                    "api_key": "",
+                    "model": "gpt-oss",
+                },
+            )
+
+        import yaml
+
+        config = yaml.safe_load((config_home / "config.yaml").read_text()) or {}
+        model = config.get("model") or {}
+        assert model.get("provider") == "custom"
+        assert "api_mode" not in model

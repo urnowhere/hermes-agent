@@ -930,6 +930,25 @@ def test_named_custom_provider_anthropic_api_mode(monkeypatch):
     assert resolved["base_url"] == "https://proxy.example.com/anthropic"
 
 
+def test_named_custom_provider_explicit_responses_api_mode(monkeypatch):
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "local-responses")
+    monkeypatch.setattr(
+        rp,
+        "_get_named_custom_provider",
+        lambda p: {
+            "name": "local-responses",
+            "base_url": "http://localhost:23000/v1",
+            "api_key": "",
+            "api_mode": "codex_responses",
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="local-responses")
+
+    assert resolved["api_mode"] == "codex_responses"
+    assert resolved["base_url"] == "http://localhost:23000/v1"
+
+
 # ------------------------------------------------------------------
 # fix #2562 — resolve_provider("custom") must not remap to "openrouter"
 # ------------------------------------------------------------------

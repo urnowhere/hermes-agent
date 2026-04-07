@@ -142,6 +142,42 @@ def test_setup_custom_providers_synced(tmp_path, monkeypatch):
     assert reloaded.get("custom_providers") == [{"name": "Local", "base_url": "http://localhost:8080/v1"}]
 
 
+def test_setup_syncs_custom_provider_api_mode_from_disk(tmp_path, monkeypatch):
+    """setup wizard should preserve custom provider api_mode written by model flow."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _clear_provider_env(monkeypatch)
+    _stub_tts(monkeypatch)
+
+    config = load_config()
+
+    def fake_select():
+        cfg = load_config()
+        cfg["model"] = {
+            "provider": "custom",
+            "base_url": "http://localhost:23000/v1",
+            "default": "gpt-oss",
+            "api_mode": "codex_responses",
+        }
+        cfg["custom_providers"] = [
+            {
+                "name": "Local Responses",
+                "base_url": "http://localhost:23000/v1",
+                "model": "gpt-oss",
+                "api_mode": "codex_responses",
+            }
+        ]
+        save_config(cfg)
+
+    monkeypatch.setattr("hermes_cli.main.select_provider_and_model", fake_select)
+
+    setup_model_provider(config)
+    save_config(config)
+
+    reloaded = load_config()
+    assert reloaded["model"]["api_mode"] == "codex_responses"
+    assert reloaded["custom_providers"][0]["api_mode"] == "codex_responses"
+
+
 def test_setup_cancel_preserves_existing_config(tmp_path, monkeypatch):
     """When the user cancels provider selection, existing config is preserved."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))

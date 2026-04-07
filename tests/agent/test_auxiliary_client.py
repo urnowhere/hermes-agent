@@ -35,8 +35,10 @@ def _clean_env(monkeypatch):
         # Per-task provider/model/direct-endpoint overrides
         "AUXILIARY_VISION_PROVIDER", "AUXILIARY_VISION_MODEL",
         "AUXILIARY_VISION_BASE_URL", "AUXILIARY_VISION_API_KEY",
+        "AUXILIARY_VISION_API_MODE",
         "AUXILIARY_WEB_EXTRACT_PROVIDER", "AUXILIARY_WEB_EXTRACT_MODEL",
         "AUXILIARY_WEB_EXTRACT_BASE_URL", "AUXILIARY_WEB_EXTRACT_API_KEY",
+        "AUXILIARY_WEB_EXTRACT_API_MODE",
         "CONTEXT_COMPRESSION_PROVIDER", "CONTEXT_COMPRESSION_MODEL",
     ):
         monkeypatch.delenv(key, raising=False)
@@ -542,6 +544,52 @@ class TestGetTextAuxiliaryClient:
         assert mock_openai.call_args.kwargs["api_key"] == "no-key-required"
         assert mock_openai.call_args.kwargs["base_url"] == "http://localhost:2345/v1"
 
+    def test_task_direct_endpoint_honors_explicit_codex_responses_api_mode(self, monkeypatch):
+        monkeypatch.setenv("AUXILIARY_WEB_EXTRACT_BASE_URL", "http://localhost:2345/v1")
+        monkeypatch.setenv("AUXILIARY_WEB_EXTRACT_API_KEY", "task-key")
+        monkeypatch.setenv("AUXILIARY_WEB_EXTRACT_API_MODE", "codex_responses")
+        monkeypatch.setenv("AUXILIARY_WEB_EXTRACT_MODEL", "task-model")
+        with patch("agent.auxiliary_client.OpenAI") as mock_openai:
+            mock_openai.return_value = MagicMock()
+            client, model = get_text_auxiliary_client("web_extract")
+
+        from agent.auxiliary_client import CodexAuxiliaryClient
+
+        assert isinstance(client, CodexAuxiliaryClient)
+        assert model == "task-model"
+        assert mock_openai.call_args.kwargs["base_url"] == "http://localhost:2345/v1"
+        assert mock_openai.call_args.kwargs["api_key"] == "task-key"
+
+    def test_custom_provider_runtime_honors_explicit_codex_responses_api_mode(self, monkeypatch):
+        monkeypatch.setattr(
+            "agent.auxiliary_client._resolve_custom_runtime",
+            lambda: ("http://localhost:1234/v1", "runtime-key", "codex_responses"),
+        )
+        monkeypatch.setattr("agent.auxiliary_client._read_main_model", lambda: "runtime-model")
+
+        with patch("agent.auxiliary_client.OpenAI") as mock_openai:
+            mock_openai.return_value = MagicMock()
+            client, model = resolve_provider_client("custom")
+
+        from agent.auxiliary_client import CodexAuxiliaryClient
+
+        assert isinstance(client, CodexAuxiliaryClient)
+        assert model == "runtime-model"
+        assert mock_openai.call_args.kwargs["base_url"] == "http://localhost:1234/v1"
+        assert mock_openai.call_args.kwargs["api_key"] == "runtime-key"
+
+    def test_task_direct_endpoint_honors_explicit_anthropic_messages_api_mode(self, monkeypatch):
+        monkeypatch.setenv("AUXILIARY_WEB_EXTRACT_BASE_URL", "https://api.example.test/anthropic")
+        monkeypatch.setenv("AUXILIARY_WEB_EXTRACT_API_KEY", "anthropic-key")
+        monkeypatch.setenv("AUXILIARY_WEB_EXTRACT_API_MODE", "anthropic_messages")
+        monkeypatch.setenv("AUXILIARY_WEB_EXTRACT_MODEL", "claude-test")
+        with patch("agent.anthropic_adapter.build_anthropic_client", return_value=MagicMock()):
+            client, model = get_text_auxiliary_client("web_extract")
+
+        assert client is not None
+        assert client.__class__.__name__ == "AnthropicAuxiliaryClient"
+        assert model == "claude-test"
+
     def test_custom_endpoint_uses_config_saved_base_url(self, monkeypatch):
         config = {
             "model": {
@@ -567,6 +615,7 @@ class TestGetTextAuxiliaryClient:
 
     def test_codex_fallback_when_nothing_else(self, codex_auth_dir):
         with patch("agent.auxiliary_client._read_nous_auth", return_value=None), \
+             patch("agent.auxiliary_client._resolve_custom_runtime", return_value=(None, None, None)), \
              patch("agent.auxiliary_client.OpenAI") as mock_openai:
             client, model = get_text_auxiliary_client()
         assert model == "gpt-5.2-codex"
@@ -780,7 +829,7 @@ class TestAuxiliaryPoolAwareness:
              patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)), \
              patch("agent.auxiliary_client._read_codex_access_token", return_value=None), \
              patch("agent.auxiliary_client._resolve_custom_runtime",
-                   return_value=("http://localhost:1234/v1", "local-key")), \
+                   return_value=("http://localhost:1234/v1", "local-key", None)), \
              patch("agent.auxiliary_client.OpenAI") as mock_openai:
             client, model = get_vision_auxiliary_client()
         assert client is not None  # Custom endpoint picked up as fallback
@@ -806,6 +855,22 @@ class TestAuxiliaryPoolAwareness:
         assert client is not None
         assert model == "vision-model"
         assert mock_openai.call_args.kwargs["api_key"] == "no-key-required"
+
+    def test_vision_direct_endpoint_honors_explicit_codex_responses_api_mode(self, monkeypatch):
+        monkeypatch.setenv("AUXILIARY_VISION_BASE_URL", "http://localhost:4567/v1")
+        monkeypatch.setenv("AUXILIARY_VISION_API_KEY", "vision-key")
+        monkeypatch.setenv("AUXILIARY_VISION_API_MODE", "codex_responses")
+        monkeypatch.setenv("AUXILIARY_VISION_MODEL", "vision-model")
+        with patch("agent.auxiliary_client.OpenAI") as mock_openai:
+            mock_openai.return_value = MagicMock()
+            client, model = get_vision_auxiliary_client()
+
+        from agent.auxiliary_client import CodexAuxiliaryClient
+
+        assert isinstance(client, CodexAuxiliaryClient)
+        assert model == "vision-model"
+        assert mock_openai.call_args.kwargs["base_url"] == "http://localhost:4567/v1"
+        assert mock_openai.call_args.kwargs["api_key"] == "vision-key"
 
     def test_vision_uses_openrouter_when_available(self, monkeypatch):
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
@@ -847,6 +912,7 @@ class TestAuxiliaryPoolAwareness:
         monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         with patch("agent.auxiliary_client._read_nous_auth", return_value=None), \
+             patch("agent.auxiliary_client._resolve_custom_runtime", return_value=(None, None, None)), \
              patch("agent.auxiliary_client._read_codex_access_token", return_value=None), \
              patch("agent.auxiliary_client._resolve_api_key_provider", return_value=(None, None)):
             client, model = get_vision_auxiliary_client()
@@ -989,6 +1055,7 @@ class TestResolveForcedProvider:
 
     def test_forced_main_falls_to_codex(self, codex_auth_dir, monkeypatch):
         with patch("agent.auxiliary_client._read_nous_auth", return_value=None), \
+             patch("agent.auxiliary_client._resolve_custom_runtime", return_value=(None, None, None)), \
              patch("agent.auxiliary_client.OpenAI"):
             client, model = _resolve_forced_provider("main")
         from agent.auxiliary_client import CodexAuxiliaryClient

@@ -26,8 +26,10 @@ def _run_auxiliary_bridge(config_dict, monkeypatch):
     for key in (
         "AUXILIARY_VISION_PROVIDER", "AUXILIARY_VISION_MODEL",
         "AUXILIARY_VISION_BASE_URL", "AUXILIARY_VISION_API_KEY",
+        "AUXILIARY_VISION_API_MODE",
         "AUXILIARY_WEB_EXTRACT_PROVIDER", "AUXILIARY_WEB_EXTRACT_MODEL",
         "AUXILIARY_WEB_EXTRACT_BASE_URL", "AUXILIARY_WEB_EXTRACT_API_KEY",
+        "AUXILIARY_WEB_EXTRACT_API_MODE",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -42,12 +44,14 @@ def _run_auxiliary_bridge(config_dict, monkeypatch):
                 "model": "AUXILIARY_VISION_MODEL",
                 "base_url": "AUXILIARY_VISION_BASE_URL",
                 "api_key": "AUXILIARY_VISION_API_KEY",
+                "api_mode": "AUXILIARY_VISION_API_MODE",
             },
             "web_extract": {
                 "provider": "AUXILIARY_WEB_EXTRACT_PROVIDER",
                 "model": "AUXILIARY_WEB_EXTRACT_MODEL",
                 "base_url": "AUXILIARY_WEB_EXTRACT_BASE_URL",
                 "api_key": "AUXILIARY_WEB_EXTRACT_API_KEY",
+                "api_mode": "AUXILIARY_WEB_EXTRACT_API_MODE",
             },
         }
         for task_key, env_map in aux_task_env.items():
@@ -58,6 +62,7 @@ def _run_auxiliary_bridge(config_dict, monkeypatch):
             model = str(task_cfg.get("model", "")).strip()
             base_url = str(task_cfg.get("base_url", "")).strip()
             api_key = str(task_cfg.get("api_key", "")).strip()
+            api_mode = str(task_cfg.get("api_mode", "")).strip()
             if prov and prov != "auto":
                 os.environ[env_map["provider"]] = prov
             if model:
@@ -66,6 +71,8 @@ def _run_auxiliary_bridge(config_dict, monkeypatch):
                 os.environ[env_map["base_url"]] = base_url
             if api_key:
                 os.environ[env_map["api_key"]] = api_key
+            if api_mode:
+                os.environ[env_map["api_mode"]] = api_mode
 
 
 # ── Config bridging tests ────────────────────────────────────────────────────
@@ -113,6 +120,7 @@ class TestAuxiliaryConfigBridge:
                 "vision": {
                     "base_url": "http://localhost:1234/v1",
                     "api_key": "local-key",
+                    "api_mode": "codex_responses",
                     "model": "qwen2.5-vl",
                 }
             }
@@ -120,6 +128,7 @@ class TestAuxiliaryConfigBridge:
         _run_auxiliary_bridge(config, monkeypatch)
         assert os.environ.get("AUXILIARY_VISION_BASE_URL") == "http://localhost:1234/v1"
         assert os.environ.get("AUXILIARY_VISION_API_KEY") == "local-key"
+        assert os.environ.get("AUXILIARY_VISION_API_MODE") == "codex_responses"
         assert os.environ.get("AUXILIARY_VISION_MODEL") == "qwen2.5-vl"
 
     def test_empty_values_not_bridged(self, monkeypatch):
@@ -206,10 +215,12 @@ class TestGatewayBridgeCodeParity:
         assert "AUXILIARY_VISION_MODEL" in content
         assert "AUXILIARY_VISION_BASE_URL" in content
         assert "AUXILIARY_VISION_API_KEY" in content
+        assert "AUXILIARY_VISION_API_MODE" in content
         assert "AUXILIARY_WEB_EXTRACT_PROVIDER" in content
         assert "AUXILIARY_WEB_EXTRACT_MODEL" in content
         assert "AUXILIARY_WEB_EXTRACT_BASE_URL" in content
         assert "AUXILIARY_WEB_EXTRACT_API_KEY" in content
+        assert "AUXILIARY_WEB_EXTRACT_API_MODE" in content
 
     def test_gateway_no_compression_env_bridge(self):
         """Gateway should NOT bridge compression config to env vars (config-only)."""
@@ -262,6 +273,7 @@ class TestDefaultConfigShape:
         vision = DEFAULT_CONFIG["auxiliary"]["vision"]
         assert "provider" in vision
         assert "model" in vision
+        assert "api_mode" in vision
         assert vision["provider"] == "auto"
         assert vision["model"] == ""
 
@@ -270,6 +282,7 @@ class TestDefaultConfigShape:
         web = DEFAULT_CONFIG["auxiliary"]["web_extract"]
         assert "provider" in web
         assert "model" in web
+        assert "api_mode" in web
         assert web["provider"] == "auto"
         assert web["model"] == ""
 

@@ -148,7 +148,8 @@ def _codex_ack_message_response(text: str):
 
 
 class _FakeResponsesStream:
-    def __init__(self, *, final_response=None, final_error=None):
+    def __init__(self, *, events=None, final_response=None, final_error=None):
+        self._events = list(events or [])
         self._final_response = final_response
         self._final_error = final_error
 
@@ -159,7 +160,7 @@ class _FakeResponsesStream:
         return False
 
     def __iter__(self):
-        return iter(())
+        return iter(self._events)
 
     def get_final_response(self):
         if self._final_error is not None:
@@ -187,6 +188,15 @@ def _codex_request_kwargs():
         "tools": None,
         "store": False,
     }
+
+
+def _custom_responses_empty_terminal():
+    return SimpleNamespace(
+        output=[],
+        usage=SimpleNamespace(input_tokens=5, output_tokens=3, total_tokens=8),
+        status="completed",
+        model="gpt-5.4",
+    )
 
 
 def test_api_mode_uses_explicit_provider_when_codex(monkeypatch):
@@ -372,6 +382,46 @@ def test_run_codex_stream_fallback_parses_create_stream_events(monkeypatch):
     assert calls["create"] == 1
     assert create_stream.closed is True
     assert response.output[0].content[0].text == "streamed create ok"
+
+
+def test_run_codex_stream_custom_provider_hydrates_empty_terminal_output(monkeypatch):
+    _patch_agent_bootstrap(monkeypatch)
+    agent = run_agent.AIAgent(
+        model="gpt-5.4",
+        provider="custom",
+        api_mode="codex_responses",
+        base_url="http://localhost:23000/v1",
+        api_key="test-key",
+        quiet_mode=True,
+        max_iterations=4,
+        skip_context_files=True,
+        skip_memory=True,
+    )
+    stream = _FakeResponsesStream(
+        events=[
+            SimpleNamespace(
+                type="response.output_item.done",
+                item=SimpleNamespace(
+                    type="message",
+                    status="completed",
+                    content=[SimpleNamespace(type="output_text", text="custom ok")],
+                    phase="final_answer",
+                    role="assistant",
+                ),
+            ),
+            SimpleNamespace(
+                type="response.completed",
+                response=_custom_responses_empty_terminal(),
+            ),
+        ],
+        final_response=_custom_responses_empty_terminal(),
+    )
+
+    response = agent._run_codex_stream(_codex_request_kwargs(), client=SimpleNamespace(
+        responses=SimpleNamespace(stream=lambda **kwargs: stream),
+    ))
+
+    assert response.output[0].content[0].text == "custom ok"
 
 
 def test_run_conversation_codex_plain_text(monkeypatch):

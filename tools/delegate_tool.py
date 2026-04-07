@@ -38,6 +38,7 @@ MAX_CONCURRENT_CHILDREN = 3
 MAX_DEPTH = 2  # parent (0) -> child (1) -> grandchild rejected (2)
 DEFAULT_MAX_ITERATIONS = 50
 DEFAULT_TOOLSETS = ["terminal", "file", "web"]
+_VALID_API_MODES = {"chat_completions", "codex_responses", "anthropic_messages"}
 
 
 def check_delegate_requirements() -> bool:
@@ -645,6 +646,9 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     configured_provider = str(cfg.get("provider") or "").strip() or None
     configured_base_url = str(cfg.get("base_url") or "").strip() or None
     configured_api_key = str(cfg.get("api_key") or "").strip() or None
+    configured_api_mode = str(cfg.get("api_mode") or "").strip().lower() or None
+    if configured_api_mode not in _VALID_API_MODES:
+        configured_api_mode = None
 
     if configured_base_url:
         api_key = (
@@ -659,13 +663,14 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
 
         base_lower = configured_base_url.lower()
         provider = "custom"
-        api_mode = "chat_completions"
-        if "chatgpt.com/backend-api/codex" in base_lower:
-            provider = "openai-codex"
-            api_mode = "codex_responses"
-        elif "api.anthropic.com" in base_lower:
-            provider = "anthropic"
-            api_mode = "anthropic_messages"
+        api_mode = configured_api_mode or "chat_completions"
+        if not configured_api_mode:
+            if "chatgpt.com/backend-api/codex" in base_lower:
+                provider = "openai-codex"
+                api_mode = "codex_responses"
+            elif "api.anthropic.com" in base_lower:
+                provider = "anthropic"
+                api_mode = "anthropic_messages"
 
         return {
             "model": configured_model,

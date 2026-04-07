@@ -143,24 +143,27 @@ if _config_path.exists():
         if _auxiliary_cfg and isinstance(_auxiliary_cfg, dict):
             _aux_task_env = {
                 "vision": {
-                    "provider": "AUXILIARY_VISION_PROVIDER",
-                    "model": "AUXILIARY_VISION_MODEL",
-                    "base_url": "AUXILIARY_VISION_BASE_URL",
-                    "api_key": "AUXILIARY_VISION_API_KEY",
-                },
-                "web_extract": {
-                    "provider": "AUXILIARY_WEB_EXTRACT_PROVIDER",
-                    "model": "AUXILIARY_WEB_EXTRACT_MODEL",
-                    "base_url": "AUXILIARY_WEB_EXTRACT_BASE_URL",
-                    "api_key": "AUXILIARY_WEB_EXTRACT_API_KEY",
-                },
-                "approval": {
-                    "provider": "AUXILIARY_APPROVAL_PROVIDER",
-                    "model": "AUXILIARY_APPROVAL_MODEL",
-                    "base_url": "AUXILIARY_APPROVAL_BASE_URL",
-                    "api_key": "AUXILIARY_APPROVAL_API_KEY",
-                },
-            }
+                "provider": "AUXILIARY_VISION_PROVIDER",
+                "model": "AUXILIARY_VISION_MODEL",
+                "base_url": "AUXILIARY_VISION_BASE_URL",
+                "api_key": "AUXILIARY_VISION_API_KEY",
+                "api_mode": "AUXILIARY_VISION_API_MODE",
+            },
+            "web_extract": {
+                "provider": "AUXILIARY_WEB_EXTRACT_PROVIDER",
+                "model": "AUXILIARY_WEB_EXTRACT_MODEL",
+                "base_url": "AUXILIARY_WEB_EXTRACT_BASE_URL",
+                "api_key": "AUXILIARY_WEB_EXTRACT_API_KEY",
+                "api_mode": "AUXILIARY_WEB_EXTRACT_API_MODE",
+            },
+            "approval": {
+                "provider": "AUXILIARY_APPROVAL_PROVIDER",
+                "model": "AUXILIARY_APPROVAL_MODEL",
+                "base_url": "AUXILIARY_APPROVAL_BASE_URL",
+                "api_key": "AUXILIARY_APPROVAL_API_KEY",
+                "api_mode": "AUXILIARY_APPROVAL_API_MODE",
+            },
+        }
             for _task_key, _env_map in _aux_task_env.items():
                 _task_cfg = _auxiliary_cfg.get(_task_key, {})
                 if not isinstance(_task_cfg, dict):
@@ -169,6 +172,7 @@ if _config_path.exists():
                 _model = str(_task_cfg.get("model", "")).strip()
                 _base_url = str(_task_cfg.get("base_url", "")).strip()
                 _api_key = str(_task_cfg.get("api_key", "")).strip()
+                _api_mode = str(_task_cfg.get("api_mode", "")).strip()
                 if _prov and _prov != "auto":
                     os.environ[_env_map["provider"]] = _prov
                 if _model:
@@ -177,6 +181,8 @@ if _config_path.exists():
                     os.environ[_env_map["base_url"]] = _base_url
                 if _api_key:
                     os.environ[_env_map["api_key"]] = _api_key
+                if _api_mode:
+                    os.environ[_env_map["api_mode"]] = _api_mode
         _agent_cfg = _cfg.get("agent", {})
         if _agent_cfg and isinstance(_agent_cfg, dict):
             if "max_turns" in _agent_cfg:

@@ -279,12 +279,14 @@ def load_cli_config() -> Dict[str, Any]:
                 "model": "",
                 "base_url": "",
                 "api_key": "",
+                "api_mode": "",
             },
             "web_extract": {
                 "provider": "auto",
                 "model": "",
                 "base_url": "",
                 "api_key": "",
+                "api_mode": "",
             },
         },
         "delegation": {
@@ -461,25 +463,28 @@ def load_cli_config() -> Dict[str, Any]:
     auxiliary_config = defaults.get("auxiliary", {})
     auxiliary_task_env = {
         # config key → env var mapping
-        "vision": {
-            "provider": "AUXILIARY_VISION_PROVIDER",
-            "model": "AUXILIARY_VISION_MODEL",
-            "base_url": "AUXILIARY_VISION_BASE_URL",
-            "api_key": "AUXILIARY_VISION_API_KEY",
-        },
-        "web_extract": {
-            "provider": "AUXILIARY_WEB_EXTRACT_PROVIDER",
-            "model": "AUXILIARY_WEB_EXTRACT_MODEL",
-            "base_url": "AUXILIARY_WEB_EXTRACT_BASE_URL",
-            "api_key": "AUXILIARY_WEB_EXTRACT_API_KEY",
-        },
-        "approval": {
-            "provider": "AUXILIARY_APPROVAL_PROVIDER",
-            "model": "AUXILIARY_APPROVAL_MODEL",
-            "base_url": "AUXILIARY_APPROVAL_BASE_URL",
-            "api_key": "AUXILIARY_APPROVAL_API_KEY",
-        },
-    }
+            "vision": {
+                "provider": "AUXILIARY_VISION_PROVIDER",
+                "model": "AUXILIARY_VISION_MODEL",
+                "base_url": "AUXILIARY_VISION_BASE_URL",
+                "api_key": "AUXILIARY_VISION_API_KEY",
+                "api_mode": "AUXILIARY_VISION_API_MODE",
+            },
+            "web_extract": {
+                "provider": "AUXILIARY_WEB_EXTRACT_PROVIDER",
+                "model": "AUXILIARY_WEB_EXTRACT_MODEL",
+                "base_url": "AUXILIARY_WEB_EXTRACT_BASE_URL",
+                "api_key": "AUXILIARY_WEB_EXTRACT_API_KEY",
+                "api_mode": "AUXILIARY_WEB_EXTRACT_API_MODE",
+            },
+            "approval": {
+                "provider": "AUXILIARY_APPROVAL_PROVIDER",
+                "model": "AUXILIARY_APPROVAL_MODEL",
+                "base_url": "AUXILIARY_APPROVAL_BASE_URL",
+                "api_key": "AUXILIARY_APPROVAL_API_KEY",
+                "api_mode": "AUXILIARY_APPROVAL_API_MODE",
+            },
+        }
     
     for task_key, env_map in auxiliary_task_env.items():
         task_cfg = auxiliary_config.get(task_key, {})
@@ -489,6 +494,7 @@ def load_cli_config() -> Dict[str, Any]:
         model = str(task_cfg.get("model", "")).strip()
         base_url = str(task_cfg.get("base_url", "")).strip()
         api_key = str(task_cfg.get("api_key", "")).strip()
+        api_mode = str(task_cfg.get("api_mode", "")).strip()
         if prov and prov != "auto":
             os.environ[env_map["provider"]] = prov
         if model:
@@ -497,6 +503,8 @@ def load_cli_config() -> Dict[str, Any]:
             os.environ[env_map["base_url"]] = base_url
         if api_key:
             os.environ[env_map["api_key"]] = api_key
+        if api_mode:
+            os.environ[env_map["api_mode"]] = api_mode
     
     # Security settings
     security_config = defaults.get("security", {})
