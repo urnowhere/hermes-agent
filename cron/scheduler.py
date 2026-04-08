@@ -236,6 +236,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         "wecom": Platform.WECOM,
         "email": Platform.EMAIL,
         "sms": Platform.SMS,
+        "irc": Platform.IRC,
     }
     platform = platform_map.get(platform_name.lower())
     if not platform:
