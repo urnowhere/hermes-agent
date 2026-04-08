@@ -330,8 +330,15 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         if match:
             return match.group(1), None, True
     if platform_name == "simplex":
-        # SimpleX chat_id is either a numeric contact ID or "group:<N>"
+        # SimpleX chat_id is either a numeric contact ID or "group:<N>".
+        # The agent sometimes appends a base64 invitation-hash suffix
+        # (e.g. "group:1:bGlYMXIxRjNTQ3hqZHIzZg==") when it saves jobs —
+        # strip anything after the numeric group ID so the SimpleX CLI
+        # sees a clean "#<N>" reference.
         if target_ref.startswith("group:"):
+            parts = target_ref.split(":", 2)
+            if len(parts) >= 2 and parts[1].lstrip("-").isdigit():
+                return f"group:{parts[1]}", None, True
             return target_ref, None, True
         if target_ref.lstrip("-").isdigit():
             return target_ref, None, True
