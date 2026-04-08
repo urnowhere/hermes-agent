@@ -286,6 +286,15 @@ If the Nowledge Mem desktop app is installed on the same machine, `nmem` is alre
 pip install nmem-cli
 ```
 
+For remote Mem, configure the machine running Hermes with:
+
+```bash
+nmem config client set url https://your-server:14242
+nmem config client set api-key your-key
+```
+
+That writes the shared local client config used by `nmem`. It is separate from server-side Access Anywhere or host bind settings on the Mem machine.
+
 **Config:** `$HERMES_HOME/nowledge-mem.json`
 
 | Key | Default | Description |

@@ -71,6 +71,16 @@ $HERMES_HOME/nowledge-mem.json
 
 Server URL and API key are managed by `nmem`, not the provider.
 
+For remote Mem, configure the machine running Hermes with:
+
+```bash
+nmem config client set url https://your-server:14242
+nmem config client set api-key your-key
+```
+
+That writes the shared local client config `nmem` reads. It is separate from
+server-side Access Anywhere or bind/allowlist settings on the Mem host.
+
 ## Verify
 
 Ask Hermes:
