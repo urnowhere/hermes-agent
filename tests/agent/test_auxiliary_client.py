@@ -238,6 +238,34 @@ class TestAnthropicOAuthFlag:
         assert mock_build.call_args.args[0] == "sk-ant-oat01-pooled"
 
 
+def test_resolve_provider_client_raw_codex_uses_runtime_resolved_base_url(monkeypatch):
+    class DummyClient:
+        def __init__(self, *, api_key, base_url):
+            self.api_key = api_key
+            self.base_url = base_url
+
+    monkeypatch.setattr("agent.auxiliary_client.OpenAI", DummyClient)
+    monkeypatch.setattr(
+        "hermes_cli.auth.resolve_codex_runtime_credentials",
+        lambda refresh_if_expiring=True: {
+            "api_key": "codex-runtime-token",
+            "base_url": "https://runtime.example/codex",
+        },
+    )
+
+    client, model = resolve_provider_client(
+        "openai-codex",
+        None,
+        async_mode=False,
+        raw_codex=True,
+    )
+
+    assert isinstance(client, DummyClient)
+    assert client.api_key == "codex-runtime-token"
+    assert client.base_url == "https://runtime.example/codex"
+    assert model == "gpt-5.2-codex"
+
+
 class TestExpiredCodexFallback:
     """Test that expired Codex tokens don't block the auto chain."""
 
