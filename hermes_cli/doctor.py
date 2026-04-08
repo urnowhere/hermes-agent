@@ -243,7 +243,17 @@ def run_doctor(args):
             check_ok(name)
         except ImportError:
             check_fail(name, "(missing)")
-            issues.append(f"Install {name}: {_python_install_cmd()} {module}")
+            if _is_termux():
+                issues.append(
+                    f"Repair Hermes project environment ({name} missing): "
+                    f"cd {PROJECT_ROOT} && "
+                    "python -m pip install -e '.[termux]' -c constraints-termux.txt"
+                )
+            else:
+                issues.append(
+                    f"Repair Hermes project environment ({name} missing): "
+                    f"cd {PROJECT_ROOT} && uv sync --locked --extra all"
+                )
     
     for module, name in optional_packages:
         try:
@@ -748,12 +758,16 @@ def run_doctor(args):
         _cmd_link = _cmd_link_dir / "hermes"
 
         if _venv_bin is None:
+            if _is_termux_env:
+                _repair_cmd = "python -m pip install -e '.[termux]' -c constraints-termux.txt"
+            else:
+                _repair_cmd = "uv sync --locked --extra all"
             check_warn(
                 "Venv entry point not found",
-                "(hermes not in venv/bin/ or .venv/bin/ — reinstall with pip install -e '.[all]')"
+                f"(hermes not in venv/bin/ or .venv/bin/ — reinstall with {_repair_cmd})"
             )
             manual_issues.append(
-                f"Reinstall entry point: cd {PROJECT_ROOT} && source venv/bin/activate && pip install -e '.[all]'"
+                f"Reinstall entry point: cd {PROJECT_ROOT} && {_repair_cmd}"
             )
         else:
             check_ok(f"Venv entry point exists ({_venv_bin.relative_to(PROJECT_ROOT)})")

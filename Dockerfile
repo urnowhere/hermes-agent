@@ -72,8 +72,7 @@ RUN chmod -R a+rX /opt/hermes
 # If HERMES_UID is unset, the entrypoint drops to the default hermes user (10000).
 
 # ---------- Python virtualenv ----------
-RUN uv venv && \
-    uv pip install --no-cache-dir -e ".[all]"
+RUN uv sync --locked --extra all --no-dev
 
 # ---------- Runtime ----------
 ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist

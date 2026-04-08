@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+import hermes_cli.main as cli_main
 from hermes_cli.main import cmd_update, PROJECT_ROOT
 
 
@@ -37,6 +38,12 @@ def _make_run_side_effect(branch="main", verify_ok=True, commit_count="0"):
 @pytest.fixture
 def mock_args():
     return SimpleNamespace()
+
+
+@pytest.fixture(autouse=True)
+def _skip_dependency_sync(monkeypatch):
+    """These tests focus on update branch routing, not dependency syncing."""
+    monkeypatch.setattr(cli_main, "_sync_project_dependencies_for_update", lambda: None)
 
 
 class TestCmdUpdateBranchFallback:

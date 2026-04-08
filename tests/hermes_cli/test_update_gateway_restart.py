@@ -113,9 +113,27 @@ def _make_run_side_effect(
     return side_effect
 
 
+def _gateway_pid_sequence(*responses):
+    """Return each PID response in order, then repeat the last response."""
+    calls = {"count": 0}
+
+    def side_effect(*_args, **_kwargs):
+        index = min(calls["count"], len(responses) - 1)
+        calls["count"] += 1
+        return list(responses[index])
+
+    return side_effect
+
+
 @pytest.fixture
 def mock_args():
     return SimpleNamespace()
+
+
+@pytest.fixture(autouse=True)
+def _skip_dependency_sync(monkeypatch):
+    """Gateway restart tests focus on restart routing, not dependency syncing."""
+    monkeypatch.setattr(cli_main, "_sync_project_dependencies_for_update", lambda: None)
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +177,7 @@ class TestLaunchdPlistPath:
     def test_plist_path_includes_venv_bin(self):
         plist = gateway_cli.generate_launchd_plist()
         detected = gateway_cli._detect_venv_dir()
-        venv_bin = str(detected / "bin") if detected else str(gateway_cli.PROJECT_ROOT / "venv" / "bin")
+        venv_bin = str(detected / "bin") if detected else str(gateway_cli.PROJECT_ROOT / ".venv" / "bin")
         assert venv_bin in plist
 
     def test_plist_path_starts_with_venv_bin(self):
@@ -170,7 +188,7 @@ class TestLaunchdPlistPath:
                 path_value = lines[i + 1].strip()
                 path_value = path_value.replace("<string>", "").replace("</string>", "")
                 detected = gateway_cli._detect_venv_dir()
-                venv_bin = str(detected / "bin") if detected else str(gateway_cli.PROJECT_ROOT / "venv" / "bin")
+                venv_bin = str(detected / "bin") if detected else str(gateway_cli.PROJECT_ROOT / ".venv" / "bin")
                 assert path_value.startswith(venv_bin + ":")
                 break
         else:
@@ -196,7 +214,7 @@ class TestLaunchdPlistPath:
 
     def test_plist_path_deduplicates_venv_bin_when_already_in_path(self, monkeypatch):
         detected = gateway_cli._detect_venv_dir()
-        venv_bin = str(detected / "bin") if detected else str(gateway_cli.PROJECT_ROOT / "venv" / "bin")
+        venv_bin = str(detected / "bin") if detected else str(gateway_cli.PROJECT_ROOT / ".venv" / "bin")
         monkeypatch.setenv("PATH", f"{venv_bin}:/usr/bin:/bin")
         plist = gateway_cli.generate_launchd_plist()
         lines = plist.splitlines()
@@ -415,7 +433,7 @@ class TestCmdUpdateLaunchdRestart:
             pid=12345,
         )
 
-        with patch.object(gateway_cli, "find_gateway_pids", return_value=[12345]), \
+        with patch.object(gateway_cli, "find_gateway_pids", side_effect=_gateway_pid_sequence([12345], [])), \
              patch.object(gateway_cli, "find_profile_gateway_processes", return_value=[process]), \
              patch.object(gateway_cli, "launch_detached_profile_gateway_restart", return_value=True) as restart, \
              patch.object(gateway_cli, "_graceful_restart_via_sigusr1", return_value=True) as graceful, \
@@ -453,7 +471,7 @@ class TestCmdUpdateLaunchdRestart:
             pid=12345,
         )
 
-        with patch.object(gateway_cli, "find_gateway_pids", return_value=[12345]), \
+        with patch.object(gateway_cli, "find_gateway_pids", side_effect=_gateway_pid_sequence([12345], [])), \
              patch.object(gateway_cli, "find_profile_gateway_processes", return_value=[process]), \
              patch.object(gateway_cli, "launch_detached_profile_gateway_restart", return_value=True) as restart, \
              patch.object(gateway_cli, "_graceful_restart_via_sigusr1", return_value=False) as graceful, \
@@ -872,7 +890,12 @@ class TestServicePidExclusion:
             launchctl_loaded=True,
         )
 
+        find_calls = {"count": 0}
+
         def fake_find(exclude_pids=None, all_profiles=False):
+            find_calls["count"] += 1
+            if find_calls["count"] > 1:
+                return []
             _exclude = exclude_pids or set()
             return [p for p in [SERVICE_PID, MANUAL_PID] if p not in _exclude]
 
