@@ -972,14 +972,17 @@ class SlackAdapter(BasePlatformAdapter):
             reply_to_message_id=thread_ts if thread_ts != ts else None,
         )
 
-        # Add 👀 reaction to acknowledge receipt
-        await self._add_reaction(channel_id, ts, "eyes")
+        # Add 👀 reaction to acknowledge receipt (controlled by enable_reactions config)
+        enable_reactions = self.config.extra.get("enable_reactions", True)
+        if enable_reactions:
+            await self._add_reaction(channel_id, ts, "eyes")
 
         await self.handle_message(msg_event)
 
         # Replace 👀 with ✅ when done
-        await self._remove_reaction(channel_id, ts, "eyes")
-        await self._add_reaction(channel_id, ts, "white_check_mark")
+        if enable_reactions:
+            await self._remove_reaction(channel_id, ts, "eyes")
+            await self._add_reaction(channel_id, ts, "white_check_mark")
 
     # ----- Approval button support (Block Kit) -----
 
