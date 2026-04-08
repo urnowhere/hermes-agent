@@ -163,3 +163,16 @@ def test_handle_tool_call_returns_structured_error(monkeypatch, tmp_path):
     payload = json.loads(provider.handle_tool_call("nmem_save", {"content": "x"}))
     assert payload["success"] is False
     assert "nmem_save failed" in payload["error"]
+
+
+def test_handle_tool_call_falls_back_without_registry_helpers(monkeypatch, tmp_path):
+    monkeypatch.setattr(provider_module, "NowledgeMemClient", FakeClient)
+    monkeypatch.setattr(provider_module, "_registry_tool_error", None)
+    monkeypatch.setattr(provider_module, "_registry_tool_result", None)
+
+    provider = NowledgeMemProvider()
+    provider.initialize("session-1", hermes_home=str(tmp_path), platform="cli")
+
+    payload = json.loads(provider.handle_tool_call("nmem_search", {"query": "release"}))
+    assert payload["success"] is True
+    assert payload["memories"][0]["title"] == "Shipping focus"
