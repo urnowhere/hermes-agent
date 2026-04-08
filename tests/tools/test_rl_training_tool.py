@@ -5,11 +5,13 @@ terminates processes, and handles edge cases on failure paths.
 Inspired by PR #715 (0xbyt4).
 """
 
-from unittest.mock import MagicMock
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from tools.rl_training_tool import RunState, _stop_training_run
+from tools.rl_training_tool import RunState, _stop_training_run, _spawn_training_run
 
 
 def _make_run_state(**overrides) -> RunState:
@@ -140,3 +142,52 @@ class TestStopTrainingRunStatus:
         state = _make_run_state()
         _stop_training_run(state)  # should not raise
         assert state.status == "pending"
+
+
+class TestSpawnTrainingRunEnvSanitization:
+    @pytest.mark.asyncio
+    async def test_trainer_env_preserves_tinker_and_wandb_only(self, tmp_path, monkeypatch):
+        captured_envs = []
+
+        class FakeProcess:
+            def __init__(self):
+                self.returncode = 0
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                return None
+
+        def fake_popen(cmd, **kwargs):
+            captured_envs.append(kwargs.get("env"))
+            return FakeProcess()
+
+        monkeypatch.setattr("tools.rl_training_tool.LOGS_DIR", tmp_path / "logs")
+        monkeypatch.setattr(
+            "tools.rl_training_tool._environments",
+            [SimpleNamespace(name="test_env", file_path=tmp_path / "env.py")],
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-should-not-leak")
+        monkeypatch.setenv("TINKER_API_KEY", "tinker-key")
+        monkeypatch.setenv("WANDB_API_KEY", "wandb-key")
+
+        state = _make_run_state(environment="test_env")
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("run: test\n")
+
+        def fake_create_task(coro):
+            coro.close()
+            return MagicMock()
+
+        with (
+            patch("tools.rl_training_tool.subprocess.Popen", side_effect=fake_popen),
+            patch("tools.rl_training_tool.asyncio.sleep", new=AsyncMock()),
+            patch("tools.rl_training_tool.asyncio.create_task", side_effect=fake_create_task),
+        ):
+            await _spawn_training_run(state, config_path)
+
+        trainer_env = captured_envs[1]
+        assert trainer_env["TINKER_API_KEY"] == "tinker-key"
+        assert trainer_env["WANDB_API_KEY"] == "wandb-key"
+        assert "OPENAI_API_KEY" not in trainer_env

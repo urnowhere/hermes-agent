@@ -66,6 +66,7 @@ from typing import Dict, Any, Optional, List
 from pathlib import Path
 from agent.auxiliary_client import call_llm
 from hermes_constants import get_hermes_home
+from tools.environments.local import _sanitize_subprocess_env
 
 try:
     from tools.website_policy import check_website_access
@@ -894,7 +895,17 @@ def _run_browser_command(
         logger.debug("browser cmd=%s task=%s socket_dir=%s (%d chars)",
                      command, task_id, task_socket_dir, len(task_socket_dir))
         
-        browser_env = {**os.environ}
+        browser_env = _sanitize_subprocess_env(
+            os.environ,
+            {
+                "_HERMES_FORCE_BROWSERBASE_API_KEY": os.getenv("BROWSERBASE_API_KEY", ""),
+                "_HERMES_FORCE_BROWSERBASE_PROJECT_ID": os.getenv("BROWSERBASE_PROJECT_ID", ""),
+                "_HERMES_FORCE_BROWSER_USE_API_KEY": os.getenv("BROWSER_USE_API_KEY", ""),
+                "_HERMES_FORCE_FIRECRAWL_API_KEY": os.getenv("FIRECRAWL_API_KEY", ""),
+                "_HERMES_FORCE_FIRECRAWL_API_URL": os.getenv("FIRECRAWL_API_URL", ""),
+                "_HERMES_FORCE_FIRECRAWL_BROWSER_TTL": os.getenv("FIRECRAWL_BROWSER_TTL", ""),
+            },
+        )
 
         # Ensure PATH includes Hermes-managed Node first, Homebrew versioned
         # node dirs (for macOS ``brew install node@24``), then standard system dirs.
