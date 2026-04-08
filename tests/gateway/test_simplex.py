@@ -555,20 +555,20 @@ class TestSimplexContactRequest:
 class TestSimplexCorrelation:
     @pytest.mark.asyncio
     async def test_correlated_response_resolves_future(self, monkeypatch):
+        """An event whose corrId matches a pending response should resolve
+        the future with the inner resp dict and clear the pending entry."""
         import asyncio
 
         adapter = _make_simplex_adapter(monkeypatch)
-        loop = asyncio.get_event_loop()
-        fut = loop.create_future()
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
         adapter._pending_responses["corr_1"] = fut
 
         raw_event = {"corrId": "corr_1", "resp": {"type": "newChatItems"}}
-        await adapter._handle_event(raw_event.get("resp", {}))
+        await adapter._handle_event(raw_event)
 
-        # corrId handling is in the outer wrapper, let's test it directly
-        # The _handle_event receives resp, but corrId is checked in _ws_listener
-        # Actually, looking at the code, corrId IS checked in _handle_event
-        # Let me re-read...
+        assert fut.done()
+        assert fut.result() == {"type": "newChatItems"}
+        assert "corr_1" not in adapter._pending_responses
 
     @pytest.mark.asyncio
     async def test_unhandled_event_type_ignored(self, monkeypatch):
@@ -598,6 +598,8 @@ class TestSimplexSend:
 
     @pytest.mark.asyncio
     async def test_send_group_format(self, monkeypatch):
+        """Groups use the structured ``/_send #<id> json [...]`` form so
+        delivery is keyed on the numeric group ID, not a display name."""
         adapter = _make_simplex_adapter(monkeypatch)
         adapter._send_command = AsyncMock(return_value={"type": "newChatItems"})
 
@@ -605,8 +607,10 @@ class TestSimplexSend:
         assert result.success is True
 
         cmd = adapter._send_command.call_args[0][0]
-        assert cmd == "#99 Hello group!"
+        assert cmd.startswith("/_send #99 json ")
         assert "#group:" not in cmd
+        payload = json.loads(cmd[len("/_send #99 json "):])
+        assert payload == [{"msgContent": {"type": "text", "text": "Hello group!"}}]
 
     @pytest.mark.asyncio
     async def test_send_error_response(self, monkeypatch):
@@ -773,62 +777,54 @@ class TestSimplexSendMessage:
         assert Platform.SIMPLEX.value == "simplex"
 
     @pytest.mark.asyncio
-    async def test_send_simplex_standalone_dm_format(self, monkeypatch):
-        """The standalone _send_simplex should use @<id> for DMs."""
+    async def test_send_simplex_standalone_dm(self, monkeypatch):
+        """_send_simplex routes text chunks through SimplexAdapter.send() for DMs."""
         from tools.send_message_tool import _send_simplex
+        from gateway.platforms.base import SendResult
 
-        mock_ws = AsyncMock()
-        mock_ws.send = AsyncMock()
-        mock_ws.recv = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "corrId": "test",
-                    "resp": {"type": "newChatItems"},
-                }
-            )
-        )
+        mock_adapter = MagicMock()
+        mock_adapter.connect = AsyncMock(return_value=True)
+        mock_adapter.disconnect = AsyncMock()
+        mock_adapter.send = AsyncMock(return_value=SendResult(success=True))
+        mock_adapter._ws = object()  # simulate connected WebSocket
 
-        with patch("websockets.connect") as mock_connect:
-            mock_connect.return_value.__aenter__ = AsyncMock(return_value=mock_ws)
-            mock_connect.return_value.__aexit__ = AsyncMock(return_value=False)
-
+        with patch("gateway.platforms.simplex.SimplexAdapter", return_value=mock_adapter):
             result = await _send_simplex(
                 {"ws_url": "ws://localhost:5225"},
                 "42",
                 "Hello!",
+                ["Hello!"],
+                [],
             )
 
         assert result.get("success") is True
-        sent_payload = json.loads(mock_ws.send.call_args[0][0])
-        assert sent_payload["cmd"] == "@42 Hello!"
+        mock_adapter.send.assert_awaited_once_with("42", "Hello!")
 
     @pytest.mark.asyncio
-    async def test_send_simplex_standalone_group_format(self, monkeypatch):
-        """The standalone _send_simplex should use #<id> for groups (not #group:<id>)."""
+    async def test_send_simplex_standalone_group(self, monkeypatch):
+        """_send_simplex passes a group chat_id through to SimplexAdapter.send() unchanged.
+
+        The adapter itself is responsible for turning ``group:99`` into the
+        SimpleX CLI's ``#99`` group reference — that's covered by
+        ``TestSimplexSend.test_send_group_format``.
+        """
         from tools.send_message_tool import _send_simplex
+        from gateway.platforms.base import SendResult
 
-        mock_ws = AsyncMock()
-        mock_ws.send = AsyncMock()
-        mock_ws.recv = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "corrId": "test",
-                    "resp": {"type": "newChatItems"},
-                }
-            )
-        )
+        mock_adapter = MagicMock()
+        mock_adapter.connect = AsyncMock(return_value=True)
+        mock_adapter.disconnect = AsyncMock()
+        mock_adapter.send = AsyncMock(return_value=SendResult(success=True))
+        mock_adapter._ws = object()
 
-        with patch("websockets.connect") as mock_connect:
-            mock_connect.return_value.__aenter__ = AsyncMock(return_value=mock_ws)
-            mock_connect.return_value.__aexit__ = AsyncMock(return_value=False)
-
+        with patch("gateway.platforms.simplex.SimplexAdapter", return_value=mock_adapter):
             result = await _send_simplex(
                 {"ws_url": "ws://localhost:5225"},
                 "group:99",
                 "Hello group!",
+                ["Hello group!"],
+                [],
             )
 
         assert result.get("success") is True
-        sent_payload = json.loads(mock_ws.send.call_args[0][0])
-        assert sent_payload["cmd"] == "#99 Hello group!"
-        assert "#group:" not in sent_payload["cmd"]
+        mock_adapter.send.assert_awaited_once_with("group:99", "Hello group!")
