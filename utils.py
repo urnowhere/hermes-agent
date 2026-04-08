@@ -2,6 +2,7 @@
 
 import json
 import os
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any, Union
@@ -110,7 +111,9 @@ def atomic_yaml_write(
     )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            yaml.dump(data, f, default_flow_style=default_flow_style, sort_keys=sort_keys)
+            yaml.dump(
+                data, f, default_flow_style=default_flow_style, sort_keys=sort_keys
+            )
             if extra_content:
                 f.write(extra_content)
             f.flush()
@@ -124,3 +127,53 @@ def atomic_yaml_write(
         except OSError:
             pass
         raise
+
+
+def rotate_config_backups(config_path: Union[str, Path], max_backups: int = 5) -> None:
+    """Rotate config file backups before a write operation.
+
+    Maintains a ring of backup files (.bak, .bak.1, .bak.2, ...) so the
+    previous config is always recoverable. Removes orphaned backups outside
+    the managed ring.
+
+    Args:
+        config_path: Path to the config file (e.g., config.yaml).
+        max_backups: Maximum number of backups to retain (default 5).
+                     Files are rotated: .bak.4 -> .bak.5, ..., .bak -> .bak.1
+    """
+    path = Path(config_path)
+    if not path.exists():
+        return
+
+    base = path.parent
+    stem = path.stem  # "config" for "config.yaml"
+    ext = path.suffix  # ".yaml"
+
+    # Rotate existing backups: .bak.4 -> .bak.5, ..., .bak -> .bak.1
+    for i in range(max_backups - 1, 0, -1):
+        src = base / f"{stem}{ext}.bak.{i}"
+        dst = base / f"{stem}{ext}.bak.{i + 1}"
+        if src.exists():
+            try:
+                os.replace(src, dst)
+            except OSError:
+                pass
+
+    # Move current config to .bak.1
+    dst = base / f"{stem}{ext}.bak.1"
+    try:
+        os.replace(path, dst)
+        # Set owner-only permissions since config may contain secrets
+        os.chmod(dst, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
+
+    # Cleanup orphaned backups outside the managed ring
+    for orphan in base.glob(f"{stem}{ext}.bak.*"):
+        try:
+            suffix = orphan.name.split(".bak.")[-1]
+            num = int(suffix)
+            if num > max_backups:
+                orphan.unlink()
+        except (ValueError, OSError):
+            pass
