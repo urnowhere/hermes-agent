@@ -201,6 +201,31 @@ class MemoryManager:
         self._tool_to_provider: Dict[str, MemoryProvider] = {}
         self._has_external: bool = False  # True once a non-builtin provider is added
 
+    def _index_provider_tools(self, provider: MemoryProvider) -> None:
+        """Index tool names -> provider for dispatch routing.
+
+        Providers may expose their tool schemas before initialize() or only
+        after initialize() succeeds. Re-indexing must therefore be safe and
+        idempotent.
+        """
+        for schema in provider.get_tool_schemas():
+            tool_name = schema.get("name", "")
+            if not tool_name:
+                continue
+            existing = self._tool_to_provider.get(tool_name)
+            if existing is None:
+                self._tool_to_provider[tool_name] = provider
+                continue
+            if existing is provider:
+                continue
+            logger.warning(
+                "Memory tool name conflict: '%s' already registered by %s, "
+                "ignoring from %s",
+                tool_name,
+                existing.name,
+                provider.name,
+            )
+
     # -- Registration --------------------------------------------------------
 
     def add_provider(self, provider: MemoryProvider) -> None:
@@ -229,19 +254,8 @@ class MemoryManager:
 
         self._providers.append(provider)
 
-        # Index tool names → provider for routing
-        for schema in provider.get_tool_schemas():
-            tool_name = schema.get("name", "")
-            if tool_name and tool_name not in self._tool_to_provider:
-                self._tool_to_provider[tool_name] = provider
-            elif tool_name in self._tool_to_provider:
-                logger.warning(
-                    "Memory tool name conflict: '%s' already registered by %s, "
-                    "ignoring from %s",
-                    tool_name,
-                    self._tool_to_provider[tool_name].name,
-                    provider.name,
-                )
+        # Index tool names -> provider for routing.
+        self._index_provider_tools(provider)
 
         logger.info(
             "Memory provider '%s' registered (%d tools)",
@@ -550,6 +564,7 @@ class MemoryManager:
         for provider in self._providers:
             try:
                 provider.initialize(session_id=session_id, **kwargs)
+                self._index_provider_tools(provider)
             except Exception as e:
                 logger.warning(
                     "Memory provider '%s' initialize failed: %s",

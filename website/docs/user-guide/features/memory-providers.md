@@ -1,12 +1,12 @@
 ---
 sidebar_position: 4
 title: "Memory Providers"
-description: "External memory provider plugins — Honcho, OpenViking, Mem0, Hindsight, Holographic, RetainDB, ByteRover, Supermemory"
+description: "External memory provider plugins — Honcho, Nowledge Mem, OpenViking, Mem0, Hindsight, Holographic, RetainDB, ByteRover, Supermemory"
 ---
 
 # Memory Providers
 
-Hermes Agent ships with 8 external memory provider plugins that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md. Only **one** external provider can be active at a time — the built-in memory is always active alongside it.
+Hermes Agent ships with 9 external memory provider plugins that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md. Only **one** external provider can be active at a time — the built-in memory is always active alongside it.
 
 ## Quick Start
 
@@ -22,7 +22,7 @@ Or set manually in `~/.hermes/config.yaml`:
 
 ```yaml
 memory:
-  provider: openviking   # or honcho, mem0, hindsight, holographic, retaindb, byterover, supermemory
+  provider: nowledge-mem   # or honcho, openviking, mem0, hindsight, holographic, retaindb, byterover, supermemory
 ```
 
 ## How It Works
@@ -257,6 +257,50 @@ See the [Honcho page](./honcho.md#observation-directional-vs-unified) for the fu
 
 See the [config reference](https://github.com/hermes-ai/hermes-agent/blob/main/plugins/memory/honcho/README.md) and [Honcho integration guide](https://docs.honcho.dev/v3/guides/integrations/hermes).
 
+
+---
+
+### Nowledge Mem
+
+Cross-tool knowledge graph memory shared across Hermes, Cursor, Claude Code, Codex, Gemini, and other Nowledge Mem integrations.
+
+| | |
+|---|---|
+| **Best for** | Durable knowledge that should stay available across multiple agent tools, not just Hermes |
+| **Requires** | Running Nowledge Mem app or server + `nmem` CLI |
+| **Data storage** | Local-first desktop app or remote self-hosted server |
+| **Cost** | Free local use / self-hosted |
+
+**Tools:** `nmem_search` (memory search), `nmem_save` (save durable knowledge), `nmem_update` (refine memory), `nmem_delete` (delete memory), `nmem_thread_search` (search conversations), `nmem_thread_messages` (fetch thread messages)
+
+**Setup:**
+```bash
+hermes memory setup    # select "nowledge-mem"
+# Or manually:
+hermes config set memory.provider nowledge-mem
+```
+
+If the Nowledge Mem desktop app is installed on the same machine, `nmem` is already bundled. Otherwise:
+
+```bash
+pip install nmem-cli
+```
+
+**Config:** `$HERMES_HOME/nowledge-mem.json`
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `timeout` | `30` | Request timeout in seconds |
+| `space` | `""` | Optional default space name for this Hermes provider |
+| `space_by_identity` | `""` | Optional JSON object mapping Hermes identities to named spaces |
+| `space_template` | `""` | Optional template like `research-{identity}` when `space` is empty |
+
+**Key features:**
+- Working Memory injected into the system prompt
+- Search-backed prefetch before each turn
+- Hermes user-profile writes mirrored into cross-tool memory
+- Cleaned Hermes transcripts captured as Mem threads when the session actually ends
+- Conversation thread search alongside durable memories
 
 ---
 
@@ -526,7 +570,12 @@ echo 'SUPERMEMORY_API_KEY=***' >> ~/.hermes/.env
 
 | Provider | Storage | Cost | Tools | Dependencies | Unique Feature |
 |----------|---------|------|-------|-------------|----------------|
+<<<<<<< HEAD
 | **Honcho** | Cloud | Paid | 5 | `honcho-ai` | Dialectic user modeling + session-scoped context |
+=======
+| **Honcho** | Cloud | Paid | 4 | `honcho-ai` | Dialectic user modeling |
+| **Nowledge Mem** | Local/Self-hosted | Free | 6 | `nmem` CLI | Cross-tool shared memory + Working Memory |
+>>>>>>> d703cdd5 (feat(memory): add Nowledge Mem memory provider)
 | **OpenViking** | Self-hosted | Free | 5 | `openviking` + server | Filesystem hierarchy + tiered loading |
 | **Mem0** | Cloud | Paid | 3 | `mem0ai` | Server-side LLM extraction |
 | **Hindsight** | Cloud/Local | Free/Paid | 3 | `hindsight-client` | Knowledge graph + reflect synthesis |
@@ -540,7 +589,7 @@ echo 'SUPERMEMORY_API_KEY=***' >> ~/.hermes/.env
 Each provider's data is isolated per [profile](/docs/user-guide/profiles):
 
 - **Local storage providers** (Holographic, ByteRover) use `$HERMES_HOME/` paths which differ per profile
-- **Config file providers** (Honcho, Mem0, Hindsight, Supermemory) store config in `$HERMES_HOME/` so each profile has its own credentials
+- **Config file providers** (Honcho, Nowledge Mem, Mem0, Hindsight, Supermemory) store config in `$HERMES_HOME/` so each profile has its own credentials
 - **Cloud providers** (RetainDB) auto-derive profile-scoped project names
 - **Env var providers** (OpenViking) are configured via each profile's `.env` file
 
