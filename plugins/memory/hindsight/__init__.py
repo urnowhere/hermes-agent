@@ -80,6 +80,18 @@ def _run_sync(coro, timeout: float = 120.0):
     return future.result(timeout=timeout)
 
 
+def _resolve_secret(config_value: str | None, env_var: str) -> str:
+    """Prefer env secrets when config only contains a redacted placeholder."""
+    candidates = [
+        str(config_value or "").strip(),
+        str(os.environ.get(env_var, "") or "").strip(),
+    ]
+    for candidate in candidates:
+        if candidate and set(candidate) != {"*"}:
+            return candidate
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Tool schemas
 # ---------------------------------------------------------------------------
@@ -254,7 +266,7 @@ class HindsightMemoryProvider(MemoryProvider):
                 self._client = HindsightEmbedded(
                     profile=self._config.get("profile", "hermes"),
                     llm_provider=self._config.get("llm_provider", ""),
-                    llm_api_key=self._config.get("llmApiKey") or os.environ.get("HINDSIGHT_LLM_API_KEY", ""),
+                    llm_api_key=_resolve_secret(self._config.get("llmApiKey"), "HINDSIGHT_LLM_API_KEY"),
                     llm_model=self._config.get("llm_model", ""),
                 )
             else:
@@ -311,7 +323,7 @@ class HindsightMemoryProvider(MemoryProvider):
                     # If the config changed and the daemon is running, stop it.
                     from pathlib import Path as _Path
                     profile_env = _Path.home() / ".hindsight" / "profiles" / f"{profile}.env"
-                    current_key = self._config.get("llmApiKey") or os.environ.get("HINDSIGHT_LLM_API_KEY", "")
+                    current_key = _resolve_secret(self._config.get("llmApiKey"), "HINDSIGHT_LLM_API_KEY")
                     current_provider = self._config.get("llm_provider", "")
                     current_model = self._config.get("llm_model", "")
 
