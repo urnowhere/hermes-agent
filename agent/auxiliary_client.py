@@ -1189,13 +1189,18 @@ def resolve_provider_client(
         if raw_codex:
             # Return the raw OpenAI client for callers that need direct
             # access to responses.stream() (e.g., the main agent loop).
-            codex_token = _read_codex_access_token()
+            from hermes_cli.auth import resolve_codex_runtime_credentials
+
+            codex_creds = resolve_codex_runtime_credentials(
+                refresh_if_expiring=True,
+            )
+            codex_token = codex_creds.get("api_key", "").strip()
             if not codex_token:
                 logger.warning("resolve_provider_client: openai-codex requested "
                                "but no Codex OAuth token found (run: hermes model)")
                 return None, None
             final_model = model or _CODEX_AUX_MODEL
-            raw_client = OpenAI(api_key=codex_token, base_url=_CODEX_AUX_BASE_URL)
+            raw_client = OpenAI(api_key=codex_token, base_url=codex_creds["base_url"])
             return (raw_client, final_model)
         # Standard path: wrap in CodexAuxiliaryClient adapter
         client, default = _try_codex()
