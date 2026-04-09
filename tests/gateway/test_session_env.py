@@ -1,6 +1,7 @@
 import os
 
 from gateway.config import Platform
+import gateway.run as gateway_run
 from gateway.run import GatewayRunner
 from gateway.session import SessionContext, SessionSource
 
@@ -43,3 +44,30 @@ def test_clear_session_env_removes_thread_id(monkeypatch):
     assert os.getenv("HERMES_SESSION_CHAT_ID") is None
     assert os.getenv("HERMES_SESSION_CHAT_NAME") is None
     assert os.getenv("HERMES_SESSION_THREAD_ID") is None
+
+
+def test_resolve_runtime_agent_kwargs_does_not_force_env_provider(monkeypatch):
+    captured = {}
+
+    def fake_resolve_runtime_provider(*, requested=None, **_kwargs):
+        captured["requested"] = requested
+        return {
+            "api_key": "test-key",
+            "base_url": "https://opencode.ai/zen/go/v1",
+            "provider": "opencode-go",
+            "api_mode": "chat_completions",
+            "command": None,
+            "args": [],
+        }
+
+    monkeypatch.setenv("HERMES_INFERENCE_PROVIDER", "openai-codex")
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        fake_resolve_runtime_provider,
+    )
+
+    resolved = gateway_run._resolve_runtime_agent_kwargs()
+
+    assert captured["requested"] is None
+    assert resolved["provider"] == "opencode-go"
+    assert resolved["api_key"] == "test-key"

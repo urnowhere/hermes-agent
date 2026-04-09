@@ -297,9 +297,11 @@ def _resolve_runtime_agent_kwargs() -> dict:
     )
 
     try:
-        runtime = resolve_runtime_provider(
-            requested=os.getenv("HERMES_INFERENCE_PROVIDER"),
-        )
+        # Keep gateway provider resolution aligned with the normal CLI path:
+        # explicit call-site overrides win, then config.yaml, then env vars.
+        # Passing HERMES_INFERENCE_PROVIDER here incorrectly let stale .env
+        # values override the saved config only in gateway sessions.
+        runtime = resolve_runtime_provider()
     except Exception as exc:
         raise RuntimeError(format_runtime_provider_error(exc)) from exc
 
