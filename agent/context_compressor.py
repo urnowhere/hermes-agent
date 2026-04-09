@@ -55,17 +55,19 @@ class ContextCompressor:
 
     Algorithm:
       1. Prune old tool results (cheap, no LLM call)
-      2. Protect head messages (system prompt + first exchange)
+      2. Protect head messages (system prompt only by default; configurable
+         via protect_first_n)
       3. Protect tail messages by token budget (most recent ~20K tokens)
       4. Summarize middle turns with structured LLM prompt
       5. On subsequent compactions, iteratively update the previous summary
+      6. If summary generation fails, abort compaction to prevent data loss
     """
 
     def __init__(
         self,
         model: str,
         threshold_percent: float = 0.50,
-        protect_first_n: int = 3,
+        protect_first_n: int = 1,
         protect_last_n: int = 20,
         summary_target_ratio: float = 0.20,
         quiet_mode: bool = False,
@@ -266,9 +268,8 @@ class ContextCompressor:
         inspired by Pi-mono and OpenCode. When a previous summary exists,
         generates an iterative update instead of summarizing from scratch.
 
-        Returns None if all attempts fail — the caller should drop
-        the middle turns without a summary rather than inject a useless
-        placeholder.
+        Returns None if all attempts fail — the caller should abort compaction
+        and return the original messages unchanged to prevent data loss.
         """
         now = time.monotonic()
         if now < self._summary_failure_cooldown_until:
@@ -577,7 +578,8 @@ Write only the summary body. Do not include any preamble or prefix."""
     # Main compression entry point
     # ------------------------------------------------------------------
 
-    def compress(self, messages: List[Dict[str, Any]], current_tokens: int = None) -> List[Dict[str, Any]]:
+    def compress(self, messages: List[Dict[str, Any]], current_tokens: int = None,
+                 force_truncation: bool = False) -> List[Dict[str, Any]]:
         """Compress conversation messages by summarizing middle turns.
 
         Algorithm:
@@ -586,6 +588,11 @@ Write only the summary body. Do not include any preamble or prefix."""
           3. Find tail boundary by token budget (~20K tokens of recent context)
           4. Summarize middle turns with structured LLM prompt
           5. On re-compression, iteratively update the previous summary
+
+        Args:
+            force_truncation: When True, drop middle turns even if summary
+                generation fails (last-resort fallback for API context overflow).
+                When False (default), abort compaction to prevent data loss.
 
         After compression, orphaned tool_call / tool_result pairs are cleaned
         up so the API never receives mismatched IDs.
@@ -655,6 +662,21 @@ Write only the summary body. Do not include any preamble or prefix."""
                     (msg.get("content") or "")
                     + "\n\n[Note: Some earlier conversation turns have been compacted into a handoff summary to preserve context space. The current session state may still reflect earlier work, so build on that summary and state rather than re-doing work.]"
                 )
+            elif msg.get("role") in ("user", "assistant") and not msg.get("tool_calls"):
+                # Mark preserved head messages as historical so the model
+                # doesn't re-address old user requests after compaction.
+                # Guard with isinstance() because some providers (e.g. OpenAI
+                # vision) send content as a list of dicts, not a plain string.
+                content = msg.get("content")
+                if (
+                    isinstance(content, str)
+                    and content
+                    and not content.startswith("[HISTORICAL")
+                ):
+                    msg["content"] = (
+                        "[HISTORICAL — from the start of this session, already addressed]\n"
+                        + content
+                    )
             compressed.append(msg)
 
         _merge_summary_into_tail = False
@@ -682,8 +704,33 @@ Write only the summary body. Do not include any preamble or prefix."""
             if not _merge_summary_into_tail:
                 compressed.append({"role": summary_role, "content": summary})
         else:
-            if not self.quiet_mode:
-                logger.debug("No summary model available — middle turns dropped without summary")
+            # Summary generation failed (provider down, timeout, rate limit, etc.).
+            #
+            # TWO MODES depending on force_truncation:
+            #
+            # force_truncation=False (default, normal compaction at ~50% threshold):
+            #   Abort compaction entirely and return the original messages unchanged.
+            #   The 50% threshold provides a large buffer before the API hard-rejects,
+            #   so aborting once is safe.  The next turn will retry compaction.
+            #
+            # force_truncation=True (hard fallback, API already rejected for overflow):
+            #   Drop the middle turns WITHOUT a summary.  Losing context is bad, but
+            #   crashing the conversation entirely is worse.  The model keeps the
+            #   system prompt + recent messages and can at least continue functioning.
+            if not force_truncation:
+                if not self.quiet_mode:
+                    logger.warning(
+                        "Summary generation failed — aborting compaction to prevent "
+                        "data loss.  Will retry on next turn."
+                    )
+                return messages
+            else:
+                if not self.quiet_mode:
+                    logger.warning(
+                        "Summary generation failed and force_truncation=True — "
+                        "dropping %d middle turns without summary (last resort).",
+                        len(turns_to_summarize),
+                    )
 
         for i in range(compress_end, n_messages):
             msg = messages[i].copy()
