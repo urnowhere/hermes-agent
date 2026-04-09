@@ -154,6 +154,7 @@ def _install_dependencies(provider_name: str) -> None:
         "mem0ai": "mem0",
         "hindsight-client": "hindsight_client",
         "hindsight-all": "hindsight",
+        "keep-skill": "keep",
     }
 
     # Check which packages are missing
@@ -368,14 +369,48 @@ def cmd_setup(args) -> None:
                     continue
 
             if choices and not is_secret:
-                # Use curses picker for choice fields
-                choice_items = [(c, "") for c in choices]
+                # Normalize choices: support both plain strings and dicts
+                # with label/value/hint/default keys.
+                normalized_choices = []
+                for choice in choices:
+                    if isinstance(choice, dict):
+                        label = choice.get("label") or choice.get("name") or str(choice.get("value", ""))
+                        hint = choice.get("description") or choice.get("hint") or ""
+                        value = choice.get("value", label)
+                        normalized_choices.append({
+                            "label": str(label),
+                            "desc": str(hint),
+                            "value": value,
+                            "default": bool(choice.get("default")),
+                        })
+                    else:
+                        normalized_choices.append({
+                            "label": str(choice),
+                            "desc": "",
+                            "value": choice,
+                            "default": False,
+                        })
+
+                # If no choices available, show the empty_message + hints
+                # and abort setup (provider cannot be configured).
+                if not normalized_choices:
+                    print(f"\n  ✗ {desc}")
+                    empty_message = field.get("empty_message")
+                    if empty_message:
+                        print(f"    {empty_message}")
+                    empty_hints = field.get("empty_hints") or []
+                    for hint in empty_hints:
+                        print(f"    - {hint}")
+                    print()
+                    return
+
+                choice_items = [(c["label"], c["desc"]) for c in normalized_choices]
                 current = provider_config.get(key, default)
-                current_idx = 0
-                if current and current in choices:
-                    current_idx = choices.index(current)
+                current_idx = next((i for i, c in enumerate(normalized_choices) if c["value"] == current), None)
+                if current_idx is None:
+                    current_idx = next((i for i, c in enumerate(normalized_choices) if c["default"]), 0)
                 sel = _curses_select(f"  {desc}", choice_items, default=current_idx)
-                provider_config[key] = choices[sel]
+                provider_config[key] = normalized_choices[sel]["value"]
             elif is_secret:
                 # Prompt for secret
                 existing = os.environ.get(env_var, "") if env_var else ""
@@ -401,11 +436,14 @@ def cmd_setup(args) -> None:
     config["memory"]["provider"] = name
     save_config(config)
 
-    # Write non-secret config to provider's native location
+    # Write non-secret config to provider's native location.
+    # save_config may print its own status messages.
     hermes_home = str(get_hermes_home())
+    provider_config_saved = False
     if provider_config and hasattr(provider, "save_config"):
         try:
             provider.save_config(provider_config, hermes_home)
+            provider_config_saved = True
         except Exception as e:
             print(f"  Failed to write provider config: {e}")
 
@@ -415,7 +453,7 @@ def cmd_setup(args) -> None:
 
     print(f"\n  Memory provider: {name}")
     print(f"  Activation saved to config.yaml")
-    if provider_config:
+    if provider_config_saved:
         print(f"  Provider config saved")
     if env_writes:
         print(f"  API keys saved to .env")
