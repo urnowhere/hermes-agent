@@ -23,6 +23,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+from hermes_constants import DEFAULT_COPILOT_ACP_BASE_URL, DEFAULT_QWEN_CODE_ACP_BASE_URL
+
 logger = logging.getLogger(__name__)
 
 
@@ -67,12 +69,18 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
     "copilot-acp": HermesOverlay(
         transport="codex_responses",
         auth_type="external_process",
-        base_url_override="acp://copilot",
+        base_url_override=DEFAULT_COPILOT_ACP_BASE_URL,
         base_url_env_var="COPILOT_ACP_BASE_URL",
     ),
     "github-copilot": HermesOverlay(
         transport="openai_chat",
         extra_env_vars=("COPILOT_GITHUB_TOKEN", "GH_TOKEN"),
+    ),
+    "qwen-code-acp": HermesOverlay(
+        transport="openai_chat",
+        auth_type="external_process",
+        base_url_override=DEFAULT_QWEN_CODE_ACP_BASE_URL,
+        base_url_env_var="QWEN_CODE_ACP_BASE_URL",
     ),
     "anthropic": HermesOverlay(
         transport="anthropic_messages",
@@ -184,6 +192,10 @@ ALIASES: Dict[str, str] = {
     "copilot": "github-copilot",
     "github": "github-copilot",
     "github-copilot-acp": "copilot-acp",
+
+    # qwen-code-acp
+    "qwen-code": "qwen-code-acp",
+    "qwen-code-acp": "qwen-code-acp",
 
     # vercel (models.dev ID for AI Gateway)
     "ai-gateway": "vercel",

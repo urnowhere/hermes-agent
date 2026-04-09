@@ -920,6 +920,7 @@ def select_provider_and_model(args=None):
         "openai-codex": "OpenAI Codex",
         "qwen-oauth": "Qwen OAuth",
         "copilot-acp": "GitHub Copilot ACP",
+        "qwen-code-acp": "Qwen Code ACP",
         "copilot": "GitHub Copilot",
         "anthropic": "Anthropic",
         "gemini": "Google AI Studio",
@@ -955,6 +956,7 @@ def select_provider_and_model(args=None):
 
     extended_providers = [
         ("copilot-acp", "GitHub Copilot ACP (spawns `copilot --acp --stdio`)"),
+        ("qwen-code-acp", "Qwen Code ACP (spawns `qwen --acp`)"),
         ("gemini", "Google AI Studio (Gemini models — OpenAI-compatible endpoint)"),
         ("zai", "Z.AI / GLM (Zhipu AI direct API)"),
         ("kimi-coding", "Kimi / Moonshot (Moonshot AI direct API)"),
@@ -1049,6 +1051,8 @@ def select_provider_and_model(args=None):
         _model_flow_qwen_oauth(config, current_model)
     elif selected_provider == "copilot-acp":
         _model_flow_copilot_acp(config, current_model)
+    elif selected_provider == "qwen-code-acp":
+        _model_flow_qwen_code_acp(config, current_model)
     elif selected_provider == "copilot":
         _model_flow_copilot(config, current_model)
     elif selected_provider == "custom":
@@ -2144,6 +2148,90 @@ def _model_flow_copilot_acp(config, current_model=""):
         catalog=catalog,
         api_key=catalog_api_key,
     ) or selected
+    _save_model_choice(selected)
+
+    cfg = load_config()
+    model = cfg.get("model")
+    if not isinstance(model, dict):
+        model = {"default": model} if model else {}
+        cfg["model"] = model
+    model["provider"] = provider_id
+    model["base_url"] = effective_base
+    model["api_mode"] = "chat_completions"
+    save_config(cfg)
+    deactivate_provider()
+
+    print(f"Default model set to: {selected} (via {pconfig.name})")
+
+
+def _model_flow_qwen_code_acp(config, current_model=""):
+    """Qwen Code ACP flow using the local Qwen CLI."""
+    from hermes_cli.auth import (
+        PROVIDER_REGISTRY,
+        _prompt_model_selection,
+        _save_model_choice,
+        deactivate_provider,
+        get_external_process_provider_status,
+        resolve_external_process_provider_credentials,
+    )
+    from hermes_cli.config import load_config, save_config
+
+    del config
+
+    provider_id = "qwen-code-acp"
+    pconfig = PROVIDER_REGISTRY[provider_id]
+
+    status = get_external_process_provider_status(provider_id)
+    resolved_command = status.get("resolved_command") or status.get("command") or "qwen"
+    effective_base = status.get("base_url") or pconfig.inference_base_url
+
+    print("  Qwen Code ACP delegates Hermes turns to `qwen --acp`.")
+    print("  Hermes currently starts its own ACP subprocess for each request.")
+    print("  Hermes uses your selected model as a hint for the Qwen ACP session.")
+    print(f"  Command: {resolved_command}")
+    print(f"  Backend marker: {effective_base}")
+    print()
+
+    try:
+        creds = resolve_external_process_provider_credentials(provider_id)
+    except Exception as exc:
+        print(f"  ⚠ {exc}")
+        print("  Set HERMES_QWEN_ACP_COMMAND or QWEN_CLI_PATH if Qwen CLI is installed elsewhere.")
+        return
+
+    effective_base = creds.get("base_url") or effective_base
+
+    # Try to fetch available models directly from the Qwen Code CLI via ACP.
+    from agent.qwen_acp_client import QwenACPClient
+
+    print("  Fetching available models from Qwen Code CLI…")
+    try:
+        _acp_client = QwenACPClient(
+            acp_command=creds.get("command") or resolved_command,
+            acp_args=creds.get("args"),
+        )
+        _raw_models = _acp_client.list_models()
+        model_list = [m["modelId"] for m in _raw_models if m.get("modelId")]
+    except Exception:
+        model_list = []
+
+    if model_list:
+        print(f"  Found {len(model_list)} model(s) from Qwen Code CLI")
+    else:
+        print("  ⚠ Could not auto-detect models from Qwen Code CLI.")
+        print('    Use "Enter custom model name" to specify your model.')
+
+    # Prompt for model selection
+    print("  Select a Qwen model to use with Qwen Code ACP:")
+    selected = _prompt_model_selection(
+        model_list,
+        current_model=current_model if current_model and current_model != "(not set)" else "",
+    )
+
+    if not selected:
+        print("No change.")
+        return
+
     _save_model_choice(selected)
 
     cfg = load_config()

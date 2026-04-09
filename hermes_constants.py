@@ -93,6 +93,9 @@ def parse_reasoning_effort(effort: str) -> dict | None:
     return None
 
 
+DEFAULT_COPILOT_ACP_BASE_URL = "acp://copilot"
+DEFAULT_QWEN_CODE_ACP_BASE_URL = "acp://qwen-code"
+
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MODELS_URL = f"{OPENROUTER_BASE_URL}/models"
 OPENROUTER_CHAT_URL = f"{OPENROUTER_BASE_URL}/chat/completions"

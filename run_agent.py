@@ -770,6 +770,9 @@ class AIAgent:
                 if self.provider == "copilot-acp":
                     client_kwargs["command"] = self.acp_command
                     client_kwargs["args"] = self.acp_args
+                if self.provider == "qwen-code-acp":
+                    client_kwargs["command"] = self.acp_command
+                    client_kwargs["args"] = self.acp_args
                 effective_base = base_url
                 if "openrouter" in effective_base.lower():
                     client_kwargs["default_headers"] = {
@@ -3599,6 +3602,17 @@ class AIAgent:
             client = CopilotACPClient(**client_kwargs)
             logger.info(
                 "Copilot ACP client created (%s, shared=%s) %s",
+                reason,
+                shared,
+                self._client_log_context(),
+            )
+            return client
+        if self.provider == "qwen-code-acp" or str(client_kwargs.get("base_url", "")).startswith("acp://qwen-code"):
+            from agent.qwen_acp_client import QwenACPClient
+
+            client = QwenACPClient(**client_kwargs)
+            logger.info(
+                "Qwen Code ACP client created (%s, shared=%s) %s",
                 reason,
                 shared,
                 self._client_log_context(),
