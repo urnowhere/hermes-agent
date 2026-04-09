@@ -1,5 +1,11 @@
 FROM debian:13.4
 
+# Install Node.js 22 LTS via NodeSource (Node 20 LTS reaches EOL April 2026)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl ca-certificates && \
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    rm -rf /var/lib/apt/lists/*
+
 # Install system dependencies in one layer, clear APT cache
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
