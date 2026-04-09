@@ -1,0 +1,3 @@
+name: builtin-hash
+description: "Deterministic hash-based embeddings (always available)"
+manifest_version: 1

@@ -1,0 +1,6 @@
+name: local-cross-encoder
+description: "Local CrossEncoder reranker (requires torch)"
+manifest_version: 1
+pip_dependencies:
+  - sentence-transformers
+  - torch

@@ -1,0 +1,3 @@
+name: builtin-structural
+description: "Structural chunker for markdown headings, code symbols, and paragraphs"
+manifest_version: 1

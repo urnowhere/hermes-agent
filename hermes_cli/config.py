@@ -201,7 +201,7 @@ def ensure_hermes_home():
     home = get_hermes_home()
     home.mkdir(parents=True, exist_ok=True)
     _secure_dir(home)
-    for subdir in ("cron", "sessions", "logs", "memories"):
+    for subdir in ("cron", "sessions", "logs", "memories", "workspace", "knowledgebase"):
         d = home / subdir
         d.mkdir(parents=True, exist_ok=True)
         _secure_dir(d)
@@ -566,6 +566,44 @@ DEFAULT_CONFIG = {
         "level": "INFO",       # Minimum level for agent.log: DEBUG, INFO, WARNING
         "max_size_mb": 5,      # Max size per log file before rotation
         "backup_count": 3,     # Number of rotated backup files to keep
+    },
+
+    # Workspace — local-first document store for RAG-powered knowledge
+    "workspace": {
+        "enabled": True,
+        "path": "",  # empty = HERMES_HOME/workspace
+    },
+
+    # Knowledgebase — indexing, retrieval, and embedding config for workspace RAG
+    "knowledgebase": {
+        "path": "",  # empty = HERMES_HOME/knowledgebase
+        "roots": [],  # additional directories to index: [{path: "...", recursive: false}]
+        "retrieval_mode": "off",  # off | gated | always
+        "auto_index": True,  # auto-rebuild index before retrieval
+        "chunking": {
+            "default_tokens": 512,
+            "overlap_tokens": 80,
+        },
+        "embeddings": {
+            "provider": "local",  # local | openai | google
+            "model": "google/embeddinggemma-300m",
+            "dimensions": 768,
+        },
+        "reranking": {
+            "provider": "local",  # local | cohere | voyage | heuristic
+            "model": "",
+        },
+        "watch_for_changes": False,
+        "watch_interval_seconds": 10,
+        "indexing": {
+            "max_file_mb": 10,
+        },
+        "dense_top_k": 40,
+        "sparse_top_k": 40,
+        "fused_top_k": 30,
+        "final_top_k": 8,
+        "max_injected_chunks": 6,
+        "max_injected_tokens": 3200,
     },
 
     # Config schema version - bump this when adding new required fields

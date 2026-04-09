@@ -1,0 +1,3 @@
+name: builtin-hybrid-rrf
+description: "Hybrid sparse+dense retrieval with Reciprocal Rank Fusion"
+manifest_version: 1

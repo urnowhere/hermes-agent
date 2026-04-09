@@ -1,0 +1,6 @@
+name: local-sentence-transformers
+description: "Local SentenceTransformers embeddings (requires torch)"
+manifest_version: 1
+pip_dependencies:
+  - sentence-transformers
+  - torch

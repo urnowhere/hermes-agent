@@ -1,0 +1,5 @@
+name: openai
+description: "OpenAI embeddings API"
+manifest_version: 1
+requires_env:
+  - OPENAI_API_KEY

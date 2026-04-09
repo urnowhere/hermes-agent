@@ -1,0 +1,3 @@
+name: heuristic
+description: "Lexical overlap heuristic reranker (non-LLM)"
+manifest_version: 1

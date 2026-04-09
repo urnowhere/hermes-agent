@@ -117,3 +117,54 @@ def _enforce_test_timeout():
     yield
     signal.alarm(0)
     signal.signal(signal.SIGALRM, old)
+
+
+# ── Workspace test helpers ─────────────────────────────────────────────────
+
+def make_workspace_config(tmp_path: Path) -> dict:
+    """Return a workspace config dict suitable for workspace unit tests.
+
+    Shared across tests/agent/test_workspace.py, tests/tools/test_workspace_tool.py,
+    and any other test that needs a full workspace + knowledgebase config.
+    """
+    return {
+        "workspace": {
+            "enabled": True,
+            "path": str(tmp_path / "workspace"),
+        },
+        "knowledgebase": {
+            "path": str(tmp_path / "knowledgebase"),
+            "roots": [],
+            "retrieval_mode": "off",
+            "auto_index": True,
+            "max_injected_chunks": 6,
+            "max_injected_tokens": 3200,
+            "dense_top_k": 40,
+            "sparse_top_k": 40,
+            "fused_top_k": 30,
+            "final_top_k": 8,
+            "chunking": {
+                "default_tokens": 512,
+                "overlap_tokens": 80,
+            },
+            "embeddings": {
+                "provider": "local",
+                "model": "google/embeddinggemma-300m",
+                "dimensions": 768,
+            },
+            "reranker": {
+                "enabled": False,
+                "provider": "local",
+                "model": "bge-reranker-v2-m3",
+            },
+            "indexing": {
+                "max_file_mb": 10,
+            },
+        },
+    }
+
+
+@pytest.fixture()
+def workspace_config(tmp_path):
+    """Fixture providing a standard workspace config for tests."""
+    return make_workspace_config(tmp_path)

@@ -1,0 +1,5 @@
+name: google
+description: "Google Gemini embeddings API"
+manifest_version: 1
+requires_env:
+  - GEMINI_API_KEY

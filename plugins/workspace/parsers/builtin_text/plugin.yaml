@@ -1,0 +1,3 @@
+name: builtin-text
+description: "Built-in text/code/markdown file parser"
+manifest_version: 1
