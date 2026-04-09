@@ -3930,6 +3930,142 @@ class HermesCLI:
         else:
             _cprint("    (session only — add --global to persist)")
 
+    def _handle_provider_command(self, cmd_original: str):
+        """Handle /provider command — show or switch providers.
+
+        Supports:
+          /provider                     — show current provider + available providers
+          /provider <name>              — switch to provider, auto-select first model
+          /provider <name> <model>      — switch to provider with specific model
+        """
+        from hermes_cli.model_switch import switch_model, parse_model_flags
+        from hermes_cli.providers import get_label, resolve_provider_full
+        from hermes_cli.config import load_config
+
+        # Parse args from the original command
+        parts = cmd_original.split()
+        # parts[0] is "/provider", rest are args
+        args = parts[1:] if len(parts) > 1 else []
+
+        # No args: show providers
+        if not args:
+            self._show_model_and_providers()
+            return
+
+        # First arg is provider name
+        provider_name = args[0]
+        explicit_model = args[1] if len(args) > 1 else ""
+
+        # Load user providers from config to get the models list
+        try:
+            cfg = load_config()
+            user_providers = cfg.get("providers", {})
+        except Exception:
+            user_providers = {}
+
+        # Resolve the provider
+        pdef = resolve_provider_full(provider_name, user_providers)
+        if pdef is None:
+            _cprint(f"  ✗ Unknown provider '{provider_name}'")
+            _cprint("    Use /provider to see available providers")
+            _cprint("    Or define it in config.yaml under 'providers:'")
+            return
+
+        # Determine model to use
+        model_to_use = explicit_model
+
+        if not model_to_use:
+            # Try to get model from user config's models list
+            user_entry = user_providers.get(provider_name, {})
+            models_list = user_entry.get("models", [])
+            if models_list and isinstance(models_list, list):
+                model_to_use = models_list[0]
+                _cprint(f"  Using first configured model: {model_to_use}")
+            else:
+                # Try auto-detect from endpoint
+                if pdef.base_url:
+                    from hermes_cli.runtime_provider import _auto_detect_local_model
+                    detected = _auto_detect_local_model(pdef.base_url)
+                    if detected:
+                        model_to_use = detected
+                        _cprint(f"  Auto-detected model: {model_to_use}")
+
+        if not model_to_use:
+            _cprint(f"  ✗ No model specified and couldn't auto-detect")
+            _cprint(f"    Usage: /provider {provider_name} <model-name>")
+            if user_providers.get(provider_name):
+                _cprint(f"    Or add a 'models:' list to your config.yaml provider entry")
+            return
+
+        # Perform the switch using the existing pipeline
+        result = switch_model(
+            raw_input=model_to_use,
+            current_provider=self.provider or "",
+            current_model=self.model or "",
+            current_base_url=self.base_url or "",
+            current_api_key=self.api_key or "",
+            is_global=False,
+            explicit_provider=provider_name,
+            user_providers=user_providers,
+        )
+
+        if not result.success:
+            _cprint(f"  ✗ {result.error_message}")
+            return
+
+        # Apply to CLI state
+        old_model = self.model
+        old_provider = self.provider
+        self.model = result.new_model
+        self.provider = result.target_provider
+        self.requested_provider = result.target_provider
+        if result.api_key:
+            self.api_key = result.api_key
+            self._explicit_api_key = result.api_key
+        if result.base_url:
+            self.base_url = result.base_url
+            self._explicit_base_url = result.base_url
+        if result.api_mode:
+            self.api_mode = result.api_mode
+
+        # Apply to running agent
+        if self.agent is not None:
+            try:
+                self.agent.switch_model(
+                    new_model=result.new_model,
+                    new_provider=result.target_provider,
+                    api_key=result.api_key,
+                    base_url=result.base_url,
+                    api_mode=result.api_mode,
+                )
+            except Exception as exc:
+                _cprint(f"  ⚠ Agent swap failed ({exc}); change applied to next session.")
+
+        # Store model switch note
+        self._pending_model_switch_note = (
+            f"[Note: model was just switched from {old_model} to {result.new_model} "
+            f"via {result.provider_label or result.target_provider}. "
+            f"Adjust your self-identification accordingly.]"
+        )
+
+        # Display confirmation
+        provider_label = result.provider_label or result.target_provider
+        _cprint(f"  ✓ Switched to {provider_label}")
+        _cprint(f"    Model: {result.new_model}")
+
+        # Show metadata if available
+        mi = result.model_info
+        if mi:
+            if mi.context_window:
+                _cprint(f"    Context: {mi.context_window:,} tokens")
+            if mi.max_output:
+                _cprint(f"    Max output: {mi.max_output:,} tokens")
+
+        if result.warning_message:
+            _cprint(f"    ⚠ {result.warning_message}")
+
+        _cprint("    (session only — use /model --global to persist)")
+
     def _show_model_and_providers(self):
         """Show current model + provider and list all authenticated providers.
 
@@ -4554,7 +4690,7 @@ class HermesCLI:
         elif canonical == "model":
             self._handle_model_switch(cmd_original)
         elif canonical == "provider":
-            self._show_model_and_providers()
+            self._handle_provider_command(cmd_original)
         elif canonical == "prompt":
             # Use original case so prompt text isn't lowercased
             self._handle_prompt_command(cmd_original)
