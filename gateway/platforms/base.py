@@ -769,6 +769,35 @@ class BasePlatformAdapter(ABC):
     def is_connected(self) -> bool:
         """Check if adapter is currently connected."""
         return self._running
+
+    def _log_disposition(
+        self,
+        disposition: str,
+        *,
+        event: Optional[MessageEvent] = None,
+        session_key: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> None:
+        """Emit a structured gateway disposition log for non-happy-path outcomes."""
+        parts = [
+            "gateway_disposition",
+            f"platform={self.platform.value}",
+            f"adapter={self.name}",
+            f"disposition={disposition}",
+        ]
+        if session_key:
+            parts.append(f"session_key={session_key}")
+        if event is not None:
+            if getattr(event, "message_id", None):
+                parts.append(f"message_id={event.message_id}")
+            if getattr(event.source, "chat_id", None):
+                parts.append(f"chat_id={event.source.chat_id}")
+            cmd = event.get_command() if hasattr(event, "get_command") else None
+            if cmd:
+                parts.append(f"command={cmd}")
+        if reason:
+            parts.append(f"reason={reason}")
+        logger.info(" ".join(parts))
     
     def set_message_handler(self, handler: MessageHandler) -> None:
         """
@@ -1291,6 +1320,11 @@ class BasePlatformAdapter(ABC):
             else:
                 # All retries exhausted (loop completed without break) — notify user
                 logger.error("[%s] Failed to deliver response after %d retries: %s", self.name, max_retries, error_str)
+                self._log_disposition(
+                    "delivery_failed_retries_exhausted",
+                    session_key=chat_id,
+                    reason=error_str[:160] if error_str else "retry_exhausted",
+                )
                 notice = (
                     "\u26a0\ufe0f Message delivery failed after multiple attempts. "
                     "Please try again \u2014 your request was processed but the response could not be sent."
@@ -1391,6 +1425,12 @@ class BasePlatformAdapter(ABC):
                         existing.text = self._merge_caption(existing.text, event.text)
                 else:
                     self._pending_messages[session_key] = event
+                self._log_disposition(
+                    "queued_without_interrupt",
+                    event=event,
+                    session_key=session_key,
+                    reason="photo_follow_up",
+                )
                 return  # Don't interrupt now - will run after current task completes
 
             # Default behavior for non-photo follow-ups: interrupt the running agent
@@ -1476,6 +1516,12 @@ class BasePlatformAdapter(ABC):
             # DEBUG to avoid noisy warnings for expected behavior.
             if not response:
                 logger.debug("[%s] Handler returned empty/None response for %s", self.name, event.source.chat_id)
+                self._log_disposition(
+                    "handler_empty_response",
+                    event=event,
+                    session_key=session_key,
+                    reason="empty_or_already_streamed",
+                )
             if response:
                 # Extract MEDIA:<path> tags (from TTS tool) before other processing
                 media_files, response = self.extract_media(response)
@@ -1544,6 +1590,8 @@ class BasePlatformAdapter(ABC):
                 # Human-like pacing delay between text and media
                 human_delay = self._get_human_delay()
 
+                media_failure_count = 0
+
                 # Send extracted images as native attachments
                 if images:
                     logger.info("[%s] Extracted %d image(s) to send as attachments", self.name, len(images))
@@ -1573,9 +1621,23 @@ class BasePlatformAdapter(ABC):
                                 metadata=_thread_metadata,
                             )
                         if not img_result.success:
+                            media_failure_count += 1
                             logger.error("[%s] Failed to send image: %s", self.name, img_result.error)
+                            self._log_disposition(
+                                "partial_delivery_failure",
+                                event=event,
+                                session_key=session_key,
+                                reason="image_send_failed",
+                            )
                     except Exception as img_err:
+                        media_failure_count += 1
                         logger.error("[%s] Error sending image: %s", self.name, img_err, exc_info=True)
+                        self._log_disposition(
+                            "partial_delivery_failure",
+                            event=event,
+                            session_key=session_key,
+                            reason="image_send_exception",
+                        )
 
                 # Send extracted media files — route by file type
                 _AUDIO_EXTS = {'.ogg', '.opus', '.mp3', '.wav', '.m4a'}
@@ -1613,9 +1675,23 @@ class BasePlatformAdapter(ABC):
                             )
 
                         if not media_result.success:
+                            media_failure_count += 1
                             logger.warning("[%s] Failed to send media (%s): %s", self.name, ext, media_result.error)
+                            self._log_disposition(
+                                "partial_delivery_failure",
+                                event=event,
+                                session_key=session_key,
+                                reason=f"media_send_failed:{ext}",
+                            )
                     except Exception as media_err:
+                        media_failure_count += 1
                         logger.warning("[%s] Error sending media: %s", self.name, media_err)
+                        self._log_disposition(
+                            "partial_delivery_failure",
+                            event=event,
+                            session_key=session_key,
+                            reason="media_send_exception",
+                        )
 
                 # Send auto-detected local files as native attachments
                 for file_path in local_files:
@@ -1624,25 +1700,53 @@ class BasePlatformAdapter(ABC):
                     try:
                         ext = Path(file_path).suffix.lower()
                         if ext in _IMAGE_EXTS:
-                            await self.send_image_file(
+                            file_result = await self.send_image_file(
                                 chat_id=event.source.chat_id,
                                 image_path=file_path,
                                 metadata=_thread_metadata,
                             )
                         elif ext in _VIDEO_EXTS:
-                            await self.send_video(
+                            file_result = await self.send_video(
                                 chat_id=event.source.chat_id,
                                 video_path=file_path,
                                 metadata=_thread_metadata,
                             )
                         else:
-                            await self.send_document(
+                            file_result = await self.send_document(
                                 chat_id=event.source.chat_id,
                                 file_path=file_path,
                                 metadata=_thread_metadata,
                             )
+                        if file_result is not None and not getattr(file_result, "success", False):
+                            media_failure_count += 1
+                            self._log_disposition(
+                                "partial_delivery_failure",
+                                event=event,
+                                session_key=session_key,
+                                reason=f"local_file_send_failed:{ext}",
+                            )
                     except Exception as file_err:
+                        media_failure_count += 1
                         logger.error("[%s] Error sending local file %s: %s", self.name, file_path, file_err)
+                        self._log_disposition(
+                            "partial_delivery_failure",
+                            event=event,
+                            session_key=session_key,
+                            reason="local_file_send_exception",
+                        )
+
+                if text_content and media_failure_count > 0:
+                    notice = (
+                        f"⚠️ I sent the text response, but {media_failure_count} attachment"
+                        f"{'s' if media_failure_count != 1 else ''} failed to deliver."
+                    )
+                    notice_result = await self._send_with_retry(
+                        chat_id=event.source.chat_id,
+                        content=notice,
+                        reply_to=event.message_id,
+                        metadata=_thread_metadata,
+                    )
+                    _record_delivery(notice_result)
 
             # Determine overall success for the processing hook
             processing_ok = delivery_succeeded if delivery_attempted else not bool(response)
