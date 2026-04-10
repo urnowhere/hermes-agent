@@ -18,6 +18,7 @@ from hermes_cli.profiles import (
     validate_profile_name,
     get_profile_dir,
     create_profile,
+    create_wrapper_script,
     delete_profile,
     list_profiles,
     set_active_profile,
@@ -106,6 +107,17 @@ class TestGetProfileDir:
         tmp_path = profile_env
         result = get_profile_dir("coder")
         assert result == tmp_path / ".hermes" / "profiles" / "coder"
+
+    def test_custom_hermes_home_changes_default_profile_root(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        custom_home = tmp_path / "AppData" / "Local" / "hermes"
+        custom_home.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(custom_home))
+
+        assert _get_default_hermes_home() == custom_home
+        assert _get_profiles_root() == custom_home / "profiles"
+        assert get_profile_dir("default") == custom_home
+        assert get_profile_dir("coder") == custom_home / "profiles" / "coder"
 
 
 # ===================================================================
@@ -274,6 +286,18 @@ class TestActiveProfile:
         with pytest.raises(FileNotFoundError):
             set_active_profile("nonexistent")
 
+    def test_set_active_profile_uses_custom_hermes_home(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        custom_home = tmp_path / "AppData" / "Local" / "hermes"
+        custom_home.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(custom_home))
+
+        create_profile("coder", no_alias=True)
+        set_active_profile("coder")
+
+        active_path = custom_home / "active_profile"
+        assert active_path.read_text().strip() == "coder"
+
 
 # ===================================================================
 # TestGetActiveProfileName
@@ -303,6 +327,15 @@ class TestGetActiveProfileName:
         # not "custom".  The user is on the default profile of their
         # custom deployment.
         assert get_active_profile_name() == "default"
+
+    def test_custom_profile_root_returns_profile_name(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        custom_home = tmp_path / "AppData" / "Local" / "hermes"
+        profile_dir = custom_home / "profiles" / "coder"
+        profile_dir.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(profile_dir))
+
+        assert get_active_profile_name() == "coder"
 
 
 # ===================================================================
@@ -360,6 +393,32 @@ class TestAliasCollision:
         result = check_alias_collision("default")
         assert result is not None
         assert "reserved" in result.lower()
+
+    def test_windows_uses_where_for_collision_check(self, profile_env, monkeypatch):
+        monkeypatch.setattr("hermes_cli.profiles.sys.platform", "win32")
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stdout="")
+            result = check_alias_collision("mybot")
+
+        assert result is None
+        assert mock_run.call_args.args[0] == ["where", "mybot"]
+
+
+class TestWrapperScripts:
+    def test_windows_wrapper_creates_cmd_and_ps1(self, profile_env, monkeypatch):
+        wrapper_dir = Path(profile_env) / "bin"
+        monkeypatch.setattr("hermes_cli.profiles.sys.platform", "win32")
+        monkeypatch.setattr("hermes_cli.profiles._get_wrapper_dir", lambda: wrapper_dir)
+
+        wrapper_path = create_wrapper_script("coder")
+
+        cmd_path = wrapper_dir / "coder.cmd"
+        ps1_path = wrapper_dir / "coder.ps1"
+        assert wrapper_path == cmd_path
+        assert cmd_path.exists()
+        assert ps1_path.exists()
+        assert "hermes -p coder %*" in cmd_path.read_text()
+        assert "hermes -p coder @args" in ps1_path.read_text()
 
 
 # ===================================================================

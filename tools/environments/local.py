@@ -2,6 +2,7 @@
 
 import os
 import platform
+import re
 import shutil
 import signal
 import subprocess
@@ -171,9 +172,23 @@ _find_shell = _find_bash
 
 
 # Standard PATH entries for environments with minimal PATH.
-_SANE_PATH = (
-    "/opt/homebrew/bin:/opt/homebrew/sbin:"
-    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+_POSIX_SANE_PATH_ENTRIES = [
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/sbin",
+    "/usr/local/bin",
+    "/usr/sbin",
+    "/usr/bin",
+    "/sbin",
+    "/bin",
+]
+_WINDOWS_SANE_PATH_ENTRIES = [
+    r"C:\Windows\System32",
+    r"C:\Windows",
+    r"C:\Windows\System32\WindowsPowerShell\v1.0",
+]
+_SANE_PATH = os.pathsep.join(
+    _WINDOWS_SANE_PATH_ENTRIES if _IS_WINDOWS else _POSIX_SANE_PATH_ENTRIES
 )
 
 
@@ -192,9 +207,26 @@ def _make_run_env(env: dict) -> dict:
             run_env[real_key] = v
         elif k not in _HERMES_PROVIDER_ENV_BLOCKLIST or _is_passthrough(k):
             run_env[k] = v
+
     existing_path = run_env.get("PATH", "")
-    if "/usr/bin" not in existing_path.split(":"):
-        run_env["PATH"] = f"{existing_path}:{_SANE_PATH}" if existing_path else _SANE_PATH
+    if _IS_WINDOWS:
+        sane_entries = _WINDOWS_SANE_PATH_ENTRIES
+        existing_parts = [part for part in existing_path.split(os.pathsep) if part]
+        normalized_existing = {part.lower() for part in existing_parts}
+        missing_entries = [entry for entry in sane_entries if entry.lower() not in normalized_existing]
+        if missing_entries:
+            run_env["PATH"] = os.pathsep.join(existing_parts + missing_entries)
+        elif existing_path:
+            run_env["PATH"] = existing_path
+        else:
+            run_env["PATH"] = os.pathsep.join(sane_entries)
+    else:
+        if "/usr/bin" not in existing_path.split(os.pathsep):
+            run_env["PATH"] = f"{existing_path}{os.pathsep}{_SANE_PATH}" if existing_path else _SANE_PATH
+        elif existing_path:
+            run_env["PATH"] = existing_path
+        else:
+            run_env["PATH"] = _SANE_PATH
     return run_env
 
 
@@ -206,9 +238,34 @@ class LocalEnvironment(BaseEnvironment):
     CWD persists via file-based read after each command.
     """
 
+    _WINDOWS_DRIVE_RE = re.compile(r"^([A-Za-z]):(?:[\\/](.*))?$")
+    _MSYS_DRIVE_RE = re.compile(r"^/([A-Za-z])(?:/(.*))?$")
+
     def __init__(self, cwd: str = "", timeout: int = 60, env: dict = None):
         super().__init__(cwd=cwd or os.getcwd(), timeout=timeout, env=env)
         self.init_session()
+
+    @staticmethod
+    def _normalize_cwd_for_shell(cwd: str) -> str:
+        if not _IS_WINDOWS or not cwd:
+            return cwd
+        match = LocalEnvironment._WINDOWS_DRIVE_RE.match(cwd.replace("\\", "/"))
+        if not match:
+            return cwd
+        drive = match.group(1).lower()
+        tail = (match.group(2) or "").strip("/")
+        return f"/{drive}/{tail}" if tail else f"/{drive}"
+
+    @staticmethod
+    def _normalize_cwd_from_shell(cwd: str) -> str:
+        if not _IS_WINDOWS or not cwd:
+            return cwd
+        match = LocalEnvironment._MSYS_DRIVE_RE.match(cwd.strip())
+        if not match:
+            return cwd
+        drive = match.group(1).upper()
+        tail = (match.group(2) or "").replace("/", "\\")
+        return f"{drive}:\\{tail}" if tail else f"{drive}:\\"
 
     def get_temp_dir(self) -> str:
         """Return a shell-safe writable temp dir for local execution.
@@ -235,6 +292,9 @@ class LocalEnvironment(BaseEnvironment):
             return candidate.rstrip("/") or "/"
 
         return "/tmp"
+
+    def _wrap_command(self, command: str, cwd: str) -> str:
+        return super()._wrap_command(command, self._normalize_cwd_for_shell(cwd))
 
     def _run_bash(self, cmd_string: str, *, login: bool = False,
                   timeout: int = 120,
@@ -283,12 +343,13 @@ class LocalEnvironment(BaseEnvironment):
         try:
             cwd_path = open(self._cwd_file).read().strip()
             if cwd_path:
-                self.cwd = cwd_path
+                self.cwd = self._normalize_cwd_from_shell(cwd_path)
         except (OSError, FileNotFoundError):
             pass
 
         # Still strip the marker from output so it's not visible
         self._extract_cwd_from_output(result)
+        self.cwd = self._normalize_cwd_from_shell(self.cwd)
 
     def cleanup(self):
         """Clean up temp files."""

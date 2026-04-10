@@ -23,7 +23,7 @@ It's not a coding copilot tethered to an IDE or a chatbot wrapper around a singl
 
 | | |
 |---|---|
-| 🚀 **[Installation](/docs/getting-started/installation)** | Install in 60 seconds on Linux, macOS, or WSL2 |
+| 🚀 **[Installation](/docs/getting-started/installation)** | Install in 60 seconds on Linux, macOS, native Windows, or WSL2 |
 | 📖 **[Quickstart Tutorial](/docs/getting-started/quickstart)** | Your first conversation and key features to try |
 | 🗺️ **[Learning Path](/docs/getting-started/learning-path)** | Find the right docs for your experience level |
 | ⚙️ **[Configuration](/docs/user-guide/configuration)** | Config file, providers, models, and options |

@@ -9,8 +9,11 @@ See: https://github.com/NousResearch/hermes-agent/issues/1264
 """
 
 import os
+import sys
 import threading
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from tools.environments.local import (
     LocalEnvironment,
@@ -290,6 +293,7 @@ class TestBlocklistCoverage:
         assert extras.issubset(_HERMES_PROVIDER_ENV_BLOCKLIST)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX/Homebrew-specific PATH assertions")
 class TestSanePathIncludesHomebrew:
     """Verify _SANE_PATH includes macOS Homebrew directories."""
 

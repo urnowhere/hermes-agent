@@ -17,12 +17,17 @@ Run the one-line installer:
 curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
 ```
 
+```powershell
+# Windows PowerShell
+irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1 | iex
+```
+
 :::tip Android / Termux
 If you're installing on a phone, see the dedicated [Termux guide](./termux.md) for the tested manual path, supported extras, and current Android-specific limitations.
 :::
 
 :::tip Windows Users
-Install [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) first, then run the command above inside your WSL2 terminal.
+Native Windows uses the PowerShell installer and Git for Windows' Bash backend. If you already prefer a Linux workflow, WSL2 remains a perfectly good alternative.
 :::
 
 After it finishes, reload your shell:

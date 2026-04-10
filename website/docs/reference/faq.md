@@ -30,11 +30,13 @@ Set your provider with `hermes model` or by editing `~/.hermes/.env`. See the [E
 
 ### Does it work on Windows?
 
-**Not natively.** Hermes Agent requires a Unix-like environment. On Windows, install [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) and run Hermes from inside it. The standard install command works perfectly in WSL2:
+Yes — Hermes supports native Windows through the PowerShell installer, with Git for Windows providing the Bash backend used by terminal execution:
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
+```powershell
+irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1 | iex
 ```
+
+WSL2 is still a good option if you already prefer a Linux environment or want Linux-native tooling and networking semantics.
 
 ### Does it work on Android / Termux?
 

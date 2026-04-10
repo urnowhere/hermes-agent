@@ -204,11 +204,32 @@ class TestMemoryStorePersistence:
         monkeypatch.setattr("tools.memory_tool.get_memory_dir", lambda: tmp_path)
         # Write file with duplicates
         mem_file = tmp_path / "MEMORY.md"
-        mem_file.write_text("duplicate entry\n§\nduplicate entry\n§\nunique entry")
+        mem_file.write_text("duplicate entry\n§\nduplicate entry\n§\nunique entry", encoding="utf-8")
 
         store = MemoryStore()
         store.load_from_disk()
         assert len(store.memory_entries) == 2
+
+    def test_file_lock_uses_windows_fallback_when_fcntl_unavailable(self, tmp_path, monkeypatch):
+        class FakeMsvcrt:
+            LK_LOCK = 1
+            LK_UNLCK = 2
+
+            def __init__(self):
+                self.calls = []
+
+            def locking(self, fd, mode, size):
+                self.calls.append((mode, size))
+
+        fake_msvcrt = FakeMsvcrt()
+        monkeypatch.setattr("tools.memory_tool.fcntl", None)
+        monkeypatch.setattr("tools.memory_tool.msvcrt", fake_msvcrt, raising=False)
+
+        lock_target = tmp_path / "MEMORY.md"
+        with MemoryStore._file_lock(lock_target):
+            assert lock_target.with_suffix(".md.lock").exists()
+
+        assert fake_msvcrt.calls == [(fake_msvcrt.LK_LOCK, 1), (fake_msvcrt.LK_UNLCK, 1)]
 
 
 class TestMemoryStoreSnapshot:

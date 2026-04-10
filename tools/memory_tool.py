@@ -23,7 +23,16 @@ Design:
 - Frozen snapshot pattern: system prompt is stable, tool responses show live state
 """
 
-import fcntl
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - exercised via monkeypatch on Unix CI
+    fcntl = None
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - exercised via monkeypatch on Unix CI
+    msvcrt = None
+
 import json
 import logging
 import os
@@ -135,6 +144,30 @@ class MemoryStore:
         }
 
     @staticmethod
+    def _acquire_file_lock(fd) -> None:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            return
+        if msvcrt is not None:
+            fd.seek(0)
+            if fd.tell() == 0:
+                fd.write(" ")
+                fd.flush()
+            fd.seek(0)
+            msvcrt.locking(fd.fileno(), msvcrt.LK_LOCK, 1)
+            return
+
+    @staticmethod
+    def _release_file_lock(fd) -> None:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return
+        if msvcrt is not None:
+            fd.seek(0)
+            msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
+            return
+
+    @staticmethod
     @contextmanager
     def _file_lock(path: Path):
         """Acquire an exclusive file lock for read-modify-write safety.
@@ -144,12 +177,12 @@ class MemoryStore:
         """
         lock_path = path.with_suffix(path.suffix + ".lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = open(lock_path, "w")
+        fd = open(lock_path, "a+")
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            MemoryStore._acquire_file_lock(fd)
             yield
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            MemoryStore._release_file_lock(fd)
             fd.close()
 
     @staticmethod

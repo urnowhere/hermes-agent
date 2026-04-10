@@ -1,7 +1,7 @@
 ---
 sidebar_position: 2
 title: "Installation"
-description: "Install Hermes Agent on Linux, macOS, WSL2, or Android via Termux"
+description: "Install Hermes Agent on Linux, macOS, native Windows, WSL2, or Android via Termux"
 ---
 
 # Installation
@@ -15,6 +15,18 @@ Get Hermes Agent up and running in under two minutes with the one-line installer
 ```bash
 curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
 ```
+
+### Windows / PowerShell
+
+```powershell
+irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1 | iex
+```
+
+The Windows installer:
+- installs or finds `uv`, Python, Node.js, and Git
+- configures Hermes under `%LOCALAPPDATA%\hermes`
+- uses Git for Windows' Bash backend for terminal execution
+- leaves you in a native PowerShell workflow (`hermes`, `hermes setup`, `hermes doctor`)
 
 ### Android / Termux
 
@@ -32,10 +44,6 @@ The installer detects Termux automatically and switches to a tested Android flow
 - skips the untested browser / WhatsApp bootstrap by default
 
 If you want the fully explicit path, follow the dedicated [Termux guide](./termux.md).
-
-:::warning Windows
-Native Windows is **not supported**. Please install [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) and run Hermes Agent from there. The install command above works inside WSL2.
-:::
 
 ### What the Installer Does
 

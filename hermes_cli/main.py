@@ -4078,7 +4078,7 @@ def cmd_profile(args):
 
     elif action == "show":
         name = args.profile_name
-        from hermes_cli.profiles import get_profile_dir, profile_exists, _read_config_model, _check_gateway_running, _count_skills
+        from hermes_cli.profiles import get_profile_dir, profile_exists, _read_config_model, _check_gateway_running, _count_skills, _existing_wrapper_path
         if not profile_exists(name):
             print(f"Error: Profile '{name}' does not exist.")
             sys.exit(1)
@@ -4086,7 +4086,7 @@ def cmd_profile(args):
         model, provider = _read_config_model(profile_dir)
         gw = _check_gateway_running(profile_dir)
         skills = _count_skills(profile_dir)
-        wrapper = _get_wrapper_dir() / name
+        wrapper = _existing_wrapper_path(name)
 
         print(f"\nProfile: {name}")
         print(f"Path:    {profile_dir}")
@@ -4096,7 +4096,7 @@ def cmd_profile(args):
         print(f"Skills:  {skills}")
         print(f".env:    {'exists' if (profile_dir / '.env').exists() else 'not configured'}")
         print(f"SOUL.md: {'exists' if (profile_dir / 'SOUL.md').exists() else 'not configured'}")
-        if wrapper.exists():
+        if wrapper is not None and wrapper.exists():
             print(f"Alias:   {wrapper}")
         print()
 
@@ -4122,11 +4122,8 @@ def cmd_profile(args):
             if collision:
                 print(f"Error: {collision}")
                 sys.exit(1)
-            wrapper_path = create_wrapper_script(alias_name)
+            wrapper_path = create_wrapper_script(alias_name, profile_name=name)
             if wrapper_path:
-                # If custom name, write the profile name into the wrapper
-                if custom_name:
-                    wrapper_path.write_text(f'#!/bin/sh\nexec hermes -p {name} "$@"\n')
                 print(f"✓ Alias created: {wrapper_path}")
                 if not _is_wrapper_dir_in_path():
                     print(f"⚠ {_get_wrapper_dir()} is not in your PATH.")

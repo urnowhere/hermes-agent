@@ -37,32 +37,53 @@ $NodeVersion = "22"
 
 function Write-Banner {
     Write-Host ""
-    Write-Host "┌─────────────────────────────────────────────────────────┐" -ForegroundColor Magenta
-    Write-Host "│             ⚕ Hermes Agent Installer                    │" -ForegroundColor Magenta
-    Write-Host "├─────────────────────────────────────────────────────────┤" -ForegroundColor Magenta
-    Write-Host "│  An open source AI agent by Nous Research.              │" -ForegroundColor Magenta
-    Write-Host "└─────────────────────────────────────────────────────────┘" -ForegroundColor Magenta
+    Write-Host "===========================================================" -ForegroundColor Magenta
+    Write-Host "              Hermes Agent Installer" -ForegroundColor Magenta
+    Write-Host "        An open source AI agent by Nous Research." -ForegroundColor Magenta
+    Write-Host "===========================================================" -ForegroundColor Magenta
     Write-Host ""
 }
 
 function Write-Info {
     param([string]$Message)
-    Write-Host "→ $Message" -ForegroundColor Cyan
+    Write-Host "> $Message" -ForegroundColor Cyan
 }
 
 function Write-Success {
     param([string]$Message)
-    Write-Host "✓ $Message" -ForegroundColor Green
+    Write-Host "[OK] $Message" -ForegroundColor Green
 }
 
 function Write-Warn {
     param([string]$Message)
-    Write-Host "⚠ $Message" -ForegroundColor Yellow
+    Write-Host "[WARN] $Message" -ForegroundColor Yellow
 }
 
 function Write-Err {
     param([string]$Message)
-    Write-Host "✗ $Message" -ForegroundColor Red
+    Write-Host "[ERR] $Message" -ForegroundColor Red
+}
+
+function Invoke-NativeProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string[]]$ArgumentList = @(),
+        [string]$WorkingDirectory = ""
+    )
+
+    $startParams = @{
+        FilePath   = $FilePath
+        ArgumentList = $ArgumentList
+        NoNewWindow = $true
+        Wait        = $true
+        PassThru    = $true
+    }
+    if ($WorkingDirectory) {
+        $startParams.WorkingDirectory = $WorkingDirectory
+    }
+
+    $proc = Start-Process @startParams
+    return $proc.ExitCode
 }
 
 # ============================================================================
@@ -131,7 +152,7 @@ function Install-Uv {
 
 function Test-Python {
     Write-Info "Checking Python $PythonVersion..."
-    
+
     # Let uv find or install Python
     try {
         $pythonPath = & $UvCmd python find $PythonVersion 2>$null
@@ -141,24 +162,25 @@ function Test-Python {
             return $true
         }
     } catch { }
-    
-    # Python not found — use uv to install it (no admin needed!)
+
+    # Python not found - use uv to install it (no admin needed!)
     Write-Info "Python $PythonVersion not found, installing via uv..."
     try {
-        $uvOutput = & $UvCmd python install $PythonVersion 2>&1
-        if ($LASTEXITCODE -eq 0) {
+        $installExit = Invoke-NativeProcess -FilePath $UvCmd -ArgumentList @("python", "install", $PythonVersion)
+        if ($installExit -eq 0) {
+            Start-Sleep -Milliseconds 300
             $pythonPath = & $UvCmd python find $PythonVersion 2>$null
             if ($pythonPath) {
                 $ver = & $pythonPath --version 2>$null
                 Write-Success "Python installed: $ver"
                 return $true
             }
+            Write-Warn "uv reported success, but Python $PythonVersion was not immediately discoverable"
         } else {
-            Write-Warn "uv python install output:"
-            Write-Host $uvOutput -ForegroundColor DarkGray
+            Write-Warn "uv python install exited with code $installExit"
         }
     } catch {
-        Write-Warn "uv python install error: $_"
+        Write-Warn "uv python install failed to start: $_"
     }
 
     # Fallback: check if ANY Python 3.10+ is already available on the system
@@ -183,7 +205,7 @@ function Test-Python {
             return $true
         }
     }
-    
+
     Write-Err "Failed to install Python $PythonVersion"
     Write-Info "Install Python 3.11 manually, then re-run this script:"
     Write-Info "  https://www.python.org/downloads/"
@@ -193,13 +215,98 @@ function Test-Python {
 
 function Test-Git {
     Write-Info "Checking Git..."
-    
+
     if (Get-Command git -ErrorAction SilentlyContinue) {
         $version = git --version
         Write-Success "Git found ($version)"
         return $true
     }
-    
+
+    $managedGit = "$HermesHome\git\cmd\git.exe"
+    $managedBash = "$HermesHome\git\bin\bash.exe"
+    if (Test-Path $managedGit) {
+        $env:Path = "$HermesHome\git\cmd;$env:Path"
+        if (Test-Path $managedBash) {
+            $env:HERMES_GIT_BASH_PATH = $managedBash
+        }
+        $version = & $managedGit --version
+        Write-Success "Git found (Hermes-managed: $version)"
+        return $true
+    }
+
+    Write-Warn "Git not found - attempting automatic install..."
+
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Write-Info "Installing Git via winget..."
+        try {
+            $wingetExit = Invoke-NativeProcess -FilePath "winget" -ArgumentList @("install", "--id", "Git.Git", "-e", "--silent", "--accept-package-agreements", "--accept-source-agreements")
+            if ($wingetExit -eq 0) {
+                $env:Path = [Environment]::GetEnvironmentVariable("Path", "User") + ";" + [Environment]::GetEnvironmentVariable("Path", "Machine")
+                foreach ($candidate in @(
+                    "$env:ProgramFiles\Git\cmd",
+                    "$env:ProgramFiles(x86)\Git\cmd",
+                    "$env:LOCALAPPDATA\Programs\Git\cmd"
+                )) {
+                    if ($candidate -and (Test-Path (Join-Path $candidate "git.exe")) -and ($env:Path -notlike "*$candidate*")) {
+                        $env:Path = "$candidate;$env:Path"
+                    }
+                }
+                if (Get-Command git -ErrorAction SilentlyContinue) {
+                    $gitCmd = Get-Command git
+                    $gitRoot = Split-Path (Split-Path $gitCmd.Source -Parent) -Parent
+                    $bashCandidate = Join-Path $gitRoot "bin\bash.exe"
+                    if (Test-Path $bashCandidate) {
+                        $env:HERMES_GIT_BASH_PATH = $bashCandidate
+                    }
+                    $version = git --version
+                    Write-Success "Git installed via winget ($version)"
+                    return $true
+                }
+            } else {
+                Write-Warn "winget Git install exited with code $wingetExit"
+            }
+        } catch {
+            Write-Warn "winget Git install failed: $_"
+        }
+    }
+
+    Write-Info "Downloading portable Git for Windows..."
+    try {
+        $releasePage = Invoke-WebRequest -Uri "https://git-scm.com/install/windows" -UseBasicParsing
+        $portableUrlMatch = [regex]::Match($releasePage.Content, "https://github\.com/git-for-windows/git/releases/download/\S+?/PortableGit-\S+?-64-bit\.7z\.exe")
+        if (-not $portableUrlMatch.Success) {
+            throw "Could not determine the latest PortableGit download URL"
+        }
+
+        $portableUrl = $portableUrlMatch.Value
+        $tmpGit = Join-Path $env:TEMP "PortableGit-latest.exe"
+        if (Test-Path $tmpGit) { Remove-Item -Force $tmpGit -ErrorAction SilentlyContinue }
+        Invoke-WebRequest -Uri $portableUrl -OutFile $tmpGit -UseBasicParsing
+
+        if (Test-Path "$HermesHome\git") {
+            Remove-Item -Recurse -Force "$HermesHome\git"
+        }
+        New-Item -ItemType Directory -Force -Path "$HermesHome\git" | Out-Null
+        $portableExit = Invoke-NativeProcess -FilePath $tmpGit -ArgumentList @("-o$HermesHome\git", "-y")
+        if ($portableExit -ne 0) {
+            throw "Portable Git extraction exited with code $portableExit"
+        }
+
+        if (-not (Test-Path $managedGit)) {
+            throw "Portable Git installed, but git.exe was not found at $managedGit"
+        }
+
+        $env:Path = "$HermesHome\git\cmd;$env:Path"
+        if (Test-Path $managedBash) {
+            $env:HERMES_GIT_BASH_PATH = $managedBash
+        }
+        $version = & $managedGit --version
+        Write-Success "Git installed to $HermesHome\git ($version)"
+        return $true
+    } catch {
+        Write-Warn "Portable Git install failed: $_"
+    }
+
     Write-Err "Git not found"
     Write-Info "Please install Git from:"
     Write-Info "  https://git-scm.com/download/win"
@@ -226,7 +333,7 @@ function Test-Node {
         return $true
     }
 
-    Write-Info "Node.js not found — installing Node.js $NodeVersion LTS..."
+    Write-Info "Node.js not found - installing Node.js $NodeVersion LTS..."
 
     # Try winget first (cleanest on modern Windows)
     if (Get-Command winget -ErrorAction SilentlyContinue) {
@@ -244,7 +351,7 @@ function Test-Node {
         } catch { }
     }
 
-    # Fallback: download binary zip to ~/.hermes/node/
+    # Fallback: download binary zip to $HermesHome\node\
     Write-Info "Downloading Node.js $NodeVersion binary..."
     try {
         $arch = if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86" }
@@ -268,7 +375,7 @@ function Test-Node {
                 $env:Path = "$HermesHome\node;$env:Path"
 
                 $version = & "$HermesHome\node\node.exe" --version
-                Write-Success "Node.js $version installed to ~/.hermes/node/"
+                Write-Success "Node.js $version installed to $HermesHome\node\"
                 $script:HasNode = $true
 
                 Remove-Item -Force $tmpZip -ErrorAction SilentlyContinue
@@ -459,7 +566,7 @@ function Install-Repository {
         # Fallback: download ZIP archive (bypasses git file I/O issues entirely)
         if (-not $cloneSuccess) {
             if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue }
-            Write-Warn "Git clone failed — downloading ZIP archive instead..."
+            Write-Warn "Git clone failed - downloading ZIP archive instead..."
             try {
                 $zipUrl = "https://github.com/NousResearch/hermes-agent/archive/refs/heads/$Branch.zip"
                 $zipPath = "$env:TEMP\hermes-agent-$Branch.zip"
@@ -620,7 +727,7 @@ function Set-PathVariable {
 function Copy-ConfigTemplates {
     Write-Info "Setting up configuration files..."
     
-    # Create ~/.hermes directory structure
+    # Create Hermes home directory structure
     New-Item -ItemType Directory -Force -Path "$HermesHome\cron" | Out-Null
     New-Item -ItemType Directory -Force -Path "$HermesHome\sessions" | Out-Null
     New-Item -ItemType Directory -Force -Path "$HermesHome\logs" | Out-Null
@@ -638,13 +745,13 @@ function Copy-ConfigTemplates {
         $examplePath = "$InstallDir\.env.example"
         if (Test-Path $examplePath) {
             Copy-Item $examplePath $envPath
-            Write-Success "Created ~/.hermes/.env from template"
+            Write-Success "Created $envPath from template"
         } else {
             New-Item -ItemType File -Force -Path $envPath | Out-Null
-            Write-Success "Created ~/.hermes/.env"
+            Write-Success "Created $envPath"
         }
     } else {
-        Write-Info "~/.hermes/.env already exists, keeping it"
+        Write-Info "$envPath already exists, keeping it"
     }
     
     # Create config.yaml
@@ -653,10 +760,10 @@ function Copy-ConfigTemplates {
         $examplePath = "$InstallDir\cli-config.yaml.example"
         if (Test-Path $examplePath) {
             Copy-Item $examplePath $configPath
-            Write-Success "Created ~/.hermes/config.yaml from template"
+            Write-Success "Created $configPath from template"
         }
     } else {
-        Write-Info "~/.hermes/config.yaml already exists, keeping it"
+        Write-Info "$configPath already exists, keeping it"
     }
     
     # Create SOUL.md if it doesn't exist (global persona file)
@@ -823,13 +930,13 @@ function Start-GatewayIfConfigured {
 
 function Write-Completion {
     Write-Host ""
-    Write-Host "┌─────────────────────────────────────────────────────────┐" -ForegroundColor Green
-    Write-Host "│              ✓ Installation Complete!                   │" -ForegroundColor Green
-    Write-Host "└─────────────────────────────────────────────────────────┘" -ForegroundColor Green
+    Write-Host "===========================================================" -ForegroundColor Green
+    Write-Host "               Installation Complete!" -ForegroundColor Green
+    Write-Host "===========================================================" -ForegroundColor Green
     Write-Host ""
     
     # Show file locations
-    Write-Host "📁 Your files:" -ForegroundColor Cyan
+    Write-Host "Your files:" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "   Config:    " -NoNewline -ForegroundColor Yellow
     Write-Host "$HermesHome\config.yaml"
@@ -841,9 +948,9 @@ function Write-Completion {
     Write-Host "$HermesHome\hermes-agent\"
     Write-Host ""
     
-    Write-Host "─────────────────────────────────────────────────────────" -ForegroundColor Cyan
+    Write-Host "-----------------------------------------------------------" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "🚀 Commands:" -ForegroundColor Cyan
+    Write-Host "Commands:" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "   hermes              " -NoNewline -ForegroundColor Green
     Write-Host "Start chatting"
@@ -859,9 +966,9 @@ function Write-Completion {
     Write-Host "Update to latest version"
     Write-Host ""
     
-    Write-Host "─────────────────────────────────────────────────────────" -ForegroundColor Cyan
+    Write-Host "-----------------------------------------------------------" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "⚡ Restart your terminal for PATH changes to take effect" -ForegroundColor Yellow
+    Write-Host "Restart your terminal for PATH changes to take effect" -ForegroundColor Yellow
     Write-Host ""
     
     if (-not $HasNode) {
@@ -885,9 +992,9 @@ function Write-Completion {
 function Main {
     Write-Banner
     
-    if (-not (Install-Uv)) { throw "uv installation failed — cannot continue" }
-    if (-not (Test-Python)) { throw "Python $PythonVersion not available — cannot continue" }
-    if (-not (Test-Git)) { throw "Git not found — install from https://git-scm.com/download/win" }
+    if (-not (Install-Uv)) { throw "uv installation failed - cannot continue" }
+    if (-not (Test-Python)) { throw "Python $PythonVersion not available - cannot continue" }
+    if (-not (Test-Git)) { throw "Git not found - install from https://git-scm.com/download/win" }
     Test-Node              # Auto-installs if missing
     Install-SystemPackages  # ripgrep + ffmpeg in one step
     
