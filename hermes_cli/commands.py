@@ -21,6 +21,32 @@ from prompt_toolkit.completion import Completer, Completion
 
 
 # ---------------------------------------------------------------------------
+# Shared constants
+# ---------------------------------------------------------------------------
+
+#: Intensity rules for /caveman mode — used by CLI and gateway.
+CAVEMAN_INTENSITY_RULES: dict[str, str] = {
+    "lite": "Drop filler and pleasantries. Keep grammar. Professional but no fluff.",
+    "full": "Drop articles, use fragments. Classic caveman. [thing] [action] [reason].",
+    "ultra": "Max compression. Abbreviate. Arrow notation X→Y. One word if enough.",
+}
+
+#: Strong system-level instruction template for caveman mode.
+#: {rule} is replaced with the intensity-specific rule from CAVEMAN_INTENSITY_RULES.
+#: Starts with sentinel "[SYSTEM: CAVEMAN MODE" — idempotent transcript cleanup depends on this.
+CAVEMAN_SYSTEM_INSTRUCTION = (
+    "[SYSTEM: CAVEMAN MODE ON — intensity: {intensity_upper}] "
+    "CRITICAL OVERRIDE: You MUST respond in caveman speak for ALL replies. "
+    "This overrides your default communication style. "
+    "Rules: {rule} "
+    "NEVER use filler phrases, greetings, pleasantries, or formal language. "
+    "NEVER start with 'I', 'Sure', 'Of course', 'Certainly', 'Great question'. "
+    "Code blocks: unchanged (normal syntax). Everything else: caveman. "
+    "If you catch yourself writing normally, stop and rewrite in caveman style."
+)
+
+
+# ---------------------------------------------------------------------------
 # CommandDef dataclass
 # ---------------------------------------------------------------------------
 
@@ -105,6 +131,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                subcommands=("normal", "fast", "status", "on", "off")),
     CommandDef("skin", "Show or change the display skin/theme", "Configuration",
                cli_only=True, args_hint="[name]"),
+    CommandDef("caveman", "Toggle caveman speak mode (compressed responses, fewer tokens)", "Configuration",
+               aliases=("cav",), args_hint="[lite|full|ultra]"),
     CommandDef("voice", "Toggle voice mode", "Configuration",
                args_hint="[on|off|tts|status]", subcommands=("on", "off", "tts", "status")),
 
