@@ -28,6 +28,104 @@ from hermes_cli.colors import Colors, color
 # Process Management (for manual gateway runs)
 # =============================================================================
 
+_GATEWAY_PROCESS_PATTERNS = (
+    "hermes_cli.main gateway",
+    "hermes_cli/main.py gateway",
+    "hermes gateway",
+    "gateway/run.py",
+)
+
+_WINDOWS_PROCESS_QUERY_COMMANDS = (
+    ["wmic", "process", "get", "ProcessId,CommandLine", "/FORMAT:LIST"],
+    [
+        "powershell",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        (
+            "Get-CimInstance Win32_Process | ForEach-Object { "
+            "if ($_.CommandLine) { "
+            "Write-Output ('CommandLine=' + $_.CommandLine); "
+            "Write-Output ('ProcessId=' + $_.ProcessId); "
+            "Write-Output '' "
+            "} }"
+        ),
+    ],
+    [
+        "pwsh",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        (
+            "Get-CimInstance Win32_Process | ForEach-Object { "
+            "if ($_.CommandLine) { "
+            "Write-Output ('CommandLine=' + $_.CommandLine); "
+            "Write-Output ('ProcessId=' + $_.ProcessId); "
+            "Write-Output '' "
+            "} }"
+        ),
+    ],
+)
+
+
+def _parse_windows_gateway_pids(output: str, *, exclude_pids: set[int] | None = None) -> list[int]:
+    """Parse Windows process-list output and return matching gateway PIDs."""
+    pids: list[int] = []
+    excluded = exclude_pids or set()
+    current_cmd = ""
+
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if line.startswith("CommandLine="):
+            current_cmd = line[len("CommandLine="):]
+            continue
+        if not line.startswith("ProcessId="):
+            continue
+
+        pid_str = line[len("ProcessId="):]
+        if not any(pattern in current_cmd for pattern in _GATEWAY_PROCESS_PATTERNS):
+            current_cmd = ""
+            continue
+
+        try:
+            pid = int(pid_str)
+        except ValueError:
+            current_cmd = ""
+            continue
+
+        if pid != os.getpid() and pid not in excluded and pid not in pids:
+            pids.append(pid)
+        current_cmd = ""
+
+    return pids
+
+
+def _find_gateway_pids_windows(exclude_pids: set[int] | None = None) -> list[int]:
+    """Find gateway PIDs on Windows, falling back when WMIC is unavailable."""
+    for command in _WINDOWS_PROCESS_QUERY_COMMANDS:
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        except Exception:
+            continue
+
+        if result.returncode != 0:
+            continue
+
+        return _parse_windows_gateway_pids(
+            result.stdout,
+            exclude_pids=exclude_pids,
+        )
+
+    return []
+
+
 def _get_service_pids() -> set:
     """Return PIDs currently managed by systemd or launchd gateway services.
 
@@ -100,36 +198,10 @@ def find_gateway_pids(exclude_pids: set | None = None) -> list:
     """
     pids = []
     _exclude = exclude_pids or set()
-    patterns = [
-        "hermes_cli.main gateway",
-        "hermes_cli/main.py gateway",
-        "hermes gateway",
-        "gateway/run.py",
-    ]
 
     try:
         if is_windows():
-            # Windows: use wmic to search command lines
-            result = subprocess.run(
-                ["wmic", "process", "get", "ProcessId,CommandLine", "/FORMAT:LIST"],
-                capture_output=True, text=True, timeout=10
-            )
-            # Parse WMIC LIST output: blocks of "CommandLine=...\nProcessId=...\n"
-            current_cmd = ""
-            for line in result.stdout.split('\n'):
-                line = line.strip()
-                if line.startswith("CommandLine="):
-                    current_cmd = line[len("CommandLine="):]
-                elif line.startswith("ProcessId="):
-                    pid_str = line[len("ProcessId="):]
-                    if any(p in current_cmd for p in patterns):
-                        try:
-                            pid = int(pid_str)
-                            if pid != os.getpid() and pid not in pids and pid not in _exclude:
-                                pids.append(pid)
-                        except ValueError:
-                            pass
-                    current_cmd = ""
+            return _find_gateway_pids_windows(exclude_pids=_exclude)
         else:
             result = subprocess.run(
                 ["ps", "aux"],
@@ -141,7 +213,7 @@ def find_gateway_pids(exclude_pids: set | None = None) -> list:
                 # Skip grep and current process
                 if 'grep' in line or str(os.getpid()) in line:
                     continue
-                for pattern in patterns:
+                for pattern in _GATEWAY_PROCESS_PATTERNS:
                     if pattern in line:
                         parts = line.split()
                         if len(parts) > 1:

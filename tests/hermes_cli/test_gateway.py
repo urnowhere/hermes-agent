@@ -259,3 +259,60 @@ class TestWaitForGatewayExit:
 
         # Should not raise — ProcessLookupError means it's already gone.
         gateway._wait_for_gateway_exit(timeout=10.0, force_after=2.0)
+
+
+class TestFindGatewayPidsWindows:
+    def test_falls_back_to_powershell_when_wmic_missing(self, monkeypatch):
+        monkeypatch.setattr(gateway, "is_windows", lambda: True)
+        monkeypatch.setattr(gateway.os, "getpid", lambda: 999)
+
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            if cmd[0] == "wmic":
+                raise FileNotFoundError
+            assert cmd[0] == "powershell"
+            return SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    "CommandLine=python gateway/run.py\n"
+                    "ProcessId=123\n\n"
+                    "CommandLine=python -m hermes_cli.main gateway\n"
+                    "ProcessId=456\n"
+                ),
+                stderr="",
+            )
+
+        monkeypatch.setattr(gateway.subprocess, "run", fake_run)
+
+        assert gateway.find_gateway_pids() == [123, 456]
+        assert calls[0][0] == "wmic"
+        assert calls[1][0] == "powershell"
+
+    def test_windows_fallback_skips_excluded_current_and_non_matching_pids(self, monkeypatch):
+        monkeypatch.setattr(gateway, "is_windows", lambda: True)
+        monkeypatch.setattr(gateway.os, "getpid", lambda: 456)
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "wmic":
+                return SimpleNamespace(returncode=1, stdout="", stderr="wmic unavailable")
+            assert cmd[0] == "powershell"
+            return SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    "CommandLine=python gateway/run.py\n"
+                    "ProcessId=123\n\n"
+                    "CommandLine=python gateway/run.py\n"
+                    "ProcessId=456\n\n"
+                    "CommandLine=python gateway/run.py\n"
+                    "ProcessId=789\n\n"
+                    "CommandLine=python unrelated.py\n"
+                    "ProcessId=321\n"
+                ),
+                stderr="",
+            )
+
+        monkeypatch.setattr(gateway.subprocess, "run", fake_run)
+
+        assert gateway.find_gateway_pids(exclude_pids={789}) == [123]
