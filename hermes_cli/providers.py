@@ -127,6 +127,11 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         is_aggregator=True,
         base_url_env_var="HF_BASE_URL",
     ),
+    "novita": HermesOverlay(
+        transport="openai_chat",
+        is_aggregator=True,
+        base_url_env_var="NOVITA_BASE_URL",
+    ),
 }
 
 
@@ -212,6 +217,10 @@ ALIASES: Dict[str, str] = {
     "hf": "huggingface",
     "hugging-face": "huggingface",
     "huggingface-hub": "huggingface",
+
+    # novita
+    "novita-ai": "novita",
+    "novitaai": "novita",
 
     # Local server aliases → virtual "local" concept (resolved via user config)
     "lmstudio": "lmstudio",

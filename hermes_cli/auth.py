@@ -242,6 +242,14 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=("HF_TOKEN",),
         base_url_env_var="HF_BASE_URL",
     ),
+    "novita": ProviderConfig(
+        id="novita",
+        name="NovitaAI",
+        auth_type="api_key",
+        inference_base_url="https://api.novita.ai/openai/v1",
+        api_key_env_vars=("NOVITA_API_KEY",),
+        base_url_env_var="NOVITA_BASE_URL",
+    ),
 }
 
 
@@ -902,6 +910,7 @@ def resolve_provider(
         "hf": "huggingface", "hugging-face": "huggingface", "huggingface-hub": "huggingface",
         "go": "opencode-go", "opencode-go-sub": "opencode-go",
         "kilo": "kilocode", "kilo-code": "kilocode", "kilo-gateway": "kilocode",
+        "novita-ai": "novita", "novitaai": "novita",
         # Local server aliases — route through the generic custom provider
         "lmstudio": "custom", "lm-studio": "custom", "lm_studio": "custom",
         "ollama": "custom", "vllm": "custom", "llamacpp": "custom",

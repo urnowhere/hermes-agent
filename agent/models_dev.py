@@ -143,6 +143,7 @@ class ProviderInfo:
 # Hermes provider names → models.dev provider IDs
 PROVIDER_TO_MODELS_DEV: Dict[str, str] = {
     "openrouter": "openrouter",
+    "novita": "novita-ai",
     "anthropic": "anthropic",
     "zai": "zai",
     "kimi-coding": "kimi-for-coding",

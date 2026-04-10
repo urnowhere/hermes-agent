@@ -934,6 +934,7 @@ def select_provider_and_model(args=None):
         "kilocode": "Kilo Code",
         "alibaba": "Alibaba Cloud (DashScope)",
         "huggingface": "Hugging Face",
+        "novita": "NovitaAI",
         "custom": "Custom endpoint",
     }
     active_label = provider_labels.get(active, active) if active else "none"
@@ -952,6 +953,7 @@ def select_provider_and_model(args=None):
         ("qwen-oauth", "Qwen OAuth (reuses local Qwen CLI login)"),
         ("copilot", "GitHub Copilot (uses GITHUB_TOKEN or gh auth token)"),
         ("huggingface", "Hugging Face Inference Providers (20+ open models)"),
+        ("novita", "NovitaAI (multi-model, pay-per-use)"),
     ]
 
     extended_providers = [
@@ -1077,6 +1079,8 @@ def select_provider_and_model(args=None):
         _model_flow_anthropic(config, current_model)
     elif selected_provider == "kimi-coding":
         _model_flow_kimi(config, current_model)
+    elif selected_provider == "novita":
+        _model_flow_novita(config, current_model)
     elif selected_provider in ("gemini", "zai", "minimax", "minimax-cn", "kilocode", "opencode-zen", "opencode-go", "ai-gateway", "alibaba", "huggingface"):
         _model_flow_api_key_provider(config, selected_provider, current_model)
 
@@ -2280,6 +2284,76 @@ def _model_flow_kimi(config, current_model=""):
 
         endpoint_label = "Kimi Coding" if is_coding_plan else "Moonshot"
         print(f"Default model set to: {selected} (via {endpoint_label})")
+    else:
+        print("No change.")
+
+
+def _model_flow_novita(config, current_model=""):
+    """NovitaAI provider: ensure API key, fetch live model list + pricing."""
+    from hermes_cli.auth import _prompt_model_selection, _save_model_choice, deactivate_provider
+    from hermes_cli.config import get_env_value, save_env_value
+
+    api_key = get_env_value("NOVITA_API_KEY") or os.getenv("NOVITA_API_KEY", "")
+    if not api_key:
+        print("No NovitaAI API key configured.")
+        print("Get one at: https://novita.ai/settings/key-management")
+        print()
+        try:
+            import getpass
+            key = getpass.getpass("NOVITA_API_KEY (or Enter to cancel): ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            return
+        if not key:
+            print("Cancelled.")
+            return
+        save_env_value("NOVITA_API_KEY", key)
+        api_key = key
+        print("API key saved.")
+        print()
+
+    # Fetch live model list: Novita API → models.dev → static fallback
+    from hermes_cli.models import _fetch_novita_models, get_pricing_for_provider, _PROVIDER_MODELS
+    novita_models = _fetch_novita_models()
+    if novita_models:
+        print(f"  Found {len(novita_models)} model(s) from NovitaAI API")
+    else:
+        # Try models.dev as intermediate fallback
+        try:
+            from agent.models_dev import fetch_models_dev, PROVIDER_TO_MODELS_DEV
+            mdev_id = PROVIDER_TO_MODELS_DEV.get("novita")
+            if mdev_id:
+                data = fetch_models_dev()
+                mdev_models = list(data.get(mdev_id, {}).get("models", {}).keys())
+                if mdev_models:
+                    novita_models = mdev_models
+                    print(f"  Found {len(novita_models)} model(s) from models.dev (API unreachable)")
+        except Exception:
+            pass
+        if not novita_models:
+            novita_models = list(_PROVIDER_MODELS.get("novita", []))
+            if novita_models:
+                print(f"  Using {len(novita_models)} curated models (API & models.dev unreachable)")
+
+    # Fetch live pricing
+    pricing = get_pricing_for_provider("novita")
+
+    selected = _prompt_model_selection(novita_models, current_model=current_model, pricing=pricing)
+    if selected:
+        _save_model_choice(selected)
+
+        from hermes_cli.config import load_config, save_config
+        cfg = load_config()
+        model = cfg.get("model")
+        if not isinstance(model, dict):
+            model = {"default": model} if model else {}
+            cfg["model"] = model
+        model["provider"] = "novita"
+        model["base_url"] = os.getenv("NOVITA_BASE_URL", "").strip() or "https://api.novita.ai/openai/v1"
+        model["api_mode"] = "chat_completions"
+        save_config(cfg)
+        deactivate_provider()
+        print(f"Default model set to: {selected} (via NovitaAI)")
     else:
         print("No change.")
 
@@ -4321,7 +4395,7 @@ For more help on a command:
     )
     chat_parser.add_argument(
         "--provider",
-        choices=["auto", "openrouter", "nous", "openai-codex", "copilot-acp", "copilot", "anthropic", "gemini", "huggingface", "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode"],
+        choices=["auto", "openrouter", "nous", "openai-codex", "copilot-acp", "copilot", "anthropic", "gemini", "huggingface", "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode", "novita"],
         default=None,
         help="Inference provider (default: auto)"
     )

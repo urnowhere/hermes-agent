@@ -26,14 +26,14 @@ _PROVIDER_PREFIXES: frozenset[str] = frozenset({
     "openrouter", "nous", "openai-codex", "copilot", "copilot-acp",
     "gemini", "zai", "kimi-coding", "minimax", "minimax-cn", "anthropic", "deepseek",
     "opencode-zen", "opencode-go", "ai-gateway", "kilocode", "alibaba",
-    "qwen-oauth",
+    "qwen-oauth", "novita",
     "custom", "local",
     # Common aliases
     "google", "google-gemini", "google-ai-studio",
     "glm", "z-ai", "z.ai", "zhipu", "github", "github-copilot",
     "github-models", "kimi", "moonshot", "claude", "deep-seek",
     "opencode", "zen", "go", "vercel", "kilo", "dashscope", "aliyun", "qwen",
-    "qwen-portal",
+    "qwen-portal", "novita-ai", "novitaai",
 })
 
 
@@ -68,6 +68,9 @@ _MODEL_CACHE_TTL = 3600
 _endpoint_model_metadata_cache: Dict[str, Dict[str, Dict[str, Any]]] = {}
 _endpoint_model_metadata_cache_time: Dict[str, float] = {}
 _ENDPOINT_MODEL_CACHE_TTL = 300
+
+_novita_metadata_cache: Dict[str, Dict[str, Any]] = {}
+_novita_metadata_cache_time: float = 0
 
 # Descending tiers for context length probing when the model is unknown.
 # We start at 128K (a safe default for most modern models) and step down
@@ -213,6 +216,7 @@ _URL_TO_PROVIDER: Dict[str, str] = {
     "models.github.ai": "copilot",
     "api.fireworks.ai": "fireworks",
     "opencode.ai": "opencode-go",
+    "api.novita.ai": "novita",
 }
 
 
@@ -441,6 +445,50 @@ def fetch_model_metadata(force_refresh: bool = False) -> Dict[str, Dict[str, Any
     except Exception as e:
         logging.warning(f"Failed to fetch model metadata from OpenRouter: {e}")
         return _model_metadata_cache or {}
+
+
+def fetch_novita_model_metadata(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
+    """Fetch model metadata from NovitaAI /v1/models (cached for 1 hour).
+
+    Returns {model_id: {"context_length": int, "max_completion_tokens": int}}.
+    """
+    global _novita_metadata_cache, _novita_metadata_cache_time
+
+    if not force_refresh and _novita_metadata_cache and (time.time() - _novita_metadata_cache_time) < _MODEL_CACHE_TTL:
+        return _novita_metadata_cache
+
+    api_key = os.getenv("NOVITA_API_KEY", "").strip()
+    if not api_key:
+        return _novita_metadata_cache or {}
+
+    try:
+        base_url = os.getenv("NOVITA_BASE_URL", "").strip() or "https://api.novita.ai/openai/v1"
+        url = base_url.rstrip("/") + "/models"
+        response = requests.get(
+            url,
+            headers={"Authorization": f"Bearer {api_key}", "User-Agent": "HermesAgent/1.0"},
+            timeout=10,
+        )
+        response.raise_for_status()
+
+        cache: Dict[str, Dict[str, Any]] = {}
+        for model in response.json().get("data", []):
+            model_id = model.get("id", "")
+            if not model_id:
+                continue
+            cache[model_id] = {
+                "context_length": model.get("context_size", 128000),
+                "max_completion_tokens": model.get("max_output_tokens", 4096),
+            }
+
+        _novita_metadata_cache = cache
+        _novita_metadata_cache_time = time.time()
+        logger.debug("Fetched metadata for %s models from NovitaAI", len(cache))
+        return cache
+
+    except Exception as e:
+        logger.debug("Failed to fetch model metadata from NovitaAI: %s", e)
+        return _novita_metadata_cache or {}
 
 
 def fetch_endpoint_model_metadata(
@@ -977,6 +1025,14 @@ def get_model_context_length(
         ctx = _query_anthropic_context_length(model, base_url or "https://api.anthropic.com", api_key)
         if ctx:
             return ctx
+
+    # 4b. NovitaAI /v1/models API (authoritative for Novita-hosted models)
+    if provider == "novita" or (base_url and "api.novita.ai" in base_url):
+        metadata = fetch_novita_model_metadata()
+        if model in metadata:
+            ctx = metadata[model].get("context_length")
+            if isinstance(ctx, int) and ctx > 0:
+                return ctx
 
     # 5. Provider-aware lookups (before generic OpenRouter cache)
     # These are provider-specific and take priority over the generic OR cache,
