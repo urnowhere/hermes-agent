@@ -149,6 +149,31 @@ class TestProviderPersistsAfterModelSave:
         assert model.get("api_mode") == "codex_responses"
         assert config["agent"]["reasoning_effort"] == "high"
 
+    def test_named_custom_provider_preserves_explicit_api_mode(self, config_home):
+        """Named custom providers should re-activate with their saved api_mode."""
+        import yaml
+
+        from hermes_cli.main import _model_flow_named_custom
+
+        provider_info = {
+            "name": "Packy",
+            "base_url": "https://packy.example.com/v1",
+            "api_key": "sk-test",
+            "model": "gpt-5.4",
+            "api_mode": "codex_responses",
+        }
+
+        with patch("hermes_cli.auth._save_model_choice"), \
+             patch("hermes_cli.auth.deactivate_provider"):
+            _model_flow_named_custom({}, provider_info)
+
+        config = yaml.safe_load((config_home / "config.yaml").read_text()) or {}
+        model = config.get("model")
+        assert isinstance(model, dict)
+        assert model.get("provider") == "custom"
+        assert model.get("base_url") == "https://packy.example.com/v1"
+        assert model.get("api_mode") == "codex_responses"
+
     def test_copilot_acp_provider_saved_when_selected(self, config_home):
         """_model_flow_copilot_acp should persist provider/base_url/model together."""
         from hermes_cli.main import _model_flow_copilot_acp
