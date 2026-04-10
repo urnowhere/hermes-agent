@@ -48,6 +48,37 @@ model:
   # api_key: "your-key-here"  # Uncomment to set here instead of .env
   base_url: "https://openrouter.ai/api/v1"
 
+# ── Custom providers ─────────────────────────────────────────────────────
+#
+# Saved custom endpoints. Created automatically by `hermes model` → Custom,
+# or add manually here. Each entry appears in the provider picker.
+#
+# custom_providers:
+#   - name: "My vLLM"
+#     base_url: "https://my-vllm.example.com/v1"
+#     api_key: "sk-..."
+#     model: "meta-llama/Llama-3.3-70B-Instruct"  # last-used model
+#     # models_url: optional override for the model list endpoint.
+#     # By default, hermes probes <base_url>/models (OpenAI-compatible).
+#     # Set this when the endpoint uses a non-standard path or a
+#     # separate management API for listing models.
+#     # models_url: "https://my-vllm.example.com/admin/models"
+#
+# ── User-defined providers (config.yaml providers: section) ──────────────
+#
+# Named providers with a fixed URL and env var for the API key.
+# Useful for LiteLLM proxies, cloud providers not yet built into Hermes, etc.
+#
+# providers:
+#   bedrock:
+#     name: "AWS Bedrock (via LiteLLM)"
+#     api: "http://localhost:4000/v1"
+#     key_env: "LITELLM_PROXY_KEY"
+#     transport: "openai_chat"        # or "anthropic_messages"
+#     default_model: "anthropic/claude-sonnet-4.6"
+#     # models_url: optional override for the model list endpoint.
+#     # models_url: "http://localhost:4000/v1/models"
+
   # ── Token limits — two settings, easy to confuse ──────────────────────────
   #
   # context_length: TOTAL context window (input + output tokens combined).

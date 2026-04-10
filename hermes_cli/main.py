@@ -985,6 +985,7 @@ def select_provider_and_model(args=None):
                 "base_url": base_url,
                 "api_key": entry.get("api_key", ""),
                 "model": entry.get("model", ""),
+                "models_url": entry.get("models_url", ""),
             }
         return custom_provider_map
 
@@ -1697,8 +1698,9 @@ def _remove_custom_provider(config):
 def _model_flow_named_custom(config, provider_info):
     """Handle a named custom provider from config.yaml custom_providers list.
 
-    If the entry has a saved model name, activates it immediately.
-    Otherwise probes the endpoint's /models API to let the user pick one.
+    Probes the endpoint's /models API to show available models for selection.
+    If a model is already saved, it appears as the default with an option to
+    keep it (avoiding the probe delay when the user just wants to re-activate).
     """
     from hermes_cli.auth import _save_model_choice, deactivate_provider
     from hermes_cli.config import load_config, save_config
@@ -1708,41 +1710,37 @@ def _model_flow_named_custom(config, provider_info):
     base_url = provider_info["base_url"]
     api_key = provider_info.get("api_key", "")
     saved_model = provider_info.get("model", "")
+    models_url = provider_info.get("models_url", "")
 
-    # If a model is saved, just activate immediately — no probing needed
-    if saved_model:
-        _save_model_choice(saved_model)
-
-        cfg = load_config()
-        model = cfg.get("model")
-        if not isinstance(model, dict):
-            model = {"default": model} if model else {}
-            cfg["model"] = model
-        model["provider"] = "custom"
-        model["base_url"] = base_url
-        if api_key:
-            model["api_key"] = api_key
-        save_config(cfg)
-        deactivate_provider()
-
-        print(f"✅ Switched to: {saved_model}")
-        print(f"   Provider: {name} ({base_url})")
-        return
-
-    # No saved model — probe endpoint and let user pick
     print(f"  Provider: {name}")
     print(f"  URL:      {base_url}")
+    if saved_model:
+        print(f"  Current:  {saved_model}")
     print()
-    print("No model saved for this provider. Fetching available models...")
-    models = fetch_api_models(api_key, base_url, timeout=8.0)
+
+    # Probe for available models (models_url override, then standard /models)
+    print("Fetching available models...")
+    if models_url:
+        from hermes_cli.model_switch import _probe_endpoint_models
+        models = _probe_endpoint_models(base_url, api_key=api_key, models_url=models_url, timeout=8.0)
+    else:
+        models = fetch_api_models(api_key, base_url, timeout=8.0)
+
+    # Ensure saved model appears in the list (even if probe missed it)
+    if saved_model and models and saved_model not in models:
+        models.insert(0, saved_model)
 
     if models:
         print(f"Found {len(models)} model(s):\n")
+        # Pre-select saved model so user can press Enter to keep it
+        default_idx = 0
+        if saved_model and saved_model in models:
+            default_idx = models.index(saved_model)
         try:
             from simple_term_menu import TerminalMenu
             menu_items = [f"  {m}" for m in models] + ["  Cancel"]
             menu = TerminalMenu(
-                menu_items, cursor_index=0,
+                menu_items, cursor_index=default_idx,
                 menu_cursor="-> ", menu_cursor_style=("fg_green", "bold"),
                 menu_highlight_style=("fg_green",),
                 cycle_cursor=True, clear_screen=False,

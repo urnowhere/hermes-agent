@@ -21,6 +21,7 @@ OpenRouter variant suffixes (``:free``, ``:extended``, ``:fast``).
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import List, NamedTuple, Optional
 
@@ -720,6 +721,64 @@ def switch_model(
 
 
 # ---------------------------------------------------------------------------
+# Lightweight /v1/models probe for user-defined endpoints
+# ---------------------------------------------------------------------------
+
+def _probe_endpoint_models(
+    api_url: str,
+    api_key: str = "",
+    models_url: str = "",
+    timeout: float = 2.0,
+) -> List[str]:
+    """Probe an OpenAI-compatible endpoint for available model IDs.
+
+    Uses *models_url* if provided (custom override), otherwise delegates to
+    ``probe_api_models()`` from ``hermes_cli.models`` which handles URL
+    fallback logic (with/without ``/v1`` suffix).
+
+    Returns a list of model ID strings, or an empty list on any failure
+    (timeout, 4xx, connection error).  Short timeout by default — this is
+    called from the ``/model`` picker where speed matters more than completeness.
+    """
+    if not api_url and not models_url:
+        return []
+
+    if models_url:
+        # Custom override — probe the explicit URL directly
+        import json
+        import urllib.request
+
+        headers = {"Accept": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        try:
+            req = urllib.request.Request(models_url.rstrip("/"), headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode())
+                return [
+                    m.get("id", "") for m in data.get("data", [])
+                    if isinstance(m, dict) and m.get("id")
+                ]
+        except Exception:
+            return []
+
+    # Standard path — reuse probe_api_models() from models.py
+    # Rewrite /anthropic → /v1 before probing (the /anthropic endpoint
+    # doesn't support /models).
+    effective_url = api_url.rstrip("/")
+    if effective_url.endswith("/anthropic"):
+        effective_url = effective_url[: -len("/anthropic")] + "/v1"
+
+    try:
+        from hermes_cli.models import probe_api_models
+        result = probe_api_models(api_key, effective_url, timeout=timeout)
+        models = result.get("models") if result else None
+        return [m for m in (models or []) if m] or []
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
 # Authenticated providers listing (for /model no-args display)
 # ---------------------------------------------------------------------------
 
@@ -854,20 +913,27 @@ def list_authenticated_providers(
             display_name = ep_cfg.get("name", "") or ep_name
             api_url = ep_cfg.get("api", "") or ep_cfg.get("url", "") or ""
             default_model = ep_cfg.get("default_model", "")
+            models_url = ep_cfg.get("models_url", "")
+            key_env = ep_cfg.get("key_env", "")
 
-            models_list = []
-            if default_model:
-                models_list.append(default_model)
+            # Probe endpoint for live model list (short timeout, best-effort)
+            probe_key = os.getenv(key_env, "") if key_env else ""
+            probed = _probe_endpoint_models(
+                api_url, api_key=probe_key, models_url=models_url, timeout=2.0,
+            )
 
-            # Try to probe /v1/models if URL is set (but don't block on it)
-            # For now just show what we know from config
+            # Merge: probed models first, then static default if not already present
+            models_list = list(probed)
+            if default_model and default_model not in models_list:
+                models_list.insert(0, default_model)
+
             results.append({
                 "slug": ep_name,
                 "name": display_name,
                 "is_current": ep_name == current_provider,
                 "is_user_defined": True,
-                "models": models_list,
-                "total_models": len(models_list) if models_list else 0,
+                "models": models_list[:max_models],
+                "total_models": len(models_list),
                 "source": "user-config",
                 "api_url": api_url,
             })
@@ -892,17 +958,26 @@ def list_authenticated_providers(
             if slug in seen_slugs:
                 continue
 
-            models_list = []
+            api_key = (entry.get("api_key") or "").strip()
+            models_url = (entry.get("models_url") or "").strip()
             default_model = (entry.get("model") or "").strip()
-            if default_model:
-                models_list.append(default_model)
+
+            # Probe endpoint for live model list (short timeout, best-effort)
+            probed = _probe_endpoint_models(
+                api_url, api_key=api_key, models_url=models_url, timeout=2.0,
+            )
+
+            # Merge: probed models first, then saved model if not already present
+            models_list = list(probed)
+            if default_model and default_model not in models_list:
+                models_list.insert(0, default_model)
 
             results.append({
                 "slug": slug,
                 "name": display_name,
                 "is_current": slug == current_provider,
                 "is_user_defined": True,
-                "models": models_list,
+                "models": models_list[:max_models],
                 "total_models": len(models_list),
                 "source": "user-config",
                 "api_url": api_url,
