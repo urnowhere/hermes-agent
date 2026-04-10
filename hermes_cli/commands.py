@@ -31,6 +31,20 @@ CAVEMAN_INTENSITY_RULES: dict[str, str] = {
     "ultra": "Max compression. Abbreviate. Arrow notation X→Y. One word if enough.",
 }
 
+#: Strong system-level instruction template for caveman mode.
+#: {rule} is replaced with the intensity-specific rule from CAVEMAN_INTENSITY_RULES.
+#: Starts with sentinel "[SYSTEM: CAVEMAN MODE" — idempotent transcript cleanup depends on this.
+CAVEMAN_SYSTEM_INSTRUCTION = (
+    "[SYSTEM: CAVEMAN MODE ON — intensity: {intensity_upper}] "
+    "CRITICAL OVERRIDE: You MUST respond in caveman speak for ALL replies. "
+    "This overrides your default communication style. "
+    "Rules: {rule} "
+    "NEVER use filler phrases, greetings, pleasantries, or formal language. "
+    "NEVER start with 'I', 'Sure', 'Of course', 'Certainly', 'Great question'. "
+    "Code blocks: unchanged (normal syntax). Everything else: caveman. "
+    "If you catch yourself writing normally, stop and rewrite in caveman style."
+)
+
 
 # ---------------------------------------------------------------------------
 # CommandDef dataclass

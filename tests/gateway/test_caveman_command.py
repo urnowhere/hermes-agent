@@ -296,4 +296,4 @@ class TestCliCavemanToggle:
             if m.get("content", "").startswith("[SYSTEM: CAVEMAN MODE ON")
         ]
         assert len(caveman_entries) == 1
-        assert "ultra" in caveman_entries[0]["content"]
+        assert "ULTRA" in caveman_entries[0]["content"]

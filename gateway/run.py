@@ -2892,6 +2892,19 @@ class GatewayRunner:
                 except Exception as exc:
                     logger.debug("@ context reference expansion failed: %s", exc)
 
+            # Inject caveman mode instruction into ephemeral system prompt (every API call)
+            _caveman = getattr(session_entry, 'caveman_mode', None)
+            if _caveman:
+                from hermes_cli.commands import CAVEMAN_INTENSITY_RULES, CAVEMAN_SYSTEM_INSTRUCTION
+                _rule = CAVEMAN_INTENSITY_RULES.get(_caveman, "")
+                _caveman_instruction = CAVEMAN_SYSTEM_INSTRUCTION.format(
+                    intensity_upper=_caveman.upper(),
+                    rule=_rule,
+                )
+                context_prompt = (_caveman_instruction + "\n\n" + context_prompt).strip() if context_prompt else _caveman_instruction
+                # Per-turn reminder appended to user message for extra reinforcement
+                message_text = message_text + f"\n\n[Reminder: CAVEMAN MODE {_caveman.upper()} is active. Respond in caveman speak.]"
+
             # Run the agent
             agent_result = await self._run_agent(
                 message=message_text,
@@ -4791,9 +4804,11 @@ class GatewayRunner:
         rule = CAVEMAN_INTENSITY_RULES.get(intensity, CAVEMAN_INTENSITY_RULES["full"])
         msg = (
             f"[SYSTEM: CAVEMAN MODE ON — intensity: {intensity}] "
-            f"Respond like smart caveman from now on. {rule} "
+            f"IMPORTANT: You MUST respond in caveman speak from now on. "
+            f"Rules: {rule} "
             f"Keep all technical accuracy. Code blocks unchanged. "
-            f"Stay in caveman mode until user say /caveman again or 'normal mode'."
+            f"This overrides your default communication style. "
+            f"Stay in caveman mode until user says /caveman again or 'normal mode'."
         )
 
         # Inject idempotently: strip any previous caveman entry, then append fresh one
@@ -4801,7 +4816,7 @@ class GatewayRunner:
         cleaned = [m for m in history if not (
             isinstance(m.get("content"), str) and m["content"].startswith(_sentinel)
         )]
-        cleaned.append({"role": "system", "content": msg})
+        cleaned.append({"role": "user", "content": msg})
         self.session_store.rewrite_transcript(session_entry.session_id, cleaned)
 
         return f"{icons[intensity]} Caveman mode **ON** — intensity: {intensity}. Fewer tokens."

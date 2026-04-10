@@ -5188,7 +5188,7 @@ class HermesCLI:
         one is appended, so repeated toggles never stack garbage into history.
         When *state* is "off" the entries are simply removed with nothing added.
         """
-        from hermes_cli.commands import CAVEMAN_INTENSITY_RULES
+        from hermes_cli.commands import CAVEMAN_INTENSITY_RULES, CAVEMAN_SYSTEM_INSTRUCTION
 
         _sentinel = "[SYSTEM: CAVEMAN MODE"
 
@@ -5205,11 +5205,9 @@ class HermesCLI:
             return
 
         rule = CAVEMAN_INTENSITY_RULES.get(intensity or "full", CAVEMAN_INTENSITY_RULES["full"])
-        msg = (
-            f"[SYSTEM: CAVEMAN MODE ON — intensity: {intensity}] "
-            f"Respond like smart caveman from now on. {rule} "
-            f"Keep all technical accuracy. Code blocks unchanged. "
-            f"Stay in caveman mode until user say /caveman again or 'normal mode'."
+        msg = CAVEMAN_SYSTEM_INSTRUCTION.format(
+            intensity_upper=(intensity or "full").upper(),
+            rule=rule,
         )
         self.conversation_history.append({"role": "user", "content": msg})
 
