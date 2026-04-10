@@ -237,7 +237,7 @@ class TestWaitForGatewayExit:
         monkeypatch.setattr("os.kill", mock_kill)
 
         gateway._wait_for_gateway_exit(timeout=10.0, force_after=5.0)
-        assert (42, signal.SIGKILL) in kills
+        assert (42, getattr(signal, "SIGKILL", signal.SIGTERM)) in kills
 
     def test_handles_process_already_gone_on_kill(self, monkeypatch):
         """ProcessLookupError during SIGKILL is not fatal."""
