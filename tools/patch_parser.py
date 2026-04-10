@@ -355,7 +355,15 @@ def _apply_update(op: PatchOperation, file_ops: Any) -> Tuple[bool, str]:
     
     if read_result.error:
         return False, f"Cannot read file: {read_result.error}"
-    
+
+    if getattr(read_result, 'truncated', False):
+        total = getattr(read_result, 'total_lines', '?')
+        return False, (
+            f"{op.file_path} has {total} lines but the read was capped before the end. "
+            "Patching a partial view would destroy the rest of the file. "
+            "Split the patch into smaller hunks targeting specific sections."
+        )
+
     # Parse content (remove line numbers)
     current_lines = []
     for line in read_result.content.split('\n'):

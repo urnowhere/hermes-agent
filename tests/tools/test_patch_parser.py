@@ -253,3 +253,42 @@ class TestAdditionOnlyHunks:
         assert result.success is True
         assert file_ops.written.endswith("def new_func():\n    return True\n")
         assert "existing = True" in file_ops.written
+
+class TestTruncatedFileSafeguard:
+    """patch_parser should refuse to patch files that were read truncated."""
+
+    def test_truncated_read_returns_error_and_does_not_write(self):
+        patch = """*** Begin Patch
+*** Update File: big.py
+@@ some_func @@
+ def some_func():
+-    return 1
++    return 2
+*** End Patch"""
+        ops, err = parse_v4a_patch(patch)
+        assert err is None
+
+        class FakeFileOps:
+            def __init__(self):
+                self.write_called = False
+
+            def read_file(self, path, offset=1, limit=500):
+                # Simulate a file that has more lines than the read limit returned
+                return SimpleNamespace(
+                    content="def some_func():\n    return 1",
+                    error=None,
+                    truncated=True,
+                    total_lines=3500,
+                )
+
+            def write_file(self, path, content):
+                self.write_called = True
+                return SimpleNamespace(error=None)
+
+        file_ops = FakeFileOps()
+        result = apply_v4a_operations(ops, file_ops)
+
+        assert result.success is False
+        assert "3500" in result.error
+        assert "capped" in result.error
+        assert file_ops.write_called is False
