@@ -1144,10 +1144,12 @@ run_setup_wizard() {
 
     # Run hermes setup using the venv Python directly (no activation needed).
     # Redirect stdin from /dev/tty so interactive prompts work when piped from curl.
+    # Skip the immediate handoff into chat: prompt_toolkit can fail on macOS
+    # when setup itself was started with stdin redirected from /dev/tty.
     if [ "$USE_VENV" = true ]; then
-        "$INSTALL_DIR/venv/bin/python" -m hermes_cli.main setup < /dev/tty
+        HERMES_SKIP_POST_SETUP_CHAT=1 "$INSTALL_DIR/venv/bin/python" -m hermes_cli.main setup < /dev/tty
     else
-        python -m hermes_cli.main setup < /dev/tty
+        HERMES_SKIP_POST_SETUP_CHAT=1 python -m hermes_cli.main setup < /dev/tty
     fi
 }
 

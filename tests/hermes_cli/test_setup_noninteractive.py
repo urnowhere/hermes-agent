@@ -137,3 +137,17 @@ class TestNonInteractiveSetup:
 
         terminal_section.assert_called_once_with(config)
         tts_section.assert_not_called()
+
+    def test_offer_launch_chat_skips_when_installer_requests_it(self, monkeypatch, capsys):
+        """Installer-launched setup should be able to skip the in-process chat handoff."""
+        from hermes_cli import setup as setup_mod
+
+        monkeypatch.setenv("HERMES_SKIP_POST_SETUP_CHAT", "1")
+
+        with patch.object(
+            setup_mod, "prompt_yes_no", side_effect=AssertionError("prompt should not be called")
+        ):
+            setup_mod._offer_launch_chat()
+
+        out = capsys.readouterr().out
+        assert "Skipping immediate launch into chat" in out

@@ -3058,6 +3058,11 @@ def run_setup_wizard(args):
 def _offer_launch_chat():
     """Prompt the user to jump straight into chat after setup."""
     print()
+    if os.environ.get("HERMES_SKIP_POST_SETUP_CHAT") == "1":
+        print_info(
+            "Skipping immediate launch into chat for this setup session."
+        )
+        return
     if prompt_yes_no("Launch hermes chat now?", True):
         from hermes_cli.main import cmd_chat
         from types import SimpleNamespace
