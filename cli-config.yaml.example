@@ -644,6 +644,7 @@ platform_toolsets:
   qqbot: [hermes-qqbot]
   yuanbao: [hermes-yuanbao]
   teams: [hermes-teams]
+  nextcloud_talk: [hermes-nextcloud-talk]
 
 # =============================================================================
 # Gateway Platform Settings

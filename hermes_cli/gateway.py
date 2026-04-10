@@ -3145,6 +3145,22 @@ _PLATFORMS = [
              "help": "Optional — restrict DM access to specific user OpenIDs."},
             {"name": "QQBOT_HOME_CHANNEL", "prompt": "Home channel (user/group OpenID for cron delivery, or empty)", "password": False,
              "help": "OpenID to deliver cron results and notifications to."},
+        "key": "nextcloud_talk",
+        "label": "Nextcloud Talk",
+        "emoji": "☁️",
+        "token_var": "NEXTCLOUD_TALK_BOT_SECRET",
+        "setup_instructions": [
+            "On your Nextcloud server, run:",
+            "  sudo -u www-data php occ talk:bot:install \"Hermes\" <secret> http://<lxc-ip>:8765/talk/webhook \"Hermes AI Agent\" --feature=webhook --feature=response",
+            "Then attach the bot to each conversation:",
+            "  sudo -u www-data php occ talk:bot:setup <bot-id> <conv-token>",
+            "See scripts/register_talk_bot.sh for a helper that generates the secret.",
+        ],
+        "vars": [
+            {"name": "NEXTCLOUD_TALK_URL", "prompt": "Nextcloud base URL (https://nextcloud.example.com)", "password": False,
+             "help": "Base URL of your Nextcloud instance."},
+            {"name": "NEXTCLOUD_TALK_BOT_SECRET", "prompt": "32-char shared secret from talk:bot:install", "password": True,
+             "help": "The shared secret you passed to talk:bot:install."},
         ],
     },
     {
