@@ -4801,7 +4801,7 @@ class GatewayRunner:
         cleaned = [m for m in history if not (
             isinstance(m.get("content"), str) and m["content"].startswith(_sentinel)
         )]
-        cleaned.append({"role": "user", "content": msg})
+        cleaned.append({"role": "system", "content": msg})
         self.session_store.rewrite_transcript(session_entry.session_id, cleaned)
 
         return f"{icons[intensity]} Caveman mode **ON** — intensity: {intensity}. Fewer tokens."
