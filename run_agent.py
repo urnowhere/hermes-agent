@@ -4918,6 +4918,22 @@ class AIAgent:
                                     )
                                 except Exception:
                                     pass
+                                # Back off before retrying to avoid tight
+                                # retry loops — especially important for
+                                # local LLMs whose prefill may legitimately
+                                # exceed the stale-stream timeout.
+                                _backoff = min(5.0 * (2 ** _stream_attempt), 30.0)
+                                import random as _rng
+                                _backoff += _rng.uniform(0, _backoff * 0.25)
+                                logger.info("Backing off %.1fs before stream retry", _backoff)
+                                # Sleep in small increments to stay responsive
+                                # to interrupts (matches outer retry pattern).
+                                _sleep_end = time.time() + _backoff
+                                while time.time() < _sleep_end:
+                                    if self._interrupt_requested:
+                                        result["error"] = InterruptedError("interrupted during stream retry backoff")
+                                        return
+                                    time.sleep(0.1)
                                 continue
                             self._emit_status(
                                 "❌ Connection to provider failed after "
