@@ -282,6 +282,35 @@ def _expand_whatsapp_auth_aliases(identifier: str) -> set:
 
 logger = logging.getLogger(__name__)
 
+
+def _log_gateway_disposition(
+    disposition: str,
+    *,
+    source: Optional[SessionSource] = None,
+    session_key: Optional[str] = None,
+    event: Optional[MessageEvent] = None,
+    reason: Optional[str] = None,
+) -> None:
+    parts = ["gateway_disposition", f"disposition={disposition}"]
+    if source is not None:
+        if getattr(source, "platform", None):
+            parts.append(f"platform={source.platform.value}")
+        if getattr(source, "chat_id", None):
+            parts.append(f"chat_id={source.chat_id}")
+        if getattr(source, "user_id", None):
+            parts.append(f"user_id={source.user_id}")
+    if session_key:
+        parts.append(f"session_key={session_key}")
+    if event is not None and getattr(event, "message_id", None):
+        parts.append(f"message_id={event.message_id}")
+    if event is not None:
+        cmd = event.get_command() if hasattr(event, "get_command") else None
+        if cmd:
+            parts.append(f"command={cmd}")
+    if reason:
+        parts.append(f"reason={reason}")
+    logger.info(" ".join(parts))
+
 # Sentinel placed into _running_agents immediately when a session starts
 # processing, *before* any await.  Prevents a second message for the same
 # session from bypassing the "already running" guard during the async gap
@@ -1851,6 +1880,12 @@ class GatewayRunner:
                 # prevent spamming the user with repeated messages when
                 # multiple DMs arrive in quick succession.
                 if self.pairing_store._is_rate_limited(platform_name, source.user_id):
+                    _log_gateway_disposition(
+                        "unauthorized_rate_limited",
+                        source=source,
+                        event=event,
+                        reason="pairing_rate_limited",
+                    )
                     return None
                 code = self.pairing_store.generate_code(
                     platform_name, source.user_id, source.user_name or ""
@@ -2064,6 +2099,13 @@ class GatewayRunner:
                             adapter._pending_messages[_quick_key] = event
                     else:
                         adapter._pending_messages[_quick_key] = event
+                _log_gateway_disposition(
+                    "queued_without_interrupt",
+                    source=source,
+                    session_key=_quick_key,
+                    event=event,
+                    reason="photo_follow_up_active_run",
+                )
                 return None
 
             running_agent = self._running_agents.get(_quick_key)
@@ -2087,6 +2129,13 @@ class GatewayRunner:
                 self._pending_messages[_quick_key] += "\n" + event.text
             else:
                 self._pending_messages[_quick_key] = event.text
+            _log_gateway_disposition(
+                "interrupt_requested",
+                source=source,
+                session_key=_quick_key,
+                event=event,
+                reason="active_run_interrupted_by_new_input",
+            )
             return None
 
         # Check for commands
