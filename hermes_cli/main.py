@@ -97,7 +97,12 @@ def _apply_profile_override() -> None:
             consume = 1
             break
 
-    # 2. If no flag, check ~/.hermes/active_profile
+    # 2. If no explicit flag and HERMES_HOME is already set, respect it.
+    explicit_home = os.environ.get("HERMES_HOME", "").strip()
+    if profile_name is None and explicit_home:
+        return
+
+    # 3. Otherwise, if no flag, check ~/.hermes/active_profile
     if profile_name is None:
         try:
             active_path = Path.home() / ".hermes" / "active_profile"
@@ -109,7 +114,7 @@ def _apply_profile_override() -> None:
         except (UnicodeDecodeError, OSError):
             pass  # corrupted file, skip
 
-    # 3. If we found a profile, resolve and set HERMES_HOME
+    # 4. If we found a profile, resolve and set HERMES_HOME
     if profile_name is not None:
         try:
             from hermes_cli.profiles import resolve_profile_env
@@ -634,8 +639,16 @@ def cmd_chat(args):
     if getattr(args, "source", None):
         os.environ["HERMES_SESSION_SOURCE"] = args.source
 
-    # Import and run the CLI
-    from cli import main as cli_main
+    # Import and run the local CLI module explicitly from the repo source tree.
+    import importlib.util
+    from pathlib import Path
+    cli_path = Path(__file__).resolve().parent.parent / "cli.py"
+    spec = importlib.util.spec_from_file_location("hermes_local_cli", cli_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Failed to load local CLI module from {cli_path}")
+    cli_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli_module)
+    cli_main = cli_module.main
     
     # Build kwargs from args
     kwargs = {
