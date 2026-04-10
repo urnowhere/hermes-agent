@@ -2928,13 +2928,35 @@ def _offer_launch_chat():
     if prompt_yes_no("Launch hermes chat now?", True):
         from hermes_cli.main import cmd_chat
         from types import SimpleNamespace
-        cmd_chat(SimpleNamespace(
-            query=None, resume=None, continue_last=None, model=None,
-            provider=None, effort=None, skin=None, oneshot=False,
-            quiet=False, verbose=False, toolsets=None, skills=None,
-            yolo=False, source=None, worktree=False, checkpoints=False,
-            pass_session_id=False, max_turns=None,
-        ))
+
+        try:
+            cmd_chat(SimpleNamespace(
+                query=None, resume=None, continue_last=None, model=None,
+                provider=None, effort=None, skin=None, oneshot=False,
+                quiet=False, verbose=False, toolsets=None, skills=None,
+                yolo=False, source=None, worktree=False, checkpoints=False,
+                pass_session_id=False, max_turns=None,
+            ))
+        except OSError as exc:
+            if exc.errno != 22:
+                raise
+            # Interactive setup may leave stdin in a state that prompt_toolkit
+            # cannot re-register with the event loop. Restart chat in a fresh
+            # process so it gets clean stdio and selector state.
+            print()
+            print("Starting chat in a fresh session...")
+            hermes_bin = os.path.join(os.path.dirname(sys.executable), "hermes")
+            if os.path.exists(hermes_bin):
+                try:
+                    os.execvp(hermes_bin, [hermes_bin, "chat"])
+                except OSError:
+                    pass
+            try:
+                os.execvp(sys.executable, [sys.executable, "-m", "hermes_cli", "chat"])
+            except OSError as launch_exc:
+                print_error(f"Could not launch chat automatically: {launch_exc}")
+                print_info("Start it manually with: hermes chat")
+                raise SystemExit(1) from launch_exc
 
 
 def _run_first_time_quick_setup(config: dict, hermes_home, is_existing: bool):

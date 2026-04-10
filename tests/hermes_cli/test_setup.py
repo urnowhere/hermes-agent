@@ -4,6 +4,9 @@ import json
 import sys
 import types
 
+import pytest
+
+import hermes_cli.setup as setup_mod
 from hermes_cli.auth import get_active_provider
 from hermes_cli.config import load_config, save_config
 from hermes_cli.setup import setup_model_provider
@@ -362,3 +365,93 @@ def test_modal_setup_persists_direct_mode_when_user_chooses_their_own_account(tm
 
     assert config["terminal"]["backend"] == "modal"
     assert config["terminal"]["modal_mode"] == "direct"
+
+
+def test_offer_launch_chat_reexecs_after_oserror(monkeypatch, capsys):
+    monkeypatch.setattr("hermes_cli.setup.prompt_yes_no", lambda *args, **kwargs: True)
+    monkeypatch.setattr(setup_mod.sys, "executable", "/tmp/venv/bin/python")
+    monkeypatch.setattr(setup_mod.os.path, "exists", lambda path: path == "/tmp/venv/bin/hermes")
+
+    def fake_cmd_chat(args):
+        assert args.query is None
+        raise OSError(22, "Invalid argument")
+
+    exec_calls = []
+
+    def fake_execvp(path, argv):
+        exec_calls.append((path, argv))
+        raise SystemExit(0)
+
+    monkeypatch.setattr("hermes_cli.main.cmd_chat", fake_cmd_chat)
+    monkeypatch.setattr(setup_mod.os, "execvp", fake_execvp)
+
+    with pytest.raises(SystemExit):
+        setup_mod._offer_launch_chat()
+
+    assert exec_calls == [("/tmp/venv/bin/hermes", ["/tmp/venv/bin/hermes", "chat"])]
+    assert "Starting chat in a fresh session..." in capsys.readouterr().out
+
+
+def test_offer_launch_chat_reraises_unrelated_oserror(monkeypatch):
+    monkeypatch.setattr("hermes_cli.setup.prompt_yes_no", lambda *args, **kwargs: True)
+
+    def fake_cmd_chat(args):
+        raise OSError(2, "No such file or directory")
+
+    monkeypatch.setattr("hermes_cli.main.cmd_chat", fake_cmd_chat)
+    monkeypatch.setattr(setup_mod.os, "execvp", lambda *args, **kwargs: pytest.fail("unexpected execvp"))
+
+    with pytest.raises(OSError, match="No such file or directory"):
+        setup_mod._offer_launch_chat()
+
+
+def test_offer_launch_chat_falls_back_to_module_when_binary_missing(monkeypatch, capsys):
+    monkeypatch.setattr("hermes_cli.setup.prompt_yes_no", lambda *args, **kwargs: True)
+    monkeypatch.setattr(setup_mod.sys, "executable", "/tmp/venv/bin/python")
+    monkeypatch.setattr(setup_mod.os.path, "exists", lambda path: False)
+
+    def fake_cmd_chat(args):
+        raise OSError(22, "Invalid argument")
+
+    exec_calls = []
+
+    def fake_execvp(path, argv):
+        exec_calls.append((path, argv))
+        raise SystemExit(0)
+
+    monkeypatch.setattr("hermes_cli.main.cmd_chat", fake_cmd_chat)
+    monkeypatch.setattr(setup_mod.os, "execvp", fake_execvp)
+
+    with pytest.raises(SystemExit):
+        setup_mod._offer_launch_chat()
+
+    assert exec_calls == [("/tmp/venv/bin/python", ["/tmp/venv/bin/python", "-m", "hermes_cli", "chat"])]
+    assert "Starting chat in a fresh session..." in capsys.readouterr().out
+
+
+def test_offer_launch_chat_falls_back_to_module_when_binary_exec_fails(monkeypatch):
+    monkeypatch.setattr("hermes_cli.setup.prompt_yes_no", lambda *args, **kwargs: True)
+    monkeypatch.setattr(setup_mod.sys, "executable", "/tmp/venv/bin/python")
+    monkeypatch.setattr(setup_mod.os.path, "exists", lambda path: path == "/tmp/venv/bin/hermes")
+
+    def fake_cmd_chat(args):
+        raise OSError(22, "Invalid argument")
+
+    exec_calls = []
+
+    def fake_execvp(path, argv):
+        exec_calls.append((path, argv))
+        if path == "/tmp/venv/bin/hermes":
+            raise OSError(8, "Exec format error")
+        raise SystemExit(0)
+
+    monkeypatch.setattr("hermes_cli.main.cmd_chat", fake_cmd_chat)
+    monkeypatch.setattr(setup_mod.os, "execvp", fake_execvp)
+
+    with pytest.raises(SystemExit):
+        setup_mod._offer_launch_chat()
+
+    assert exec_calls == [
+        ("/tmp/venv/bin/hermes", ["/tmp/venv/bin/hermes", "chat"]),
+        ("/tmp/venv/bin/python", ["/tmp/venv/bin/python", "-m", "hermes_cli", "chat"]),
+    ]
