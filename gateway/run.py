@@ -2715,8 +2715,13 @@ class GatewayRunner:
                 "session_key": session_key,
             })
         
-        # Build session context
-        context = build_session_context(source, self.config, session_entry)
+        # Build session context — pass available tool names for capability-aware platform notes
+        try:
+            from model_tools import get_all_tool_names as _get_tool_names
+            _available_tools = _get_tool_names()
+        except Exception:
+            _available_tools = None
+        context = build_session_context(source, self.config, session_entry, available_tools=_available_tools)
         
         # Set session context variables for tools (task-local, concurrency-safe)
         _session_env_tokens = self._set_session_env(context)
@@ -7251,7 +7256,7 @@ class GatewayRunner:
                 from gateway.config import StreamingConfig
                 _scfg = StreamingConfig()
 
-            if _scfg.enabled and _scfg.transport != "off":
+            if _scfg.enabled and _scfg.transport not in ("off", False):
                 try:
                     from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
                     _adapter = self.adapters.get(source.platform)
