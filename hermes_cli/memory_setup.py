@@ -368,28 +368,20 @@ def cmd_setup(args) -> None:
                 if not all(provider_config.get(k) == v for k, v in when.items()):
                     continue
 
-            if choices and not is_secret:
-                # Normalize choices: support both plain strings and dicts
-                # with label/value/hint/default keys.
-                normalized_choices = []
-                for choice in choices:
-                    if isinstance(choice, dict):
-                        label = choice.get("label") or choice.get("name") or str(choice.get("value", ""))
-                        hint = choice.get("description") or choice.get("hint") or ""
-                        value = choice.get("value", label)
-                        normalized_choices.append({
-                            "label": str(label),
-                            "desc": str(hint),
-                            "value": value,
-                            "default": bool(choice.get("default")),
-                        })
-                    else:
-                        normalized_choices.append({
-                            "label": str(choice),
-                            "desc": "",
-                            "value": choice,
-                            "default": False,
-                        })
+            if choices is not None and not is_secret:
+                # Memory provider schemas expose plain-string choices.
+                # Keep the wizard aligned with the live plugin contract while
+                # still treating an explicit empty list as "no choices
+                # available", so the provider can surface install guidance.
+                normalized_choices = [
+                    {
+                        "label": str(choice),
+                        "desc": "",
+                        "value": choice,
+                        "default": False,
+                    }
+                    for choice in choices
+                ]
 
                 # If no choices available, show the empty_message + hints
                 # and abort setup (provider cannot be configured).

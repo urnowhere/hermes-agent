@@ -8,34 +8,16 @@ def _make_args() -> Namespace:
 
 
 class TestMemorySetup:
-    def test_choice_dicts_use_value_and_default_hint(self, monkeypatch, capsys):
-        """Choice metadata from plugin schemas should drive the selector cleanly.
-
-        Keep returns choice objects, not just plain strings. The setup wizard
-        needs to:
-        - show the human-friendly labels/descriptions to the reviewer
-        - use the declared default when there is no saved value yet
-        - write back the machine-facing ``value`` rather than the label
-        """
+    def test_choice_strings_use_default_value(self, monkeypatch, capsys):
+        """Plain-string choices should use the schema default cleanly."""
 
         class Provider:
             def get_config_schema(self):
                 return [{
                     "key": "summarizer",
                     "description": "Summarization provider",
-                    "choices": [
-                        {
-                            "label": "OpenAI (Recommended)",
-                            "description": "Best default for most installs",
-                            "value": "openai",
-                            "default": True,
-                        },
-                        {
-                            "label": "Anthropic",
-                            "description": "Use Claude for summaries",
-                            "value": "anthropic",
-                        },
-                    ],
+                    "choices": ["OpenAI (Recommended)", "Anthropic"],
+                    "default": "OpenAI (Recommended)",
                 }]
 
             def save_config(self, values, hermes_home):
@@ -66,16 +48,53 @@ class TestMemorySetup:
         assert selects[1] == (
             "  Summarization provider",
             [
-                ("OpenAI (Recommended)", "Best default for most installs"),
-                ("Anthropic", "Use Claude for summaries"),
+                ("OpenAI (Recommended)", ""),
+                ("Anthropic", ""),
             ],
             0,
         )
         assert saved_configs == [{"memory": {"provider": "keep"}}]
-        assert provider.saved == ({"summarizer": "openai"}, "/tmp/hermes-home")
+        assert provider.saved == (
+            {"summarizer": "OpenAI (Recommended)"},
+            "/tmp/hermes-home",
+        )
 
         out = capsys.readouterr().out
         assert "Provider config saved" in out
+
+    def test_empty_choice_list_shows_guidance_and_aborts(self, monkeypatch, capsys):
+        """Providers can expose install guidance by returning no choices."""
+
+        class Provider:
+            def get_config_schema(self):
+                return [{
+                    "key": "_keep_not_installed",
+                    "description": "keep-skill is not installed",
+                    "choices": [],
+                    "empty_message": "keep-skill must be installed before configuring.",
+                    "empty_hints": [
+                        "pip install keep-skill",
+                        "uv pip install keep-skill",
+                    ],
+                }]
+
+        saved_configs = []
+
+        monkeypatch.setenv("HERMES_HOME", "/tmp/hermes-home")
+        monkeypatch.setattr(memory_setup_mod, "_get_available_providers", lambda: [("keep", "local", Provider())])
+        monkeypatch.setattr(memory_setup_mod, "_install_dependencies", lambda name: None)
+        monkeypatch.setattr(memory_setup_mod, "_curses_select", lambda title, items, default=0: 0)
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: {})
+        monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: saved_configs.append(cfg))
+
+        memory_setup_mod.cmd_setup(_make_args())
+
+        assert saved_configs == []
+        out = capsys.readouterr().out
+        assert "keep-skill is not installed" in out
+        assert "keep-skill must be installed before configuring." in out
+        assert "pip install keep-skill" in out
+        assert "Provider config saved" not in out
 
     def test_provider_config_failure_does_not_claim_success(self, monkeypatch, capsys):
         """Activation and provider-native config are separate steps.
