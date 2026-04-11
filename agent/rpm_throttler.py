@@ -93,5 +93,11 @@ def maybe_throttle(
         threshold,
         sleep_for,
     )
-    time.sleep(sleep_for)
+    # Sleep in 1s chunks so the calling thread remains responsive to
+    # interrupts (Ctrl-C, agent timeout) during long throttle waits.
+    slept = 0.0
+    while slept < sleep_for:
+        chunk = min(1.0, sleep_for - slept)
+        time.sleep(chunk)
+        slept += chunk
     return sleep_for

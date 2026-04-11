@@ -2697,6 +2697,8 @@ class AIAgent:
         try:
             from agent.rpm_throttler import maybe_throttle
             return maybe_throttle(self._rate_limit_state, self.provider or "")
+        except (KeyboardInterrupt, SystemExit):
+            raise
         except Exception:
             return 0.0  # Never let throttle logic break the agent loop
 
@@ -4530,7 +4532,11 @@ class AIAgent:
         resp = result["response"]
         if resp is not None:
             http_resp = getattr(resp, "response", None) or getattr(resp, "_response", None)
-            self._capture_rate_limits(http_resp)
+            if http_resp is not None:
+                self._capture_rate_limits(http_resp)
+            else:
+                logger.debug("Could not extract HTTP response from %s for rate limit capture",
+                             type(resp).__name__)
         return resp
 
     # ── Unified streaming API call ─────────────────────────────────────────
