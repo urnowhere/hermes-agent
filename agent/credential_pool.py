@@ -209,7 +209,7 @@ def _is_concurrency_error(reason: Optional[str]) -> bool:
     if not reason:
         return False
     reason_lower = reason.lower()
-    return any(kw in reason_lower for kw in ("1302", "concurren", "rate limit"))
+    return any(kw in reason_lower for kw in ("1302", "concurren"))
 
 
 def _parse_absolute_timestamp(value: Any) -> Optional[float]:

@@ -1097,9 +1097,14 @@ class TestConcurrencyAwareTTL:
         ttl = _exhausted_ttl(429, error_reason="Too many concurrent requests")
         assert ttl == EXHAUSTED_TTL_CONCURRENCY_SECONDS
 
-    def test_rate_limit_keyword_gets_short_ttl(self):
-        ttl = _exhausted_ttl(429, error_reason="rate limit exceeded")
+    def test_concurrent_request_keyword_gets_short_ttl(self):
+        ttl = _exhausted_ttl(429, error_reason="too many concurrent requests")
         assert ttl == EXHAUSTED_TTL_CONCURRENCY_SECONDS
+
+    def test_generic_rate_limit_keeps_long_ttl(self):
+        """RPM/TPM 'rate limit exceeded' should NOT get the short cooldown."""
+        ttl = _exhausted_ttl(429, error_reason="rate limit exceeded")
+        assert ttl == EXHAUSTED_TTL_429_SECONDS
 
     def test_non_429_unaffected(self):
         ttl = _exhausted_ttl(402, error_reason="1302")

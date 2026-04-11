@@ -2098,7 +2098,7 @@ def call_llm(
     with _sem.slot(priority=False, timeout=_sem_timeout) as _acquired:
         if not _acquired and not _is_critical:
             logger.info("concurrency: auxiliary %s skipped (semaphore busy)", task or "call")
-            return None
+            raise RuntimeError(f"Concurrency semaphore busy, skipping auxiliary {task or 'call'}")
         if not _acquired:
             logger.warning("concurrency: %s proceeding without slot (critical)", task or "call")
 
@@ -2291,7 +2291,7 @@ async def async_call_llm(
     async with _sem.async_slot(priority=False, timeout=_sem_timeout) as _acquired:
         if not _acquired and not _is_critical:
             logger.info("concurrency: async %s skipped (semaphore busy)", task or "call")
-            return None
+            raise RuntimeError(f"Concurrency semaphore busy, skipping async auxiliary {task or 'call'}")
         if not _acquired:
             logger.warning("concurrency: async %s proceeding without slot (critical)", task or "call")
 
