@@ -4667,6 +4667,13 @@ class AIAgent:
         """
         result = {"response": None, "error": None}
         request_client_holder = {"client": None}
+        # Request-local cancellation flag. Distinct from self._interrupt_requested
+        # because that flag is cleared at run_conversation() turn boundaries, but
+        # this daemon worker thread can outlive the turn. Tracks whether THIS
+        # specific request was cancelled by the main thread's interrupt handler,
+        # so transport errors that are the expected consequence of our own
+        # force-close aren't misread as a network bug.
+        _request_cancelled = {"value": False}
 
         def _call():
             try:
@@ -4683,6 +4690,17 @@ class AIAgent:
                     request_client_holder["client"] = self._create_request_openai_client(reason="chat_completion_request")
                     result["response"] = request_client_holder["client"].chat.completions.create(**api_kwargs)
             except Exception as e:
+                # If the request was cancelled by the main thread's interrupt
+                # handler, the transport error is the expected consequence of
+                # our own force-close, NOT a network bug. Swallow it instead
+                # of surfacing — the main thread will raise InterruptedError.
+                if _request_cancelled["value"]:
+                    logger.debug(
+                        "Non-streaming worker caught %s after request cancellation — "
+                        "exiting without surfacing a network error.",
+                        type(e).__name__,
+                    )
+                    return
                 result["error"] = e
             finally:
                 request_client = request_client_holder.get("client")
@@ -4694,6 +4712,12 @@ class AIAgent:
         while t.is_alive():
             t.join(timeout=0.3)
             if self._interrupt_requested:
+                # Mark the request cancelled so the worker's exception handler
+                # recognizes the forced close and doesn't surface the error.
+                _request_cancelled["value"] = True
+                logger.debug(
+                    "Force-closing httpx client due to interrupt (not a network error)."
+                )
                 # Force-close the in-flight worker-local HTTP connection to stop
                 # token generation without poisoning the shared client used to
                 # seed future retries.
@@ -4803,6 +4827,14 @@ class AIAgent:
         # poll loop uses this to detect stale connections that keep receiving
         # SSE keep-alive pings but no actual data.
         last_chunk_time = {"t": time.time()}
+        # Request-local cancellation flag. Set by the outer poll loop when it
+        # observes self._interrupt_requested and force-closes the httpx client.
+        # The worker's retry loop checks this flag to distinguish our own
+        # interrupt-induced close from a genuine transient transport error —
+        # so we exit cleanly instead of burning 2*180s retry cycles on a dead
+        # request, which was the root cause of the 7-minute cascading-interrupt
+        # hang observed in production.
+        _request_cancelled = {"value": False}
 
         def _fire_first_delta():
             if not first_delta_fired["done"] and on_first_delta:
@@ -5087,6 +5119,16 @@ class AIAgent:
 
             try:
                 for _stream_attempt in range(_max_stream_retries + 1):
+                    # Check cancellation before each new attempt. If an interrupt
+                    # fired between iterations (e.g. during cleanup/retry wait),
+                    # the new attempt would just get force-closed again — exit
+                    # now instead of wasting a request.
+                    if _request_cancelled["value"]:
+                        logger.debug(
+                            "Streaming worker saw request cancellation before attempt %s — exiting.",
+                            _stream_attempt + 1,
+                        )
+                        return
                     try:
                         if self.api_mode == "anthropic_messages":
                             self._try_refresh_anthropic_client_credentials()
@@ -5095,6 +5137,20 @@ class AIAgent:
                             result["response"] = _call_chat_completions()
                         return  # success
                     except Exception as e:
+                        # If this request was cancelled by the outer poll loop,
+                        # the transport error is the expected consequence of our
+                        # own force-close — NOT a transient network error. Exit
+                        # without retrying, falling back, or emitting reconnect
+                        # status. Preserve the error for diagnostics.
+                        if _request_cancelled["value"]:
+                            logger.debug(
+                                "Streaming worker caught %s after request cancellation — "
+                                "exiting without retry. (This error is the expected "
+                                "consequence of interrupt force-close, not a network bug.)",
+                                type(e).__name__,
+                            )
+                            result["error"] = e
+                            return
                         if deltas_were_sent["yes"]:
                             # Streaming failed AFTER some tokens were already
                             # delivered.  Don't retry or fall back — partial
@@ -5146,6 +5202,14 @@ class AIAgent:
                             # Transient network / timeout error. Retry the
                             # streaming request with a fresh connection first.
                             if _stream_attempt < _max_stream_retries:
+                                # Final cancel check before emitting user-facing
+                                # "Reconnecting…" status — the cancel flag may
+                                # have been set during exception handling above.
+                                if _request_cancelled["value"]:
+                                    logger.debug(
+                                        "Streaming worker cancelled before reconnect status/retry — exiting."
+                                    )
+                                    return
                                 logger.info(
                                     "Streaming attempt %s/%s failed (%s: %s), "
                                     "retrying with fresh connection...",
@@ -5205,6 +5269,13 @@ class AIAgent:
                                 e,
                             )
 
+                        # Cancel check before falling back — avoid spinning up
+                        # a non-streaming request that will just get force-closed.
+                        if _request_cancelled["value"]:
+                            logger.debug(
+                                "Streaming worker cancelled before fallback — exiting."
+                            )
+                            return
                         try:
                             # Reset stale timer — the non-streaming fallback
                             # uses its own client; prevent the stale detector
@@ -5280,6 +5351,17 @@ class AIAgent:
                 last_chunk_time["t"] = time.time()
 
             if self._interrupt_requested:
+                # Mark the request cancelled so the worker's retry loop exits
+                # cleanly instead of treating the forced RemoteProtocolError
+                # as a transient network error and burning 2*180s on doomed
+                # retry attempts. This is the primary fix for the cascading
+                # interrupt hang bug.
+                _request_cancelled["value"] = True
+                logger.debug(
+                    "Interrupt during streaming API call — marking request cancelled "
+                    "and force-closing client. Subsequent transport errors on this "
+                    "request are the expected consequence of this close, not a network bug."
+                )
                 try:
                     if self.api_mode == "anthropic_messages":
                         from agent.anthropic_adapter import build_anthropic_client

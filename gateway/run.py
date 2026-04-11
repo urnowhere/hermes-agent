@@ -3263,9 +3263,27 @@ class GatewayRunner:
                 if is_audio:
                     audio_paths.append(path)
             if audio_paths:
-                message_text = await self._enrich_message_with_transcription(
+                message_text, _successful_transcripts = await self._enrich_message_with_transcription(
                     message_text, audio_paths
                 )
+                # Echo each successful transcript back to the user immediately,
+                # before the agent loop runs. Lets the user verify STT quality
+                # in real-time and see the raw whisper output verbatim.
+                if _successful_transcripts:
+                    _echo_adapter = self.adapters.get(source.platform)
+                    _echo_meta = {"thread_id": source.thread_id} if source.thread_id else None
+                    if _echo_adapter:
+                        for _tx in _successful_transcripts:
+                            try:
+                                await _echo_adapter.send(
+                                    source.chat_id,
+                                    f'🎙️ "{_tx}"',
+                                    metadata=_echo_meta,
+                                )
+                            except Exception as _echo_exc:
+                                logger.debug(
+                                    "Transcript echo failed (non-fatal): %s", _echo_exc,
+                                )
                 # If STT failed, send a direct message to the user so they
                 # know voice isn't configured — don't rely on the agent to
                 # relay the error clearly.
@@ -6711,7 +6729,7 @@ class GatewayRunner:
         self,
         user_text: str,
         audio_paths: List[str],
-    ) -> str:
+    ) -> tuple[str, List[str]]:
         """
         Auto-transcribe user voice/audio messages using the configured STT provider
         and prepend the transcript to the message text.
@@ -6721,7 +6739,13 @@ class GatewayRunner:
             audio_paths: List of local file paths to cached audio files.
 
         Returns:
-            The enriched message string with transcriptions prepended.
+            A tuple of ``(enriched_text, successful_transcripts)``:
+              - ``enriched_text``: the message string with transcription wrappers
+                prepended (same as before).
+              - ``successful_transcripts``: the raw transcript strings for audio
+                clips that were successfully transcribed, in input order. Empty
+                list if every clip failed or STT is disabled. Callers can use
+                this to echo transcripts back to the user before the agent loop.
         """
         if not getattr(self.config, "stt_enabled", True):
             disabled_note = "[The user sent voice message(s), but transcription is disabled in config."
@@ -6732,19 +6756,21 @@ class GatewayRunner:
                 )
             disabled_note += "]"
             if user_text:
-                return f"{disabled_note}\n\n{user_text}"
-            return disabled_note
+                return f"{disabled_note}\n\n{user_text}", []
+            return disabled_note, []
 
         from tools.transcription_tools import transcribe_audio
         import asyncio
 
         enriched_parts = []
+        successful_transcripts: List[str] = []
         for path in audio_paths:
             try:
                 logger.debug("Transcribing user voice: %s", path)
                 result = await asyncio.to_thread(transcribe_audio, path)
                 if result["success"]:
                     transcript = result["transcript"]
+                    successful_transcripts.append(transcript)
                     enriched_parts.append(
                         f'[The user sent a voice message~ '
                         f'Here\'s what they said: "{transcript}"]'
@@ -6789,9 +6815,75 @@ class GatewayRunner:
             if user_text and user_text.strip() == _placeholder:
                 return prefix
             if user_text:
-                return f"{prefix}\n\n{user_text}"
-            return prefix
-        return user_text
+                return f"{prefix}\n\n{user_text}", successful_transcripts
+            return prefix, successful_transcripts
+        return user_text, successful_transcripts
+
+    async def _dequeue_pending_with_transcription(
+        self,
+        adapter,
+        session_key: str,
+        source,
+    ) -> str | None:
+        """Dequeue a pending queued message, auto-transcribing audio media.
+
+        When a voice/audio message arrives during an active agent run, the
+        adapter stores the event in its pending queue and signals an interrupt
+        (see base.BaseAdapter.handle_message). The adapter path bypasses
+        _handle_message entirely, so the normal STT pipeline at message-receive
+        time never runs.
+
+        This helper fills that gap: when the dequeued event has audio media,
+        we transcribe inline, echo the raw transcript back to the user (same
+        "🎙️" format as the fresh-message path), and return enriched text.
+        Non-audio events fall back to _build_media_placeholder, matching the
+        original _dequeue_pending_text behavior.
+        """
+        event = adapter.get_pending_message(session_key)
+        if not event:
+            return None
+
+        text = event.text or ""
+
+        audio_paths: List[str] = []
+        media_urls = getattr(event, "media_urls", None) or []
+        media_types = getattr(event, "media_types", None) or []
+        for i, path in enumerate(media_urls):
+            mtype = media_types[i] if i < len(media_types) else ""
+            is_audio = (
+                mtype.startswith("audio/")
+                or getattr(event, "message_type", None) in (MessageType.VOICE, MessageType.AUDIO)
+            )
+            if is_audio:
+                audio_paths.append(path)
+
+        if audio_paths:
+            enriched_text, successful_transcripts = await self._enrich_message_with_transcription(
+                text, audio_paths,
+            )
+            # Echo raw transcripts back to the user so voice interrupts
+            # feel identical to fresh voice messages.
+            if successful_transcripts:
+                echo_adapter = self.adapters.get(source.platform)
+                echo_meta = {"thread_id": source.thread_id} if source.thread_id else None
+                if echo_adapter:
+                    for tx in successful_transcripts:
+                        try:
+                            await echo_adapter.send(
+                                source.chat_id,
+                                f'🎙️ "{tx}"',
+                                metadata=echo_meta,
+                            )
+                        except Exception as echo_exc:
+                            logger.debug(
+                                "Transcript echo failed (non-fatal): %s", echo_exc,
+                            )
+            return enriched_text or None
+
+        # Non-audio fallback: preserve original _dequeue_pending_text semantics.
+        if not text and media_urls:
+            text = _build_media_placeholder(event)
+        return text or None
 
     async def _inject_watch_notification(self, synth_text: str, original_event) -> None:
         """Inject a watch-pattern notification as a synthetic message event.
@@ -7856,7 +7948,52 @@ class GatewayRunner:
                     agent = agent_holder[0]
                     if agent:
                         pending_event = adapter.get_pending_message(session_key)
-                        pending_text = pending_event.text if pending_event else None
+                        pending_text = None
+                        if pending_event is not None:
+                            pending_text = pending_event.text or ""
+                            # Transcribe audio media BEFORE signaling the
+                            # agent, so voice messages interrupt with the
+                            # real transcript instead of an empty string
+                            # (or file-path placeholder). Matches the UX
+                            # of fresh voice messages including the
+                            # 🎙️ echo back to the user.
+                            _media_urls = getattr(pending_event, "media_urls", None) or []
+                            _media_types = getattr(pending_event, "media_types", None) or []
+                            _audio_paths = []
+                            for _i, _path in enumerate(_media_urls):
+                                _mtype = _media_types[_i] if _i < len(_media_types) else ""
+                                _is_audio = (
+                                    _mtype.startswith("audio/")
+                                    or getattr(pending_event, "message_type", None) in (MessageType.VOICE, MessageType.AUDIO)
+                                )
+                                if _is_audio:
+                                    _audio_paths.append(_path)
+                            if _audio_paths:
+                                try:
+                                    _enriched, _transcripts = await self._enrich_message_with_transcription(
+                                        pending_text, _audio_paths,
+                                    )
+                                    pending_text = _enriched
+                                    if _transcripts:
+                                        _echo_meta = {"thread_id": source.thread_id} if source.thread_id else None
+                                        for _tx in _transcripts:
+                                            try:
+                                                await adapter.send(
+                                                    source.chat_id,
+                                                    f'🎙️ "{_tx}"',
+                                                    metadata=_echo_meta,
+                                                )
+                                            except Exception as _echo_exc:
+                                                logger.debug(
+                                                    "Voice-interrupt echo failed (non-fatal): %s",
+                                                    _echo_exc,
+                                                )
+                                except Exception as _trans_exc:
+                                    logger.warning(
+                                        "Voice-interrupt transcription failed: %s", _trans_exc,
+                                    )
+                            elif not pending_text and _media_urls:
+                                pending_text = _build_media_placeholder(pending_event)
                         logger.debug("Interrupt detected from adapter, signaling agent...")
                         agent.interrupt(pending_text)
                         break
@@ -8060,11 +8197,15 @@ class GatewayRunner:
             pending = None
             if result and adapter and session_key:
                 if result.get("interrupted"):
-                    pending = _dequeue_pending_text(adapter, session_key)
+                    pending = await self._dequeue_pending_with_transcription(
+                        adapter, session_key, source,
+                    )
                     if not pending and result.get("interrupt_message"):
                         pending = result.get("interrupt_message")
                 else:
-                    pending = _dequeue_pending_text(adapter, session_key)
+                    pending = await self._dequeue_pending_with_transcription(
+                        adapter, session_key, source,
+                    )
                     if pending:
                         logger.debug("Processing queued message after agent completion: '%s...'", pending[:40])
             
