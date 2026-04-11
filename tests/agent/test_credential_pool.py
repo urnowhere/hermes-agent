@@ -1071,3 +1071,36 @@ def test_load_pool_does_not_seed_claude_code_when_anthropic_not_configured(tmp_p
 
     # Should NOT have seeded the claude_code entry
     assert pool.entries() == []
+
+
+# ---------------------------------------------------------------------------
+# Concurrency-aware TTL tests
+# ---------------------------------------------------------------------------
+
+from agent.credential_pool import (
+    _exhausted_ttl,
+    EXHAUSTED_TTL_429_SECONDS,
+    EXHAUSTED_TTL_CONCURRENCY_SECONDS,
+)
+
+
+class TestConcurrencyAwareTTL:
+    def test_billing_429_gets_long_ttl(self):
+        ttl = _exhausted_ttl(429, error_reason=None)
+        assert ttl == EXHAUSTED_TTL_429_SECONDS
+
+    def test_concurrency_429_gets_short_ttl(self):
+        ttl = _exhausted_ttl(429, error_reason="1302")
+        assert ttl == EXHAUSTED_TTL_CONCURRENCY_SECONDS
+
+    def test_concurrency_keyword_gets_short_ttl(self):
+        ttl = _exhausted_ttl(429, error_reason="Too many concurrent requests")
+        assert ttl == EXHAUSTED_TTL_CONCURRENCY_SECONDS
+
+    def test_rate_limit_keyword_gets_short_ttl(self):
+        ttl = _exhausted_ttl(429, error_reason="rate limit exceeded")
+        assert ttl == EXHAUSTED_TTL_CONCURRENCY_SECONDS
+
+    def test_non_429_unaffected(self):
+        ttl = _exhausted_ttl(402, error_reason="1302")
+        assert ttl >= 3600

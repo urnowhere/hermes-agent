@@ -73,6 +73,7 @@ SUPPORTED_POOL_STRATEGIES = {
 # Provider-supplied reset_at timestamps override these defaults.
 EXHAUSTED_TTL_429_SECONDS = 60 * 60          # 1 hour
 EXHAUSTED_TTL_DEFAULT_SECONDS = 60 * 60      # 1 hour
+EXHAUSTED_TTL_CONCURRENCY_SECONDS = 5        # transient concurrency 429 — retry quickly
 
 # Pool key prefix for custom OpenAI-compatible endpoints.
 # Custom endpoints all share provider='custom' but are keyed by their
@@ -189,11 +190,26 @@ def _is_manual_source(source: str) -> bool:
     return normalized == SOURCE_MANUAL or normalized.startswith(f"{SOURCE_MANUAL}:")
 
 
-def _exhausted_ttl(error_code: Optional[int]) -> int:
-    """Return cooldown seconds based on the HTTP status that caused exhaustion."""
+def _exhausted_ttl(error_code: Optional[int], error_reason: Optional[str] = None) -> int:
+    """Return cooldown seconds based on the HTTP status that caused exhaustion.
+
+    Concurrency-related 429s (z.ai error 1302, 'rate limit', 'concurrent')
+    get a short cooldown because they are transient.  Billing/quota 429s
+    keep the long cooldown.
+    """
+    if error_code == 429 and _is_concurrency_error(error_reason):
+        return EXHAUSTED_TTL_CONCURRENCY_SECONDS
     if error_code == 429:
         return EXHAUSTED_TTL_429_SECONDS
     return EXHAUSTED_TTL_DEFAULT_SECONDS
+
+
+def _is_concurrency_error(reason: Optional[str]) -> bool:
+    """Return True if the error reason indicates a transient concurrency limit."""
+    if not reason:
+        return False
+    reason_lower = reason.lower()
+    return any(kw in reason_lower for kw in ("1302", "concurren", "rate limit"))
 
 
 def _parse_absolute_timestamp(value: Any) -> Optional[float]:
@@ -271,7 +287,10 @@ def _exhausted_until(entry: PooledCredential) -> Optional[float]:
     if reset_at is not None:
         return reset_at
     if entry.last_status_at:
-        return entry.last_status_at + _exhausted_ttl(entry.last_error_code)
+        return entry.last_status_at + _exhausted_ttl(
+            entry.last_error_code,
+            error_reason=getattr(entry, "last_error_reason", None),
+        )
     return None
 
 
