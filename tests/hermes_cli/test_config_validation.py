@@ -88,6 +88,22 @@ class TestCustomProvidersValidation:
         })
         assert any("not a dict" in i.message for i in issues)
 
+    def test_custom_provider_accepts_max_concurrent(self):
+        """max_concurrent is a valid custom_providers field."""
+        config = {
+            "custom_providers": [
+                {
+                    "name": "my-zai",
+                    "base_url": "https://api.z.ai/api/coding/paas/v4",
+                    "api_key": "test-key",
+                    "max_concurrent": 2,
+                }
+            ]
+        }
+        issues = validate_config_structure(config)
+        error_messages = [i.message for i in issues if i.severity == "error"]
+        assert not any("max_concurrent" in m for m in error_messages)
+
     def test_none_custom_providers_no_issues(self):
         """No custom_providers at all should be fine."""
         issues = validate_config_structure({
