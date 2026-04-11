@@ -519,7 +519,7 @@ def _is_skill_disabled(name: str, platform: str = None) -> bool:
 
 
 def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
-    """Recursively find all skills in ~/.hermes/skills/ and external dirs.
+    """Recursively find all skills in ~/.hermes/skills/, project-local dirs, and external dirs.
 
     Args:
         skip_disabled: If True, return ALL skills regardless of disabled
@@ -527,9 +527,10 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
             filters out disabled skills.
 
     Returns:
-        List of skill metadata dicts (name, description, category).
+        List of skill metadata dicts (name, description, category, source).
+        The ``source`` field is ``"local"``, ``"project"``, or ``"external"``.
     """
-    from agent.skill_utils import get_external_skills_dirs
+    from agent.skill_utils import get_external_skills_dirs, get_project_skills_dirs
 
     skills = []
     seen_names: set = set()
@@ -537,13 +538,17 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
     # Load disabled set once (not per-skill)
     disabled = set() if skip_disabled else _get_disabled_skill_names()
 
-    # Scan local dir first, then external dirs (local takes precedence)
-    dirs_to_scan = []
+    # Build ordered scan list with source labels
+    # Precedence: local > project > external (first seen name wins)
+    dirs_with_source: List[tuple] = []
     if SKILLS_DIR.exists():
-        dirs_to_scan.append(SKILLS_DIR)
-    dirs_to_scan.extend(get_external_skills_dirs())
+        dirs_with_source.append((SKILLS_DIR, "local"))
+    for d in get_project_skills_dirs():
+        dirs_with_source.append((d, "project"))
+    for d in get_external_skills_dirs():
+        dirs_with_source.append((d, "external"))
 
-    for scan_dir in dirs_to_scan:
+    for scan_dir, source in dirs_with_source:
         for skill_md in scan_dir.rglob("SKILL.md"):
             if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
                 continue
@@ -581,6 +586,7 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                     "name": name,
                     "description": description,
                     "category": category,
+                    "source": source,
                 })
 
             except (UnicodeDecodeError, PermissionError) as e:
@@ -798,12 +804,14 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
         JSON string with skill content or error message
     """
     try:
-        from agent.skill_utils import get_external_skills_dirs
+        from agent.skill_utils import get_external_skills_dirs, get_project_skills_dirs
 
         # Build list of all skill directories to search
+        # Precedence: local > project > external
         all_dirs = []
         if SKILLS_DIR.exists():
             all_dirs.append(SKILLS_DIR)
+        all_dirs.extend(get_project_skills_dirs())
         all_dirs.extend(get_external_skills_dirs())
 
         if not all_dirs:

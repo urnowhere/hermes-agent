@@ -224,13 +224,80 @@ def get_external_skills_dirs() -> List[Path]:
     return result
 
 
-def get_all_skills_dirs() -> List[Path]:
-    """Return all skill directories: local ``~/.hermes/skills/`` first, then external.
+def get_project_skills_dirs() -> List[Path]:
+    """Discover project-local skill directories from the working directory.
 
-    The local dir is always first (and always included even if it doesn't exist
-    yet — callers handle that).  External dirs follow in config order.
+    Checks the current working directory (or nearest git root) for skill
+    directories in a well-known set of paths, checked in order:
+
+    1. ``<project_root>/.hermes/skills/`` — Hermes-native, project-scoped
+    2. ``<project_root>/.agents/skills/`` — Agent-agnostic convention
+    3. ``<project_root>/.claude/skills/`` — Interop with Claude Code / ``npx skills``
+
+    These directories are **read-only** — ``skill_manage`` always writes to
+    ``~/.hermes/skills/``.  Project skills shadow global skills of the same
+    name (local > project > external precedence).
+
+    Returns only directories that actually exist.  Duplicates and paths that
+    resolve to the local ``~/.hermes/skills/`` are silently skipped.
+    """
+    _PROJECT_SKILL_SUBDIRS = (
+        Path(".hermes") / "skills",
+        Path(".agents") / "skills",
+        Path(".claude") / "skills",
+    )
+
+    project_root = _find_project_root()
+    if project_root is None:
+        return []
+
+    local_skills = (get_hermes_home() / "skills").resolve()
+    seen: Set[Path] = set()
+    result: List[Path] = []
+
+    for subdir in _PROJECT_SKILL_SUBDIRS:
+        candidate = (project_root / subdir).resolve()
+        if candidate == local_skills:
+            continue
+        if candidate in seen:
+            continue
+        if candidate.is_dir():
+            seen.add(candidate)
+            result.append(candidate)
+
+    return result
+
+
+def _find_project_root() -> Optional[Path]:
+    """Find the project root by walking up from cwd looking for ``.git``.
+
+    Returns the directory containing ``.git``, or ``cwd`` itself if no git
+    root is found (so project-local skills still work outside git repos).
+    """
+    try:
+        cwd = Path.cwd().resolve()
+    except (OSError, ValueError):
+        return None
+
+    for parent in [cwd, *cwd.parents]:
+        if (parent / ".git").exists():
+            return parent
+
+    # Not in a git repo — use cwd as project root
+    return cwd
+
+
+def get_all_skills_dirs() -> List[Path]:
+    """Return all skill directories: local first, then project-local, then external.
+
+    The local dir (``~/.hermes/skills/``) is always first (and always included
+    even if it doesn't exist yet — callers handle that).  Project-local dirs
+    follow, then external dirs in config order.
+
+    Precedence for name collisions: local > project > external.
     """
     dirs = [get_hermes_home() / "skills"]
+    dirs.extend(get_project_skills_dirs())
     dirs.extend(get_external_skills_dirs())
     return dirs
 
