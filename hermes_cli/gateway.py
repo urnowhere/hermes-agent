@@ -197,27 +197,51 @@ def find_gateway_pids(exclude_pids: set | None = None) -> list:
                             pass
                     current_cmd = ""
         else:
-            result = subprocess.run(
-                ["ps", "aux"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            for line in result.stdout.split('\n'):
-                # Skip grep and current process
-                if 'grep' in line or str(os.getpid()) in line:
-                    continue
-                for pattern in patterns:
-                    if pattern in line:
-                        parts = line.split()
-                        if len(parts) > 1:
-                            try:
-                                pid = int(parts[1])
-                                if pid not in pids and pid not in _exclude:
-                                    pids.append(pid)
-                            except ValueError:
-                                continue
-                        break
+            # Try /proc first (works in Docker without procps installed),
+            # fall back to ps aux.
+            _found_via_proc = False
+            if os.path.isdir("/proc"):
+                try:
+                    my_pid = os.getpid()
+                    for entry in os.listdir("/proc"):
+                        if not entry.isdigit():
+                            continue
+                        pid = int(entry)
+                        if pid == my_pid or pid in _exclude:
+                            continue
+                        try:
+                            cmdline = open(f"/proc/{pid}/cmdline", "rb").read().decode("utf-8", errors="replace")
+                            cmdline = cmdline.replace("\x00", " ")
+                            if any(p in cmdline for p in patterns):
+                                pids.append(pid)
+                        except (OSError, PermissionError):
+                            continue
+                    _found_via_proc = True
+                except Exception:
+                    pass
+
+            if not _found_via_proc:
+                result = subprocess.run(
+                    ["ps", "aux"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                for line in result.stdout.split('\n'):
+                    # Skip grep and current process
+                    if 'grep' in line or str(os.getpid()) in line:
+                        continue
+                    for pattern in patterns:
+                        if pattern in line:
+                            parts = line.split()
+                            if len(parts) > 1:
+                                try:
+                                    pid = int(parts[1])
+                                    if pid not in pids and pid not in _exclude:
+                                        pids.append(pid)
+                                except ValueError:
+                                    continue
+                            break
     except Exception:
         pass
 
