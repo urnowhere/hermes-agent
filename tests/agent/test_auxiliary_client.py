@@ -1166,3 +1166,57 @@ def test_resolve_api_key_provider_skips_unconfigured_anthropic(monkeypatch):
 
     assert "anthropic" not in called, \
         "_try_anthropic() should not be called when anthropic is not explicitly configured"
+
+
+class TestConcurrencyIntegration:
+    def setup_method(self):
+        from agent.concurrency import reset_registry
+        reset_registry()
+
+    @patch("agent.auxiliary_client._get_cached_client")
+    @patch("agent.auxiliary_client._resolve_task_provider_model")
+    def test_call_llm_acquires_and_releases_semaphore(self, mock_resolve, mock_get_client):
+        """call_llm wraps the API call with a concurrency semaphore."""
+        from agent.concurrency import ConcurrencySemaphore
+
+        mock_resolve.return_value = ("zai", "glm-5.1", None, "test-key")
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = MagicMock()
+        mock_get_client.return_value = (mock_client, "glm-5.1")
+
+        sem = ConcurrencySemaphore(max_concurrent=1)
+        with patch("agent.auxiliary_client.get_semaphore", return_value=sem):
+            call_llm(
+                task="test",
+                provider="zai",
+                model="glm-5.1",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        assert sem.active == 0
+        mock_client.chat.completions.create.assert_called_once()
+
+    @patch("agent.auxiliary_client._get_cached_client")
+    @patch("agent.auxiliary_client._resolve_task_provider_model")
+    def test_call_llm_releases_semaphore_on_error(self, mock_resolve, mock_get_client):
+        """Semaphore is released even if the API call raises."""
+        from agent.concurrency import ConcurrencySemaphore
+
+        mock_resolve.return_value = ("zai", "glm-5.1", None, "test-key")
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = RuntimeError("boom")
+        mock_get_client.return_value = (mock_client, "glm-5.1")
+
+        sem = ConcurrencySemaphore(max_concurrent=1)
+        with patch("agent.auxiliary_client.get_semaphore", return_value=sem):
+            try:
+                call_llm(
+                    task="test",
+                    provider="zai",
+                    model="glm-5.1",
+                    messages=[{"role": "user", "content": "hi"}],
+                )
+            except RuntimeError:
+                pass
+
+        assert sem.active == 0
