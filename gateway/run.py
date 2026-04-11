@@ -3429,7 +3429,10 @@ class GatewayRunner:
             if agent_result.get("session_id") and agent_result["session_id"] != session_entry.session_id:
                 session_entry.session_id = agent_result["session_id"]
 
-            # Prepend reasoning/thinking if display is enabled
+            # Prepend reasoning/thinking if display is enabled.
+            # Keep the clean response separate for transcript persistence
+            # so reasoning blocks don't leak into resumed sessions.
+            _clean_response = response
             if getattr(self, "_show_reasoning", False) and response:
                 last_reasoning = agent_result.get("last_reasoning")
                 if last_reasoning:
@@ -3541,10 +3544,13 @@ class GatewayRunner:
                         session_entry.session_id,
                         {"role": "user", "content": message_text, "timestamp": ts}
                     )
-                    if response:
+                    # Use _clean_response (without reasoning prefix) to prevent
+                    # internal reasoning blocks from persisting into the transcript
+                    # and leaking into user-visible chat on session resume.
+                    if _clean_response:
                         self.session_store.append_to_transcript(
                             session_entry.session_id,
-                            {"role": "assistant", "content": response, "timestamp": ts}
+                            {"role": "assistant", "content": _clean_response, "timestamp": ts}
                         )
                 else:
                     # The agent already persisted these messages to SQLite via
