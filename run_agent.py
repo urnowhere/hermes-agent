@@ -2785,12 +2785,12 @@ class AIAgent:
         if self._memory_manager:
             try:
                 self._memory_manager.on_session_end(messages or [])
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("External memory provider session-end hook failed: %s", e)
             try:
                 self._memory_manager.shutdown_all()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("External memory provider shutdown hook failed: %s", e)
         # Notify context engine of session end (flush DAG, close DBs, etc.)
         if hasattr(self, "context_compressor") and self.context_compressor:
             try:
@@ -4413,6 +4413,37 @@ class AIAgent:
             self._client_kwargs["default_headers"] = _qwen_portal_headers()
         else:
             self._client_kwargs.pop("default_headers", None)
+
+    def _build_memory_turn_context(
+        self,
+        *,
+        turn_user_id: str | None = None,
+        turn_user_name: str | None = None,
+    ) -> Dict[str, str]:
+        """Collect narrow per-turn context for external memory providers."""
+        context: Dict[str, str] = {}
+
+        if self.session_id:
+            context["session_id"] = self.session_id
+        if self.platform:
+            context["platform"] = self.platform
+
+        user_id = self._user_id if turn_user_id is None else turn_user_id
+        if user_id:
+            context["user_id"] = str(user_id)
+
+        if turn_user_name:
+            context["user_name"] = str(turn_user_name)
+
+        if self._session_db and self.session_id:
+            try:
+                session_title = self._session_db.get_session_title(self.session_id)
+            except Exception:
+                session_title = None
+            if session_title:
+                context["session_title"] = str(session_title)
+
+        return context
 
     def _swap_credential(self, entry) -> None:
         runtime_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
@@ -6386,8 +6417,8 @@ class AIAgent:
         if self._memory_manager:
             try:
                 self._memory_manager.on_pre_compress(messages)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("External memory provider pre-compress hook failed: %s", e)
 
         compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens)
 
@@ -7376,6 +7407,8 @@ class AIAgent:
         task_id: str = None,
         stream_callback: Optional[callable] = None,
         persist_user_message: Optional[str] = None,
+        turn_user_id: Optional[str] = None,
+        turn_user_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run a complete conversation with tool calling until completion.
@@ -7391,7 +7424,12 @@ class AIAgent:
             persist_user_message: Optional clean user message to store in
                 transcripts/history when user_message contains API-only
                 synthetic prefixes.
-                    or queuing follow-up prefetch work.
+                or queuing follow-up prefetch work.
+            turn_user_id: Optional per-message user identifier supplied by the
+                host. This may differ from the cached agent's original user in
+                shared thread sessions.
+            turn_user_name: Optional per-message display name supplied by the
+                host for attribution in shared sessions.
 
         Returns:
             Dict: Complete conversation result with final response and message history
@@ -7487,6 +7525,21 @@ class AIAgent:
 
         # Preserve the original user message (no nudge injection).
         original_user_message = persist_user_message if persist_user_message is not None else user_message
+        _memory_turn_context = self._build_memory_turn_context(
+            turn_user_id=turn_user_id,
+            turn_user_name=turn_user_name,
+        )
+
+        if self._memory_manager:
+            try:
+                _turn_message = original_user_message if isinstance(original_user_message, str) else ""
+                self._memory_manager.on_turn_start(
+                    self._user_turn_count,
+                    _turn_message,
+                    **_memory_turn_context,
+                )
+            except Exception as e:
+                logger.debug("External memory provider turn-start hook failed: %s", e)
 
         # Track memory nudge trigger (turn-based, checked here).
         # Skill trigger is checked AFTER the agent loop completes, based on
@@ -9978,8 +10031,8 @@ class AIAgent:
             try:
                 self._memory_manager.sync_all(original_user_message, final_response)
                 self._memory_manager.queue_prefetch_all(original_user_message)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("External memory provider post-turn hooks failed: %s", e)
 
         # Background memory/skill review — runs AFTER the response is delivered
         # so it never competes with the user's task for model attention.

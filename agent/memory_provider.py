@@ -146,7 +146,8 @@ class MemoryProvider(ABC):
 
         Use for turn-counting, scope management, periodic maintenance.
 
-        kwargs may include: remaining_tokens, model, platform, tool_count.
+        kwargs may include: remaining_tokens, model, platform, tool_count,
+        session_id, session_title, user_id, and user_name.
         Providers use what they need; extras are ignored.
         """
 
