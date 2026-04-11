@@ -96,6 +96,7 @@ from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, DEVELOPER_ROLE_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
+from agent.concurrency import get_semaphore
 from agent.display import (
     KawaiiSpinner, build_tool_preview as _build_tool_preview,
     get_cute_tool_message as _get_cute_tool_message_impl,
@@ -1701,7 +1702,18 @@ class AIAgent:
         has_future_ack = bool(
             re.search(r"\b(i['’]ll|i will|let me|i can do that|i can help with that)\b", assistant_text)
         )
-        if not has_future_ack:
+        # "let me know" is a polite closer, not a planning statement
+        if has_future_ack and re.search(r"\blet me know\b", assistant_text):
+            has_future_ack = bool(
+                re.search(r"\b(i[\'\'\u2019]ll|i will|i can do that|i can help with that)\b", assistant_text)
+            )
+
+        # Chinese planning patterns (common with GLM and other Chinese LLMs)
+        has_cn_future_ack = bool(
+            re.search(r"(现在|接下来|马上|然后).{0,10}(分析|写入|处理|执行|开始|继续|导出|生成|创建)", assistant_text)
+        )
+
+        if not has_future_ack and not has_cn_future_ack:
             return False
 
         action_markers = (
@@ -4453,7 +4465,7 @@ class AIAgent:
             self._try_refresh_anthropic_client_credentials()
         return self._anthropic_client.messages.create(**api_kwargs)
 
-    def _interruptible_api_call(self, api_kwargs: dict):
+    def _interruptible_api_call(self, api_kwargs: dict, *, _skip_sem: bool = False):
         """
         Run the API call in a background thread so the main conversation loop
         can detect interrupts without waiting for the full HTTP round-trip.
@@ -4462,57 +4474,72 @@ class AIAgent:
         close that worker-local client, so retries and other requests never
         inherit a closed transport.
         """
-        result = {"response": None, "error": None}
-        request_client_holder = {"client": None}
+        # ── Concurrency gating — main agent gets priority ────────────
+        _sem_acquired = False
+        if not _skip_sem:
+            _api_key = self.api_key or ""
+            if self._credential_pool:
+                _current = self._credential_pool.current()
+                if _current:
+                    _api_key = getattr(_current, "api_key", _api_key) or _api_key
+            _sem = get_semaphore(self.provider or "", _api_key, model=self.model)
+            _sem_acquired = _sem.acquire(priority=True)
 
-        def _call():
-            try:
-                if self.api_mode == "codex_responses":
-                    request_client_holder["client"] = self._create_request_openai_client(reason="codex_stream_request")
-                    result["response"] = self._run_codex_stream(
-                        api_kwargs,
-                        client=request_client_holder["client"],
-                        on_first_delta=getattr(self, "_codex_on_first_delta", None),
-                    )
-                elif self.api_mode == "anthropic_messages":
-                    result["response"] = self._anthropic_messages_create(api_kwargs)
-                else:
-                    request_client_holder["client"] = self._create_request_openai_client(reason="chat_completion_request")
-                    result["response"] = request_client_holder["client"].chat.completions.create(**api_kwargs)
-            except Exception as e:
-                result["error"] = e
-            finally:
-                request_client = request_client_holder.get("client")
-                if request_client is not None:
-                    self._close_request_openai_client(request_client, reason="request_complete")
+        try:
+            result = {"response": None, "error": None}
+            request_client_holder = {"client": None}
 
-        t = threading.Thread(target=_call, daemon=True)
-        t.start()
-        while t.is_alive():
-            t.join(timeout=0.3)
-            if self._interrupt_requested:
-                # Force-close the in-flight worker-local HTTP connection to stop
-                # token generation without poisoning the shared client used to
-                # seed future retries.
+            def _call():
                 try:
-                    if self.api_mode == "anthropic_messages":
-                        from agent.anthropic_adapter import build_anthropic_client
-
-                        self._anthropic_client.close()
-                        self._anthropic_client = build_anthropic_client(
-                            self._anthropic_api_key,
-                            getattr(self, "_anthropic_base_url", None),
+                    if self.api_mode == "codex_responses":
+                        request_client_holder["client"] = self._create_request_openai_client(reason="codex_stream_request")
+                        result["response"] = self._run_codex_stream(
+                            api_kwargs,
+                            client=request_client_holder["client"],
+                            on_first_delta=getattr(self, "_codex_on_first_delta", None),
                         )
+                    elif self.api_mode == "anthropic_messages":
+                        result["response"] = self._anthropic_messages_create(api_kwargs)
                     else:
-                        request_client = request_client_holder.get("client")
-                        if request_client is not None:
-                            self._close_request_openai_client(request_client, reason="interrupt_abort")
-                except Exception:
-                    pass
-                raise InterruptedError("Agent interrupted during API call")
-        if result["error"] is not None:
-            raise result["error"]
-        return result["response"]
+                        request_client_holder["client"] = self._create_request_openai_client(reason="chat_completion_request")
+                        result["response"] = request_client_holder["client"].chat.completions.create(**api_kwargs)
+                except Exception as e:
+                    result["error"] = e
+                finally:
+                    request_client = request_client_holder.get("client")
+                    if request_client is not None:
+                        self._close_request_openai_client(request_client, reason="request_complete")
+
+            t = threading.Thread(target=_call, daemon=True)
+            t.start()
+            while t.is_alive():
+                t.join(timeout=0.3)
+                if self._interrupt_requested:
+                    # Force-close the in-flight worker-local HTTP connection to stop
+                    # token generation without poisoning the shared client used to
+                    # seed future retries.
+                    try:
+                        if self.api_mode == "anthropic_messages":
+                            from agent.anthropic_adapter import build_anthropic_client
+
+                            self._anthropic_client.close()
+                            self._anthropic_client = build_anthropic_client(
+                                self._anthropic_api_key,
+                                getattr(self, "_anthropic_base_url", None),
+                            )
+                        else:
+                            request_client = request_client_holder.get("client")
+                            if request_client is not None:
+                                self._close_request_openai_client(request_client, reason="interrupt_abort")
+                    except Exception:
+                        pass
+                    raise InterruptedError("Agent interrupted during API call")
+            if result["error"] is not None:
+                raise result["error"]
+            return result["response"]
+        finally:
+            if _sem_acquired:
+                _sem.release()
 
     # ── Unified streaming API call ─────────────────────────────────────────
 
@@ -4566,6 +4593,20 @@ class AIAgent:
     def _interruptible_streaming_api_call(
         self, api_kwargs: dict, *, on_first_delta: callable = None
     ):
+        # ── Concurrency gating — main agent gets priority ────────────
+        _api_key = self.api_key or ""
+        if self._credential_pool:
+            _current = self._credential_pool.current()
+            if _current:
+                _api_key = getattr(_current, "api_key", _api_key) or _api_key
+        _sem = get_semaphore(self.provider or "", _api_key, model=self.model)
+        with _sem.slot(priority=True):
+            return self._interruptible_streaming_api_call_inner(
+                api_kwargs, on_first_delta=on_first_delta)
+
+    def _interruptible_streaming_api_call_inner(
+        self, api_kwargs: dict, *, on_first_delta: callable = None
+    ):
         """Streaming variant of _interruptible_api_call for real-time token delivery.
 
         Handles all three api_modes:
@@ -4588,7 +4629,7 @@ class AIAgent:
             # temporarily so _run_codex_stream can pick it up.
             self._codex_on_first_delta = on_first_delta
             try:
-                return self._interruptible_api_call(api_kwargs)
+                return self._interruptible_api_call(api_kwargs, _skip_sem=True)
             finally:
                 self._codex_on_first_delta = None
 
@@ -5007,7 +5048,7 @@ class AIAgent:
                             # uses its own client; prevent the stale detector
                             # from firing on stale timestamps from failed streams.
                             last_chunk_time["t"] = time.time()
-                            result["response"] = self._interruptible_api_call(api_kwargs)
+                            result["response"] = self._interruptible_api_call(api_kwargs, _skip_sem=True)
                         except Exception as fallback_err:
                             result["error"] = fallback_err
                         return

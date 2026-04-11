@@ -53,6 +53,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from openai import OpenAI
 
+from agent.concurrency import get_semaphore
 from agent.credential_pool import load_pool
 from hermes_cli.config import get_hermes_home
 from hermes_constants import OPENROUTER_BASE_URL
@@ -2086,56 +2087,71 @@ def call_llm(
                      task, resolved_provider or "auto", final_model or "default",
                      f" at {_base_info}" if _base_info and "openrouter" not in _base_info else "")
 
-    kwargs = _build_call_kwargs(
-        resolved_provider, final_model, messages,
-        temperature=temperature, max_tokens=max_tokens,
-        tools=tools, timeout=effective_timeout, extra_body=extra_body,
-        base_url=resolved_base_url)
+    # ── Concurrency gating ───────────────────────────────────────────
+    # Auxiliary calls defer to main agent (priority=False).
+    # Critical tasks (context compression) get a short timeout and proceed
+    # anyway; non-critical tasks skip if the semaphore is busy.
+    _sem = get_semaphore(resolved_provider or "", resolved_api_key or "", model=final_model)
+    _is_critical = task in ("compression", "context_compression")
+    _sem_timeout = 5.0 if _is_critical else 30.0
 
-    # Handle max_tokens vs max_completion_tokens retry, then payment fallback.
-    try:
-        return client.chat.completions.create(**kwargs)
-    except Exception as first_err:
-        err_str = str(first_err)
-        if "max_tokens" in err_str or "unsupported_parameter" in err_str:
-            kwargs.pop("max_tokens", None)
-            kwargs["max_completion_tokens"] = max_tokens
-            try:
-                return client.chat.completions.create(**kwargs)
-            except Exception as retry_err:
-                # If the max_tokens retry also hits a payment error,
-                # fall through to the payment fallback below.
-                if not _is_payment_error(retry_err):
-                    raise
-                first_err = retry_err
+    with _sem.slot(priority=False, timeout=_sem_timeout) as _acquired:
+        if not _acquired and not _is_critical:
+            logger.info("concurrency: auxiliary %s skipped (semaphore busy)", task or "call")
+            raise RuntimeError(f"Concurrency semaphore busy, skipping auxiliary {task or 'call'}")
+        if not _acquired:
+            logger.warning("concurrency: %s proceeding without slot (critical)", task or "call")
 
-        # ── Payment / credit exhaustion fallback ──────────────────────
-        # When the resolved provider returns 402 or a credit-related error,
-        # try alternative providers instead of giving up.  This handles the
-        # common case where a user runs out of OpenRouter credits but has
-        # Codex OAuth or another provider available.
-        #
-        # ── Connection error fallback ────────────────────────────────
-        # When a provider endpoint is unreachable (DNS failure, connection
-        # refused, timeout), try alternative providers.  This handles stale
-        # Codex/OAuth tokens that authenticate but whose endpoint is down,
-        # and providers the user never configured that got picked up by
-        # the auto-detection chain.
-        should_fallback = _is_payment_error(first_err) or _is_connection_error(first_err)
-        if should_fallback:
-            reason = "payment error" if _is_payment_error(first_err) else "connection error"
-            logger.info("Auxiliary %s: %s on %s (%s), trying fallback",
-                        task or "call", reason, resolved_provider, first_err)
-            fb_client, fb_model, fb_label = _try_payment_fallback(
-                resolved_provider, task)
-            if fb_client is not None:
-                fb_kwargs = _build_call_kwargs(
-                    fb_label, fb_model, messages,
-                    temperature=temperature, max_tokens=max_tokens,
-                    tools=tools, timeout=effective_timeout,
-                    extra_body=extra_body)
-                return fb_client.chat.completions.create(**fb_kwargs)
-        raise
+        kwargs = _build_call_kwargs(
+            resolved_provider, final_model, messages,
+            temperature=temperature, max_tokens=max_tokens,
+            tools=tools, timeout=effective_timeout, extra_body=extra_body,
+            base_url=resolved_base_url)
+
+        # Handle max_tokens vs max_completion_tokens retry, then payment fallback.
+        try:
+            return client.chat.completions.create(**kwargs)
+        except Exception as first_err:
+            err_str = str(first_err)
+            if "max_tokens" in err_str or "unsupported_parameter" in err_str:
+                kwargs.pop("max_tokens", None)
+                kwargs["max_completion_tokens"] = max_tokens
+                try:
+                    return client.chat.completions.create(**kwargs)
+                except Exception as retry_err:
+                    # If the max_tokens retry also hits a payment error,
+                    # fall through to the payment fallback below.
+                    if not _is_payment_error(retry_err):
+                        raise
+                    first_err = retry_err
+
+            # ── Payment / credit exhaustion fallback ──────────────────────
+            # When the resolved provider returns 402 or a credit-related error,
+            # try alternative providers instead of giving up.  This handles the
+            # common case where a user runs out of OpenRouter credits but has
+            # Codex OAuth or another provider available.
+            #
+            # ── Connection error fallback ────────────────────────────────
+            # When a provider endpoint is unreachable (DNS failure, connection
+            # refused, timeout), try alternative providers.  This handles stale
+            # Codex/OAuth tokens that authenticate but whose endpoint is down,
+            # and providers the user never configured that got picked up by
+            # the auto-detection chain.
+            should_fallback = _is_payment_error(first_err) or _is_connection_error(first_err)
+            if should_fallback:
+                reason = "payment error" if _is_payment_error(first_err) else "connection error"
+                logger.info("Auxiliary %s: %s on %s (%s), trying fallback",
+                            task or "call", reason, resolved_provider, first_err)
+                fb_client, fb_model, fb_label = _try_payment_fallback(
+                    resolved_provider, task)
+                if fb_client is not None:
+                    fb_kwargs = _build_call_kwargs(
+                        fb_label, fb_model, messages,
+                        temperature=temperature, max_tokens=max_tokens,
+                        tools=tools, timeout=effective_timeout,
+                        extra_body=extra_body)
+                    return fb_client.chat.completions.create(**fb_kwargs)
+            raise
 
 
 def extract_content_or_reasoning(response) -> str:
@@ -2268,18 +2284,29 @@ async def async_call_llm(
 
     effective_timeout = timeout if timeout is not None else _get_task_timeout(task)
 
-    kwargs = _build_call_kwargs(
-        resolved_provider, final_model, messages,
-        temperature=temperature, max_tokens=max_tokens,
-        tools=tools, timeout=effective_timeout, extra_body=extra_body,
-        base_url=resolved_base_url)
+    _sem = get_semaphore(resolved_provider or "", resolved_api_key or "", model=final_model)
+    _is_critical = task in ("compression", "context_compression")
+    _sem_timeout = 5.0 if _is_critical else 30.0
 
-    try:
-        return await client.chat.completions.create(**kwargs)
-    except Exception as first_err:
-        err_str = str(first_err)
-        if "max_tokens" in err_str or "unsupported_parameter" in err_str:
-            kwargs.pop("max_tokens", None)
-            kwargs["max_completion_tokens"] = max_tokens
+    async with _sem.async_slot(priority=False, timeout=_sem_timeout) as _acquired:
+        if not _acquired and not _is_critical:
+            logger.info("concurrency: async %s skipped (semaphore busy)", task or "call")
+            raise RuntimeError(f"Concurrency semaphore busy, skipping async auxiliary {task or 'call'}")
+        if not _acquired:
+            logger.warning("concurrency: async %s proceeding without slot (critical)", task or "call")
+
+        kwargs = _build_call_kwargs(
+            resolved_provider, final_model, messages,
+            temperature=temperature, max_tokens=max_tokens,
+            tools=tools, timeout=effective_timeout, extra_body=extra_body,
+            base_url=resolved_base_url)
+
+        try:
             return await client.chat.completions.create(**kwargs)
-        raise
+        except Exception as first_err:
+            err_str = str(first_err)
+            if "max_tokens" in err_str or "unsupported_parameter" in err_str:
+                kwargs.pop("max_tokens", None)
+                kwargs["max_completion_tokens"] = max_tokens
+                return await client.chat.completions.create(**kwargs)
+            raise
