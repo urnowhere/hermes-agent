@@ -2782,9 +2782,10 @@ class GatewayRunner:
                                 notice = f"{notice}\n\n{session_info}"
                         except Exception:
                             pass
+                        _reset_meta = {"thread_id": source.thread_id} if source.thread_id else None
                         await adapter.send(
                             source.chat_id, notice,
-                            metadata=getattr(event, 'metadata', None),
+                            metadata=_reset_meta,
                         )
             except Exception as e:
                 logger.debug("Auto-reset notification failed (non-fatal): %s", e)
@@ -7961,8 +7962,9 @@ class GatewayRunner:
                     first_response = result.get("final_response", "")
                     if first_response and not _already_streamed:
                         try:
+                            _resp_meta = {"thread_id": source.thread_id} if source.thread_id else None
                             await adapter.send(source.chat_id, first_response,
-                                               metadata=getattr(event, "metadata", None))
+                                               metadata=_resp_meta)
                         except Exception as e:
                             logger.warning("Failed to send first response before queued message: %s", e)
                 # else: interrupted — discard the interrupted response ("Operation
