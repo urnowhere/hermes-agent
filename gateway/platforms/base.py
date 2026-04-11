@@ -2902,6 +2902,48 @@ class BasePlatformAdapter(ABC):
                     except Exception as file_err:
                         logger.error("[%s] Error sending local file %s: %s", self.name, file_path, file_err)
 
+            # Drain any media files that tools enqueued directly via the
+            # gateway media queue (e.g. browser_screenshot). This runs even
+            # when ``response`` is empty so a screenshot still ships if the
+            # agent's text reply was suppressed for any reason.
+            try:
+                from gateway.media_queue import drain_media
+                queued_media = drain_media(session_key)
+            except Exception as drain_err:
+                logger.warning("[%s] media_queue drain failed: %s", self.name, drain_err)
+                queued_media = []
+            for queued_path in queued_media:
+                if human_delay > 0:
+                    await asyncio.sleep(human_delay)
+                try:
+                    ext = Path(queued_path).suffix.lower()
+                    if ext in _AUDIO_EXTS:
+                        await self.send_voice(
+                            chat_id=event.source.chat_id,
+                            audio_path=queued_path,
+                            metadata=_thread_metadata,
+                        )
+                    elif ext in _VIDEO_EXTS:
+                        await self.send_video(
+                            chat_id=event.source.chat_id,
+                            video_path=queued_path,
+                            metadata=_thread_metadata,
+                        )
+                    elif ext in _IMAGE_EXTS:
+                        await self.send_image_file(
+                            chat_id=event.source.chat_id,
+                            image_path=queued_path,
+                            metadata=_thread_metadata,
+                        )
+                    else:
+                        await self.send_document(
+                            chat_id=event.source.chat_id,
+                            file_path=queued_path,
+                            metadata=_thread_metadata,
+                        )
+                except Exception as queued_err:
+                    logger.error("[%s] Error sending queued media %s: %s", self.name, queued_path, queued_err)
+
             # Determine overall success for the processing hook
             processing_ok = delivery_succeeded if delivery_attempted else not bool(response)
             await self._run_processing_hook(
