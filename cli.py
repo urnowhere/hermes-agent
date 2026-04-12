@@ -1616,7 +1616,8 @@ class HermesCLI:
         # YAML 1.1 parses bare `off` as boolean False — normalise to string.
         _raw_tp = CLI_CONFIG["display"].get("tool_progress", "all")
         self.tool_progress_mode = "off" if _raw_tp is False else str(_raw_tp)
-        # resume_display: "full" (show history) | "minimal" (one-liner only)
+        # resume_display: "full" (show recap) | "expanded" (recap + last
+        # assistant response) | "minimal" (one-liner only)
         self.resume_display = CLI_CONFIG["display"].get("resume_display", "full")
         # bell_on_complete: play terminal bell (\a) when agent finishes a response
         self.bell_on_complete = CLI_CONFIG["display"].get("bell_on_complete", False)
@@ -3077,18 +3078,84 @@ class HermesCLI:
 
         return True
 
+    @staticmethod
+    def _strip_resume_reasoning(text: str) -> str:
+        """Remove hidden reasoning blocks from resume display text."""
+        import re
+
+        cleaned = re.sub(
+            r"<REASONING_SCRATCHPAD>.*?</REASONING_SCRATCHPAD>\s*",
+            "", text, flags=re.DOTALL,
+        )
+        cleaned = re.sub(
+            r"<REASONING_SCRATCHPAD>.*$",
+            "", cleaned, flags=re.DOTALL,
+        )
+        return cleaned.strip()
+
+    def _render_response_panel(self, response: str, title_suffix: str = "") -> None:
+        """Render assistant text in the standard Hermes response panel style."""
+        if not response:
+            return
+
+        try:
+            from hermes_cli.skin_engine import get_active_skin
+            _skin = get_active_skin()
+            label = _skin.get_branding("response_label", "⚕ Hermes")
+            _resp_color = _skin.get_color("response_border", "#CD7F32")
+            _resp_text = _skin.get_color("banner_text", "#FFF8DC")
+        except Exception:
+            label = "⚕ Hermes"
+            _resp_color = "#CD7F32"
+            _resp_text = "#FFF8DC"
+
+        console = ChatConsole() if self._app else self.console
+        console.print(Panel(
+            _rich_text_from_ansi(response),
+            title=f"[{_resp_color} bold]{label}{title_suffix}[/]",
+            title_align="left",
+            border_style=_resp_color,
+            style=_resp_text,
+            box=rich_box.HORIZONTALS,
+            padding=(1, 2),
+        ))
+
+    def _get_last_resume_assistant_response(self) -> str:
+        """Return the latest visible assistant text from the resumed history."""
+        for msg in reversed(self.conversation_history or []):
+            if msg.get("role") != "assistant":
+                continue
+            content = msg.get("content")
+            text = "" if content is None else str(content)
+            text = self._strip_resume_reasoning(text)
+            if text:
+                return text
+        return ""
+
+    def _display_post_resume_context(self):
+        """Show post-resume context according to ``display.resume_display``."""
+        if not self.conversation_history or self.resume_display == "minimal":
+            return
+
+        self._display_resumed_history()
+
+        if self.resume_display != "expanded":
+            return
+
+        last_response = self._get_last_resume_assistant_response()
+        if last_response:
+            self._render_response_panel(last_response, title_suffix=" (previous response)")
+
     def _display_resumed_history(self):
         """Render a compact recap of previous conversation messages.
 
         Uses Rich markup with dim/muted styling so the recap is visually
-        distinct from the active conversation.  Caps the display at the
+        distinct from the active conversation. Caps the display at the
         last ``MAX_DISPLAY_EXCHANGES`` user/assistant exchanges and shows
         an indicator for earlier hidden messages.
         """
         if not self.conversation_history:
             return
-
-        # Check config: resume_display setting
         if self.resume_display == "minimal":
             return
 
@@ -3096,21 +3163,6 @@ class HermesCLI:
         MAX_USER_LEN = 300           # truncate user messages
         MAX_ASST_LEN = 200           # truncate assistant text
         MAX_ASST_LINES = 3           # max lines of assistant text
-
-        def _strip_reasoning(text: str) -> str:
-            """Remove <REASONING_SCRATCHPAD>...</REASONING_SCRATCHPAD> blocks
-            from displayed text (reasoning model internal thoughts)."""
-            import re
-            cleaned = re.sub(
-                r"<REASONING_SCRATCHPAD>.*?</REASONING_SCRATCHPAD>\s*",
-                "", text, flags=re.DOTALL,
-            )
-            # Also strip unclosed reasoning tags at the end
-            cleaned = re.sub(
-                r"<REASONING_SCRATCHPAD>.*$",
-                "", cleaned, flags=re.DOTALL,
-            )
-            return cleaned.strip()
 
         # Collect displayable entries (skip system, tool-result messages)
         entries = []  # list of (role, display_text)
@@ -3141,7 +3193,7 @@ class HermesCLI:
 
             elif role == "assistant":
                 text = "" if content is None else str(content)
-                text = _strip_reasoning(text)
+                text = self._strip_resume_reasoning(text)
                 parts = []
                 if text:
                     lines = text.splitlines()
@@ -3152,7 +3204,6 @@ class HermesCLI:
                     parts.append(text)
                 if tool_calls:
                     tc_count = len(tool_calls)
-                    # Extract tool names
                     names = []
                     for tc in tool_calls:
                         fn = tc.get("function", {})
@@ -3165,21 +3216,17 @@ class HermesCLI:
                     noun = "call" if tc_count == 1 else "calls"
                     parts.append(f"[{tc_count} tool {noun}: {names_str}]")
                 if not parts:
-                    # Skip pure-reasoning messages that have no visible output
                     continue
                 entries.append(("assistant", " ".join(parts)))
 
         if not entries:
             return
 
-        # Determine if we need to truncate
         skipped = 0
         if len(entries) > MAX_DISPLAY_EXCHANGES * 2:
             skipped = len(entries) - MAX_DISPLAY_EXCHANGES * 2
             entries = entries[skipped:]
 
-        # Build the display using Rich
-        from rich.panel import Panel
         from rich.text import Text
 
         try:
@@ -3205,7 +3252,6 @@ class HermesCLI:
         for i, (role, text) in enumerate(entries):
             if role == "user":
                 lines.append("  ● You: ", style=f"dim bold {_session_label_c}")
-                # Show first line inline, indent rest
                 msg_lines = text.splitlines()
                 lines.append(msg_lines[0] + "\n", style="dim")
                 for ml in msg_lines[1:]:
@@ -3217,16 +3263,15 @@ class HermesCLI:
                 for ml in msg_lines[1:]:
                     lines.append(f"            {ml}\n", style="dim")
             if i < len(entries) - 1:
-                lines.append("")  # small gap
+                lines.append("")
 
-        panel = Panel(
+        self.console.print(Panel(
             lines,
             title=f"[dim {_session_label_c}]Previous Conversation[/]",
             border_style=f"dim {_session_border_c}",
             padding=(0, 1),
             style=_history_text_c,
-        )
-        self.console.print(panel)
+        ))
 
     def _try_attach_clipboard_image(self) -> bool:
         """Check clipboard for an image and attach it if found.
@@ -4115,6 +4160,7 @@ class HermesCLI:
                 f" ({msg_count} user message{'s' if msg_count != 1 else ''},"
                 f" {len(self.conversation_history)} total)"
             )
+            self._display_post_resume_context()
         else:
             _cprint(f"  ↻ Resumed session {target_id}{title_part} — no messages, starting fresh.")
 
@@ -7765,18 +7811,6 @@ class HermesCLI:
                     _cprint(f"\n{r_top}\n{_DIM}{display_reasoning}{_RST}\n{r_bot}")
 
             if response and not response_previewed:
-                # Use skin engine for label/color with fallback
-                try:
-                    from hermes_cli.skin_engine import get_active_skin
-                    _skin = get_active_skin()
-                    label = _skin.get_branding("response_label", "⚕ Hermes")
-                    _resp_color = _skin.get_color("response_border", "#CD7F32")
-                    _resp_text = _skin.get_color("banner_text", "#FFF8DC")
-                except Exception:
-                    label = "⚕ Hermes"
-                    _resp_color = "#CD7F32"
-                    _resp_text = "#FFF8DC"
-
                 is_error_response = result and (result.get("failed") or result.get("partial"))
                 already_streamed = self._stream_started and self._stream_box_opened and not is_error_response
                 if use_streaming_tts and _streaming_box_opened and not is_error_response:
@@ -7788,16 +7822,7 @@ class HermesCLI:
                     # _flush_stream() already closed the box. Skip Rich Panel.
                     pass
                 else:
-                    _chat_console = ChatConsole()
-                    _chat_console.print(Panel(
-                        _rich_text_from_ansi(response),
-                        title=f"[{_resp_color} bold]{label}[/]",
-                        title_align="left",
-                        border_style=_resp_color,
-                        style=_resp_text,
-                        box=rich_box.HORIZONTALS,
-                        padding=(1, 2),
-                    ))
+                    self._render_response_panel(response)
 
 
             # Play terminal bell when agent finishes (if enabled).
@@ -8106,7 +8131,7 @@ class HermesCLI:
         # so the user has context before typing their first message.
         if self._resumed:
             if self._preload_resumed_session():
-                self._display_resumed_history()
+                self._display_post_resume_context()
 
         try:
             from hermes_cli.skin_engine import get_active_skin

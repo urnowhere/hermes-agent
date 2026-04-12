@@ -126,6 +126,13 @@ class TestDisplayResumedHistory:
         cli_obj._display_resumed_history()
         return buf.getvalue()
 
+    def _capture_post_resume_display(self, cli_obj):
+        """Run _display_post_resume_context and capture console output."""
+        buf = StringIO()
+        cli_obj.console.file = buf
+        cli_obj._display_post_resume_context()
+        return buf.getvalue()
+
     def test_simple_history_shows_user_and_assistant(self):
         cli = _make_cli()
         cli.conversation_history = _simple_history()
@@ -247,6 +254,31 @@ class TestDisplayResumedHistory:
         output = self._capture_display(cli)
 
         assert "Previous Conversation" in output
+
+    def test_expanded_mode_shows_full_last_assistant_response(self):
+        cli = _make_cli(config_overrides={"display": {"resume_display": "expanded"}})
+        multi = "\n".join([f"Line {i}" for i in range(20)])
+        cli.conversation_history = [
+            {"role": "user", "content": "Show me lines."},
+            {"role": "assistant", "content": multi},
+        ]
+        output = self._capture_post_resume_display(cli)
+
+        assert "Previous Conversation" in output
+        assert "previous response" in output.lower()
+        assert "Line 0" in output
+        assert "Line 19" in output
+
+    def test_expanded_mode_skips_extra_panel_when_no_visible_assistant_text(self):
+        cli = _make_cli(config_overrides={"display": {"resume_display": "expanded"}})
+        cli.conversation_history = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": None},
+        ]
+        output = self._capture_post_resume_display(cli)
+
+        assert "Previous Conversation" in output
+        assert "previous response" not in output.lower()
 
     def test_assistant_with_no_content_no_tools_skipped(self):
         """Assistant messages with no visible output (e.g. pure reasoning)
@@ -434,6 +466,23 @@ class TestPreloadResumedSession:
         output = buf.getvalue()
         assert "1 user message," in output
         assert "1 user messages" not in output
+
+
+class TestResumeCommandDisplay:
+    """/resume should use the same post-resume display path as startup resume."""
+
+    def test_handle_resume_command_uses_post_resume_context(self):
+        cli = _make_cli(config_overrides={"display": {"resume_display": "expanded"}})
+        cli.session_id = "current_session"
+        cli._session_db = MagicMock()
+        cli._session_db.get_session.return_value = {"id": "target_session", "title": "Target"}
+        cli._session_db.get_messages_as_conversation.return_value = _simple_history()
+        cli._display_post_resume_context = MagicMock()
+
+        with patch("hermes_cli.main._resolve_session_by_name_or_id", return_value="target_session"):
+            cli._handle_resume_command("/resume target_session")
+
+        cli._display_post_resume_context.assert_called_once()
 
 
 # ── Integration: _init_agent skips when preloaded ────────────────────

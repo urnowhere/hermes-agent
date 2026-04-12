@@ -115,12 +115,19 @@ The recap:
 - **Caps** at the last 10 exchanges with a "... N earlier messages ..." indicator
 - Uses **dim styling** to distinguish from the active conversation
 
-To disable the recap and keep the minimal one-liner behavior, set in `~/.hermes/config.yaml`:
+Resume display modes in `~/.hermes/config.yaml`:
 
 ```yaml
 display:
-  resume_display: minimal   # default: full
+  resume_display: full      # compact recap (default)
+  # resume_display: expanded  # recap + full previous assistant response
+  # resume_display: minimal   # one-line resume notice only
 ```
+
+`expanded` is useful when you want both orientation and actionability: you keep
+the recap panel, then Hermes also shows the full last visible assistant response
+in the normal response panel style so you can immediately continue from the last
+answer.
 
 :::tip
 Session IDs follow the format `YYYYMMDD_HHMMSS_<8-char-hex>`, e.g. `20250305_091523_a1b2c3d4`. You can resume by ID or by title — both work with `-c` and `-r`.
