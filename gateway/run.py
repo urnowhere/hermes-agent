@@ -1471,6 +1471,7 @@ class GatewayRunner:
             os.getenv(v)
             for v in ("TELEGRAM_ALLOWED_USERS", "DISCORD_ALLOWED_USERS",
                        "WHATSAPP_ALLOWED_USERS", "SLACK_ALLOWED_USERS",
+                       "WHATSAPP_GROUP_ALLOWED_USERS",
                        "SIGNAL_ALLOWED_USERS", "SIGNAL_GROUP_ALLOWED_USERS",
                        "EMAIL_ALLOWED_USERS",
                        "SMS_ALLOWED_USERS", "MATTERMOST_ALLOWED_USERS",
@@ -2280,6 +2281,37 @@ class GatewayRunner:
         platform_name = source.platform.value if source.platform else ""
         if self.pairing_store.is_approved(platform_name, user_id):
             return True
+
+        # WhatsApp group allowlist: when configured, any member in an allowed
+        # group can chat with Hermes. "*" allows all groups.
+        if source.platform == Platform.WHATSAPP and source.chat_type == "group":
+            group_allowlist = os.getenv("WHATSAPP_GROUP_ALLOWED_USERS", "").strip()
+            if group_allowlist:
+                allowed_groups = {
+                    group_id.strip()
+                    for group_id in group_allowlist.split(",")
+                    if group_id.strip()
+                }
+                if "*" in allowed_groups:
+                    return True
+
+                normalized_allowed_groups = set()
+                for group_id in allowed_groups:
+                    normalized_allowed_groups.add(group_id)
+                    normalized_group_id = _normalize_whatsapp_identifier(group_id)
+                    if normalized_group_id:
+                        normalized_allowed_groups.add(normalized_group_id)
+
+                chat_id_candidates = set()
+                raw_chat_id = str(source.chat_id or "").strip()
+                if raw_chat_id:
+                    chat_id_candidates.add(raw_chat_id)
+                    normalized_chat_id = _normalize_whatsapp_identifier(raw_chat_id)
+                    if normalized_chat_id:
+                        chat_id_candidates.add(normalized_chat_id)
+
+                if chat_id_candidates & normalized_allowed_groups:
+                    return True
 
         # Check platform-specific and global allowlists
         platform_allowlist = os.getenv(platform_env_map.get(source.platform, ""), "").strip()

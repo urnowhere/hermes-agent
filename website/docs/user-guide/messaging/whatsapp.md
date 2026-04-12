@@ -108,6 +108,12 @@ To use the pairing flow instead, remove both variables and rely on the
 [DM pairing system](/docs/user-guide/security#dm-pairing-system).
 :::
 
+You can also allow entire WhatsApp groups by setting
+`WHATSAPP_GROUP_ALLOWED_USERS` to a comma-separated list of group IDs
+(e.g. `120363001234567890@g.us`). Anyone in an allowed group can chat
+with Hermes. If `WHATSAPP_REQUIRE_MENTION=true`, group messages still
+need to mention the bot before Hermes responds.
+
 Optional behavior settings in `~/.hermes/config.yaml`:
 
 ```yaml

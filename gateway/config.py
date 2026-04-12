@@ -635,6 +635,11 @@ def load_gateway_config() -> GatewayConfig:
                     if isinstance(frc, list):
                         frc = ",".join(str(v) for v in frc)
                     os.environ["WHATSAPP_FREE_RESPONSE_CHATS"] = str(frc)
+                gac = whatsapp_cfg.get("group_allowed_users")
+                if gac is not None and not os.getenv("WHATSAPP_GROUP_ALLOWED_USERS"):
+                    if isinstance(gac, list):
+                        gac = ",".join(str(v) for v in gac)
+                    os.environ["WHATSAPP_GROUP_ALLOWED_USERS"] = str(gac)
 
             # Matrix settings → env vars (env vars take precedence)
             matrix_cfg = yaml_cfg.get("matrix", {})

@@ -263,6 +263,7 @@ class TestBlocklistCoverage:
             "WHATSAPP_ENABLED",
             "WHATSAPP_MODE",
             "WHATSAPP_ALLOWED_USERS",
+            "WHATSAPP_GROUP_ALLOWED_USERS",
             "SIGNAL_HTTP_URL",
             "SIGNAL_ACCOUNT",
             "SIGNAL_ALLOWED_USERS",

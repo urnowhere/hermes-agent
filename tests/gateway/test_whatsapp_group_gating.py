@@ -83,13 +83,16 @@ def test_config_bridges_whatsapp_group_settings(monkeypatch, tmp_path):
         "whatsapp:\n"
         "  require_mention: true\n"
         "  mention_patterns:\n"
-        "    - \"^\\\\s*chompy\\\\b\"\n",
+        "    - \"^\\\\s*chompy\\\\b\"\n"
+        "  group_allowed_users:\n"
+        "    - \"120363001234567890@g.us\"\n",
         encoding="utf-8",
     )
 
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.delenv("WHATSAPP_REQUIRE_MENTION", raising=False)
     monkeypatch.delenv("WHATSAPP_MENTION_PATTERNS", raising=False)
+    monkeypatch.delenv("WHATSAPP_GROUP_ALLOWED_USERS", raising=False)
 
     config = load_gateway_config()
 
@@ -98,6 +101,7 @@ def test_config_bridges_whatsapp_group_settings(monkeypatch, tmp_path):
     assert config.platforms[Platform.WHATSAPP].extra["mention_patterns"] == [r"^\s*chompy\b"]
     assert __import__("os").environ["WHATSAPP_REQUIRE_MENTION"] == "true"
     assert json.loads(__import__("os").environ["WHATSAPP_MENTION_PATTERNS"]) == [r"^\s*chompy\b"]
+    assert __import__("os").environ["WHATSAPP_GROUP_ALLOWED_USERS"] == "120363001234567890@g.us"
 
 
 def test_free_response_chats_bypass_mention_gating():

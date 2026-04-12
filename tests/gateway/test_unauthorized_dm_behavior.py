@@ -14,6 +14,7 @@ def _clear_auth_env(monkeypatch) -> None:
         "TELEGRAM_ALLOWED_USERS",
         "DISCORD_ALLOWED_USERS",
         "WHATSAPP_ALLOWED_USERS",
+        "WHATSAPP_GROUP_ALLOWED_USERS",
         "SLACK_ALLOWED_USERS",
         "SIGNAL_ALLOWED_USERS",
         "EMAIL_ALLOWED_USERS",
@@ -108,6 +109,66 @@ def test_star_wildcard_in_allowlist_authorizes_any_user(monkeypatch):
         chat_type="dm",
     )
     assert runner._is_user_authorized(source) is True
+
+
+def test_whatsapp_group_allowlist_authorizes_any_group_member(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("WHATSAPP_GROUP_ALLOWED_USERS", "120363001234567890")
+
+    runner, _adapter = _make_runner(
+        Platform.WHATSAPP,
+        GatewayConfig(platforms={Platform.WHATSAPP: PlatformConfig(enabled=True)}),
+    )
+
+    source = SessionSource(
+        platform=Platform.WHATSAPP,
+        user_id="99998887776@s.whatsapp.net",
+        chat_id="120363001234567890@g.us",
+        user_name="group-member",
+        chat_type="group",
+    )
+
+    assert runner._is_user_authorized(source) is True
+
+
+def test_whatsapp_group_allowlist_supports_star_wildcard(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("WHATSAPP_GROUP_ALLOWED_USERS", "*")
+
+    runner, _adapter = _make_runner(
+        Platform.WHATSAPP,
+        GatewayConfig(platforms={Platform.WHATSAPP: PlatformConfig(enabled=True)}),
+    )
+
+    source = SessionSource(
+        platform=Platform.WHATSAPP,
+        user_id="99998887776@s.whatsapp.net",
+        chat_id="120363009999999999@g.us",
+        user_name="group-member",
+        chat_type="group",
+    )
+
+    assert runner._is_user_authorized(source) is True
+
+
+def test_whatsapp_group_allowlist_does_not_authorize_dm(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("WHATSAPP_GROUP_ALLOWED_USERS", "120363001234567890@g.us")
+
+    runner, _adapter = _make_runner(
+        Platform.WHATSAPP,
+        GatewayConfig(platforms={Platform.WHATSAPP: PlatformConfig(enabled=True)}),
+    )
+
+    source = SessionSource(
+        platform=Platform.WHATSAPP,
+        user_id="99998887776@s.whatsapp.net",
+        chat_id="99998887776@s.whatsapp.net",
+        user_name="stranger",
+        chat_type="dm",
+    )
+
+    assert runner._is_user_authorized(source) is False
 
 
 def test_star_wildcard_works_for_any_platform(monkeypatch):
