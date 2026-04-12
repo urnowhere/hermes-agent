@@ -467,6 +467,8 @@ def _get_or_create_env(task_id: str):
 
         if env_type == "docker":
             image = overrides.get("docker_image") or config["docker_image"]
+        elif env_type == "podman":
+            image = overrides.get("podman_image") or config["podman_image"]
         elif env_type == "singularity":
             image = overrides.get("singularity_image") or config["singularity_image"]
         elif env_type == "modal":
@@ -479,7 +481,7 @@ def _get_or_create_env(task_id: str):
         cwd = overrides.get("cwd") or config["cwd"]
 
         container_config = None
-        if env_type in ("docker", "singularity", "modal", "daytona"):
+        if env_type in ("docker", "podman", "singularity", "modal", "daytona"):
             container_config = {
                 "container_cpu": config.get("container_cpu", 1),
                 "container_memory": config.get("container_memory", 5120),
@@ -487,6 +489,29 @@ def _get_or_create_env(task_id: str):
                 "container_persistent": config.get("container_persistent", True),
                 "docker_volumes": config.get("docker_volumes", []),
             }
+
+            if env_type == "podman":
+                podman_user = config.get("podman_user", "")
+                podman_userns = config.get("podman_userns", "")
+                podman_extra_args = config.get("podman_extra_args", [])
+                podman_extra_capabilities = config.get("podman_extra_capabilities", [])
+                podman_privilged = config.get("podman_privileged", False)
+                podman_rootful = config.get("podman_rootful", False)
+
+                if str(podman_user).strip():
+                    container_config["podman_user"] = podman_user
+
+                if str(podman_userns).strip():
+                    container_config["podman_userns"] = podman_userns
+
+                if isinstance(podman_extra_args, list) and all(podman_extra_args, lambda x: isinstance(x, str)):
+                    container_config["podman_extra_args"] = podman_extra_args
+
+                if isinstance(podman_extra_capabilities, list) and all(podman_extra_capabilities, lambda x: isinstance(x, str)):
+                    container_config["podman_extra_capabilities"] = podman_extra_capabilities
+
+                container_config["podman_privileged"] = podman_privilged
+                container_config["podman_rootful"] = podman_rootful
 
         ssh_config = None
         if env_type == "ssh":

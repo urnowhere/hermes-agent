@@ -131,10 +131,11 @@ Here are some things to try next:
 
 ### Set up a sandboxed terminal
 
-For safety, run the agent in a Docker container or on a remote server:
+For safety, run the agent in a Docker/Podman container or on a remote server:
 
 ```bash
 hermes config set terminal.backend docker    # Docker isolation
+hermes config set terminal.backend podman    # Podman isolation
 hermes config set terminal.backend ssh       # Remote server
 ```
 

@@ -401,7 +401,7 @@ class HermesAgentLoop:
                                     tool_elapsed = _time.monotonic() - tool_submit_time
                                 else:
                                     # Run tool calls in a thread pool so backends that
-                                    # use asyncio.run() internally (modal, docker, daytona) get
+                                    # use asyncio.run() internally (modal, docker, podman, daytona) get
                                     # a clean event loop instead of deadlocking.
                                     loop = asyncio.get_event_loop()
                                     # Capture current tool_name/args for the lambda

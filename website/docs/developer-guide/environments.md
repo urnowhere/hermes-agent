@@ -84,7 +84,7 @@ The foundation from `atroposlib`. Provides:
 ### HermesAgentBaseEnv
 
 The hermes-agent layer (`environments/hermes_base_env.py`). Adds:
-- **Terminal backend configuration** — sets `TERMINAL_ENV` for sandboxed execution (local, Docker, Modal, Daytona, SSH, Singularity)
+- **Terminal backend configuration** — sets `TERMINAL_ENV` for sandboxed execution (local, Docker, Podman, Modal, Daytona, SSH, Singularity)
 - **Tool resolution** — `_resolve_tools_for_group()` calls hermes-agent's `get_tool_definitions()` to get the right tool schemas based on enabled/disabled toolsets
 - **Agent loop integration** — `collect_trajectory()` runs `HermesAgentLoop` and scores the result
 - **Two-phase operation** — Phase 1 (OpenAI server) for eval/SFT, Phase 2 (VLLM ManagedServer) for full RL with logprobs
@@ -113,7 +113,7 @@ Your environment inherits from `HermesAgentBaseEnv` and implements five methods:
 3. Append tool results to the conversation, go back to step 1
 4. If no `tool_calls`, the agent is done
 
-Tool calls execute in a thread pool (`ThreadPoolExecutor(128)`) so that async backends (Modal, Docker) don't deadlock inside Atropos's event loop.
+Tool calls execute in a thread pool (`ThreadPoolExecutor(128)`) so that async backends (Modal, Docker, Podman) don't deadlock inside Atropos's event loop.
 
 Returns an `AgentResult`:
 
@@ -426,7 +426,7 @@ See `environments/benchmarks/yc_bench/yc_bench_env.py` for a clean, well-documen
 | `max_agent_turns` | `int` | `30` | Max LLM calls per rollout |
 | `agent_temperature` | `float` | `1.0` | Sampling temperature |
 | `system_prompt` | `str` | `None` | System message for the agent |
-| `terminal_backend` | `str` | `"local"` | `local`, `docker`, `modal`, `daytona`, `ssh`, `singularity` |
+| `terminal_backend` | `str` | `"local"` | `local`, `docker`, `podman`, `modal`, `daytona`, `ssh`, `singularity` |
 | `terminal_timeout` | `int` | `120` | Seconds per terminal command |
 | `terminal_lifetime` | `int` | `3600` | Max sandbox lifetime |
 | `dataset_name` | `str` | `None` | HuggingFace dataset identifier |

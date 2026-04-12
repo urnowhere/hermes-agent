@@ -42,6 +42,7 @@ _COMPLEX_KEYWORDS = {
     "subagent",
     "cron",
     "docker",
+    "podman",
     "kubernetes",
 }
 

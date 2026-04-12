@@ -29,7 +29,7 @@ def build_plan_path(
     """Return the default workspace-relative markdown path for a /plan invocation.
 
     Relative paths are intentional: file tools are task/backend-aware and resolve
-    them against the active working directory for local, docker, ssh, modal,
+    them against the active working directory for local, docker, ssh, modal, podman,
     daytona, and similar terminal backends. That keeps the plan with the active
     workspace instead of the Hermes host's global home directory.
     """

@@ -56,6 +56,7 @@ The terminal tool can execute commands in different environments:
 |---------|-------------|----------|
 | `local` | Run on your machine (default) | Development, trusted tasks |
 | `docker` | Isolated containers | Security, reproducibility |
+| `podman` | Isolated containers | Security, reproducibility |
 | `ssh` | Remote server | Sandboxing, keep agent away from its own code |
 | `singularity` | HPC containers | Cluster computing, rootless |
 | `modal` | Cloud execution | Serverless, scale |
@@ -66,7 +67,7 @@ The terminal tool can execute commands in different environments:
 ```yaml
 # In ~/.hermes/config.yaml
 terminal:
-  backend: local    # or: docker, ssh, singularity, modal, daytona
+  backend: local    # or: docker, podman, ssh, singularity, modal, daytona
   cwd: "."          # Working directory
   timeout: 180      # Command timeout in seconds
 ```
@@ -119,7 +120,7 @@ Configure CPU, memory, disk, and persistence for all container backends:
 
 ```yaml
 terminal:
-  backend: docker  # or singularity, modal, daytona
+  backend: docker  # or podman, singularity, modal, daytona
   container_cpu: 1              # CPU cores (default: 1)
   container_memory: 5120        # Memory in MB (default: 5GB)
   container_disk: 51200         # Disk in MB (default: 50GB)

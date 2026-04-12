@@ -175,9 +175,9 @@ On messaging platforms, sessions auto-reset after idle time (default: 24 hours) 
 
 ## Security
 
-### Use Docker for Untrusted Code
+### Use Docker/Podman for Untrusted Code
 
-When working with untrusted repositories or running unfamiliar code, use Docker or Daytona as your terminal backend. Set `TERMINAL_BACKEND=docker` in your `.env`. Destructive commands inside a container can't harm your host system.
+When working with untrusted repositories or running unfamiliar code, use Docker, Podman, or Daytona as your terminal backend. Set `TERMINAL_BACKEND=docker` in your `.env`. Destructive commands inside a container can't harm your host system.
 
 ```bash
 # In your .env:

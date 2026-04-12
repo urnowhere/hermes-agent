@@ -75,17 +75,18 @@ For AI provider setup (OpenRouter, Anthropic, Copilot, custom endpoints, self-ho
 
 ## Terminal Backend Configuration
 
-Hermes supports six terminal backends. Each determines where the agent's shell commands actually execute — your local machine, a Docker container, a remote server via SSH, a Modal cloud sandbox, a Daytona workspace, or a Singularity/Apptainer container.
+Hermes supports seven terminal backends. Each determines where the agent's shell commands actually execute — your local machine, a Docker container, a Podman container, a remote server via SSH, a Modal cloud sandbox, a Daytona workspace, or a Singularity/Apptainer container.
 
 ```yaml
 terminal:
-  backend: local    # local | docker | ssh | modal | daytona | singularity
+  backend: local    # local | docker | podman | ssh | modal | daytona | singularity
   cwd: "."          # Working directory ("." = current dir for local, "/root" for containers)
   timeout: 180      # Per-command timeout in seconds
   env_passthrough: []  # Env var names to forward to sandboxed execution (terminal + execute_code)
   singularity_image: "docker://nikolaik/python-nodejs:python3.11-nodejs20"  # Container image for Singularity backend
   modal_image: "nikolaik/python-nodejs:python3.11-nodejs20"                 # Container image for Modal backend
   daytona_image: "nikolaik/python-nodejs:python3.11-nodejs20"               # Container image for Daytona backend
+  podman_image: "docker.io/nikolaik/python-nodejs:python3.11-nodejs20"      # Container image for Podman backend
 ```
 
 For cloud sandboxes such as Modal and Daytona, `container_persistent: true` means Hermes will try to preserve filesystem state across sandbox recreation. It does not promise that the same live sandbox, PID space, or background processes will still be running later.
@@ -96,6 +97,7 @@ For cloud sandboxes such as Modal and Daytona, `container_persistent: true` mean
 |---------|-------------------|-----------|----------|
 | **local** | Your machine directly | None | Development, personal use |
 | **docker** | Docker container | Full (namespaces, cap-drop) | Safe sandboxing, CI/CD |
+| **podman** | Podman container | Full (namespaces, cap-drop, rootless by default) | Safe sandboxing, CI/CD |
 | **ssh** | Remote server via SSH | Network boundary | Remote dev, powerful hardware |
 | **modal** | Modal cloud sandbox | Full (cloud VM) | Ephemeral cloud compute, evals |
 | **daytona** | Daytona workspace | Full (cloud container) | Managed cloud dev environments |
@@ -111,7 +113,7 @@ terminal:
 ```
 
 :::warning
-The agent has the same filesystem access as your user account. Use `hermes tools` to disable tools you don't want, or switch to Docker for sandboxing.
+The agent has the same filesystem access as your user account. Use `hermes tools` to disable tools you don't want, or switch to Docker/Podman for sandboxing.
 :::
 
 ### Docker Backend
@@ -147,6 +149,59 @@ terminal:
 - Size-limited tmpfs for `/tmp` (512MB), `/var/tmp` (256MB), `/run` (64MB)
 
 **Credential forwarding:** Env vars listed in `docker_forward_env` are resolved from your shell environment first, then `~/.hermes/.env`. Skills can also declare `required_environment_variables` which are merged automatically.
+
+### Podman Backend
+
+Very similar to the Docker backend, except it also runs in rootless mode by default and supports user namespace remapping out of the box.
+
+These traits are very useful for two reason:
+1. Many images set `root` as the default user. This could be dangerous with a default Docker installation, in case the process escapes the container. This is not a problem with a default Podman installation because `root` inside the container is not actually `root` outside the container.
+2. With user namespace remapping, you can mount the SSH and GPG sockets into the container and let the user inside the container use them for passphrase-less SSH and GPG operations - e.g. git commit signing, pushing code to a remote git server over SSH - while keeping encrypted private keys on disk.
+
+```yaml
+terminal:
+  backend: podman
+  # It is recommended that you specify the fully qualified image name, which includes the registry location at the beginning
+  podman_image: "docker.io/nikolaik/python-nodejs:python3.11-nodejs20"
+  docker_mount_cwd_to_workspace: false  # Mount launch dir into /workspace
+  docker_forward_env:              # Env vars to forward into container
+    - "GITHUB_TOKEN"
+  docker_volumes:                  # Host directory mounts
+    - "/home/user/projects:/workspace/projects"
+    - "/home/user/data:/data:ro"   # :ro for read-only
+
+  # Resource limits
+  container_cpu: 1                 # CPU cores (0 = unlimited)
+  container_memory: 5120           # MB (0 = unlimited)
+  container_disk: 51200            # MB (requires overlay2 on XFS+pquota)
+  container_persistent: true       # Persist /workspace and /root across sessions
+
+  # Podman-specific options (read the official Podman documentation about what they do)
+  podman_userns: host              # User namespace remapping mode (--userns)
+  podman_user: pn                  # User to use *inside* the container (--user), to override the default specified in the image
+  podman_privileged: false         # Enable extra privileges (--privileged)
+  podman_extra_capabilities: []    # List of extra capabilities (--cap-add)
+  podman_extra_args: []            # List of arbitrary extra arguments supported by `docker run`
+  podman_rootful: false            # Whether to run Podman in rootful mode - i.e. `sudo podman` instead of just `podman`
+```
+
+**Requirements:** Podman installed and running. Hermes probes `$PATH` plus install locations that are common or mentioned in the official Podman documentation (`/usr/bin/podman`, `/usr/local/bin/podman`, `/opt/homebrew/bin/podman`, `/opt/podman/bin/podman`, `/home/linuxbrew/.linuxbrew/bin/podman`).
+
+If you plan to use Hermes Agent in WSL2, Podman Desktop for Windows *will not* work (unlike the case for Docker Desktop and WSL2), you need to install Podman directly in WSL2.
+
+Given that even the existing Docker backend does not try to cater to Windows, this Podman will also not try to cater to Windows.
+
+**Container lifecycle:** Each session starts a long-lived container (`podman run -d ... sleep 2h`). Commands run via `podman exec` with a login shell. On cleanup, the container is stopped and removed.
+
+**Security hardening:**
+- `--cap-drop ALL` with only `DAC_OVERRIDE`, `CHOWN`, `FOWNER` added back
+- `--security-opt no-new-privileges`
+- `--pids-limit 256`
+- Size-limited tmpfs for `/tmp` (512MB), `/var/tmp` (256MB), `/run` (64MB)
+
+**Credential forwarding:** Env vars listed in `docker_forward_env` are resolved from your shell environment first, then `~/.hermes/.env`. Skills can also declare `required_environment_variables` which are merged automatically.
+
+We reuse some configuration variables introduced by the Docker backend because Docker and Podman are so similar anyway. It makes it slightly less troublesome to switch between Docker and Podman.
 
 ### SSH Backend
 

@@ -212,8 +212,33 @@ terminal:
 #   daytona_image: "nikolaik/python-nodejs:python3.11-nodejs20"
 #   container_disk: 10240          # Daytona max is 10GB per sandbox
 
+# -----------------------------------------------------------------------------
+# OPTION 7: Podman container
+# Commands run in an isolated Podman container
+# Great for: reproducible environments, testing, isolation
+# -----------------------------------------------------------------------------
+# terminal:
+#   backend: "podman"
+#   cwd: "/workspace"  # Path INSIDE the container (default: /)
+#   timeout: 180
+#   lifetime_seconds: 300
+#   docker_image: "docker.io/nikolaik/python-nodejs:python3.11-nodejs20"
+#   docker_mount_cwd_to_workspace: true   # Explicit opt-in: mount your launch cwd into /workspace
+#   # Optional: explicitly forward selected env vars into Docker.
+#   # These values come from your current shell first, then ~/.hermes/.env.
+#   # Warning: anything forwarded here is visible to commands run in the container.
+#   docker_forward_env:
+#     - "GITHUB_TOKEN"
+#     - "NPM_TOKEN"
+#   podman_user: pn                # default: unset - i.e. whatever is the default user of the container image
+#   podman_userns: keep-id         # default: host
+#   podman_privileged: true        # default: false - i.e. no `--privileged` command line option
+#   podman_extra_capabilities: []  # default: []
+#   podman_extra_args: []          # default: []
+#   podman_rootful: true           # default: false - i.e. run Podman as just `podman` instead of `sudo podman`
+
 #
-# --- Container resource limits (docker, singularity, modal, daytona -- ignored for local/ssh) ---
+# --- Container resource limits (docker, podman, singularity, modal, daytona -- ignored for local/ssh) ---
 # These settings apply to all container backends. They control the resources
 # allocated to the sandbox and whether its filesystem persists across sessions.
   container_cpu: 1              # CPU cores

@@ -288,6 +288,44 @@ def _process_single_prompt(
             except Exception as img_err:
                 if config.get("verbose"):
                     print(f"   Prompt {prompt_index}: Docker image check failed: {img_err}", flush=True)
+        elif env_type == "podman":
+            import subprocess as _sp
+            try:
+                cmd = ["podman", "image", "inspect", container_image]
+                if config.get("podman_rootful"):
+                    cmd = ["sudo"] + cmd
+
+                probe = _sp.run(
+                    cmd,
+                    capture_output=True, timeout=10,
+                )
+                if probe.returncode != 0:
+                    if config.get("verbose"):
+                        print(f"   Prompt {prompt_index}: Pulling podman image {container_image}...", flush=True)
+
+                    cmd = ["podman", "pull", container_image]
+                    if config.get("podman_rootful"):
+                        cmd = ["sudo"] + cmd
+
+                    pull = _sp.run(
+                        cmd,
+                        capture_output=True, text=True, timeout=600,
+                    )
+                    if pull.returncode != 0:
+                        return {
+                            "success": False,
+                            "prompt_index": prompt_index,
+                            "error": f"Podman image not available: {container_image}\n{pull.stderr[:500]}",
+                            "trajectory": None,
+                            "tool_stats": {},
+                            "toolsets_used": [],
+                            "metadata": {"batch_num": batch_num, "timestamp": datetime.now().isoformat()},
+                        }
+            except FileNotFoundError:
+                pass  # Docker CLI not installed — skip check (e.g., Modal backend)
+            except Exception as img_err:
+                if config.get("verbose"):
+                    print(f"   Prompt {prompt_index}: Podman image check failed: {img_err}", flush=True)
 
         from tools.terminal_tool import register_task_env_overrides
         overrides = {
@@ -295,6 +333,7 @@ def _process_single_prompt(
             "modal_image": container_image,
             "singularity_image": f"docker://{container_image}",
             "daytona_image": container_image,
+            "podman_image": container_image,
         }
         if prompt_data.get("cwd"):
             overrides["cwd"] = prompt_data["cwd"]

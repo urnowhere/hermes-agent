@@ -248,7 +248,7 @@ Each entry supports:
 - `description` (optional) — explains what the file is and how it's created
 
 When loaded, Hermes checks if these files exist. Missing files trigger `setup_needed`. Existing files are automatically:
-- **Mounted into Docker** containers as read-only bind mounts
+- **Mounted into Docker/Podman** containers as read-only bind mounts
 - **Synced into Modal** sandboxes (at creation + before each command, so mid-session OAuth works)
 - Available on **local** backend without any special handling
 

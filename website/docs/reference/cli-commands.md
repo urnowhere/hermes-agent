@@ -298,7 +298,7 @@ Outputs a compact, plain-text summary of your entire Hermes setup. Designed to b
 | **Environment** | OS, Python version, OpenAI SDK version |
 | **Identity** | Active profile name, HERMES_HOME path |
 | **Model** | Configured default model and provider |
-| **Terminal** | Backend type (local, docker, ssh, etc.) |
+| **Terminal** | Backend type (local, docker, podman, ssh, etc.) |
 | **API keys** | Presence check for all 22 provider/tool API keys |
 | **Features** | Enabled toolsets, MCP server count, memory provider |
 | **Services** | Gateway status, configured messaging platforms |

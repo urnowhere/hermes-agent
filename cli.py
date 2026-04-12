@@ -223,12 +223,18 @@ def load_cli_config() -> Dict[str, Any]:
             "timeout": 60,
             "lifetime_seconds": 300,
             "docker_image": "nikolaik/python-nodejs:python3.11-nodejs20",
+            "podman_image": "docker.io/nikolaik/python-nodejs:python3.11-nodejs20",
             "docker_forward_env": [],
             "singularity_image": "docker://nikolaik/python-nodejs:python3.11-nodejs20",
             "modal_image": "nikolaik/python-nodejs:python3.11-nodejs20",
             "daytona_image": "nikolaik/python-nodejs:python3.11-nodejs20",
             "docker_volumes": [],  # host:container volume mounts for Docker backend
             "docker_mount_cwd_to_workspace": False,  # explicit opt-in only; default off for sandbox isolation
+            "podman_userns": "host",
+            "podman_extra_args": [],
+            "podman_extra_capabilities": [],
+            "podman_privileged": False,
+            "podman_rootful": False,
         },
         "browser": {
             "inactivity_timeout": 120,  # Auto-cleanup inactive browser sessions after 2 min
@@ -417,6 +423,7 @@ def load_cli_config() -> Dict[str, Any]:
         "timeout": "TERMINAL_TIMEOUT",
         "lifetime_seconds": "TERMINAL_LIFETIME_SECONDS",
         "docker_image": "TERMINAL_DOCKER_IMAGE",
+        "podman_image": "TERMINAL_PODMAN_IMAGE",
         "docker_forward_env": "TERMINAL_DOCKER_FORWARD_ENV",
         "singularity_image": "TERMINAL_SINGULARITY_IMAGE",
         "modal_image": "TERMINAL_MODAL_IMAGE",

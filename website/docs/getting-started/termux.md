@@ -33,7 +33,7 @@ A few features still need desktop/server-style dependencies that are not publish
 - `.[all]` is not supported on Android today
 - the `voice` extra is blocked by `faster-whisper -> ctranslate2`, and `ctranslate2` does not publish Android wheels
 - automatic browser / Playwright bootstrap is skipped in the Termux installer
-- Docker-based terminal isolation is not available inside Termux
+- Docker/Podman-based terminal isolation is not available inside Termux
 
 That does not stop Hermes from working well as a phone-native CLI agent — it just means the recommended mobile install is intentionally narrower than the desktop/server install.
 
@@ -224,7 +224,7 @@ python -m pip install -e '.[termux]' -c constraints-termux.txt
 
 ## Known limitations on phones
 
-- Docker backend is unavailable
+- Docker/Podman backend is unavailable
 - local voice transcription via `faster-whisper` is unavailable in the tested path
 - browser automation setup is intentionally skipped by the installer
 - some optional extras may work, but only `.[termux]` is currently documented as the tested Android bundle

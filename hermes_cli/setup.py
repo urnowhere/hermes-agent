@@ -11,6 +11,7 @@ Modular wizard with independently-runnable sections:
 Config files are stored in ~/.hermes/ for easy access.
 """
 
+import json
 import importlib.util
 import logging
 import os
@@ -1118,10 +1119,10 @@ def setup_terminal_backend(config: dict):
         "SSH - run on a remote machine",
         "Daytona - persistent cloud development environment",
     ]
-    idx_to_backend = {0: "local", 1: "docker", 2: "modal", 3: "ssh", 4: "daytona"}
-    backend_to_idx = {"local": 0, "docker": 1, "modal": 2, "ssh": 3, "daytona": 4}
+    idx_to_backend = {0: "local", 1: "docker", 2: "modal", 3: "ssh", 4: "daytona", 5: "podman"}
+    backend_to_idx = {"local": 0, "docker": 1, "modal": 2, "ssh": 3, "daytona": 4, "podman": 5}
 
-    next_idx = 5
+    next_idx = 6
     if is_linux:
         terminal_choices.append("Singularity/Apptainer - HPC-friendly container")
         idx_to_backend[next_idx] = "singularity"
@@ -1193,6 +1194,79 @@ def setup_terminal_backend(config: dict):
         image = prompt("  Docker image", current_image)
         config["terminal"]["docker_image"] = image
         save_env_value("TERMINAL_DOCKER_IMAGE", image)
+
+        _prompt_container_resources(config)
+
+    elif selected_backend == "podman":
+        print_success("Terminal backend: Podman")
+
+        # Check if Docker is available
+        docker_bin = shutil.which("podman")
+        if not docker_bin:
+            print_warning("Podman not found in PATH!")
+            print_info("Install Podman: https://podman.io/docs/installation")
+        else:
+            print_info(f"Podman found: {docker_bin}")
+
+        # Podman image
+        current_image = config.get("terminal", {}).get(
+            "podman_image", "docker.io/nikolaik/python-nodejs:python3.11-nodejs20"
+        )
+        image = prompt("  Podman image", current_image)
+        config["terminal"]["podman_image"] = image
+        save_env_value("TERMINAL_PODMAN_IMAGE", image)
+
+        terminal = config.get("terminal")
+        # User namespace mapping
+        current_userns = terminal.get("podman_userns", "host")
+        terminal["podman_userns"] = prompt("  Podman user namespace mapping", str(current_userns))
+
+        # User
+        current_user = terminal.get("podman_user", "")
+        user = prompt("  Podman user", str(current_user))
+
+        # Extra capabilities
+        current_extra_caps = terminal.get("podman_extra_capabilities", [])
+        extra_caps = prompt("  Podman extra capabilities (space-sparated)", " ".join(current_extra_caps))
+        terminal["podman_extra_capabilities"] = extra_caps.split(" ").filter(lambda x: len(x) > 0)
+
+        # Privileged mode
+        current_privileged = "Yes" if (str(terminal.get("podman_privileged", False)).lower() in ("true", "yes", "1")) else "No"
+        idx_to_privileged = {
+            0: "no",
+            1: "yes",
+        }
+        privileged_to_idx = {
+            "yes": 1,
+            "no": 0,
+        }
+        privileged_choices = ["No", "Yes", f"Keep current ({current_privileged})"]
+        privileged_idx = prompt_choice("Podman privileged mode (--privileged)", privileged_choices)
+        if privileged_idx != 2:
+            terminal["podman_privileged"] = (privileged_idx == 1)
+
+        # Extra args
+        current_extra_args = terminal.get("podman_extra_args", [])
+        extra_args = prompt("  Podman extra args (array of strings as JSON text)", json.dumps(current_extra_args))
+        try:
+            terminal["podman_extra_args"] = json.loads(extra_args)
+        except ValueError:
+            pass
+
+        # Rootful
+        current_rootful = "Yes" if (str(terminal.get("podman_rootful", False)).lower() in ("true", "yes", "1")) else "No"
+        idx_to_rootful = {
+            0: "no",
+            1: "yes",
+        }
+        rootful_to_idx = {
+            "no": 0,
+            "yes": 1,
+        }
+        rootful_choices = ["No", "Yes", f"Keep current ({current_rootful})"]
+        rootful_idx = prompt_choice("Podman rootful mode (`sudo podman`)", rootful_choices)
+        if rootful_idx != 2:
+            terminal["podman_rootful"] = (rootful_idx == 1)
 
         _prompt_container_resources(config)
 

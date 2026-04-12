@@ -308,7 +308,7 @@ Edit with `hermes config edit` or `hermes config set section.key value`.
 |---------|-------------|
 | `model` | `default`, `provider`, `base_url`, `api_key`, `context_length` |
 | `agent` | `max_turns` (90), `tool_use_enforcement` |
-| `terminal` | `backend` (local/docker/ssh/modal), `cwd`, `timeout` (180) |
+| `terminal` | `backend` (local/docker/podman/ssh/modal), `cwd`, `timeout` (180) |
 | `compression` | `enabled`, `threshold` (0.50), `target_ratio` (0.20) |
 | `display` | `skin`, `tool_progress`, `show_reasoning`, `show_cost` |
 | `stt` | `enabled`, `provider` (local/groq/openai) |

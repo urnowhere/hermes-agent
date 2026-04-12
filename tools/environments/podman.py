@@ -1,6 +1,7 @@
-"""Docker execution environment for sandboxed command execution.
+"""Podman execution environment for sandboxed command execution.
 
 Security hardened (cap-drop ALL, no-new-privileges, PID limits),
+optionally rootless and user-namespace-remapped
 configurable resource limits (CPU, memory, disk), and optional filesystem
 persistence via bind mounts.
 """
@@ -14,7 +15,9 @@ import sys
 import uuid
 from typing import Optional
 
-from tools.environments.base import BaseEnvironment, _popen_bash
+from tools.environments.base import _popen_bash
+# for now, we'll use the exact same default security args as the Docker backend
+from tools.environments.docker import DockerEnvironment, _SECURITY_ARGS
 from tools.environments.utils import \
     normalize_forward_env_names, \
     normalize_env_dict, \
@@ -25,123 +28,99 @@ from tools.environments.local import _HERMES_PROVIDER_ENV_BLOCKLIST
 logger = logging.getLogger(__name__)
 
 
-# Common Docker Desktop install paths checked when 'docker' is not in PATH.
-# macOS Intel: /usr/local/bin, macOS Apple Silicon (Homebrew): /opt/homebrew/bin,
-# Docker Desktop app bundle: /Applications/Docker.app/Contents/Resources/bin
-_DOCKER_SEARCH_PATHS = [
-    "/usr/local/bin/docker",
-    "/opt/homebrew/bin/docker",
-    "/Applications/Docker.app/Contents/Resources/bin/docker",
+# Common Podman install paths checked when 'podman' is not in PATH.
+_PODMAN_SEARCH_PATHS = [
+    "/usr/bin/podman"
+    "/usr/local/bin/podman",
+    "/opt/homebrew/bin/podman",
+    "/opt/podman/bin/podman",
+    "/home/linuxbrew/.linuxbrew/bin/podman",
 ]
 
-_docker_executable: Optional[str] = None  # resolved once, cached
+_podman_executable: Optional[str] = None  # resolved once, cached
 
 
-def find_docker() -> Optional[str]:
-    """Locate the docker CLI binary"""
-    global _docker_executable
-    if _docker_executable is not None:
-        return _docker_executable
+def find_podman() -> Optional[str]:
+    """Locate the podman CLI binary"""
+    global _podman_executable
+    if _podman_executable is not None:
+        return _podman_executable
 
-    found = find_container_cli_binary("docker", _DOCKER_SEARCH_PATHS)
+    found = find_container_cli_binary("podman", _PODMAN_SEARCH_PATHS)
     if found:
-        _docker_executable = found
+        _podman_executable = found
         return found
 
     return None
 
 
-# Security flags applied to every container.
-# The container itself is the security boundary (isolated from host).
-# We drop all capabilities then add back the minimum needed:
-#   DAC_OVERRIDE - root can write to bind-mounted dirs owned by host user
-#   CHOWN/FOWNER - package managers (pip, npm, apt) need to set file ownership
-# Block privilege escalation and limit PIDs.
-# /tmp is size-limited and nosuid but allows exec (needed by pip/npm builds).
-_SECURITY_ARGS = [
-    "--cap-drop", "ALL",
-    "--cap-add", "DAC_OVERRIDE",
-    "--cap-add", "CHOWN",
-    "--cap-add", "FOWNER",
-    "--security-opt", "no-new-privileges",
-    "--pids-limit", "256",
-    "--tmpfs", "/tmp:rw,nosuid,size=512m",
-    "--tmpfs", "/var/tmp:rw,noexec,nosuid,size=256m",
-    "--tmpfs", "/run:rw,noexec,nosuid,size=64m",
-]
+def _ensure_podman_available() -> None:
+    """Best-effort check that the podman CLI is available before use.
 
-
-_storage_opt_ok: Optional[bool] = None  # cached result across instances
-
-
-def _ensure_docker_available() -> None:
-    """Best-effort check that the docker CLI is available before use.
-
-    Reuses ``find_docker()`` so this preflight stays consistent with the rest of
-    the Docker backend, including known non-PATH Docker Desktop locations.
+    Reuses ``find_podman()`` so this preflight stays consistent with the rest of
+    the Podman backend, including known non-PATH Podman Desktop locations.
     """
-    docker_exe = find_docker()
-    if not docker_exe:
+    podman_exe = find_podman()
+    if not podman_exe:
         logger.error(
-            "Docker backend selected but no docker executable was found in PATH "
-            "or known install locations. Install Docker Desktop and ensure the "
+            "Podman backend selected but no podman executable was found in PATH "
+            "or known install locations. Install Podman Desktop and ensure the "
             "CLI is available."
         )
         raise RuntimeError(
-            "Docker executable not found in PATH or known install locations. "
-            "Install Docker and ensure the 'docker' command is available."
+            "Podman executable not found in PATH or known install locations. "
+            "Install Podman and ensure the 'podman' command is available."
         )
 
     try:
         result = subprocess.run(
-            [docker_exe, "version"],
+            [podman_exe, "version"],
             capture_output=True,
             text=True,
             timeout=5,
         )
     except FileNotFoundError:
         logger.error(
-            "Docker backend selected but the resolved docker executable '%s' could "
+            "Podman backend selected but the resolved podman executable '%s' could "
             "not be executed.",
-            docker_exe,
+            podman_exe,
             exc_info=True,
         )
         raise RuntimeError(
-            "Docker executable could not be executed. Check your Docker installation."
+            "Podman executable could not be executed. Check your Podman installation."
         )
     except subprocess.TimeoutExpired:
         logger.error(
-            "Docker backend selected but '%s version' timed out. "
-            "The Docker daemon may not be running.",
-            docker_exe,
+            "Podman backend selected but '%s version' timed out.",
+            podman_exe,
             exc_info=True,
         )
         raise RuntimeError(
-            "Docker daemon is not responding. Ensure Docker is running and try again."
+            "`podman version` is not responding."
         )
     except Exception:
         logger.error(
-            "Unexpected error while checking Docker availability.",
+            "Unexpected error while checking Podman availability.",
             exc_info=True,
         )
         raise
     else:
         if result.returncode != 0:
             logger.error(
-                "Docker backend selected but '%s version' failed "
+                "Podman backend selected but '%s version' failed "
                 "(exit code %d, stderr=%s)",
-                docker_exe,
+                podman_exe,
                 result.returncode,
                 result.stderr.strip(),
             )
             raise RuntimeError(
-                "Docker command is available but 'docker version' failed. "
-                "Check your Docker installation."
+                "Podman command is available but 'podman version' failed. "
+                "Check your Podman installation."
             )
 
 
-class DockerEnvironment(BaseEnvironment):
-    """Hardened Docker container execution with resource limits and persistence.
+class PodmanEnvironment(DockerEnvironment):
+    """Hardened Podman container execution with resource limits and persistence.
 
     Security: all capabilities dropped, no privilege escalation, PID limits,
     size-limited tmpfs for scratch dirs. The container itself is the security
@@ -150,6 +129,12 @@ class DockerEnvironment(BaseEnvironment):
 
     Persistence: when enabled, bind mounts preserve /workspace and /root
     across container restarts.
+
+    This class is derived from DockerEnvironment so we can reuse the
+    _build_init_env_args method. Meanwhile, we support some options that are
+    first-class only in Podman, in particular:
+    1) rootless vs rootful
+    2) privileged mode
     """
 
     def __init__(
@@ -168,6 +153,13 @@ class DockerEnvironment(BaseEnvironment):
         network: bool = True,
         host_cwd: str = None,
         auto_mount_cwd: bool = False,
+        # New Podman-specific options
+        userns: str = "",
+        user: str = "",
+        privileged: bool = False,
+        extra_capabilities: list = None,
+        extra_args: list = None,
+        rootful: bool = False,
     ):
         if cwd == "~":
             cwd = "/root"
@@ -177,14 +169,21 @@ class DockerEnvironment(BaseEnvironment):
         self._forward_env = normalize_forward_env_names(forward_env)
         self._env = normalize_env_dict(env)
         self._container_id: Optional[str] = None
-        logger.info(f"DockerEnvironment volumes: {volumes}")
+        # Podman-specific options
+        self._privileged = privileged
+        self._userns = userns
+        self._user = user
+        self._extra_capabilities = extra_capabilities or []
+        self._extra_args = extra_args or []
+        self._rootful = rootful
+        logger.info(f"PodmanEnvironment volumes: {volumes}")
         # Ensure volumes is a list (config.yaml could be malformed)
         if volumes is not None and not isinstance(volumes, list):
             logger.warning(f"docker_volumes config is not a list: {volumes!r}")
             volumes = []
 
-        # Fail fast if Docker is not available.
-        _ensure_docker_available()
+        # Fail fast if Podman is not available.
+        _ensure_podman_available()
 
         # Build resource limit args
         resource_args = []
@@ -192,14 +191,11 @@ class DockerEnvironment(BaseEnvironment):
             resource_args.extend(["--cpus", str(cpu)])
         if memory > 0:
             resource_args.extend(["--memory", f"{memory}m"])
-        if disk > 0 and sys.platform != "darwin":
-            if self._storage_opt_supported():
-                resource_args.extend(["--storage-opt", f"size={disk}m"])
-            else:
-                logger.warning(
-                    "Docker storage driver does not support per-container disk limits "
-                    "(requires overlay2 on XFS with pquota). Container will run without disk quota."
-                )
+        if disk > 0:
+            logger.warning(
+                "Podman storage driver does not support per-container disk limits. "
+                "Container will run without disk quota."
+            )
         if not network:
             resource_args.append("--network=none")
 
@@ -213,7 +209,7 @@ class DockerEnvironment(BaseEnvironment):
         workspace_explicitly_mounted = False
         for vol in (volumes or []):
             if not isinstance(vol, str):
-                logger.warning(f"Docker volume entry is not a string: {vol!r}")
+                logger.warning(f"Podman volume entry is not a string: {vol!r}")
                 continue
             vol = vol.strip()
             if not vol:
@@ -223,7 +219,7 @@ class DockerEnvironment(BaseEnvironment):
                 if ":/workspace" in vol:
                     workspace_explicitly_mounted = True
             else:
-                logger.warning(f"Docker volume '{vol}' missing colon, skipping")
+                logger.warning(f"Podman volume '{vol}' missing colon, skipping")
 
         host_cwd_abs = os.path.abspath(os.path.expanduser(host_cwd)) if host_cwd else ""
         bind_host_cwd = (
@@ -233,13 +229,13 @@ class DockerEnvironment(BaseEnvironment):
             and not workspace_explicitly_mounted
         )
         if auto_mount_cwd and host_cwd and not os.path.isdir(host_cwd_abs):
-            logger.debug(f"Skipping docker cwd mount: host_cwd is not a valid directory: {host_cwd}")
+            logger.debug(f"Skipping podman cwd mount: host_cwd is not a valid directory: {host_cwd}")
 
         self._workspace_dir: Optional[str] = None
         self._home_dir: Optional[str] = None
         writable_args = []
         if self._persistent:
-            sandbox = get_sandbox_dir() / "docker" / task_id
+            sandbox = get_sandbox_dir() / "podman" / task_id
             self._home_dir = str(sandbox / "home")
             os.makedirs(self._home_dir, exist_ok=True)
             writable_args.extend([
@@ -265,7 +261,7 @@ class DockerEnvironment(BaseEnvironment):
             logger.info(f"Mounting configured host cwd to /workspace: {host_cwd_abs}")
             volume_args = ["-v", f"{host_cwd_abs}:/workspace", *volume_args]
         elif workspace_explicitly_mounted:
-            logger.debug("Skipping docker cwd mount: /workspace already mounted by user config")
+            logger.debug("Skipping podman cwd mount: /workspace already mounted by user config")
 
         # Mount credential files (OAuth tokens, etc.) declared by skills.
         # Read-only so the container can authenticate but not modify host creds.
@@ -282,7 +278,7 @@ class DockerEnvironment(BaseEnvironment):
                     f"{mount_entry['host_path']}:{mount_entry['container_path']}:ro",
                 ])
                 logger.info(
-                    "Docker: mounting credential %s -> %s",
+                    "Podman: mounting credential %s -> %s",
                     mount_entry["host_path"],
                     mount_entry["container_path"],
                 )
@@ -295,7 +291,7 @@ class DockerEnvironment(BaseEnvironment):
                     f"{skills_mount['host_path']}:{skills_mount['container_path']}:ro",
                 ])
                 logger.info(
-                    "Docker: mounting skills dir %s -> %s",
+                    "Podman: mounting skills dir %s -> %s",
                     skills_mount["host_path"],
                     skills_mount["container_path"],
                 )
@@ -310,12 +306,33 @@ class DockerEnvironment(BaseEnvironment):
                     f"{cache_mount['host_path']}:{cache_mount['container_path']}:ro",
                 ])
                 logger.info(
-                    "Docker: mounting cache dir %s -> %s",
+                    "Podman: mounting cache dir %s -> %s",
                     cache_mount["host_path"],
                     cache_mount["container_path"],
                 )
         except Exception as e:
-            logger.debug("Docker: could not load credential file mounts: %s", e)
+            logger.debug("Podman: could not load credential file mounts: %s", e)
+
+        # Apply privileged flag
+        if self._privileged:
+            writable_args.append("--privileged")
+
+        # Apply user namespace
+        if self._userns:
+            writable_args.extend(["--userns", self._userns])
+
+        # Apply user
+        if self._user:
+            writable_args.extend(["--user", self._user])
+
+        # Apply extra capabilities (additive to defaults)
+        if self._extra_capabilities:
+            for cap in self._extra_capabilities:
+                writable_args.extend(["--cap-add", cap])
+
+        # Apply extra args (no validation)
+        if self._extra_args:
+            writable_args.extend(self._extra_args)
 
         # Explicit environment variables (docker_env config) — set at container
         # creation so they're available to all processes (including entrypoint).
@@ -323,25 +340,26 @@ class DockerEnvironment(BaseEnvironment):
         for key in sorted(self._env):
             env_args.extend(["-e", f"{key}={self._env[key]}"])
 
-        logger.info(f"Docker volume_args: {volume_args}")
+        logger.info(f"Podman volume_args: {volume_args}")
         all_run_args = list(_SECURITY_ARGS) + writable_args + resource_args + volume_args + env_args
-        logger.info(f"Docker run_args: {all_run_args}")
+        logger.info(f"Podman run_args: {all_run_args}")
 
-        # Resolve the docker executable once so it works even when
+        # Resolve the podman executable once so it works even when
         # /usr/local/bin is not in PATH (common on macOS gateway/service).
-        self._docker_exe = find_docker() or "docker"
+        self._podman_exe = find_podman() or "podman"
 
-        # Start the container directly via `docker run -d`.
+        # Start the container directly via `podman run -d`.
         container_name = f"hermes-{uuid.uuid4().hex[:8]}"
         run_cmd = [
-            self._docker_exe, "run", "-d",
-            "--init",           # tini/catatonit as PID 1 — reaps zombie children
+            self._podman_exe, "run", "-d",
             "--name", container_name,
             "-w", cwd,
             *all_run_args,
             image,
-            "sleep", "infinity",  # no fixed lifetime — idle reaper handles cleanup
+            "sleep", "2h",
         ]
+        if self._rootful:
+            run_cmd = ["sudo"] + run_cmd
         logger.debug(f"Starting container: {' '.join(run_cmd)}")
         result = subprocess.run(
             run_cmd,
@@ -353,57 +371,30 @@ class DockerEnvironment(BaseEnvironment):
         self._container_id = result.stdout.strip()
         logger.info(f"Started container {container_name} ({self._container_id[:12]})")
 
-        # Build the init-time env forwarding args (used only by init_session
+        # Build init-time env forwarding args (used only by init_session
         # to inject host env vars into the snapshot; subsequent commands get
         # them from the snapshot file).
         self._init_env_args = self._build_init_env_args()
 
-        # Initialize session snapshot inside the container
+        # Initialize session snapshot inside container
         self.init_session()
-
-    def _build_init_env_args(self) -> list[str]:
-        """Build -e KEY=VALUE args for injecting host env vars into init_session.
-
-        These are used once during init_session() so that export -p captures
-        them into the snapshot.  Subsequent execute() calls don't need -e flags.
-        """
-        exec_env: dict[str, str] = dict(self._env)
-
-        explicit_forward_keys = set(self._forward_env)
-        passthrough_keys: set[str] = set()
-        try:
-            from tools.env_passthrough import get_all_passthrough
-            passthrough_keys = set(get_all_passthrough())
-        except Exception:
-            pass
-        # Explicit docker_forward_env entries are an intentional opt-in and must
-        # win over the generic Hermes secret blocklist. Only implicit passthrough
-        # keys are filtered.
-        forward_keys = explicit_forward_keys | (passthrough_keys - _HERMES_PROVIDER_ENV_BLOCKLIST)
-        hermes_env = load_hermes_env_vars() if forward_keys else {}
-        for key in sorted(forward_keys):
-            value = os.getenv(key)
-            if value is None:
-                value = hermes_env.get(key)
-            if value is not None:
-                exec_env[key] = value
-
-        args = []
-        for key in sorted(exec_env):
-            args.extend(["-e", f"{key}={exec_env[key]}"])
-        return args
 
     def _run_bash(self, cmd_string: str, *, login: bool = False,
                   timeout: int = 120,
                   stdin_data: str | None = None) -> subprocess.Popen:
-        """Spawn a bash process inside the Docker container."""
+        """Spawn a bash process inside Podman container."""
         assert self._container_id, "Container not started"
-        cmd = [self._docker_exe, "exec"]
+        cmd = [self._podman_exe, "exec"]
+
+        # Rootful support: prefix with sudo if needed
+        if self._rootful:
+            cmd = ["sudo"] + cmd
+
         if stdin_data is not None:
             cmd.append("-i")
 
         # Only inject -e env args during init_session (login=True).
-        # Subsequent commands get env vars from the snapshot.
+        # Subsequent commands get env vars from the snapshot file.
         if login:
             cmd.extend(self._init_env_args)
 
@@ -416,54 +407,18 @@ class DockerEnvironment(BaseEnvironment):
 
         return _popen_bash(cmd, stdin_data)
 
-    @staticmethod
-    def _storage_opt_supported() -> bool:
-        """Check if Docker's storage driver supports --storage-opt size=.
-        
-        Only overlay2 on XFS with pquota supports per-container disk quotas.
-        Ubuntu (and most distros) default to ext4, where this flag errors out.
-        """
-        global _storage_opt_ok
-        if _storage_opt_ok is not None:
-            return _storage_opt_ok
-        try:
-            docker = find_docker() or "docker"
-            result = subprocess.run(
-                [docker, "info", "--format", "{{.Driver}}"],
-                capture_output=True, text=True, timeout=10,
-            )
-            driver = result.stdout.strip().lower()
-            if driver != "overlay2":
-                _storage_opt_ok = False
-                return False
-            # overlay2 only supports storage-opt on XFS with pquota.
-            # Probe by attempting a dry-ish run — the fastest reliable check.
-            probe = subprocess.run(
-                [docker, "create", "--storage-opt", "size=1m", "hello-world"],
-                capture_output=True, text=True, timeout=15,
-            )
-            if probe.returncode == 0:
-                # Clean up the created container
-                container_id = probe.stdout.strip()
-                if container_id:
-                    subprocess.run([docker, "rm", container_id],
-                                   capture_output=True, timeout=5)
-                _storage_opt_ok = True
-            else:
-                _storage_opt_ok = False
-        except Exception:
-            _storage_opt_ok = False
-        logger.debug("Docker --storage-opt support: %s", _storage_opt_ok)
-        return _storage_opt_ok
-
     def cleanup(self):
-        """Stop and remove the container. Bind-mount dirs persist if persistent=True."""
+        """Stop and remove the container. Bind-mount dirs persist if persistent=True.
+        
+        Our implementation needs to support rootful mode.
+        """
         if self._container_id:
             try:
                 # Stop in background so cleanup doesn't block
+                sudo_prefix = "sudo " if self._rootful else ""
                 stop_cmd = (
-                    f"(timeout 60 {self._docker_exe} stop {self._container_id} || "
-                    f"{self._docker_exe} rm -f {self._container_id}) >/dev/null 2>&1 &"
+                    f"(timeout 60 {sudo_prefix}{self._podman_exe} stop {self._container_id} || "
+                    f"{sudo_prefix}{self._podman_exe} rm -f {self._container_id}) >/dev/null 2>&1 &"
                 )
                 subprocess.Popen(stop_cmd, shell=True)
             except Exception as e:
@@ -471,9 +426,10 @@ class DockerEnvironment(BaseEnvironment):
 
             if not self._persistent:
                 # Also schedule removal (stop only leaves it as stopped)
+                sudo_prefix = "sudo " if self._rootful else ""
                 try:
                     subprocess.Popen(
-                        f"sleep 3 && {self._docker_exe} rm -f {self._container_id} >/dev/null 2>&1 &",
+                        f"sleep 3 && {sudo_prefix}{self._podman_exe} rm -f {self._container_id} >/dev/null 2>&1 &",
                         shell=True,
                     )
                 except Exception:

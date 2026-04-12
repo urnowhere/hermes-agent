@@ -51,7 +51,7 @@ hermes-agent/
 │   ├── code_execution_tool.py # execute_code sandbox
 │   ├── delegate_tool.py  # Subagent delegation
 │   ├── mcp_tool.py       # MCP client (~1050 lines)
-│   └── environments/     # Terminal backends (local, docker, ssh, modal, daytona, singularity)
+│   └── environments/     # Terminal backends (local, docker, podman, ssh, modal, daytona, singularity)
 ├── gateway/              # Messaging platform gateway
 │   ├── run.py            # Main loop, slash commands, message dispatch
 │   ├── session.py        # SessionStore — conversation persistence

@@ -111,17 +111,24 @@ For native Anthropic auth, Hermes prefers Claude Code's own credential files whe
 
 | Variable | Description |
 |----------|-------------|
-| `TERMINAL_ENV` | Backend: `local`, `docker`, `ssh`, `singularity`, `modal`, `daytona` |
+| `TERMINAL_ENV` | Backend: `local`, `docker`, `podman`, `ssh`, `singularity`, `modal`, `daytona` |
 | `TERMINAL_DOCKER_IMAGE` | Docker image (default: `nikolaik/python-nodejs:python3.11-nodejs20`) |
 | `TERMINAL_DOCKER_FORWARD_ENV` | JSON array of env var names to explicitly forward into Docker terminal sessions. Note: skill-declared `required_environment_variables` are forwarded automatically — you only need this for vars not declared by any skill. |
 | `TERMINAL_DOCKER_VOLUMES` | Additional Docker volume mounts (comma-separated `host:container` pairs) |
 | `TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE` | Advanced opt-in: mount the launch cwd into Docker `/workspace` (`true`/`false`, default: `false`) |
 | `TERMINAL_SINGULARITY_IMAGE` | Singularity image or `.sif` path |
+| `TERMINAL_PODMAN_IMAGE` | Podman container image |
 | `TERMINAL_MODAL_IMAGE` | Modal container image |
 | `TERMINAL_DAYTONA_IMAGE` | Daytona sandbox image |
 | `TERMINAL_TIMEOUT` | Command timeout in seconds |
 | `TERMINAL_LIFETIME_SECONDS` | Max lifetime for terminal sessions in seconds |
 | `TERMINAL_CWD` | Working directory for all terminal sessions |
+| `TERMINAL_PODMAN_USERNS` | User namespace remapping mode for Podman backend, corresponding to the `--userns` option of `podman run` |
+| `TERMINAL_PODMAN_USER` | User to use inside Podman container, corresponding to the `--user` option of `podman run` |
+| `TERMINAL_PODMAN_PRIVILEGED` | Start Podman with extra privilages, corresponding to the `--privileged` option of `podman run` |
+| `TERMINAL_PODMAN_EXTRA_CAPABILITIES` | Give more capabilities to the Podman container, corresponding to the `--cap-add` option of `podman run` |
+| `TERMIANL_PODMAN_EXTRA_ARGS` | Extra, arbitrary arguments and options for `podman run` |
+| `TERMINAL_PODMAN_ROOTFUL` | Whether to run Podman in rootful mode - i.e. `sudo podman run` instead of just `podman run`; proper configuration of sudoers of the host OS required |
 | `SUDO_PASSWORD` | Enable sudo without interactive prompt |
 
 For cloud sandbox backends, persistence is filesystem-oriented. `TERMINAL_LIFETIME_SECONDS` controls when Hermes cleans up an idle terminal session, and later resumes may recreate the sandbox rather than keep the same live processes running.

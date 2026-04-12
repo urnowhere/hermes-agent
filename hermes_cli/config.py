@@ -371,6 +371,7 @@ DEFAULT_CONFIG = {
         # are passed through automatically; this list is for non-skill use cases.
         "env_passthrough": [],
         "docker_image": "nikolaik/python-nodejs:python3.11-nodejs20",
+        "podman_image": "docker.io/nikolaik/python-nodejs:python3.11-nodejs20",
         "docker_forward_env": [],
         # Explicit environment variables to set inside Docker containers.
         # Unlike docker_forward_env (which reads values from the host process),
@@ -398,6 +399,13 @@ DEFAULT_CONFIG = {
         # Enabled by default for non-local backends (SSH); local is always opt-in
         # via TERMINAL_LOCAL_PERSISTENT env var.
         "persistent_shell": True,
+        # Podman-specific options
+        "podman_userns": "host",              # --userns flag (e.g., "keep-id", "auto")
+        "podman_user": "",                # --user flag (e.g., "1000:1000", "nonroot")
+        "podman_privileged": False,        # --privileged flag
+        "podman_extra_capabilities": [],     # Additional --cap-add values (additive to defaults)
+        "podman_extra_args": [],          # Arbitrary additional podman run flags
+        "podman_rootful": False,        # Run podman commands with sudo (i.e. rootful mode)
     },
     
     "browser": {
@@ -1395,6 +1403,48 @@ OPTIONAL_ENV_VARS = {
         "url": None,
         "password": True,
         "category": "messaging",
+    },
+    "TERMINAL_PODMAN_USERNS": {
+        "description": "Podman user namespace mode (--userns flag)",
+        "prompt": "Podman User Namespace",
+        "url": "https://docs.podman.io/en/latest/markdown/podman-run.1.html#userns-mode",
+        "password": False,
+        "category": "tool",
+    },
+    "TERMINAL_PODMAN_USER": {
+        "description": "Podman user to run as inside container (--user flag)",
+        "prompt": "Podman User",
+        "url": "https://docs.podman.io/en/latest/markdown/podman-run.1.html#user-user",
+        "password": False,
+        "category": "tool",
+    },
+    "TERMINAL_PODMAN_PRIVILEGED": {
+        "description": "Run Podman containers in privileged mode (--privileged flag)",
+        "prompt": "Podman Privileged Mode",
+        "url": "https://docs.podman.io/en/latest/markdown/podman-run.1.html#privileged",
+        "password": False,
+        "category": "tool",
+    },
+    "TERMINAL_PODMAN_EXTRA_CAPABILITIES": {
+        "description": "Additional Linux capabilities to add to Podman containers (--cap-add)",
+        "prompt": "Podman Extra Capabilities",
+        "url": "https://docs.podman.io/en/latest/markdown/podman-run.1.html#cap-add-capability",
+        "password": False,
+        "category": "tool",
+    },
+    "TERMINAL_PODMAN_EXTRA_ARGS": {
+        "description": "Additional arbitrary arguments for podman run (JSON array)",
+        "prompt": "Podman Extra Arguments",
+        "url": "https://docs.podman.io/en/latest/markdown/podman-run.1.html",
+        "password": False,
+        "category": "tool",
+    },
+    "TERMINAL_PODMAN_ROOTFUL": {
+        "description": "Run Podman commands with sudo",
+        "prompt": "Podman Use Sudo",
+        "url": "",
+        "password": False,
+        "category": "tool",
     },
 
     # ── Agent settings ──
@@ -2741,6 +2791,8 @@ def show_config():
     
     if terminal.get('backend') == 'docker':
         print(f"  Docker image: {terminal.get('docker_image', 'nikolaik/python-nodejs:python3.11-nodejs20')}")
+    elif terminal.get('backend') == 'podman':
+        print(f"  Podman image: {terminal.get('podman_image', 'docker.io/nikolaik/python-nodejs:python3.11-nodejs20')}")
     elif terminal.get('backend') == 'singularity':
         print(f"  Image:        {terminal.get('singularity_image', 'docker://nikolaik/python-nodejs:python3.11-nodejs20')}")
     elif terminal.get('backend') == 'modal':

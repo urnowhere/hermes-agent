@@ -115,7 +115,7 @@ The following patterns trigger approval prompts (defined in `tools/approval.py`)
 | `gateway run` with `&`/`disown`/`nohup`/`setsid` | Prevents starting gateway outside service manager |
 
 :::info
-**Container bypass**: When running in `docker`, `singularity`, `modal`, or `daytona` backends, dangerous command checks are **skipped** because the container itself is the security boundary. Destructive commands inside a container can't harm the host.
+**Container bypass**: When running in `docker`, `podman`, `singularity`, `modal`, or `daytona` backends, dangerous command checks are **skipped** because the container itself is the security boundary. Destructive commands inside a container can't harm the host.
 :::
 
 ### Approval Flow (CLI)

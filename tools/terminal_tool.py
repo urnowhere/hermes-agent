@@ -8,10 +8,11 @@ Supports local execution, containerized backends, and Modal cloud sandboxes, inc
 Environment Selection (via TERMINAL_ENV environment variable):
 - "local": Execute directly on the host machine (default, fastest)
 - "docker": Execute in Docker containers (isolated, requires Docker)
+- "podman": Execute in Podman containers (isolated, requires Podman)
 - "modal": Execute in Modal cloud sandboxes (direct Modal or managed gateway)
 
 Features:
-- Multiple execution backends (local, docker, modal)
+- Multiple execution backends (local, docker, podman, modal)
 - Background task support
 - VM/container lifecycle management
 - Automatic cleanup after inactivity
@@ -465,9 +466,9 @@ def _transform_sudo_command(command: str | None) -> tuple[str | None, str | None
           returned unchanged so it fails gracefully with
           "sudo: a password is required".
 
-    Callers that drive a subprocess directly (local, ssh, docker, singularity)
-    should prepend sudo_stdin to their stdin_data and pass the merged bytes to
-    Popen's stdin pipe.
+    Callers that drive a subprocess directly (local, ssh, docker, podman,
+    singularity) should prepend sudo_stdin to their stdin_data and pass the
+    merged bytes to Popen's stdin pipe.
 
     Callers that cannot pipe subprocess stdin (modal, daytona) must embed the
     password in the command string themselves; see their execute() methods for
@@ -507,6 +508,7 @@ from tools.environments.local import LocalEnvironment as _LocalEnvironment
 from tools.environments.singularity import SingularityEnvironment as _SingularityEnvironment
 from tools.environments.ssh import SSHEnvironment as _SSHEnvironment
 from tools.environments.docker import DockerEnvironment as _DockerEnvironment
+from tools.environments.podman import PodmanEnvironment as _PodmanEnvironment
 from tools.environments.modal import ModalEnvironment as _ModalEnvironment
 from tools.environments.managed_modal import ManagedModalEnvironment as _ManagedModalEnvironment
 from tools.managed_tool_gateway import is_managed_tool_gateway_ready
@@ -624,7 +626,7 @@ def _get_env_config() -> Dict[str, Any]:
     cwd = os.getenv("TERMINAL_CWD", default_cwd)
     host_cwd = None
     host_prefixes = ("/Users/", "/home/", "C:\\", "C:/")
-    if env_type == "docker" and mount_docker_cwd:
+    if env_type in ("docker", "podman") and mount_docker_cwd:
         docker_cwd_source = os.getenv("TERMINAL_CWD") or os.getcwd()
         candidate = os.path.abspath(os.path.expanduser(docker_cwd_source))
         if (
@@ -633,7 +635,7 @@ def _get_env_config() -> Dict[str, Any]:
         ):
             host_cwd = candidate
             cwd = "/workspace"
-    elif env_type in ("modal", "docker", "singularity", "daytona") and cwd:
+    elif env_type in ("modal", "docker", "podman", "singularity", "daytona") and cwd:
         # Host paths and relative paths that won't work inside containers
         is_host_path = any(cwd.startswith(p) for p in host_prefixes)
         is_relative = not os.path.isabs(cwd)  # e.g. "." or "src/"
@@ -647,6 +649,7 @@ def _get_env_config() -> Dict[str, Any]:
         "env_type": env_type,
         "modal_mode": coerce_modal_mode(os.getenv("TERMINAL_MODAL_MODE", "auto")),
         "docker_image": os.getenv("TERMINAL_DOCKER_IMAGE", default_image),
+        "podman_image": os.getenv("TERMINAL_PODMAN_IMAGE", f"docker.io/{default_image}"),
         "docker_forward_env": _parse_env_var("TERMINAL_DOCKER_FORWARD_ENV", "[]", json.loads, "valid JSON"),
         "singularity_image": os.getenv("TERMINAL_SINGULARITY_IMAGE", f"docker://{default_image}"),
         "modal_image": os.getenv("TERMINAL_MODAL_IMAGE", default_image),
@@ -669,12 +672,19 @@ def _get_env_config() -> Dict[str, Any]:
             os.getenv("TERMINAL_PERSISTENT_SHELL", "true"),
         ).lower() in ("true", "1", "yes"),
         "local_persistent": os.getenv("TERMINAL_LOCAL_PERSISTENT", "false").lower() in ("true", "1", "yes"),
-        # Container resource config (applies to docker, singularity, modal, daytona -- ignored for local/ssh)
+        # Container resource config (applies to docker, podman, singularity, modal, daytona -- ignored for local/ssh)
         "container_cpu": _parse_env_var("TERMINAL_CONTAINER_CPU", "1", float, "number"),
         "container_memory": _parse_env_var("TERMINAL_CONTAINER_MEMORY", "5120"),     # MB (default 5GB)
         "container_disk": _parse_env_var("TERMINAL_CONTAINER_DISK", "51200"),        # MB (default 50GB)
         "container_persistent": os.getenv("TERMINAL_CONTAINER_PERSISTENT", "true").lower() in ("true", "1", "yes"),
         "docker_volumes": _parse_env_var("TERMINAL_DOCKER_VOLUMES", "[]", json.loads, "valid JSON"),
+        # Podman-specific config
+        "podman_userns": os.getenv("TERMINAL_PODMAN_USERNS", ""),
+        "podman_user": os.getenv("TERMINAL_PODMAN_USER", ""),
+        "podman_privileged": os.getenv("TERMINAL_PODMAN_PRIVILEGED", "false").lower() in ("true", "1", "yes"),
+        "podman_extra_capabilities": _parse_env_var("TERMINAL_PODMAN_EXTRA_CAPABILITIES", "[]", json.loads, "valid JSON"),
+        "podman_extra_args": _parse_env_var("TERMINAL_PODMAN_EXTRA_ARGS", "[]", json.loads, "valid JSON"),
+        "podman_rootful": os.getenv("TERMINAL_PODMAN_ROOTFUL", "false").lower() in ("true", "1", "yes"),
     }
 
 
@@ -696,14 +706,14 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
     Create an execution environment for sandboxed command execution.
     
     Args:
-        env_type: One of "local", "docker", "singularity", "modal", "daytona", "ssh"
-        image: Docker/Singularity/Modal image name (ignored for local/ssh)
+        env_type: One of "local", "docker", "podman", "singularity", "modal", "daytona", "ssh"
+        image: Docker/Podman/Singularity/Modal image name (ignored for local/ssh)
         cwd: Working directory
         timeout: Default command timeout
         ssh_config: SSH connection config (for env_type="ssh")
         container_config: Resource config for container backends (cpu, memory, disk, persistent)
         task_id: Task identifier for environment reuse and snapshot keying
-        host_cwd: Optional host working directory to bind into Docker when explicitly enabled
+        host_cwd: Optional host working directory to bind into Docker/Podman when explicitly enabled
         
     Returns:
         Environment instance with execute() method
@@ -737,6 +747,26 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
             image=image, cwd=cwd, timeout=timeout,
             cpu=cpu, memory=memory, disk=disk,
             persistent_filesystem=persistent, task_id=task_id,
+        )
+
+    elif env_type == "podman":
+        return _PodmanEnvironment(
+            image=image, cwd=cwd, timeout=timeout,
+            cpu=cpu, memory=memory, disk=disk,
+            persistent_filesystem=persistent, task_id=task_id,
+            volumes=volumes,
+            host_cwd=host_cwd,
+            auto_mount_cwd=cc.get("docker_mount_cwd_to_workspace", False),
+            forward_env=docker_forward_env,
+            env=docker_env,
+            network=cc.get("network", True),
+            # Podman-specific options
+            userns=cc.get("podman_userns", ""),
+            user=cc.get("podman_user", ""),
+            privileged=cc.get("podman_privileged", False),
+            extra_capabilities=cc.get("podman_extra_capabilities", []),
+            extra_args=cc.get("podman_extra_args", []),
+            rootful=cc.get("podman_rootful", False),
         )
     
     elif env_type == "modal":
@@ -813,7 +843,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
         )
 
     else:
-        raise ValueError(f"Unknown environment type: {env_type}. Use 'local', 'docker', 'singularity', 'modal', 'daytona', or 'ssh'")
+        raise ValueError(f"Unknown environment type: {env_type}. Use 'local', 'docker', 'podman', 'singularity', 'modal', 'daytona', or 'ssh'")
 
 
 def _cleanup_inactive_envs(lifetime_seconds: int = 300):
@@ -926,7 +956,7 @@ def is_persistent_env(task_id: str) -> bool:
     cross-turn persistence (``persistent_filesystem=True``).
 
     Used by the agent loop to skip per-turn teardown for backends whose whole
-    point is to survive between turns (docker with ``container_persistent``,
+    point is to survive between turns (docker/podman with ``container_persistent``,
     daytona, modal, etc.). Non-persistent backends (e.g. Morph) still get torn
     down at end-of-turn to prevent leakage. The idle reaper
     (``_cleanup_inactive_envs``) handles persistent envs once they exceed
@@ -1198,6 +1228,8 @@ def terminal_tool(
         # Select image based on env type, with per-task override support
         if env_type == "docker":
             image = overrides.get("docker_image") or config["docker_image"]
+        elif env_type == "podman":
+            image = overrides.get("podman_image") or config["podman_image"]
         elif env_type == "singularity":
             image = overrides.get("singularity_image") or config["singularity_image"]
         elif env_type == "modal":
@@ -1268,7 +1300,7 @@ def terminal_tool(
                             }
 
                         container_config = None
-                        if env_type in ("docker", "singularity", "modal", "daytona"):
+                        if env_type in ("docker", "podman", "singularity", "modal", "daytona"):
                             container_config = {
                                 "container_cpu": config.get("container_cpu", 1),
                                 "container_memory": config.get("container_memory", 5120),
@@ -1278,6 +1310,29 @@ def terminal_tool(
                                 "docker_volumes": config.get("docker_volumes", []),
                                 "docker_mount_cwd_to_workspace": config.get("docker_mount_cwd_to_workspace", False),
                             }
+
+                            if env_type == "podman":
+                                podman_user = config.get("podman_user", "")
+                                podman_userns = config.get("podman_userns", "")
+                                podman_extra_args = config.get("podman_extra_args", [])
+                                podman_extra_capabilities = config.get("podman_extra_capabilities", [])
+                                podman_privilged = config.get("podman_privileged", False)
+                                podman_rootful = config.get("podman_rootful", False)
+
+                                if str(podman_user).strip():
+                                    container_config["podman_user"] = podman_user
+
+                                if str(podman_userns).strip():
+                                    container_config["podman_userns"] = podman_userns
+
+                                if isinstance(podman_extra_args, list) and all(podman_extra_args, lambda x: isinstance(x, str)):
+                                    container_config["podman_extra_args"] = podman_extra_args
+
+                                if isinstance(podman_extra_capabilities, list) and all(podman_extra_capabilities, lambda x: isinstance(x, str)):
+                                    container_config["podman_extra_capabilities"] = podman_extra_capabilities
+
+                                container_config["podman_privileged"] = podman_privilged
+                                container_config["podman_rootful"] = podman_rootful
 
                         local_config = None
                         if env_type == "local":
@@ -1573,6 +1628,15 @@ def check_terminal_requirements() -> bool:
             result = subprocess.run([docker, "version"], capture_output=True, timeout=5)
             return result.returncode == 0
 
+        elif env_type == "podman":
+            from tools.environments.podman import find_podman
+            podman = find_podman()
+            if not podman:
+                logger.error("Podman executable not found in PATH or common install locations")
+                return False
+            result = subprocess.run([podman, "version"], capture_output=True, timeout=5)
+            return result.returncode == 0
+
         elif env_type == "singularity":
             executable = shutil.which("apptainer") or shutil.which("singularity")
             if executable:
@@ -1650,7 +1714,7 @@ def check_terminal_requirements() -> bool:
 
         else:
             logger.error(
-                "Unknown TERMINAL_ENV '%s'. Use one of: local, docker, singularity, "
+                "Unknown TERMINAL_ENV '%s'. Use one of: local, docker, podman, singularity, "
                 "modal, daytona, ssh.",
                 env_type,
             )
@@ -1669,6 +1733,7 @@ if __name__ == "__main__":
     print("\nCurrent Configuration:")
     print(f"  Environment type: {config['env_type']}")
     print(f"  Docker image: {config['docker_image']}")
+    print(f"  Podman image: {config['podman_image']}")
     print(f"  Modal image: {config['modal_image']}")
     print(f"  Working directory: {config['cwd']}")
     print(f"  Default timeout: {config['timeout']}s")
@@ -1691,8 +1756,9 @@ if __name__ == "__main__":
 
     print("\nEnvironment Variables:")
     default_img = "nikolaik/python-nodejs:python3.11-nodejs20"
-    print(f"  TERMINAL_ENV: {os.getenv('TERMINAL_ENV', 'local')} (local/docker/singularity/modal/daytona/ssh)")
+    print(f"  TERMINAL_ENV: {os.getenv('TERMINAL_ENV', 'local')} (local/docker/podman/singularity/modal/daytona/ssh)")
     print(f"  TERMINAL_DOCKER_IMAGE: {os.getenv('TERMINAL_DOCKER_IMAGE', default_img)}")
+    print(f"  TERMINAL_PODMAN_IMAGE: {os.getenv('TERMINAL_PODMAN_IMAGE', f'docker.io/{default_img}')}")
     print(f"  TERMINAL_SINGULARITY_IMAGE: {os.getenv('TERMINAL_SINGULARITY_IMAGE', f'docker://{default_img}')}")
     print(f"  TERMINAL_MODAL_IMAGE: {os.getenv('TERMINAL_MODAL_IMAGE', default_img)}")
     print(f"  TERMINAL_DAYTONA_IMAGE: {os.getenv('TERMINAL_DAYTONA_IMAGE', default_img)}")

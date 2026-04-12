@@ -223,6 +223,7 @@ The terminal system supports multiple backends:
 
 - local
 - docker
+- podmand
 - ssh
 - singularity
 - modal
