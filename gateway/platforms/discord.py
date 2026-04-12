@@ -671,6 +671,42 @@ class DiscordAdapter(BasePlatformAdapter):
             self._release_platform_lock()
             return False
 
+    async def cancel_background_tasks(self) -> None:
+        """Cancel background tasks, but first flush any pending text-batch sends.
+
+        The base-class implementation only cancels tasks in self._background_tasks.
+        Discord keeps its own _pending_text_batch_tasks dict for the message-merge
+        logic, and those tasks are NOT in _background_tasks.  On shutdown/restart
+        this caused a race where in-flight response deliveries were cancelled before
+        Discord had a chance to actually send them, resulting in silent dropped
+        messages visible to the user as tool-log-only replies with no text.
+
+        Fix: await all pending text-batch tasks (give them a short deadline to flush)
+        before delegating to the base cancel.
+        """
+        pending = list(self._pending_text_batch_tasks.values())
+        if pending:
+            logger.info(
+                "[%s] Flushing %d pending text-batch task(s) before shutdown",
+                self.name, len(pending),
+            )
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True),
+                    timeout=8.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "[%s] Text-batch flush timed out; cancelling remaining tasks",
+                    self.name,
+                )
+                for task in pending:
+                    if not task.done():
+                        task.cancel()
+        self._pending_text_batch_tasks.clear()
+        self._pending_text_batches.clear()
+        await super().cancel_background_tasks()
+
     async def disconnect(self) -> None:
         """Disconnect from Discord."""
         # Clean up all active voice connections before closing the client
@@ -2224,31 +2260,44 @@ class DiscordAdapter(BasePlatformAdapter):
 
         if not isinstance(message.channel, discord.DMChannel):
             channel_ids = {str(message.channel.id)}
+            channel_keys = {str(message.channel.id)}
+            channel_name = str(getattr(message.channel, "name", "")).strip()
+            if channel_name:
+                channel_keys.add(channel_name)
+                channel_keys.add(f"#{channel_name}")
             if parent_channel_id:
                 channel_ids.add(parent_channel_id)
+                channel_keys.add(parent_channel_id)
+                parent_channel = None
+                try:
+                    parent_channel = message.channel.parent if isinstance(message.channel, discord.Thread) else None
+                except Exception:
+                    parent_channel = None
+                parent_name = str(getattr(parent_channel, "name", "")).strip() if parent_channel else ""
+                if parent_name:
+                    channel_keys.add(parent_name)
+                    channel_keys.add(f"#{parent_name}")
 
             # Check allowed channels - if set, only respond in these channels
             allowed_channels_raw = os.getenv("DISCORD_ALLOWED_CHANNELS", "")
             if allowed_channels_raw:
                 allowed_channels = {ch.strip() for ch in allowed_channels_raw.split(",") if ch.strip()}
-                if not (channel_ids & allowed_channels):
-                    logger.debug("[%s] Ignoring message in non-allowed channel: %s", self.name, channel_ids)
+                if not ((channel_ids & allowed_channels) or (channel_keys & allowed_channels)):
+                    logger.debug("[%s] Ignoring message in non-allowed channel: %s", self.name, channel_keys)
                     return
 
             # Check ignored channels - never respond even when mentioned
             ignored_channels_raw = os.getenv("DISCORD_IGNORED_CHANNELS", "")
             ignored_channels = {ch.strip() for ch in ignored_channels_raw.split(",") if ch.strip()}
-            if channel_ids & ignored_channels:
-                logger.debug("[%s] Ignoring message in ignored channel: %s", self.name, channel_ids)
+            if channel_keys & ignored_channels:
+                logger.debug("[%s] Ignoring message in ignored channel: %s", self.name, channel_keys)
                 return
 
             free_channels_raw = os.getenv("DISCORD_FREE_RESPONSE_CHANNELS", "")
             free_channels = {ch.strip() for ch in free_channels_raw.split(",") if ch.strip()}
-            if parent_channel_id:
-                channel_ids.add(parent_channel_id)
 
             require_mention = os.getenv("DISCORD_REQUIRE_MENTION", "true").lower() not in ("false", "0", "no")
-            is_free_channel = bool(channel_ids & free_channels)
+            is_free_channel = bool(channel_keys & free_channels)
 
             # Skip the mention check if the message is in a thread where
             # the bot has previously participated (auto-created or replied in).
@@ -2270,7 +2319,7 @@ class DiscordAdapter(BasePlatformAdapter):
         if not is_thread and not isinstance(message.channel, discord.DMChannel):
             no_thread_channels_raw = os.getenv("DISCORD_NO_THREAD_CHANNELS", "")
             no_thread_channels = {ch.strip() for ch in no_thread_channels_raw.split(",") if ch.strip()}
-            skip_thread = bool(channel_ids & no_thread_channels)
+            skip_thread = bool((channel_ids & no_thread_channels) or (channel_keys & no_thread_channels))
             auto_thread = os.getenv("DISCORD_AUTO_THREAD", "true").lower() in ("true", "1", "yes")
             if auto_thread and not skip_thread:
                 thread = await self._auto_create_thread(message)
