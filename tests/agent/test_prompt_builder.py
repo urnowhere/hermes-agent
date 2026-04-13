@@ -354,6 +354,45 @@ class TestBuildSkillsSystemPrompt:
         assert "web-search" in result
         assert "old-tool" not in result
 
+    def test_deleted_skill_not_in_subsequent_calls(self, monkeypatch, tmp_path):
+        """Skills deleted after the first call must not appear in subsequent calls.
+
+        Regression test for phantom skill entries (#8845): when files were
+        deleted outside the skill manager, the in-process LRU cache would
+        keep serving stale entries because the cache key did not include a
+        filesystem fingerprint.
+        """
+        import shutil
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skills_dir = tmp_path / "skills" / "tools"
+        skills_dir.mkdir(parents=True)
+
+        # Create two skills
+        keeper = skills_dir / "keeper"
+        keeper.mkdir()
+        (keeper / "SKILL.md").write_text(
+            "---\nname: keeper\ndescription: Stays around\n---\n"
+        )
+
+        phantom = skills_dir / "phantom"
+        phantom.mkdir()
+        (phantom / "SKILL.md").write_text(
+            "---\nname: phantom\ndescription: Will be deleted\n---\n"
+        )
+
+        # First call populates caches
+        result1 = build_skills_system_prompt()
+        assert "keeper" in result1
+        assert "phantom" in result1
+
+        # Delete the phantom skill (simulates manual pruning)
+        shutil.rmtree(phantom)
+
+        # Second call must NOT return the phantom skill
+        result2 = build_skills_system_prompt()
+        assert "keeper" in result2
+        assert "phantom" not in result2
+
     def test_includes_setup_needed_skills(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         monkeypatch.delenv("MISSING_API_KEY_XYZ", raising=False)
