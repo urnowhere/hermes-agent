@@ -1073,7 +1073,7 @@ def select_provider_and_model(args=None):
         ("qwen-oauth", "Qwen OAuth (reuses local Qwen CLI login)"),
         ("copilot", "GitHub Copilot (uses GITHUB_TOKEN or gh auth token)"),
         ("huggingface", "Hugging Face Inference Providers (20+ open models)"),
-        ("novita", "NovitaAI (multi-model, pay-per-use)"),
+        ("novita", "NovitaAI (90+ models, pay-per-use)"),
     ]
 
     extended_providers = [
