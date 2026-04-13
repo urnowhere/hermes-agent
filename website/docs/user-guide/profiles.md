@@ -104,6 +104,21 @@ The CLI always shows which profile is active:
 - **Banner**: Shows `Profile: coder` on startup
 - **`hermes profile`**: Shows current profile name, path, model, gateway status
 
+### Interactive CLI `/profile`
+
+Inside the interactive CLI, `/profile` is also a slash command for checking and switching profiles without leaving chat:
+
+```text
+/profile                 # show the active profile and home directory
+/profile list            # list profiles and mark the active one
+/profile use coder       # switch to coder
+/profile coder           # shorthand for /profile use coder
+```
+
+When you switch profiles from the CLI, Hermes restarts into the target profile. That rebuilds config, paths, dotenv loading, and state cleanly instead of trying to hot-swap profile state in-process.
+
+This behavior is CLI-only. Messaging surfaces do not support `/profile` switching.
+
 ## Running gateways
 
 Each profile runs its own gateway as a separate process with its own bot token:

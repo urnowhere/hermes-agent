@@ -3891,27 +3891,74 @@ class HermesCLI:
         print("  Example: python cli.py --toolsets web,terminal")
         print()
     
-    def _handle_profile_command(self):
-        """Display active profile name and home directory."""
-        from hermes_constants import get_hermes_home, display_hermes_home
+    def _reexec_with_profile(self, profile_name: str) -> None:
+        """Replace the current process with Hermes started for profile_name."""
+        hermes_bin = shutil.which("hermes")
+        if hermes_bin:
+            os.execvp(hermes_bin, ["hermes", "--profile", profile_name])
+            return
+        os.execvp(
+            sys.executable,
+            [sys.executable, "-m", "hermes_cli.main", "--profile", profile_name],
+        )
 
-        home = get_hermes_home()
-        display = display_hermes_home()
+    def _handle_profile_command(self, cmd_original: str):
+        """Show, list, or switch profiles from the interactive CLI."""
+        from hermes_constants import display_hermes_home
+        from hermes_cli.profiles import (
+            get_active_profile_name,
+            list_profiles,
+            set_active_profile,
+        )
 
-        profiles_parent = Path.home() / ".hermes" / "profiles"
-        try:
-            rel = home.relative_to(profiles_parent)
-            profile_name = str(rel).split("/")[0]
-        except ValueError:
-            profile_name = None
+        parts = cmd_original.strip().split()
+        args = parts[1:] if len(parts) > 1 else []
+        active_profile = get_active_profile_name()
 
-        print()
-        if profile_name:
-            print(f"  Profile: {profile_name}")
+        if not args:
+            print()
+            print(f"  Profile: {active_profile}")
+            print(f"  Home:    {display_hermes_home()}")
+            print()
+            return
+
+        if args == ["list"]:
+            profiles = list_profiles()
+            print()
+            print(f"  Active profile: {active_profile}")
+            print("  Profiles:")
+            if not profiles:
+                print("    (none found)")
+            for profile in profiles:
+                marker = "*" if profile.name == active_profile else " "
+                suffix = " (default)" if profile.is_default else ""
+                print(f"    {marker} {profile.name}{suffix}")
+            print()
+            return
+
+        if len(args) == 1 and args[0] not in {"list", "use"}:
+            target_profile = args[0]
+        elif len(args) == 2 and args[0] == "use":
+            target_profile = args[1]
         else:
-            print("  Profile: default")
-        print(f"  Home:    {display}")
-        print()
+            print("(._.) Usage: /profile [list|use <name>|<name>]")
+            return
+
+        if target_profile == active_profile:
+            print(f"  Already using profile: {target_profile}")
+            return
+
+        try:
+            set_active_profile(target_profile)
+        except (ValueError, FileNotFoundError) as exc:
+            print(f"  Could not switch profile: {exc}")
+            return
+
+        print(f"  Switching to profile: {target_profile}")
+        try:
+            self._reexec_with_profile(target_profile)
+        except OSError as exc:
+            print(f"  Could not restart Hermes for profile '{target_profile}': {exc}")
 
     def show_config(self):
         """Display current configuration with kawaii ASCII art."""
@@ -5325,7 +5372,7 @@ class HermesCLI:
         elif canonical == "help":
             self.show_help()
         elif canonical == "profile":
-            self._handle_profile_command()
+            self._handle_profile_command(cmd_original)
         elif canonical == "tools":
             self._handle_tools_command(cmd_original)
         elif canonical == "toolsets":

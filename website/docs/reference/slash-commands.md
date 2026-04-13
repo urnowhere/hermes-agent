@@ -75,7 +75,7 @@ Type `/` in the CLI to open the autocomplete menu. Built-in commands are case-in
 | `/insights` | Show usage insights and analytics (last 30 days) |
 | `/platforms` (alias: `/gateway`) | Show gateway/messaging platform status |
 | `/paste` | Check clipboard for an image and attach it |
-| `/profile` | Show active profile name and home directory |
+| `/profile` | Show the active profile, list available profiles, or switch CLI profiles (`/profile`, `/profile list`, `/profile use <name>`, `/profile <name>`). Switching restarts the CLI into the target profile. |
 
 ### Exit
 
