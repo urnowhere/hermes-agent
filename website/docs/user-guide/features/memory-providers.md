@@ -1,12 +1,12 @@
 ---
 sidebar_position: 4
 title: "Memory Providers"
-description: "External memory provider plugins — Honcho, OpenViking, Mem0, Hindsight, Holographic, RetainDB, ByteRover, Supermemory"
+description: "External memory provider plugins — Honcho, OpenViking, Mem0, Hindsight, Holographic, RetainDB, ByteRover, Supermemory, Keep"
 ---
 
 # Memory Providers
 
-Hermes Agent ships with 8 external memory provider plugins that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md. Only **one** external provider can be active at a time — the built-in memory is always active alongside it.
+Hermes Agent ships with 9 external memory provider plugins that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md. Only **one** external provider can be active at a time — the built-in memory is always active alongside it.
 
 ## Quick Start
 
@@ -22,7 +22,7 @@ Or set manually in `~/.hermes/config.yaml`:
 
 ```yaml
 memory:
-  provider: openviking   # or honcho, mem0, hindsight, holographic, retaindb, byterover, supermemory
+  provider: openviking   # or honcho, mem0, hindsight, holographic, retaindb, byterover, supermemory, keep
 ```
 
 ## How It Works
@@ -456,6 +456,33 @@ echo 'SUPERMEMORY_API_KEY=***' >> ~/.hermes/.env
 
 **Support:** [Discord](https://supermemory.link/discord) · [support@supermemory.com](mailto:support@supermemory.com)
 
+### Keep
+
+Reflective memory with semantic search, edge graphs, and state-doc-driven context assembly. Local-first with a background daemon for embeddings and summarization.
+
+| | |
+|---|---|
+| **Best for** | Agents that need structured recall, contact graphs, and reflective practice |
+| **Requires** | `pip install keep-skill` or `uv pip install keep-skill`, plus an embedding provider |
+| **Data storage** | Local (per-profile `$HERMES_HOME/keep`) |
+| **Cost** | Free (open-source) + embedding model costs |
+
+**Tools:** `keep_flow` (all operations: search, get, put, tag, move, stats), `keep_prompt` (practice prompts), `keep_help` (documentation)
+
+**Setup:**
+```bash
+hermes memory setup    # select "keep"
+```
+
+If you install `keep-skill` manually, still run `hermes memory setup` afterward so Hermes bootstraps the Keep store and writes `KEEP_STORE_PATH` into the active profile's `.env`.
+
+**Key features:**
+- Semantic search with local or hosted embeddings
+- Edge graphs — tagged relationships between notes with automatic inverse edges
+- Per-turn sender tagging — each conversation turn records `user_id` and `user_name`
+- State-doc context assembly — configurable retrieval pipelines
+- Background daemon handles embeddings and summaries asynchronously
+
 ---
 
 ## Provider Comparison
@@ -470,12 +497,13 @@ echo 'SUPERMEMORY_API_KEY=***' >> ~/.hermes/.env
 | **RetainDB** | Cloud | $20/mo | 5 | `requests` | Delta compression |
 | **ByteRover** | Local/Cloud | Free/Paid | 3 | `brv` CLI | Pre-compression extraction |
 | **Supermemory** | Cloud | Paid | 4 | `supermemory` | Context fencing + session graph ingest + multi-container |
+| **Keep** | Local | Free + embeddings | 3 | `keep-skill` | Edge graphs + state-doc context assembly |
 
 ## Profile Isolation
 
 Each provider's data is isolated per [profile](/docs/user-guide/profiles):
 
-- **Local storage providers** (Holographic, ByteRover) use `$HERMES_HOME/` paths which differ per profile
+- **Local storage providers** (Keep, Holographic, ByteRover) use `$HERMES_HOME/` paths which differ per profile
 - **Config file providers** (Honcho, Mem0, Hindsight, Supermemory) store config in `$HERMES_HOME/` so each profile has its own credentials
 - **Cloud providers** (RetainDB) auto-derive profile-scoped project names
 - **Env var providers** (OpenViking) are configured via each profile's `.env` file

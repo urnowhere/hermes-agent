@@ -5383,6 +5383,8 @@ class GatewayRunner:
                 return agent.run_conversation(
                     user_message=prompt,
                     task_id=task_id,
+                    turn_user_id=source.user_id,
+                    turn_user_name=source.user_name,
                 )
 
             loop = asyncio.get_event_loop()
@@ -8096,7 +8098,13 @@ class GatewayRunner:
             _approval_session_token = set_current_session_key(_approval_session_key)
             register_gateway_notify(_approval_session_key, _approval_notify_sync)
             try:
-                result = agent.run_conversation(message, conversation_history=agent_history, task_id=session_id)
+                result = agent.run_conversation(
+                    message,
+                    conversation_history=agent_history,
+                    task_id=session_id,
+                    turn_user_id=source.user_id,
+                    turn_user_name=source.user_name,
+                )
             finally:
                 unregister_gateway_notify(_approval_session_key)
                 reset_current_session_key(_approval_session_token)

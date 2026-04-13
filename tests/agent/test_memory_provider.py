@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 from agent.memory_provider import MemoryProvider
 from agent.memory_manager import MemoryManager
+from plugins.memory.keep import KeepMemoryProvider
 
 # ---------------------------------------------------------------------------
 # Concrete test provider
@@ -64,8 +65,8 @@ class FakeMemoryProvider(MemoryProvider):
     def shutdown(self):
         self.shutdown_called = True
 
-    def on_turn_start(self, turn_number, message):
-        self.turn_starts.append((turn_number, message))
+    def on_turn_start(self, turn_number, message, **kwargs):
+        self.turn_starts.append((turn_number, message, kwargs))
 
     def on_session_end(self, messages):
         self.session_end_called = True
@@ -303,7 +304,30 @@ class TestMemoryManager:
         p = FakeMemoryProvider("p")
         mgr.add_provider(p)
         mgr.on_turn_start(3, "hello")
-        assert p.turn_starts == [(3, "hello")]
+        assert p.turn_starts == [(3, "hello", {})]
+
+    def test_on_turn_start_passes_turn_context(self):
+        mgr = MemoryManager()
+        p = FakeMemoryProvider("p")
+        mgr.add_provider(p)
+        mgr.on_turn_start(
+            4,
+            "hello",
+            session_id="sess-1",
+            session_title="Research Thread",
+            user_id="u-42",
+            user_name="Alice",
+        )
+        assert p.turn_starts == [(
+            4,
+            "hello",
+            {
+                "session_id": "sess-1",
+                "session_title": "Research Thread",
+                "user_id": "u-42",
+                "user_name": "Alice",
+            },
+        )]
 
     def test_on_session_end(self):
         mgr = MemoryManager()
@@ -371,7 +395,182 @@ class TestMemoryManager:
         result = mgr.build_system_prompt()
         assert result == "works fine"
 
+# ---------------------------------------------------------------------------
+# Plugin registration tests
+# ---------------------------------------------------------------------------
 
+
+class TestSingleProviderGating:
+    """Only the configured provider should activate."""
+
+    def test_no_provider_configured_means_builtin_only(self):
+        """When memory.provider is empty, no plugin providers activate."""
+        mgr = MemoryManager()
+        builtin = FakeMemoryProvider("builtin")
+        mgr.add_provider(builtin)
+
+        # Simulate what run_agent.py does when provider="" 
+        configured = ""
+        available_plugins = [
+            FakeMemoryProvider("holographic"),
+            FakeMemoryProvider("mem0"),
+        ]
+        # With empty config, no plugins should be added
+        if configured:
+            for p in available_plugins:
+                if p.name == configured and p.is_available():
+                    mgr.add_provider(p)
+
+        assert [p.name for p in mgr.providers] == ["builtin"]
+
+    def test_configured_provider_activates(self):
+        """Only the named provider should be added."""
+        mgr = MemoryManager()
+        builtin = FakeMemoryProvider("builtin")
+        mgr.add_provider(builtin)
+
+        configured = "holographic"
+        p1 = FakeMemoryProvider("holographic")
+        p2 = FakeMemoryProvider("mem0")
+        p3 = FakeMemoryProvider("hindsight")
+
+        for p in [p1, p2, p3]:
+            if p.name == configured and p.is_available():
+                mgr.add_provider(p)
+
+        assert [p.name for p in mgr.providers] == ["builtin", "holographic"]
+        assert p1.initialized is False  # not initialized by the gating logic itself
+
+    def test_unavailable_provider_skipped(self):
+        """If the configured provider is unavailable, it should be skipped."""
+        mgr = MemoryManager()
+        builtin = FakeMemoryProvider("builtin")
+        mgr.add_provider(builtin)
+
+        configured = "holographic"
+        p1 = FakeMemoryProvider("holographic", available=False)
+
+        for p in [p1]:
+            if p.name == configured and p.is_available():
+                mgr.add_provider(p)
+
+        assert [p.name for p in mgr.providers] == ["builtin"]
+
+    def test_nonexistent_provider_results_in_builtin_only(self):
+        """If the configured name doesn't match any plugin, only builtin remains."""
+        mgr = MemoryManager()
+        builtin = FakeMemoryProvider("builtin")
+        mgr.add_provider(builtin)
+
+        configured = "nonexistent"
+        plugins = [FakeMemoryProvider("holographic"), FakeMemoryProvider("mem0")]
+
+        for p in plugins:
+            if p.name == configured and p.is_available():
+                mgr.add_provider(p)
+
+        assert [p.name for p in mgr.providers] == ["builtin"]
+
+
+class TestKeepPluginCompatibility:
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"agent_context": "cron"},
+            {"agent_context": "flush"},
+            {"platform": "cron"},
+        ],
+        ids=["cron agent context", "flush agent context", "cron platform"],
+    )
+    def test_initialize_skips_impl_for_non_primary_contexts(self, kwargs):
+        provider = KeepMemoryProvider()
+        provider._impl = MagicMock()
+
+        provider.initialize("session-1", **kwargs)
+
+        provider._impl.initialize.assert_not_called()
+
+    def test_keep_flow_hoists_flattened_args_into_params(self):
+        provider = KeepMemoryProvider()
+        captured = {}
+
+        class Impl:
+            def handle_tool_call(self, tool_name, args, **kwargs):
+                captured["tool_name"] = tool_name
+                captured["args"] = args
+                return '{"ok": true}'
+
+        provider._impl = Impl()
+
+        result = provider.handle_tool_call(
+            "keep_flow",
+            {"state": "get", "id": ".library", "include_hidden": True},
+        )
+
+        assert json.loads(result) == {"ok": True}
+        assert captured["tool_name"] == "keep_flow"
+        assert captured["args"]["params"] == {
+            "id": ".library",
+            "include_hidden": True,
+        }
+
+    def test_keep_flow_parses_json_string_params(self):
+        provider = KeepMemoryProvider()
+        captured = {}
+
+        class Impl:
+            def handle_tool_call(self, tool_name, args, **kwargs):
+                captured["args"] = args
+                return '{"ok": true}'
+
+        provider._impl = Impl()
+
+        provider.handle_tool_call(
+            "keep_flow",
+            {"state": "get", "params": '{"id": ".library/mn61"}'},
+        )
+
+        assert captured["args"]["params"] == {"id": ".library/mn61"}
+
+    def test_keep_flow_reports_invalid_json_string_params(self):
+        provider = KeepMemoryProvider()
+        provider._impl = object()
+
+        result = json.loads(provider.handle_tool_call(
+            "keep_flow",
+            {"state": "get", "params": '{"id": '},
+        ))
+
+        assert "error" in result
+        assert "JSON object" in result["error"]
+
+    def test_keep_tool_call_returns_tool_error_when_impl_missing(self):
+        provider = KeepMemoryProvider()
+        provider._impl = None
+
+        result = json.loads(provider.handle_tool_call("keep_flow", {"state": "get"}))
+
+        assert result == {"error": "keep-skill is not installed"}
+
+    def test_keep_flow_does_not_hoist_unknown_top_level_keys(self):
+        provider = KeepMemoryProvider()
+        captured = {}
+
+        class Impl:
+            def handle_tool_call(self, tool_name, args, **kwargs):
+                captured["args"] = args
+                return '{"ok": true}'
+
+        provider._impl = Impl()
+
+        provider.handle_tool_call(
+            "keep_flow",
+            {"state": "get", "id": ".library", "unexpected": "value"},
+        )
+
+        assert captured["args"]["params"] == {"id": ".library"}
+        assert "unexpected" in captured["args"]
+        assert "unexpected" not in captured["args"]["params"]
 class TestPluginMemoryDiscovery:
     """Memory providers are discovered from plugins/memory/ directory."""
 

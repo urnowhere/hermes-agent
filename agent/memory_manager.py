@@ -260,7 +260,8 @@ class MemoryManager:
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
         """Notify all providers of a new turn.
 
-        kwargs may include: remaining_tokens, model, platform, tool_count.
+        kwargs may include: remaining_tokens, model, platform, tool_count,
+        session_id, session_title, user_id, and user_name.
         """
         for provider in self._providers:
             try:
