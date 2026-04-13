@@ -72,6 +72,7 @@ _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧
 # User-managed env files should override stale shell exports on restart.
 from hermes_constants import get_hermes_home, display_hermes_home
 from hermes_cli.env_loader import load_hermes_dotenv
+from utils import atomic_json_write
 
 _hermes_home = get_hermes_home()
 _project_env = Path(__file__).parent / '.env'
@@ -1848,6 +1849,9 @@ class HermesCLI:
         # Background task tracking: {task_id: threading.Thread}
         self._background_tasks: Dict[str, threading.Thread] = {}
         self._background_task_counter = 0
+        self._background_task_state: Dict[str, Dict[str, Any]] = {}
+        self._background_task_lock = threading.Lock()
+        self._pending_background_context_notes: List[str] = []
 
     def _invalidate(self, min_interval: float = 0.25) -> None:
         """Throttled UI repaint — prevents terminal blinking on slow/SSH connections."""
@@ -3395,6 +3399,494 @@ class HermesCLI:
         killed = process_registry.kill_all()
         print(f"  ✅ Stopped {killed} process(es).")
 
+    def _ensure_background_task_tracking(self) -> None:
+        """Initialize background-task state lazily for tests and restored objects."""
+        if not hasattr(self, "_background_tasks") or self._background_tasks is None:
+            self._background_tasks = {}
+        if not hasattr(self, "_background_task_state") or self._background_task_state is None:
+            self._background_task_state = {}
+        if not hasattr(self, "_background_task_lock") or self._background_task_lock is None:
+            self._background_task_lock = threading.Lock()
+        if not hasattr(self, "_pending_background_context_notes") or self._pending_background_context_notes is None:
+            self._pending_background_context_notes = []
+
+    def _background_tasks_root(self) -> Path:
+        """Return the profile-scoped directory for persisted background task artifacts."""
+        return get_hermes_home() / "background_tasks"
+
+    def _background_task_dir(self, task_id: str) -> Path:
+        """Return the artifact directory for a single background task."""
+        return self._background_tasks_root() / task_id
+
+    @staticmethod
+    def _snapshot_workspace_files(root: Path) -> Dict[str, Dict[str, int]]:
+        """Capture a lightweight workspace snapshot for created/modified/deleted files."""
+        snapshot: Dict[str, Dict[str, int]] = {}
+        if not root.exists():
+            return snapshot
+
+        skip_dirs = {".git", "__pycache__", ".pytest_cache", ".mypy_cache"}
+        for current_root, dirs, files in os.walk(root):
+            dirs[:] = [
+                d for d in dirs
+                if d not in skip_dirs and not Path(current_root, d).is_symlink()
+            ]
+            for filename in files:
+                path = Path(current_root) / filename
+                try:
+                    stat = path.stat()
+                    rel = path.relative_to(root).as_posix()
+                except (OSError, ValueError):
+                    continue
+                snapshot[rel] = {
+                    "size": int(stat.st_size),
+                    "mtime_ns": int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))),
+                }
+        return snapshot
+
+    @staticmethod
+    def _diff_workspace_snapshots(
+        before: Dict[str, Dict[str, int]],
+        after: Dict[str, Dict[str, int]],
+    ) -> Dict[str, List[str]]:
+        """Compute created/modified/deleted file paths from two workspace snapshots."""
+        before_keys = set(before)
+        after_keys = set(after)
+        created = sorted(after_keys - before_keys)
+        deleted = sorted(before_keys - after_keys)
+        modified = sorted(path for path in (before_keys & after_keys) if before[path] != after[path])
+        return {"created": created, "modified": modified, "deleted": deleted}
+
+    @staticmethod
+    def _background_changed_files(changes: Dict[str, List[str]]) -> List[str]:
+        """Flatten created/modified/deleted file changes into one ordered list."""
+        ordered: List[str] = []
+        seen: set[str] = set()
+        for kind in ("created", "modified", "deleted"):
+            for path in changes.get(kind, []):
+                if path in seen:
+                    continue
+                seen.add(path)
+                ordered.append(path)
+        return ordered
+
+    @staticmethod
+    def _format_background_file_summary(changes: Dict[str, List[str]], limit: int = 8) -> str:
+        """Return a compact human-readable summary of changed files."""
+        changed = HermesCLI._background_changed_files(changes)
+        if not changed:
+            return "No workspace files changed."
+
+        counts = []
+        if changes.get("created"):
+            counts.append(f"{len(changes['created'])} created")
+        if changes.get("modified"):
+            counts.append(f"{len(changes['modified'])} modified")
+        if changes.get("deleted"):
+            counts.append(f"{len(changes['deleted'])} deleted")
+        preview = ", ".join(changed[:limit])
+        if len(changed) > limit:
+            preview += f", +{len(changed) - limit} more"
+        return f"{', '.join(counts)}. Files: {preview}"
+
+    def _background_manifest_from_state(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Project in-memory task state into a JSON-serializable manifest."""
+        artifact_dir = Path(state["artifact_dir"])
+        changes = state.get("changes") or {"created": [], "modified": [], "deleted": []}
+        changed_files = state.get("changed_files") or self._background_changed_files(changes)
+        return {
+            "task_id": state["task_id"],
+            "task_num": state.get("task_num"),
+            "parent_session_id": state.get("parent_session_id"),
+            "background_session_id": state.get("background_session_id"),
+            "status": state.get("status", "unknown"),
+            "prompt": state.get("prompt", ""),
+            "prompt_preview": state.get("prompt_preview", ""),
+            "cwd": state.get("cwd", ""),
+            "started_at": state.get("started_at"),
+            "finished_at": state.get("finished_at"),
+            "last_activity_at": state.get("last_activity_at"),
+            "current_activity": state.get("current_activity"),
+            "current_tool": state.get("current_tool"),
+            "summary_preview": state.get("summary_preview", ""),
+            "error": state.get("error"),
+            "session_log_path": state.get("session_log_path"),
+            "artifact_dir": str(artifact_dir),
+            "manifest_path": str(artifact_dir / "manifest.json"),
+            "log_path": str(artifact_dir / "log.jsonl"),
+            "files_path": str(artifact_dir / "files.txt"),
+            "summary_path": str(artifact_dir / "summary.txt"),
+            "changed_files": changed_files,
+            "change_counts": {
+                "created": len(changes.get("created", [])),
+                "modified": len(changes.get("modified", [])),
+                "deleted": len(changes.get("deleted", [])),
+                "total": len(changed_files),
+            },
+        }
+
+    def _persist_background_task_manifest(self, task_id: str) -> None:
+        """Write the latest task metadata to disk for /bg inspection."""
+        self._ensure_background_task_tracking()
+        with self._background_task_lock:
+            state = dict(self._background_task_state.get(task_id, {}))
+        if not state:
+            return
+
+        artifact_dir = Path(state["artifact_dir"])
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        atomic_json_write(
+            artifact_dir / "manifest.json",
+            self._background_manifest_from_state(state),
+            indent=2,
+            default=str,
+        )
+
+    def _append_background_event(self, task_id: str, event_type: str, **payload: Any) -> None:
+        """Append a structured event to the task's JSONL activity log."""
+        event = {"timestamp": datetime.now().isoformat(), "event": event_type, **payload}
+        log_path = self._background_task_dir(task_id) / "log.jsonl"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+
+    def _update_background_task_state(self, task_id: str, **updates: Any) -> None:
+        """Update in-memory task metadata and persist the manifest."""
+        self._ensure_background_task_tracking()
+        with self._background_task_lock:
+            state = self._background_task_state.setdefault(task_id, {})
+            state.update(updates)
+            state.setdefault("last_activity_at", datetime.now().isoformat())
+        self._persist_background_task_manifest(task_id)
+
+    def _load_background_task_manifest(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """Load a persisted background task manifest from disk."""
+        manifest_path = self._background_task_dir(task_id) / "manifest.json"
+        if not manifest_path.exists():
+            return None
+        try:
+            return json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    def _get_background_task_state(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """Return merged task metadata from memory and disk."""
+        self._ensure_background_task_tracking()
+        manifest = self._load_background_task_manifest(task_id) or {}
+        with self._background_task_lock:
+            live = dict(self._background_task_state.get(task_id, {}))
+        if not manifest and not live:
+            return None
+        merged = {**manifest, **live}
+        if merged.get("artifact_dir"):
+            merged["artifact_dir"] = str(merged["artifact_dir"])
+        return merged
+
+    def _list_background_task_states(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Return recent background task states sorted newest-first."""
+        self._ensure_background_task_tracking()
+        task_ids = set(self._background_task_state)
+        root = self._background_tasks_root()
+        if root.exists():
+            try:
+                for child in root.iterdir():
+                    if child.is_dir():
+                        task_ids.add(child.name)
+            except OSError:
+                pass
+
+        states: List[Dict[str, Any]] = []
+        for task_id in task_ids:
+            state = self._get_background_task_state(task_id)
+            if state:
+                states.append(state)
+        states.sort(
+            key=lambda state: (state.get("started_at") or "", state.get("task_num") or 0),
+            reverse=True,
+        )
+        return states[:limit]
+
+    def _resolve_background_task_id(self, ref: Optional[str], *, prefer_running: bool = False) -> Optional[str]:
+        """Resolve a task ID exactly or by unique prefix, with sensible defaults."""
+        states = self._list_background_task_states(limit=100)
+        if not states:
+            return None
+
+        if not ref:
+            if prefer_running:
+                for state in states:
+                    if state.get("status") in {"running", "cancelling"}:
+                        return state.get("task_id")
+            return states[0].get("task_id")
+
+        exact = [state["task_id"] for state in states if state.get("task_id") == ref]
+        if exact:
+            return exact[0]
+
+        prefix_matches = [state["task_id"] for state in states if str(state.get("task_id", "")).startswith(ref)]
+        prefix_matches = list(dict.fromkeys(prefix_matches))
+        if len(prefix_matches) == 1:
+            return prefix_matches[0]
+        return None
+
+    def _persist_background_context_note(self, note: str) -> None:
+        """Append a background-task note into the foreground conversation history."""
+        message = {"role": "user", "content": f"[SYSTEM: {note}]"}
+        self.conversation_history.append(message)
+
+        agent = getattr(self, "agent", None)
+        if agent is not None:
+            try:
+                agent._session_messages = self.conversation_history
+                agent._save_session_log(self.conversation_history)
+            except Exception:
+                pass
+
+        session_db = getattr(self, "_session_db", None)
+        if session_db is not None:
+            try:
+                session_db.ensure_session(
+                    self.session_id,
+                    source=os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+                    model=getattr(self, "model", None),
+                )
+                session_db.append_message(
+                    session_id=self.session_id,
+                    role="user",
+                    content=message["content"],
+                )
+                if agent is not None:
+                    agent._last_flushed_db_idx = max(
+                        getattr(agent, "_last_flushed_db_idx", 0),
+                        len(self.conversation_history),
+                    )
+            except Exception:
+                pass
+
+    def _queue_background_context_note(self, note: str) -> None:
+        """Persist a context note now, or defer it until the foreground turn is idle."""
+        self._ensure_background_task_tracking()
+        if getattr(self, "_agent_running", False):
+            with self._background_task_lock:
+                self._pending_background_context_notes.append(note)
+            return
+        self._persist_background_context_note(note)
+
+    def _flush_pending_background_context_notes(self) -> None:
+        """Move deferred background-task notes into conversation history before the next turn."""
+        self._ensure_background_task_tracking()
+        with self._background_task_lock:
+            pending = list(self._pending_background_context_notes)
+            self._pending_background_context_notes.clear()
+        for note in pending:
+            self._persist_background_context_note(note)
+
+    def _write_background_files_report(self, task_id: str, changes: Dict[str, List[str]]) -> None:
+        """Write the changed-file report for a completed background task."""
+        lines: List[str] = []
+        total = 0
+        for title, key, prefix in (
+            ("Created", "created", "+"),
+            ("Modified", "modified", "~"),
+            ("Deleted", "deleted", "-"),
+        ):
+            paths = changes.get(key, [])
+            if not paths:
+                continue
+            total += len(paths)
+            lines.append(f"{title} ({len(paths)}):")
+            lines.extend(f"{prefix} {path}" for path in paths)
+            lines.append("")
+        if total == 0:
+            lines = ["No workspace files changed."]
+
+        files_path = self._background_task_dir(task_id) / "files.txt"
+        files_path.parent.mkdir(parents=True, exist_ok=True)
+        files_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+
+    def _render_background_status(self, state: Dict[str, Any]) -> List[str]:
+        """Render a task state as plain-text status lines."""
+        status = str(state.get("status") or "unknown")
+        started = str(state.get("started_at") or "unknown")
+        lines = [
+            f"Task #{state.get('task_num', '?')} [{status}]",
+            f"ID: {state.get('task_id')}",
+            f"Prompt: {state.get('prompt_preview') or state.get('prompt') or '(empty)'}",
+            f"Started: {started}",
+        ]
+        if state.get("finished_at"):
+            lines.append(f"Finished: {state['finished_at']}")
+        if state.get("current_activity"):
+            lines.append(f"Activity: {state['current_activity']}")
+        if state.get("current_tool"):
+            lines.append(f"Current Tool: {state['current_tool']}")
+        if state.get("summary_preview"):
+            lines.append(f"Summary: {state['summary_preview']}")
+        if state.get("error"):
+            lines.append(f"Error: {state['error']}")
+
+        counts = state.get("change_counts") or {}
+        if counts.get("total"):
+            lines.append(
+                "Files Changed: "
+                f"{counts.get('total', 0)} total "
+                f"({counts.get('created', 0)} created, "
+                f"{counts.get('modified', 0)} modified, "
+                f"{counts.get('deleted', 0)} deleted)"
+            )
+
+        if state.get("artifact_dir"):
+            lines.append(f"Artifacts: {state['artifact_dir']}")
+        if state.get("session_log_path"):
+            lines.append(f"Session Log: {state['session_log_path']}")
+        return lines
+
+    def _handle_background_status_command(self, task_ref: Optional[str]) -> None:
+        """Show one background task or a recent task summary list."""
+        if task_ref:
+            task_id = self._resolve_background_task_id(task_ref)
+            if not task_id:
+                _cprint(f"  Background task not found: {task_ref}")
+                return
+            state = self._get_background_task_state(task_id)
+            if not state:
+                _cprint(f"  Background task not found: {task_ref}")
+                return
+            self.console.print("\n".join(self._render_background_status(state)), highlight=False, markup=False)
+            return
+
+        states = self._list_background_task_states(limit=10)
+        if not states:
+            _cprint(f"  No background tasks found in {display_hermes_home()}/background_tasks")
+            return
+
+        lines = ["Background Tasks", ""]
+        for state in states:
+            prompt = state.get("prompt_preview") or state.get("prompt") or "(empty)"
+            activity = state.get("current_activity")
+            suffix = f" — {activity}" if activity and state.get("status") == "running" else ""
+            lines.append(
+                f"{state.get('task_id')} [{state.get('status', 'unknown')}] "
+                f"{prompt}{suffix}"
+            )
+        self.console.print("\n".join(lines), highlight=False, markup=False)
+
+    def _handle_background_log_command(self, task_ref: Optional[str]) -> None:
+        """Show the recent structured activity log for a background task."""
+        task_id = self._resolve_background_task_id(task_ref)
+        if not task_id:
+            _cprint("  Usage: /bg log <task-id>")
+            return
+
+        state = self._get_background_task_state(task_id) or {}
+        log_path = self._background_task_dir(task_id) / "log.jsonl"
+        if not log_path.exists():
+            _cprint(f"  No log found for {task_id}")
+            return
+
+        try:
+            raw_lines = [line for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        except Exception as exc:
+            _cprint(f"  Could not read log for {task_id}: {exc}")
+            return
+
+        rendered = [f"Background Log: {task_id}", ""]
+        for raw in raw_lines[-25:]:
+            try:
+                entry = json.loads(raw)
+            except Exception:
+                rendered.append(raw)
+                continue
+            stamp = str(entry.get("timestamp", ""))[:19]
+            event = entry.get("event", "event")
+            detail_parts = []
+            for key in ("tool", "preview", "duration", "status", "message", "error"):
+                value = entry.get(key)
+                if value is None or value == "":
+                    continue
+                detail_parts.append(f"{key}={value}")
+            rendered.append(f"{stamp} {event}" + (f" — {'; '.join(detail_parts)}" if detail_parts else ""))
+
+        if state.get("session_log_path"):
+            rendered.extend(["", f"Session log: {state['session_log_path']}"])
+        self.console.print("\n".join(rendered), highlight=False, markup=False)
+
+    def _handle_background_files_command(self, task_ref: Optional[str]) -> None:
+        """Show the tracked file changes for a completed background task."""
+        task_id = self._resolve_background_task_id(task_ref)
+        if not task_id:
+            _cprint("  Usage: /bg files <task-id>")
+            return
+
+        files_path = self._background_task_dir(task_id) / "files.txt"
+        if not files_path.exists():
+            _cprint(f"  No file report found for {task_id}")
+            return
+
+        try:
+            content = files_path.read_text(encoding="utf-8").strip()
+        except Exception as exc:
+            _cprint(f"  Could not read files report for {task_id}: {exc}")
+            return
+        self.console.print(content or "No workspace files changed.", highlight=False, markup=False)
+
+    def _handle_background_kill_command(self, task_ref: Optional[str]) -> None:
+        """Request cancellation for a running background task."""
+        task_id = self._resolve_background_task_id(task_ref, prefer_running=True)
+        if not task_id:
+            _cprint("  Usage: /bg kill <task-id>")
+            return
+
+        state = self._get_background_task_state(task_id)
+        if not state or state.get("status") not in {"running", "cancelling"}:
+            _cprint(f"  Background task is not running: {task_id}")
+            return
+
+        agent = state.get("agent")
+        if agent is None:
+            _cprint(f"  No live agent handle found for {task_id}")
+            return
+
+        try:
+            agent.interrupt("Background task cancelled by /bg kill")
+            self._update_background_task_state(
+                task_id,
+                status="cancelling",
+                current_activity="Cancellation requested",
+                last_activity_at=datetime.now().isoformat(),
+            )
+            self._append_background_event(
+                task_id,
+                "cancel.requested",
+                status="cancelling",
+                message="Cancellation requested via /bg kill",
+            )
+            _cprint(f"  Cancellation requested for {task_id}")
+        except Exception as exc:
+            _cprint(f"  Could not cancel {task_id}: {exc}")
+
+    def _dispatch_background_subcommand(self, cmd: str) -> bool:
+        """Handle `/bg <subcommand>` inspection commands."""
+        parts = cmd.strip().split(maxsplit=2)
+        base = parts[0].lower()
+        if base not in {"/bg", "/background"} or len(parts) < 2:
+            return False
+
+        subcommand = parts[1].lower()
+        if subcommand not in {"status", "log", "files", "kill"}:
+            return False
+
+        task_ref = parts[2].strip() if len(parts) > 2 and parts[2].strip() else None
+        if subcommand == "status":
+            self._handle_background_status_command(task_ref)
+        elif subcommand == "log":
+            self._handle_background_log_command(task_ref)
+        elif subcommand == "files":
+            self._handle_background_files_command(task_ref)
+        elif subcommand == "kill":
+            self._handle_background_kill_command(task_ref)
+        return True
+
     def _handle_paste_command(self):
         """Handle /paste — explicitly check clipboard for an image.
 
@@ -3575,6 +4067,7 @@ class HermesCLI:
 
     def _show_session_status(self):
         """Show gateway-style status for the current CLI session."""
+        self._ensure_background_task_tracking()
         session_meta = {}
         if self._session_db:
             try:
@@ -3624,6 +4117,13 @@ class HermesCLI:
             f"Tokens: {total_tokens:,}",
             f"Agent Running: {'Yes' if is_running else 'No'}",
         ])
+        active_bg = sum(
+            1
+            for state in self._list_background_task_states(limit=50)
+            if state.get("status") in {"running", "cancelling"}
+        )
+        if active_bg:
+            lines.append(f"Background Tasks: {active_bg} active")
         self.console.print("\n".join(lines), highlight=False, markup=False)
     
     def _fast_command_available(self) -> bool:
@@ -5231,6 +5731,9 @@ class HermesCLI:
         _base_word = cmd_lower.split()[0].lstrip("/")
         _cmd_def = _resolve_cmd(_base_word)
         canonical = _cmd_def.name if _cmd_def else _base_word
+
+        if canonical == "background" and self._dispatch_background_subcommand(cmd_original):
+            return True
         
         if canonical in ("quit", "exit", "q"):
             return False
@@ -5608,33 +6111,80 @@ class HermesCLI:
         """Handle /background <prompt> — run a prompt in a separate background session.
 
         Spawns a new AIAgent in a background thread with its own session.
-        When it completes, prints the result to the CLI without modifying
-        the active session's conversation history.
+        Persists task state and artifacts so `/bg` subcommands and future
+        foreground turns can inspect what happened.
         """
+        self._ensure_background_task_tracking()
         parts = cmd.strip().split(maxsplit=1)
         if len(parts) < 2 or not parts[1].strip():
             _cprint("  Usage: /background <prompt>")
             _cprint("  Example: /background Summarize the top HN stories today")
-            _cprint("  The task runs in a separate session and results display here when done.")
+            _cprint("  The task runs in a separate session. Use /bg status for live task info.")
             return
 
         prompt = parts[1].strip()
         self._background_task_counter += 1
         task_num = self._background_task_counter
         task_id = f"bg_{datetime.now().strftime('%H%M%S')}_{uuid.uuid4().hex[:6]}"
+        prompt_preview = f"{prompt[:60]}{'...' if len(prompt) > 60 else ''}"
 
         # Make sure we have valid credentials
         if not self._ensure_runtime_credentials():
             _cprint("  (>_<) Cannot start background task: no valid credentials.")
             return
 
-        _cprint(f"  🔄 Background task #{task_num} started: \"{prompt[:60]}{'...' if len(prompt) > 60 else ''}\"")
+        workspace_root = Path(os.getcwd()).resolve()
+        artifact_dir = self._background_task_dir(task_id)
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        workspace_before = self._snapshot_workspace_files(workspace_root)
+        task_state = {
+            "task_id": task_id,
+            "task_num": task_num,
+            "parent_session_id": self.session_id,
+            "background_session_id": task_id,
+            "prompt": prompt,
+            "prompt_preview": prompt_preview,
+            "status": "running",
+            "cwd": str(workspace_root),
+            "artifact_dir": str(artifact_dir),
+            "started_at": datetime.now().isoformat(),
+            "finished_at": None,
+            "last_activity_at": datetime.now().isoformat(),
+            "current_activity": "Queued to start",
+            "current_tool": None,
+            "summary_preview": "",
+            "error": None,
+            "changes": {"created": [], "modified": [], "deleted": []},
+            "changed_files": [],
+            "session_log_path": "",
+            "workspace_before": workspace_before,
+            "agent": None,
+        }
+        with self._background_task_lock:
+            self._background_task_state[task_id] = task_state
+        self._persist_background_task_manifest(task_id)
+        self._append_background_event(
+            task_id,
+            "task.started",
+            status="running",
+            prompt=prompt,
+            parent_session_id=self.session_id,
+            cwd=str(workspace_root),
+        )
+
+        self._queue_background_context_note(
+            f"Background task #{task_num} started with task ID {task_id}. "
+            f"Prompt: \"{prompt_preview}\". Use /bg status {task_id} for live status or /bg log {task_id} for artifacts."
+        )
+
+        _cprint(f"  🔄 Background task #{task_num} started: \"{prompt_preview}\"")
         _cprint(f"  Task ID: {task_id}")
-        _cprint("  You can continue chatting — results will appear when done.\n")
+        _cprint("  You can continue chatting — use /bg status for progress and /bg files when it finishes.\n")
 
         turn_route = self._resolve_turn_agent_config(prompt)
 
         def run_background():
+            bg_agent = None
             try:
                 bg_agent = AIAgent(
                     model=turn_route["model"],
@@ -5662,17 +6212,63 @@ class HermesCLI:
                     provider_data_collection=self._provider_data_collection,
                     fallback_model=self._fallback_model,
                 )
+                self._update_background_task_state(
+                    task_id,
+                    agent=bg_agent,
+                    current_activity="Thinking",
+                    session_log_path=str(getattr(bg_agent, "session_log_file", "") or ""),
+                    last_activity_at=datetime.now().isoformat(),
+                )
                 # Silence raw spinner; route thinking through TUI widget when no foreground agent is active.
                 bg_agent._print_fn = lambda *_a, **_kw: None
 
                 def _bg_thinking(text: str) -> None:
                     # Concurrent bg tasks may race on _spinner_text; acceptable for best-effort UI.
+                    preview = " ".join(str(text or "").split())[:160] or "Thinking"
+                    with self._background_task_lock:
+                        state = self._background_task_state.get(task_id)
+                        if state is not None:
+                            state["current_activity"] = preview
+                            state["last_activity_at"] = datetime.now().isoformat()
                     if not self._agent_running:
                         self._spinner_text = text
                         if self._app:
                             self._app.invalidate()
 
                 bg_agent.thinking_callback = _bg_thinking
+
+                def _bg_tool_progress(event_name, function_name=None, preview=None, function_args=None, **kwargs):
+                    now = datetime.now().isoformat()
+                    if event_name == "tool.started":
+                        self._update_background_task_state(
+                            task_id,
+                            current_tool=function_name,
+                            current_activity=f"Running {function_name}",
+                            last_activity_at=now,
+                        )
+                        self._append_background_event(
+                            task_id,
+                            "tool.started",
+                            tool=function_name,
+                            preview=preview,
+                        )
+                    elif event_name == "tool.completed":
+                        result_status = "error" if kwargs.get("is_error") else "ok"
+                        self._update_background_task_state(
+                            task_id,
+                            current_tool=None,
+                            current_activity=f"Completed {function_name}",
+                            last_activity_at=now,
+                        )
+                        self._append_background_event(
+                            task_id,
+                            "tool.completed",
+                            tool=function_name,
+                            duration=kwargs.get("duration"),
+                            status=result_status,
+                        )
+
+                bg_agent.tool_progress_callback = _bg_tool_progress
 
                 result = bg_agent.run_conversation(
                     user_message=prompt,
@@ -5682,6 +6278,47 @@ class HermesCLI:
                 response = result.get("final_response", "") if result else ""
                 if not response and result and result.get("error"):
                     response = f"Error: {result['error']}"
+                status = "interrupted" if result and result.get("interrupted") else "completed"
+                if result and result.get("failed") and not result.get("interrupted"):
+                    status = "failed"
+
+                changes = self._diff_workspace_snapshots(
+                    task_state.get("workspace_before", {}),
+                    self._snapshot_workspace_files(workspace_root),
+                )
+                changed_files = self._background_changed_files(changes)
+                summary_text = (response or "No response generated.").strip()
+                summary_preview = " ".join(summary_text.split())[:240]
+                (artifact_dir / "summary.txt").write_text(summary_text + "\n", encoding="utf-8")
+                self._write_background_files_report(task_id, changes)
+                self._update_background_task_state(
+                    task_id,
+                    agent=None,
+                    status=status,
+                    finished_at=datetime.now().isoformat(),
+                    current_tool=None,
+                    current_activity="Finished",
+                    summary_preview=summary_preview,
+                    error=result.get("error") if result else None,
+                    changes=changes,
+                    changed_files=changed_files,
+                    session_log_path=str(getattr(bg_agent, "session_log_file", "") or ""),
+                    last_activity_at=datetime.now().isoformat(),
+                    workspace_before={},
+                )
+                self._append_background_event(
+                    task_id,
+                    f"task.{status}",
+                    status=status,
+                    message=summary_preview,
+                    error=result.get("error") if result else None,
+                )
+                self._queue_background_context_note(
+                    f"Background task #{task_num} {status}. Task ID: {task_id}. "
+                    f"{self._format_background_file_summary(changes)} "
+                    f"Summary: {summary_preview or 'No response generated.'} "
+                    f"Artifacts saved under {display_hermes_home()}/background_tasks/{task_id}."
+                )
 
                 # Display result in the CLI (thread-safe via patch_stdout).
                 # Force a TUI refresh first so spinner/status bar don't overlap
@@ -5692,8 +6329,11 @@ class HermesCLI:
                     _tmod.sleep(0.05)  # brief pause for refresh
                 print()
                 ChatConsole().print(f"[{_accent_hex()}]{'─' * 40}[/]")
-                _cprint(f"  ✅ Background task #{task_num} complete")
-                _cprint(f"  Prompt: \"{prompt[:60]}{'...' if len(prompt) > 60 else ''}\"")
+                _cprint(f"  ✅ Background task #{task_num} {status}")
+                _cprint(f"  Prompt: \"{prompt_preview}\"")
+                file_summary = self._format_background_file_summary(changes)
+                if file_summary:
+                    _cprint(f"  {file_summary}")
                 ChatConsole().print(f"[{_accent_hex()}]{'─' * 40}[/]")
                 if response:
                     try:
@@ -5726,6 +6366,40 @@ class HermesCLI:
                     sys.stdout.flush()
 
             except Exception as e:
+                error_text = str(e)
+                changes = self._diff_workspace_snapshots(
+                    task_state.get("workspace_before", {}),
+                    self._snapshot_workspace_files(workspace_root),
+                )
+                changed_files = self._background_changed_files(changes)
+                (artifact_dir / "summary.txt").write_text(f"Background task failed: {error_text}\n", encoding="utf-8")
+                self._write_background_files_report(task_id, changes)
+                self._update_background_task_state(
+                    task_id,
+                    agent=None,
+                    status="failed",
+                    finished_at=datetime.now().isoformat(),
+                    current_tool=None,
+                    current_activity="Failed",
+                    summary_preview=error_text[:240],
+                    error=error_text,
+                    changes=changes,
+                    changed_files=changed_files,
+                    session_log_path=str(getattr(bg_agent, "session_log_file", "") or ""),
+                    last_activity_at=datetime.now().isoformat(),
+                    workspace_before={},
+                )
+                self._append_background_event(
+                    task_id,
+                    "task.failed",
+                    status="failed",
+                    error=error_text,
+                )
+                self._queue_background_context_note(
+                    f"Background task #{task_num} failed. Task ID: {task_id}. "
+                    f"{self._format_background_file_summary(changes)} Error: {error_text}. "
+                    f"Artifacts saved under {display_hermes_home()}/background_tasks/{task_id}."
+                )
                 # Same TUI refresh pattern as success path (#2718)
                 if self._app:
                     self._app.invalidate()
@@ -5735,6 +6409,10 @@ class HermesCLI:
                 _cprint(f"  ❌ Background task #{task_num} failed: {e}")
             finally:
                 self._background_tasks.pop(task_id, None)
+                with self._background_task_lock:
+                    state = self._background_task_state.get(task_id)
+                    if state is not None:
+                        state["agent"] = None
                 # Clear spinner only if no foreground agent owns it
                 if not self._agent_running:
                     self._spinner_text = ""
@@ -7539,6 +8217,9 @@ class HermesCLI:
         if isinstance(message, str):
             from run_agent import _sanitize_surrogates
             message = _sanitize_surrogates(message)
+
+        # Flush deferred background-task notes before the next foreground turn.
+        self._flush_pending_background_context_notes()
 
         # Add user message to history
         self.conversation_history.append({"role": "user", "content": message})

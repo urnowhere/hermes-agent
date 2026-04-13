@@ -78,8 +78,9 @@ COMMAND_REGISTRY: list[CommandDef] = [
                gateway_only=True, args_hint="[session|always]"),
     CommandDef("deny", "Deny a pending dangerous command", "Session",
                gateway_only=True),
-    CommandDef("background", "Run a prompt in the background", "Session",
-               aliases=("bg",), args_hint="<prompt>"),
+    CommandDef("background", "Run a prompt in the background or inspect /bg tasks", "Session",
+               aliases=("bg",), args_hint="<prompt>",
+               subcommands=("status", "log", "files", "kill")),
     CommandDef("btw", "Ephemeral side question using session context (no tools, not persisted)", "Session",
                args_hint="<question>"),
     CommandDef("queue", "Queue a prompt for the next turn (doesn't interrupt)", "Session",
@@ -218,6 +219,8 @@ def rebuild_lookups() -> None:
     for cmd in COMMAND_REGISTRY:
         if cmd.subcommands:
             SUBCOMMANDS[f"/{cmd.name}"] = list(cmd.subcommands)
+            for alias in cmd.aliases:
+                SUBCOMMANDS[f"/{alias}"] = list(cmd.subcommands)
     for cmd in COMMAND_REGISTRY:
         key = f"/{cmd.name}"
         if key in SUBCOMMANDS or not cmd.args_hint:
@@ -264,6 +267,8 @@ SUBCOMMANDS: dict[str, list[str]] = {}
 for _cmd in COMMAND_REGISTRY:
     if _cmd.subcommands:
         SUBCOMMANDS[f"/{_cmd.name}"] = list(_cmd.subcommands)
+        for _alias in _cmd.aliases:
+            SUBCOMMANDS[f"/{_alias}"] = list(_cmd.subcommands)
 
 # Also extract subcommands hinted in args_hint via pipe-separated patterns
 # e.g. args_hint="[on|off|tts|status]" for commands that don't have explicit subcommands.
