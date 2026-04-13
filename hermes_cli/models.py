@@ -8,6 +8,7 @@ Add, remove, or reorder entries here — both `hermes setup` and
 from __future__ import annotations
 
 import json
+import logging
 import os
 import urllib.request
 import urllib.error
@@ -1177,6 +1178,135 @@ def _resolve_copilot_catalog_api_key() -> str:
         return ""
 
 
+def _custom_provider_model_ids(
+    provider_name: str,
+    *,
+    custom_providers: Optional[list[dict[str, Any]]] = None,
+    include_probe: bool = True,
+    probe_timeout: float = 2.0,
+) -> list[str]:
+    """Return model IDs for a named custom provider from config.yaml.
+
+    Resolution order:
+      1. ``custom_providers[].models`` mapping/list
+      2. short ``/models`` probe
+      3. saved ``custom_providers[].model`` fallback
+
+    Results are de-duplicated in discovery order.
+    """
+    requested = normalize_provider(provider_name)
+    if not requested.startswith("custom:"):
+        return []
+
+    requested_key = requested.split("custom:", 1)[1].strip().lower()
+    if not requested_key:
+        return []
+
+    if custom_providers is None:
+        try:
+            from hermes_cli.config import load_config
+
+            config = load_config()
+            custom_providers = config.get("custom_providers")
+        except Exception:
+            custom_providers = None
+
+    if not isinstance(custom_providers, list):
+        return []
+
+    from hermes_cli.providers import custom_provider_slug
+
+    entry: Optional[dict[str, Any]] = None
+    for candidate in custom_providers:
+        if not isinstance(candidate, dict):
+            continue
+
+        display_name = str(candidate.get("name") or "").strip()
+        api_url = str(
+            candidate.get("base_url", "")
+            or candidate.get("url", "")
+            or candidate.get("api", "")
+            or ""
+        ).strip()
+        if not display_name or not api_url:
+            continue
+
+        slug = custom_provider_slug(display_name)
+        if requested_key in {display_name.lower(), slug.split("custom:", 1)[1]}:
+            entry = candidate
+            break
+
+    if entry is None:
+        return []
+
+    def _coerce_models(raw_models: Any) -> list[str]:
+        if isinstance(raw_models, dict):
+            raw_items = list(raw_models.keys())
+        elif isinstance(raw_models, list):
+            raw_items = raw_models
+        else:
+            return []
+
+        result: list[str] = []
+        for item in raw_items:
+            if isinstance(item, str):
+                model_id = item.strip()
+            elif isinstance(item, dict):
+                model_id = str(item.get("id") or item.get("model") or "").strip()
+            else:
+                model_id = str(item).strip()
+            if model_id:
+                result.append(model_id)
+        return result
+
+    ordered_models: list[str] = []
+    seen: set[str] = set()
+
+    def _append_all(model_ids: list[str]) -> None:
+        for model_id in model_ids:
+            if model_id in seen:
+                continue
+            seen.add(model_id)
+            ordered_models.append(model_id)
+
+    mapped_models = _coerce_models(entry.get("models"))
+    if mapped_models:
+        _append_all(mapped_models)
+        return ordered_models
+
+    if include_probe:
+        api_url = str(
+            entry.get("base_url", "")
+            or entry.get("url", "")
+            or entry.get("api", "")
+            or ""
+        ).strip()
+        if api_url:
+            api_key = str(entry.get("api_key") or "").strip() or None
+            try:
+                probe = probe_api_models(api_key, api_url, timeout=probe_timeout)
+                live_models = probe.get("models") or []
+                if isinstance(live_models, list):
+                    _append_all([
+                        str(model_id).strip()
+                        for model_id in live_models
+                        if str(model_id).strip()
+                    ])
+            except Exception as exc:
+                logging.getLogger(__name__).debug(
+                    "Failed to probe custom provider %s: %s", requested, exc
+                )
+
+    if ordered_models:
+        return ordered_models
+
+    fallback_model = str(entry.get("model") or "").strip()
+    if fallback_model:
+        _append_all([fallback_model])
+
+    return ordered_models
+
+
 def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) -> list[str]:
     """Return the best known model catalog for a provider.
 
@@ -1190,6 +1320,8 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
         from hermes_cli.codex_models import get_codex_model_ids
 
         return get_codex_model_ids()
+    if normalized.startswith("custom:"):
+        return _custom_provider_model_ids(normalized)
     if normalized in {"copilot", "copilot-acp"}:
         try:
             live = _fetch_github_models(_resolve_copilot_catalog_api_key())

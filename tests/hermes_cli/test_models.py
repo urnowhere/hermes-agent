@@ -4,6 +4,7 @@ from unittest.mock import patch, MagicMock
 
 from hermes_cli.models import (
     OPENROUTER_MODELS, fetch_openrouter_models, menu_labels, model_ids, detect_provider_for_model,
+    provider_model_ids,
     filter_nous_free_models, _NOUS_ALLOWED_FREE_MODELS,
     is_nous_free_tier, partition_nous_models_by_tier,
     check_nous_free_tier, _FREE_TIER_CACHE_TTL,
@@ -187,6 +188,74 @@ class TestDetectProviderForModel:
             result = detect_provider_for_model("claude-opus-4-6", "openai-codex")
         assert result is not None
         assert result[0] not in ("nous",)  # nous has claude models but shouldn't be suggested
+
+
+class TestProviderModelIds:
+    def test_named_custom_provider_uses_configured_models_mapping(self, monkeypatch):
+        """Named custom providers should prefer explicit configured models."""
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: {
+            "custom_providers": [{
+                "name": "Local Router",
+                "base_url": "http://127.0.0.1:4141/v1",
+                "api_key": "custom-key",
+                "model": "fallback-model",
+                "models": {
+                    "model-alpha": {},
+                    "model-beta": {},
+                },
+            }],
+        })
+
+        def _boom(*args, **kwargs):
+            raise AssertionError("explicit custom_providers[].models should skip probing")
+
+        monkeypatch.setattr("hermes_cli.models.probe_api_models", _boom)
+
+        ids = provider_model_ids("custom:local-router")
+
+        assert ids == ["model-alpha", "model-beta"]
+
+    def test_named_custom_provider_uses_probe_when_mapping_missing(self, monkeypatch):
+        """Named custom providers should probe /models before falling back to saved model."""
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: {
+            "custom_providers": [{
+                "name": "Local Router",
+                "base_url": "http://127.0.0.1:4141/v1",
+                "api_key": "custom-key",
+                "model": "fallback-model",
+            }],
+        })
+
+        probe_calls = []
+
+        def fake_probe(api_key, base_url, timeout=2.0):
+            probe_calls.append((api_key, base_url, timeout))
+            return {"models": ["model-alpha", "model-beta", "model-alpha"]}
+
+        monkeypatch.setattr("hermes_cli.models.probe_api_models", fake_probe)
+
+        ids = provider_model_ids("custom:local-router")
+
+        assert probe_calls == [("custom-key", "http://127.0.0.1:4141/v1", 2.0)]
+        assert ids == ["model-alpha", "model-beta"]
+
+    def test_named_custom_provider_uses_saved_model_when_probe_fails(self, monkeypatch):
+        """When probe fails, the saved model fallback should still appear."""
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: {
+            "custom_providers": [{
+                "name": "Backup Router",
+                "base_url": "http://127.0.0.1:4142/v1",
+                "model": "fallback-model",
+            }],
+        })
+        def _raise_probe(*args, **kwargs):
+            raise OSError("offline")
+
+        monkeypatch.setattr("hermes_cli.models.probe_api_models", _raise_probe)
+
+        ids = provider_model_ids("custom:backup-router")
+
+        assert ids == ["fallback-model"]
 
 
 class TestFilterNousFreeModels:

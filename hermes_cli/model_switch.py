@@ -753,7 +753,11 @@ def list_authenticated_providers(
         get_provider_info as _mdev_pinfo,
     )
     from hermes_cli.auth import PROVIDER_REGISTRY
-    from hermes_cli.models import OPENROUTER_MODELS, _PROVIDER_MODELS
+    from hermes_cli.models import (
+        OPENROUTER_MODELS,
+        _PROVIDER_MODELS,
+        _custom_provider_model_ids,
+    )
 
     results: List[dict] = []
     seen_slugs: set = set()
@@ -920,6 +924,7 @@ def list_authenticated_providers(
             models_list = []
             if default_model:
                 models_list.append(default_model)
+            top = models_list[:max_models]
 
             # Try to probe /v1/models if URL is set (but don't block on it)
             # For now just show what we know from config
@@ -928,7 +933,7 @@ def list_authenticated_providers(
                 "name": display_name,
                 "is_current": ep_name == current_provider,
                 "is_user_defined": True,
-                "models": models_list,
+                "models": top,
                 "total_models": len(models_list) if models_list else 0,
                 "source": "user-config",
                 "api_url": api_url,
@@ -954,17 +959,19 @@ def list_authenticated_providers(
             if slug in seen_slugs:
                 continue
 
-            models_list = []
-            default_model = (entry.get("model") or "").strip()
-            if default_model:
-                models_list.append(default_model)
+            models_list = _custom_provider_model_ids(
+                slug,
+                custom_providers=custom_providers,
+                include_probe=max_models > 0,
+            )
+            top = models_list[:max_models]
 
             results.append({
                 "slug": slug,
                 "name": display_name,
                 "is_current": slug == current_provider,
                 "is_user_defined": True,
-                "models": models_list,
+                "models": top,
                 "total_models": len(models_list),
                 "source": "user-config",
                 "api_url": api_url,
@@ -975,5 +982,3 @@ def list_authenticated_providers(
     results.sort(key=lambda r: (not r["is_current"], -r["total_models"]))
 
     return results
-
-
