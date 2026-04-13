@@ -465,22 +465,34 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             self._previous_summary = summary
             self._summary_failure_cooldown_until = 0.0
             return self._with_summary_prefix(summary)
-        except RuntimeError:
-            self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
-            logging.warning("Context compression: no provider available for "
-                            "summary. Middle turns will be dropped without summary "
-                            "for %d seconds.",
-                            _SUMMARY_FAILURE_COOLDOWN_SECONDS)
-            return None
-        except Exception as e:
-            self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
-            logging.warning(
-                "Failed to generate context summary: %s. "
-                "Further summary attempts paused for %d seconds.",
-                e,
-                _SUMMARY_FAILURE_COOLDOWN_SECONDS,
-            )
-            return None
+        except Exception as primary_err:
+            logger.warning("Primary summary model failed: model=%s error=%s — trying fallback",
+                           self.summary_model, primary_err)
+            try:
+                response = call_llm(
+                    provider="openrouter",
+                    model="qwen/qwen3.6-plus:free",
+                    base_url="https://openrouter.ai/api/v1",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3,
+                    max_tokens=summary_budget * 2,
+                )
+                content = response.choices[0].message.content
+                if not isinstance(content, str):
+                    content = str(content) if content else ""
+                summary = content.strip()
+                self._previous_summary = summary
+                self._summary_failure_cooldown_until = 0.0
+                logger.info("Fallback summary model succeeded after primary failure")
+                return self._with_summary_prefix(summary)
+            except Exception as fallback_err:
+                self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
+                logger.error("Summary generation failed with BOTH primary and fallback models: "
+                             "primary_model=%s primary_error=%s fallback_error=%s — "
+                             "further attempts paused for %ds",
+                             self.summary_model, primary_err, fallback_err,
+                             _SUMMARY_FAILURE_COOLDOWN_SECONDS)
+                return None
 
     @staticmethod
     def _with_summary_prefix(summary: str) -> str:
@@ -754,9 +766,9 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         # If LLM summary failed, insert a static fallback so the model
         # knows context was lost rather than silently dropping everything.
         if not summary:
-            if not self.quiet_mode:
-                logger.warning("Summary generation failed — inserting static fallback context marker")
             n_dropped = compress_end - compress_start
+            logger.error("Summary generation failed — inserting static fallback context marker. "
+                         "summary_model=%s. %d turns affected.", self.summary_model or "(none)", n_dropped)
             summary = (
                 f"{SUMMARY_PREFIX}\n"
                 f"Summary generation was unavailable. {n_dropped} conversation turns were "
@@ -766,28 +778,27 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             )
 
         _merge_summary_into_tail = False
-        last_head_role = messages[compress_start - 1].get("role", "user") if compress_start > 0 else "user"
-        first_tail_role = messages[compress_end].get("role", "user") if compress_end < n_messages else "user"
-        # Pick a role that avoids consecutive same-role with both neighbors.
-        # Priority: avoid colliding with head (already committed), then tail.
-        if last_head_role in ("assistant", "tool"):
-            summary_role = "user"
-        else:
-            summary_role = "assistant"
-        # If the chosen role collides with the tail AND flipping wouldn't
-        # collide with the head, flip it.
-        if summary_role == first_tail_role:
-            flipped = "assistant" if summary_role == "user" else "user"
-            if flipped != last_head_role:
-                summary_role = flipped
+        if summary:
+            last_head_role = messages[compress_start - 1].get("role", "user") if compress_start > 0 else "user"
+            first_tail_role = messages[compress_end].get("role", "user") if compress_end < n_messages else "user"
+            # Pick a role that avoids consecutive same-role with both neighbors.
+            # Priority: avoid colliding with head (already committed), then tail.
+            if last_head_role in ("assistant", "tool"):
+                summary_role = "user"
             else:
-                # Both roles would create consecutive same-role messages
-                # (e.g. head=assistant, tail=user — neither role works).
-                # Merge the summary into the first tail message instead
-                # of inserting a standalone message that breaks alternation.
-                _merge_summary_into_tail = True
-        if not _merge_summary_into_tail:
-            compressed.append({"role": summary_role, "content": summary})
+                summary_role = "assistant"
+            # If the chosen role collides with the tail AND flipping wouldn't
+            # collide with the head, flip it.
+            if summary_role == first_tail_role:
+                flipped = "assistant" if summary_role == "user" else "user"
+                if flipped != last_head_role:
+                    summary_role = flipped
+                else:
+                    # Both roles would create consecutive same-role messages.
+                    # Merge the summary into the first tail message instead.
+                    _merge_summary_into_tail = True
+            if not _merge_summary_into_tail:
+                compressed.append({"role": summary_role, "content": summary})
 
         for i in range(compress_end, n_messages):
             msg = messages[i].copy()
