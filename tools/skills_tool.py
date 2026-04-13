@@ -100,6 +100,21 @@ _PLATFORM_MAP = {
 }
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _EXCLUDED_SKILL_DIRS = frozenset((".git", ".github", ".hub"))
+
+
+def _rglob_skills(base: Path) -> list:
+    """rglob SKILL.md with symlink-following for cross-dir linked skills.
+
+    Python 3.11 Path.rglob() does not follow symlinks into directories,
+    so symlinked skill dirs (e.g. clawd-imports/rex-ink → ~/clawd/skills/rex-ink)
+    are invisible. Use os.walk(followlinks=True) instead.
+    """
+    import os as _os
+    results = []
+    for dirpath, _dirnames, filenames in _os.walk(base, followlinks=True):
+        if "SKILL.md" in filenames:
+            results.append(Path(dirpath) / "SKILL.md")
+    return results
 _REMOTE_ENV_BACKENDS = frozenset({"docker", "singularity", "modal", "ssh", "daytona"})
 _secret_capture_callback = None
 
@@ -535,7 +550,7 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
     dirs_to_scan.extend(get_external_skills_dirs())
 
     for scan_dir in dirs_to_scan:
-        for skill_md in scan_dir.rglob("SKILL.md"):
+        for skill_md in _rglob_skills(scan_dir):
             if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
                 continue
 
@@ -665,7 +680,7 @@ def skills_categories(verbose: bool = False, task_id: str = None) -> str:
         category_dirs = {}
         category_counts: Dict[str, int] = {}
         for scan_dir in all_dirs:
-            for skill_md in scan_dir.rglob("SKILL.md"):
+            for skill_md in _rglob_skills(scan_dir):
                 if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
                     continue
 
@@ -824,7 +839,7 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
         # Search by directory name across all dirs
         if not skill_md:
             for search_dir in all_dirs:
-                for found_skill_md in search_dir.rglob("SKILL.md"):
+                for found_skill_md in _rglob_skills(search_dir):
                     if found_skill_md.parent.name == name:
                         skill_dir = found_skill_md.parent
                         skill_md = found_skill_md
