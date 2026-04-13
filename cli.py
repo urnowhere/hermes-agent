@@ -23,6 +23,7 @@ import tempfile
 import time
 import uuid
 import textwrap
+import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime
@@ -1829,6 +1830,8 @@ class HermesCLI:
         self._image_counter = 0
         self.preloaded_skills: list[str] = []
         self._startup_skills_line_shown = False
+        self._pending_recovery_context: Optional[str] = None
+        self._last_clerk_checkpoint_error: Optional[str] = None
 
         # Voice mode state (also reinitialized inside run() for interactive TUI).
         self._voice_lock = threading.Lock()
@@ -4089,8 +4092,144 @@ class HermesCLI:
         except Exception:
             pass
 
+    def _get_hclerk_binary(self) -> Optional[str]:
+        candidate = _hermes_home / "bin" / "hclerk"
+        if candidate.exists():
+            return str(candidate)
+        return shutil.which("hclerk")
+
+    def _build_clerk_capture_text(self, reason: str, max_messages: int = 20) -> str:
+        recent = self.conversation_history[-max_messages:] if self.conversation_history else []
+        lines = [
+            f"reason: {reason}",
+            f"session_id: {self.session_id}",
+            f"message_count: {len(self.conversation_history)}",
+            "recent_messages:",
+        ]
+        for msg in recent:
+            role = str(msg.get("role", "unknown"))
+            content = msg.get("content")
+            if isinstance(content, list):
+                content = json.dumps(content, ensure_ascii=False)
+            text = "" if content is None else str(content)
+            text = text.replace("\r", " ").strip()
+            if len(text) > 1200:
+                text = text[:1200] + "..."
+            lines.append(f"- {role}: {text}")
+        return "\n".join(lines) + "\n"
+
+    def _run_clerk_checkpoint(self, reason: str = "reset") -> dict[str, Any] | None:
+        self._last_clerk_checkpoint_error = None
+        if not self.conversation_history:
+            return None
+        hclerk = self._get_hclerk_binary()
+        if not hclerk:
+            self._last_clerk_checkpoint_error = "hclerk binary not found"
+            return None
+
+        capture_text = self._build_clerk_capture_text(reason=reason)
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            delete=False,
+            prefix=f"autocapture-{reason}-",
+            suffix=".txt",
+        ) as tmp:
+            tmp.write(capture_text)
+            tmp_path = tmp.name
+
+        try:
+            started = time.perf_counter()
+            cmd = [
+                hclerk,
+                "pass",
+                tmp_path,
+                "--project",
+                "session-reset",
+                "--writer",
+                "hermes",
+                "--read-first",
+                str(_hermes_home / "SOUL.md"),
+                "--local-only",
+                "--handoff-only",
+                "--apply-chain",
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            payload = {
+                "ok": result.returncode == 0,
+                "reason": reason,
+                "returncode": result.returncode,
+                "stdout": result.stdout.strip(),
+                "stderr": result.stderr.strip(),
+                "duration_seconds": round(time.perf_counter() - started, 3),
+            }
+            if result.returncode != 0:
+                self._last_clerk_checkpoint_error = (result.stderr or result.stdout or "hclerk pass failed").strip()[:500]
+            return payload
+        except Exception as e:
+            self._last_clerk_checkpoint_error = str(e)
+            return {
+                "ok": False,
+                "reason": reason,
+                "error": str(e),
+            }
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+    def _arm_clerk_restore_context(self, reason: str = "reset") -> bool:
+        self._pending_recovery_context = None
+        hclerk = self._get_hclerk_binary()
+        if not hclerk:
+            return False
+        try:
+            result = subprocess.run(
+                [hclerk, "restore", "--reason", reason, "--json"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except Exception as e:
+            self._last_clerk_checkpoint_error = str(e)
+            return False
+        if result.returncode != 0:
+            self._last_clerk_checkpoint_error = (result.stderr or result.stdout or "hclerk restore failed").strip()[:500]
+            return False
+        try:
+            payload = json.loads(result.stdout)
+        except Exception as e:
+            self._last_clerk_checkpoint_error = f"invalid Clerk restore JSON: {e}"
+            return False
+
+        handoff = ((payload.get("payload") or {}).get("handoff") or {})
+        bits = []
+        for key in ("changed", "state", "risks", "next", "read_first"):
+            value = handoff.get(key)
+            if value:
+                bits.append(f"{key}: {str(value).strip()}")
+        if not bits:
+            return False
+
+        self._pending_recovery_context = (
+            "[Recovered shell state from Clerk after /reset. Use it as continuity for this first turn only. "
+            "Do not quote or summarize it unless asked.\n\n"
+            + "\n".join(bits)
+            + "\n]"
+        )
+        return True
+
+    def _consume_pending_recovery_context(self) -> str:
+        context = self._pending_recovery_context or ""
+        self._pending_recovery_context = None
+        return context
+
     def new_session(self, silent=False):
         """Start a fresh session with a new session ID and cleared agent state."""
+        checkpoint = None
+        if self.conversation_history:
+            checkpoint = self._run_clerk_checkpoint(reason="reset")
         if self.agent and self.conversation_history:
             try:
                 self.agent.flush_memories(self.conversation_history)
@@ -4146,8 +4285,17 @@ class HermesCLI:
                     pass
             self._notify_session_boundary("on_session_reset")
 
+        if checkpoint and checkpoint.get("ok"):
+            self._arm_clerk_restore_context(reason="reset")
+        elif checkpoint and not checkpoint.get("ok") and not self._last_clerk_checkpoint_error:
+            self._last_clerk_checkpoint_error = "Clerk checkpoint failed"
+
         if not silent:
             print("(^_^)v New session started!")
+            if self._pending_recovery_context:
+                print("[clerk] Recovery context armed for the next turn.")
+            elif self._last_clerk_checkpoint_error:
+                print(f"[clerk] {self._last_clerk_checkpoint_error}")
 
     def _handle_resume_command(self, cmd_original: str) -> None:
         """Handle /resume <session_id_or_title> — switch to a previous session mid-conversation."""
@@ -7717,7 +7865,10 @@ class HermesCLI:
 
             def run_agent():
                 nonlocal result
+                recovery_prefix = self._consume_pending_recovery_context() if isinstance(message, str) else ""
                 agent_message = _voice_prefix + message if _voice_prefix else message
+                if recovery_prefix:
+                    agent_message = recovery_prefix + "\n\n" + agent_message
                 # Prepend pending model switch note so the model knows about the switch
                 _msn = getattr(self, '_pending_model_switch_note', None)
                 if _msn:

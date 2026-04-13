@@ -6,6 +6,7 @@ import importlib
 import os
 import sys
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from hermes_state import SessionDB
@@ -220,3 +221,66 @@ def test_new_session_resets_token_counters(tmp_path):
     assert comp.last_total_tokens == 0
     assert comp.compression_count == 0
     assert comp._context_probed is False
+
+
+def test_new_session_runs_local_clerk_checkpoint_and_arms_recovery_context(tmp_path):
+    cli = _prepare_cli_with_active_session(tmp_path)
+    restore_payload = (
+        '{"payload":{"handoff":{"changed":"changed x","state":"state y",'
+        '"next":"next z","read_first":"/root/.hermes/SOUL.md"}}}'
+    )
+
+    with patch.object(cli, "_get_hclerk_binary", return_value="/fake/hclerk"), patch(
+        "subprocess.run",
+        side_effect=[
+            SimpleNamespace(returncode=0, stdout="pass ok", stderr=""),
+            SimpleNamespace(returncode=0, stdout=restore_payload, stderr=""),
+        ],
+    ) as mock_run:
+        cli.new_session(silent=True)
+
+    assert mock_run.call_count == 2
+    checkpoint_cmd = mock_run.call_args_list[0].args[0]
+    restore_cmd = mock_run.call_args_list[1].args[0]
+    assert checkpoint_cmd[1] == "pass"
+    assert "--local-only" in checkpoint_cmd
+    assert "--handoff-only" in checkpoint_cmd
+    assert "--apply-chain" in checkpoint_cmd
+    assert "--read-first" in checkpoint_cmd
+    assert restore_cmd == [checkpoint_cmd[0], "restore", "--reason", "reset", "--json"]
+    assert "Recovered shell state from Clerk after /reset" in (cli._pending_recovery_context or "")
+    assert "next: next z" in (cli._pending_recovery_context or "")
+
+
+def test_pending_clerk_recovery_context_is_injected_once_on_first_turn():
+    cli = _make_cli()
+    fake_agent = MagicMock()
+    fake_agent.run_conversation = MagicMock(
+        return_value={
+            "final_response": "ok",
+            "messages": [],
+            "api_calls": 1,
+            "completed": True,
+        }
+    )
+    fake_agent.interrupt = MagicMock()
+    cli.agent = fake_agent
+    cli._ensure_runtime_credentials = MagicMock(return_value=True)
+    cli._resolve_turn_agent_config = MagicMock(
+        return_value={"signature": "same", "model": cli.model, "runtime": None, "label": "test"}
+    )
+    cli._active_agent_route_signature = "same"
+    cli._init_agent = MagicMock(return_value=True)
+    cli._pending_recovery_context = "[Recovered shell state from Clerk after /reset.\n\nnext: Verify create plus readback.\n]"
+
+    cli.chat("continue")
+
+    first_message = fake_agent.run_conversation.call_args_list[0].kwargs["user_message"]
+    assert first_message.startswith("[Recovered shell state from Clerk after /reset.")
+    assert first_message.rstrip().endswith("continue")
+    assert cli._pending_recovery_context is None
+
+    fake_agent.run_conversation.reset_mock()
+    cli.chat("second turn")
+    second_message = fake_agent.run_conversation.call_args_list[0].kwargs["user_message"]
+    assert not second_message.startswith("[Recovered shell state from Clerk after /reset.")
