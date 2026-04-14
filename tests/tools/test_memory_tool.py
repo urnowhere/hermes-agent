@@ -104,6 +104,12 @@ class TestMemoryStoreAdd:
         assert result["success"] is True
         assert "Python 3.12 project" in result["entries"]
 
+    def test_add_entry_without_fcntl_locking(self, store, monkeypatch):
+        monkeypatch.setattr("tools.memory_tool.fcntl", None)
+        result = store.add("memory", "Portable memory note")
+        assert result["success"] is True
+        assert "Portable memory note" in store.memory_entries
+
     def test_add_to_user(self, store):
         result = store.add("user", "Name: Alice")
         assert result["success"] is True
@@ -203,6 +209,10 @@ class TestMemoryStorePersistence:
         mem_file = tmp_path / "MEMORY.md"
         mem_file.write_text("duplicate entry\n§\nduplicate entry\n§\nunique entry")
 
+        mem_file.write_text(
+            ENTRY_DELIMITER.join(["duplicate entry", "duplicate entry", "unique entry"]),
+            encoding="utf-8",
+        )
         store = MemoryStore()
         store.load_from_disk()
         assert len(store.memory_entries) == 2

@@ -23,7 +23,6 @@ Design:
 - Frozen snapshot pattern: system prompt is stable, tool responses show live state
 """
 
-import fcntl
 import json
 import logging
 import os
@@ -33,6 +32,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from hermes_constants import get_hermes_home
 from typing import Dict, Any, List, Optional
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 
 logger = logging.getLogger(__name__)
 
@@ -140,11 +144,28 @@ class MemoryStore:
         lock_path = path.with_suffix(path.suffix + ".lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         fd = open(lock_path, "w")
+        flock = getattr(fcntl, "flock", None) if fcntl is not None else None
+        lock_ex = getattr(fcntl, "LOCK_EX", None) if fcntl is not None else None
+        lock_un = getattr(fcntl, "LOCK_UN", None) if fcntl is not None else None
+        lock_acquired = False
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            if flock is not None and lock_ex is not None:
+                try:
+                    flock(fd, lock_ex)
+                    lock_acquired = True
+                except NotImplementedError:
+                    logger.debug(
+                        "fcntl.flock is unavailable on this platform; continuing without memory file locking."
+                    )
             yield
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            if lock_acquired and flock is not None and lock_un is not None:
+                try:
+                    flock(fd, lock_un)
+                except Exception:
+                    logger.debug(
+                        "Failed to release memory file lock for %s", lock_path, exc_info=True
+                    )
             fd.close()
 
     @staticmethod
