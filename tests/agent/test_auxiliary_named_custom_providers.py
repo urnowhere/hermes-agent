@@ -155,6 +155,34 @@ class TestResolveProviderClientNamedCustom:
         assert client is None
 
 
+def test_explicit_custom_base_url_inherits_main_custom_key(tmp_path, monkeypatch):
+    _write_config(tmp_path, {
+        "model": {
+            "default": "main-model",
+            "provider": "custom",
+            "base_url": "https://gateway.example.com/v1",
+            "api_key": "main-custom-key",
+        },
+    })
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    with patch("agent.auxiliary_client.OpenAI") as mock_openai:
+        mock_openai.return_value = MagicMock()
+        from agent.auxiliary_client import resolve_provider_client
+
+        client, model = resolve_provider_client(
+            "custom",
+            "aux-model",
+            explicit_base_url="https://gateway.example.com/v1",
+            explicit_api_key="",
+        )
+
+    assert client is not None
+    assert model == "aux-model"
+    assert mock_openai.call_args.kwargs["base_url"] == "https://gateway.example.com/v1"
+    assert mock_openai.call_args.kwargs["api_key"] == "main-custom-key"
+
+
 class TestResolveProviderClientModelNormalization:
     """Direct-provider auxiliary routing should normalize models like main runtime."""
 

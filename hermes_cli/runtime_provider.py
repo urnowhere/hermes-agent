@@ -229,9 +229,19 @@ def _try_resolve_from_custom_pool(
     base_url: str,
     provider_label: str,
     api_mode_override: Optional[str] = None,
+    explicit_api_key: Optional[str] = None,
+    pool_key_override: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Check if a credential pool exists for a custom endpoint and return a runtime dict if so."""
-    pool_key = get_custom_provider_pool_key(base_url)
+    """Check if a credential pool exists for a custom endpoint and return a runtime dict if so.
+
+    Explicit API keys must win over pooled credentials. When the caller knows
+    the intended saved provider, ``pool_key_override`` avoids ambiguous
+    base_url-first matching for different custom providers that share one
+    endpoint.
+    """
+    if has_usable_secret(explicit_api_key):
+        return None
+    pool_key = pool_key_override or get_custom_provider_pool_key(base_url)
     if not pool_key:
         return None
     try:
@@ -286,7 +296,9 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
             name_norm = _normalize_custom_provider_name(ep_name)
             # Resolve the API key from the env var name stored in key_env
             key_env = str(entry.get("key_env", "") or "").strip()
-            resolved_api_key = os.getenv(key_env, "").strip() if key_env else ""
+            resolved_api_key = str(entry.get("api_key", "") or "").strip()
+            if not resolved_api_key and key_env:
+                resolved_api_key = os.getenv(key_env, "").strip()
 
             if requested_norm in {ep_name, name_norm, f"custom:{name_norm}"}:
                 # Found match by provider key
@@ -380,7 +392,17 @@ def _resolve_named_custom_runtime(
         return None
 
     # Check if a credential pool exists for this custom endpoint
-    pool_result = _try_resolve_from_custom_pool(base_url, "custom", custom_provider.get("api_mode"))
+    pool_key_override = ""
+    custom_name = str(custom_provider.get("name") or "").strip()
+    if custom_name:
+        pool_key_override = f"custom:{_normalize_custom_provider_name(custom_name)}"
+    pool_result = _try_resolve_from_custom_pool(
+        base_url,
+        "custom",
+        custom_provider.get("api_mode"),
+        explicit_api_key=explicit_api_key,
+        pool_key_override=pool_key_override or None,
+    )
     if pool_result:
         # Propagate the model name even when using pooled credentials —
         # the pool doesn't know about the custom_providers model field.
@@ -492,7 +514,10 @@ def _resolve_openrouter_runtime(
     # For custom endpoints, check if a credential pool exists
     if effective_provider == "custom" and base_url:
         pool_result = _try_resolve_from_custom_pool(
-            base_url, effective_provider, _parse_api_mode(model_cfg.get("api_mode")),
+            base_url,
+            effective_provider,
+            _parse_api_mode(model_cfg.get("api_mode")),
+            explicit_api_key=explicit_api_key or (cfg_api_key if use_config_base_url else None),
         )
         if pool_result:
             return pool_result

@@ -898,6 +898,19 @@ def _current_custom_base_url() -> str:
     return custom_base or ""
 
 
+def _main_custom_api_key_for_base_url(base_url: str) -> str:
+    """Return the active main custom-endpoint key when it targets the same URL."""
+    normalized_base = str(base_url or "").strip().rstrip("/")
+    if not normalized_base:
+        return ""
+    main_base, main_key, _ = _resolve_custom_runtime()
+    if not main_base or not main_key:
+        return ""
+    if main_base.rstrip("/") != normalized_base:
+        return ""
+    return main_key
+
+
 def _try_custom_endpoint() -> Tuple[Optional[OpenAI], Optional[str]]:
     runtime = _resolve_custom_runtime()
     if len(runtime) == 2:
@@ -1404,6 +1417,7 @@ def resolve_provider_client(
             custom_base = explicit_base_url.strip()
             custom_key = (
                 (explicit_api_key or "").strip()
+                or _main_custom_api_key_for_base_url(custom_base)
                 or os.getenv("OPENAI_API_KEY", "").strip()
                 or "no-key-required"  # local servers don't need auth
             )

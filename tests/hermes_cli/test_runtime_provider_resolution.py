@@ -493,6 +493,38 @@ def test_custom_endpoint_uses_config_api_key_over_env(monkeypatch):
     assert resolved["api_key"] == "config-api-key"
 
 
+def test_custom_endpoint_config_api_key_skips_ambiguous_custom_pool(monkeypatch):
+    """Explicit config api_key must win over a same-base_url custom pool match."""
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "openrouter")
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "custom",
+            "base_url": "https://api.example.com/v1",
+            "api_key": "config-key",
+        },
+    )
+    monkeypatch.setattr(
+        rp,
+        "load_pool",
+        lambda provider: (_ for _ in ()).throw(
+            AssertionError("custom credential pool should be skipped when config api_key is set")
+        ),
+    )
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
+
+    resolved = rp.resolve_runtime_provider(requested="custom")
+
+    assert resolved["base_url"] == "https://api.example.com/v1"
+    assert resolved["api_key"] == "config-key"
+    assert resolved["source"] == "env/config"
+    assert resolved.get("credential_pool") is None
+
+
 def test_custom_endpoint_uses_config_api_field_when_no_api_key(monkeypatch):
     """provider: custom with 'api' in config uses it as api_key (#1760)."""
     monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "openrouter")
@@ -570,6 +602,62 @@ def test_named_custom_provider_uses_saved_credentials(monkeypatch):
     assert resolved["api_key"] == "local-provider-key"
     assert resolved["requested_provider"] == "local"
     assert resolved["source"] == "custom_provider:Local"
+
+
+def test_named_custom_provider_uses_its_own_pool_when_base_url_is_shared(monkeypatch):
+    class _Entry:
+        access_token = "provider-b-pool-key"
+        source = "config:Provider B"
+        base_url = "https://api.example.com/v1"
+
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return _Entry()
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "custom_providers": [
+                {
+                    "name": "Provider A",
+                    "base_url": "https://api.example.com/v1",
+                    "api_key": "key-a",
+                },
+                {
+                    "name": "Provider B",
+                    "base_url": "https://api.example.com/v1",
+                    "api_key": "key-b",
+                },
+            ]
+        },
+    )
+
+    def _load_pool(provider):
+        assert provider == "custom:provider-b"
+        return _Pool()
+
+    monkeypatch.setattr(rp, "load_pool", _load_pool)
+    monkeypatch.setattr(
+        rp,
+        "resolve_provider",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("named custom providers should resolve before provider fallback")
+        ),
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="custom:provider-b")
+
+    assert resolved["provider"] == "custom"
+    assert resolved["base_url"] == "https://api.example.com/v1"
+    assert resolved["api_key"] == "provider-b-pool-key"
+    assert resolved["requested_provider"] == "custom:provider-b"
+    assert resolved["source"] == "pool:custom:provider-b"
 
 
 def test_named_custom_provider_uses_providers_dict_when_list_missing(monkeypatch):
