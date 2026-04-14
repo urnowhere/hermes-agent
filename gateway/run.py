@@ -2338,6 +2338,13 @@ class GatewayRunner:
                 return None
             return QQAdapter(config)
 
+        elif platform == Platform.LINE:
+            from gateway.platforms.line import LineAdapter, check_line_requirements
+            if not check_line_requirements():
+                logger.warning("LINE: aiohttp/httpx missing or LINE_CHANNEL_ACCESS_TOKEN/LINE_CHANNEL_SECRET not set")
+                return None
+            return LineAdapter(config)
+
         return None
 
     def _is_user_authorized(self, source: SessionSource) -> bool:
@@ -2380,6 +2387,7 @@ class GatewayRunner:
             Platform.WEIXIN: "WEIXIN_ALLOWED_USERS",
             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOWED_USERS",
             Platform.QQBOT: "QQ_ALLOWED_USERS",
+            Platform.LINE: "LINE_ALLOWED_USERS",
         }
         platform_allow_all_map = {
             Platform.TELEGRAM: "TELEGRAM_ALLOW_ALL_USERS",
@@ -2398,6 +2406,7 @@ class GatewayRunner:
             Platform.WEIXIN: "WEIXIN_ALLOW_ALL_USERS",
             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOW_ALL_USERS",
             Platform.QQBOT: "QQ_ALLOW_ALL_USERS",
+            Platform.LINE: "LINE_ALLOW_ALL_USERS",
         }
 
         # Per-platform allow-all flag (e.g., DISCORD_ALLOW_ALL_USERS=true)
@@ -3188,6 +3197,15 @@ class GatewayRunner:
         # Get or create session
         session_entry = self.session_store.get_or_create_session(source)
         session_key = session_entry.session_key
+
+        # LINE is a high-friction mobile chat surface — do not block on
+        # dangerous-command approvals there. Treat LINE sessions like /yolo.
+        if source.platform == Platform.LINE:
+            try:
+                from tools.approval import enable_session_yolo
+                enable_session_yolo(session_key)
+            except Exception as e:
+                logger.debug("Failed to auto-enable YOLO for LINE session %s: %s", session_key, e)
         
         # Emit session:start for new or auto-reset sessions
         _is_new_session = (

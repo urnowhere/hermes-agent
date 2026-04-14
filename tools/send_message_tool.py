@@ -163,6 +163,7 @@ def _handle_send(args):
         "weixin": Platform.WEIXIN,
         "email": Platform.EMAIL,
         "sms": Platform.SMS,
+        "line": Platform.LINE,
     }
     platform = platform_map.get(platform_name)
     if not platform:
@@ -383,6 +384,20 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     # --- Weixin: use the native one-shot adapter helper for text + media ---
     if platform == Platform.WEIXIN:
         return await _send_weixin(pconfig, chat_id, message, media_files=media_files)
+
+    # --- LINE: use adapter send + send_image_file for media ---
+    if platform == Platform.LINE:
+        last_result = None
+        for i, chunk in enumerate(chunks):
+            is_last = (i == len(chunks) - 1)
+            result = await _send_line(
+                pconfig, chat_id, chunk,
+                media_files=media_files if is_last else [],
+            )
+            if isinstance(result, dict) and result.get("error"):
+                return result
+            last_result = result
+        return last_result
 
     # --- Non-Telegram platforms ---
     if media_files and not message.strip():
@@ -969,6 +984,57 @@ async def _send_bluebubbles(extra, chat_id, message):
             await adapter.disconnect()
     except Exception as e:
         return _error(f"BlueBubbles send failed: {e}")
+
+
+async def _send_line(pconfig, chat_id, message, media_files=None):
+    """Send via LINE Messaging API using the adapter's Push API."""
+    try:
+        from gateway.platforms.line import LineAdapter, check_line_requirements, _running_adapters
+        if not check_line_requirements():
+            return {"error": "LINE requirements not met (need httpx + aiohttp + credentials)."}
+    except ImportError:
+        return {"error": "LINE adapter not available."}
+
+    media_files = media_files or []
+
+    try:
+        # Prefer the already-running gateway adapter so that media tokens are
+        # served by the existing webhook server.  Fall back to a fresh instance
+        # for text-only sends when no gateway is active.
+        token = pconfig.token or ""
+        adapter = _running_adapters.get(token) or LineAdapter(pconfig)
+        last_result = None
+
+        if message.strip():
+            result = await adapter.send(chat_id, message)
+            if not result.success:
+                return _error(f"LINE send failed: {result.error}")
+            last_result = result
+
+        for media_path, is_voice in media_files:
+            if not os.path.exists(media_path):
+                return _error(f"Media file not found: {media_path}")
+            ext = os.path.splitext(media_path)[1].lower()
+            if ext in _IMAGE_EXTS:
+                result = await adapter.send_image_file(chat_id, media_path)
+            elif ext in _VIDEO_EXTS:
+                result = await adapter.send_video(chat_id, media_path)
+            elif ext in _AUDIO_EXTS:
+                result = await adapter.send_voice(chat_id, media_path)
+            else:
+                # LINE Messaging API does not support sending arbitrary files.
+                # Notify the user and treat as a non-fatal skip.
+                filename = os.path.basename(media_path)
+                result = await adapter.send(chat_id, f"[File: {filename} — LINE does not support sending this file type]")
+            if not result.success:
+                return _error(f"LINE media send failed: {result.error}")
+            last_result = result
+
+        if last_result is None:
+            return _error("LINE: nothing to send")
+        return {"success": True, "platform": "line", "chat_id": chat_id, "message_id": last_result.message_id}
+    except Exception as e:
+        return _error(f"LINE send failed: {e}")
 
 
 async def _send_feishu(pconfig, chat_id, message, media_files=None, thread_id=None):
