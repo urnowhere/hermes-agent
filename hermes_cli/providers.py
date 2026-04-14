@@ -127,6 +127,11 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         is_aggregator=True,
         base_url_env_var="HF_BASE_URL",
     ),
+    "novita": HermesOverlay(
+        transport="openai_chat",
+        is_aggregator=True,
+        base_url_env_var="NOVITA_BASE_URL",
+    ),
     "xai": HermesOverlay(
         transport="openai_chat",
         base_url_override="https://api.x.ai/v1",
@@ -231,6 +236,10 @@ ALIASES: Dict[str, str] = {
     "hf": "huggingface",
     "hugging-face": "huggingface",
     "huggingface-hub": "huggingface",
+
+    # novita
+    "novita-ai": "novita",
+    "novitaai": "novita",
 
     # xiaomi
     "mimo": "xiaomi",

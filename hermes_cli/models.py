@@ -300,6 +300,14 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "XiaomiMiMo/MiMo-V2-Flash",
         "moonshotai/Kimi-K2-Thinking",
     ],
+    "novita": [
+        "moonshotai/kimi-k2.5",
+        "minimax/minimax-m2.7",
+        "zai-org/glm-5",
+        "deepseek/deepseek-v3-0324",
+        "deepseek/deepseek-r1-0528",
+        "qwen/qwen3-235b-a22b-fp8",
+    ],
 }
 
 # ---------------------------------------------------------------------------
@@ -514,6 +522,7 @@ CANONICAL_PROVIDERS: list[ProviderEntry] = [
     ProviderEntry("openrouter",     "OpenRouter",               "OpenRouter (100+ models, pay-per-use)"),
     ProviderEntry("anthropic",      "Anthropic",                "Anthropic (Claude models — API key or Claude Code)"),
     ProviderEntry("openai-codex",   "OpenAI Codex",             "OpenAI Codex"),
+    ProviderEntry("novita",         "NovitaAI",                 "NovitaAI (90+ models, pay-per-use)"),
     ProviderEntry("xiaomi",         "Xiaomi MiMo",              "Xiaomi MiMo (MiMo-V2 models — pro, omni, flash)"),
     ProviderEntry("qwen-oauth",     "Qwen OAuth (Portal)",      "Qwen OAuth (reuses local Qwen CLI login)"),
     ProviderEntry("copilot",        "GitHub Copilot",           "GitHub Copilot (uses GITHUB_TOKEN or gh auth token)"),
@@ -582,6 +591,8 @@ _PROVIDER_ALIASES = {
     "hf": "huggingface",
     "hugging-face": "huggingface",
     "huggingface-hub": "huggingface",
+    "novita-ai": "novita",
+    "novitaai": "novita",
     "mimo": "xiaomi",
     "xiaomi-mimo": "xiaomi",
     "grok": "xai",
@@ -835,7 +846,7 @@ def _resolve_nous_pricing_credentials() -> tuple[str, str]:
 
 
 def get_pricing_for_provider(provider: str, *, force_refresh: bool = False) -> dict[str, dict[str, str]]:
-    """Return live pricing for providers that support it (openrouter, nous)."""
+    """Return live pricing for providers that support it (openrouter, nous, novita)."""
     normalized = normalize_provider(provider)
     if normalized == "openrouter":
         return fetch_models_with_pricing(
@@ -856,6 +867,8 @@ def get_pricing_for_provider(provider: str, *, force_refresh: bool = False) -> d
                 base_url=stripped,
                 force_refresh=force_refresh,
             )
+    if normalized == "novita":
+        return _fetch_novita_pricing()
     return {}
 
 
@@ -878,6 +891,7 @@ def list_available_providers() -> list[dict[str, str]]:
     """
     # Derive display order from canonical list + custom
     provider_order = [p.slug for p in CANONICAL_PROVIDERS] + ["custom"]
+
 
     # Build reverse alias map
     aliases_for: dict[str, list[str]] = {}
@@ -1250,6 +1264,10 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
             return live
     if normalized == "ai-gateway":
         live = _fetch_ai_gateway_models()
+        if live:
+            return live
+    if normalized == "novita":
+        live = _fetch_novita_models()
         if live:
             return live
     if normalized == "custom":
@@ -1747,6 +1765,72 @@ def _fetch_ai_gateway_models(timeout: float = 5.0) -> Optional[list[str]]:
             ]
     except Exception:
         return None
+
+
+def _fetch_novita_models(timeout: float = 5.0) -> Optional[list[str]]:
+    """Fetch available model IDs from NovitaAI /v1/models endpoint."""
+    api_key = os.getenv("NOVITA_API_KEY", "").strip()
+    if not api_key:
+        return None
+    base_url = os.getenv("NOVITA_BASE_URL", "").strip() or "https://api.novita.ai/openai/v1"
+    url = base_url.rstrip("/") + "/models"
+    headers: dict[str, str] = {
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": "HermesAgent/1.0",
+    }
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode())
+            return [m["id"] for m in data.get("data", []) if m.get("id")]
+    except Exception:
+        return None
+
+
+def _fetch_novita_pricing(timeout: float = 8.0) -> dict[str, dict[str, str]]:
+    """Fetch pricing from NovitaAI /v1/models.
+
+    NovitaAI uses ``input_token_price_per_m`` / ``output_token_price_per_m``
+    (integer, cost per million tokens in micro-dollars) instead of OpenRouter's
+    ``pricing.prompt`` / ``pricing.completion`` (per-token float).
+    Converts to the same per-token string format used by ``fetch_models_with_pricing``.
+    """
+    api_key = os.getenv("NOVITA_API_KEY", "").strip()
+    if not api_key:
+        return {}
+    base_url = os.getenv("NOVITA_BASE_URL", "").strip() or "https://api.novita.ai/openai/v1"
+    url = base_url.rstrip("/") + "/models"
+    headers: dict[str, str] = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "User-Agent": "HermesAgent/1.0",
+    }
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode())
+    except Exception:
+        return {}
+
+    result: dict[str, dict[str, str]] = {}
+    for item in payload.get("data", []):
+        mid = item.get("id")
+        if not mid:
+            continue
+        inp = item.get("input_token_price_per_m")
+        out = item.get("output_token_price_per_m")
+        if inp is not None or out is not None:
+            # NovitaAI prices are in units of 0.0001 USD per million tokens
+            # (i.e. 1/100 of a cent per Mtok).
+            # Convert to per-token dollar string for _format_price_per_mtok().
+            # e.g. glm-5.1: 14000 → $1.40/Mtok → 1.40/1e6 = 1.4e-6 $/token
+            prompt_per_tok = str(float(inp or 0) / 10_000 / 1_000_000)
+            completion_per_tok = str(float(out or 0) / 10_000 / 1_000_000)
+            result[mid] = {
+                "prompt": prompt_per_tok,
+                "completion": completion_per_tok,
+            }
+    return result
 
 
 def fetch_api_models(

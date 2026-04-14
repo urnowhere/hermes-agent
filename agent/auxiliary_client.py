@@ -104,6 +104,7 @@ _API_KEY_PROVIDER_AUX_MODELS: Dict[str, str] = {
     "opencode-zen": "gemini-3-flash",
     "opencode-go": "glm-5",
     "kilocode": "google/gemini-3-flash-preview",
+    "novita": "deepseek/deepseek-v3-0324",
 }
 
 # Vision-specific model overrides for direct providers.
@@ -2442,7 +2443,7 @@ def extract_content_or_reasoning(response) -> str:
       1. ``message.content`` — strip inline think/reasoning blocks, check for
          remaining non-whitespace text.
       2. ``message.reasoning`` / ``message.reasoning_content`` — direct
-         structured reasoning fields (DeepSeek, Moonshot, Novita, etc.).
+         structured reasoning fields (DeepSeek, Moonshot, NovitaAI, etc.).
       3. ``message.reasoning_details`` — OpenRouter unified array format.
 
     Returns the best available text, or ``""`` if nothing found.
