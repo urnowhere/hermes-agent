@@ -140,6 +140,12 @@ class SimplexAdapter(BasePlatformAdapter):
         # the file finishes downloading.
         self._pending_file_transfers: Dict[int, dict] = {}
 
+        # Text message batching — concatenate rapid-fire messages into one
+        # event before dispatching, like Telegram's built-in text batching.
+        self._text_batch_delay = float(os.getenv("HERMES_SIMPLEX_TEXT_BATCH_DELAY", "0.8"))
+        self._pending_text_batches: Dict[str, MessageEvent] = {}
+        self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
+
         logger.info(
             "SimpleX adapter initialized: ws_url=%s auto_accept=%s groups=%s",
             self.ws_url,
@@ -570,7 +576,63 @@ class SimplexAdapter(BasePlatformAdapter):
             (text or "")[:50],
         )
 
-        await self.handle_message(msg_event)
+        # Batch consecutive text messages (users sending multiple lines quickly)
+        # so the agent sees one combined message instead of dropping earlier ones.
+        if msg_type == MessageType.TEXT and text:
+            self._enqueue_text_event(msg_event)
+        else:
+            await self.handle_message(msg_event)
+
+    # ------------------------------------------------------------------
+    # Text message batching
+    # ------------------------------------------------------------------
+
+    def _text_batch_key(self, event: MessageEvent) -> str:
+        """Session-scoped key for text message batching."""
+        return f"{event.source.platform.value}:{event.source.chat_id}"
+
+    def _enqueue_text_event(self, event: MessageEvent) -> None:
+        """Buffer a text event and reset the flush timer.
+
+        When a user sends multiple messages in quick succession, they are
+        concatenated into a single event before dispatching — same approach
+        as Telegram's built-in text batching.
+        """
+        key = self._text_batch_key(event)
+        existing = self._pending_text_batches.get(key)
+        if existing is None:
+            self._pending_text_batches[key] = event
+        else:
+            if event.text:
+                existing.text = f"{existing.text}\n{event.text}" if existing.text else event.text
+            if event.media_urls:
+                existing.media_urls.extend(event.media_urls)
+                existing.media_types.extend(event.media_types)
+
+        # Cancel any pending flush and restart the timer
+        prior_task = self._pending_text_batch_tasks.get(key)
+        if prior_task and not prior_task.done():
+            prior_task.cancel()
+        self._pending_text_batch_tasks[key] = asyncio.create_task(
+            self._flush_text_batch(key)
+        )
+
+    async def _flush_text_batch(self, key: str) -> None:
+        """Wait for the quiet period then dispatch the aggregated text."""
+        current_task = asyncio.current_task()
+        try:
+            await asyncio.sleep(self._text_batch_delay)
+            event = self._pending_text_batches.pop(key, None)
+            if not event:
+                return
+            logger.info(
+                "[SimpleX] Flushing text batch %s (%d chars)",
+                key, len(event.text or ""),
+            )
+            await self.handle_message(event)
+        finally:
+            if self._pending_text_batch_tasks.get(key) is current_task:
+                self._pending_text_batch_tasks.pop(key, None)
 
     # ------------------------------------------------------------------
     # Command Interface
