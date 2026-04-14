@@ -2015,6 +2015,16 @@ class GatewayRunner:
                 "Stopping gateway%s...",
                 " for restart" if self._restart_requested else "",
             )
+            # Write the clean-shutdown marker IMMEDIATELY on entry, not at the
+            # end of stop().  If systemd's TimeoutStopSec fires before we finish
+            # draining agents, the process gets SIGKILL and any late writes are
+            # lost.  Writing early ensures the next startup always sees the marker
+            # for a graceful shutdown, preventing unwanted session suspension.
+            try:
+                (_hermes_home / ".clean_shutdown").touch()
+            except Exception:
+                pass
+
             self._running = False
             self._draining = True
 
@@ -2085,15 +2095,6 @@ class GatewayRunner:
 
             from gateway.status import remove_pid_file
             remove_pid_file()
-
-            # Write a clean-shutdown marker so the next startup knows this
-            # wasn't a crash.  suspend_recently_active() only needs to run
-            # after unexpected exits — graceful shutdowns already drain
-            # active agents, so there's no stuck-session risk.
-            try:
-                (_hermes_home / ".clean_shutdown").touch()
-            except Exception:
-                pass
 
             if self._restart_requested and self._restart_via_service:
                 self._exit_code = GATEWAY_SERVICE_RESTART_EXIT_CODE
