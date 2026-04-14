@@ -14,7 +14,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
-from gateway.status import terminate_pid
+from gateway.status import terminate_pid, _pid_is_running
 from gateway.restart import (
     DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
     GATEWAY_SERVICE_RESTART_EXIT_CODE,
@@ -317,11 +317,9 @@ def stop_profile_gateway() -> bool:
     # Wait briefly for it to exit
     import time as _time
     for _ in range(20):
-        try:
-            os.kill(pid, 0)
-            _time.sleep(0.5)
-        except (ProcessLookupError, PermissionError):
+        if not _pid_is_running(pid):
             break
+        _time.sleep(0.5)
 
     remove_pid_file()
     return True

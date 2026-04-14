@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import List, Optional
 
+from gateway.status import _pid_is_running
+
 _PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 # Directories bootstrapped inside every new profile
@@ -309,10 +311,8 @@ def _check_gateway_running(profile_dir: Path) -> bool:
             return False
         data = json.loads(raw) if raw.startswith("{") else {"pid": int(raw)}
         pid = int(data["pid"])
-        os.kill(pid, 0)  # existence check
-        return True
-    except (json.JSONDecodeError, KeyError, ValueError, TypeError,
-            ProcessLookupError, PermissionError, OSError):
+        return _pid_is_running(pid)
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError, OSError):
         return False
 
 
@@ -662,9 +662,7 @@ def _stop_gateway_process(profile_dir: Path) -> None:
         # Wait up to 10s for graceful shutdown
         for _ in range(20):
             _time.sleep(0.5)
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
+            if not _pid_is_running(pid):
                 print(f"✓ Gateway stopped (PID {pid})")
                 return
         # Force kill

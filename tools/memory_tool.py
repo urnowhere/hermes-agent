@@ -23,10 +23,18 @@ Design:
 - Frozen snapshot pattern: system prompt is stable, tool responses show live state
 """
 
-import fcntl
 import json
 import logging
 import os
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
 import re
 import tempfile
 from contextlib import contextmanager
@@ -136,15 +144,33 @@ class MemoryStore:
 
         Uses a separate .lock file so the memory file itself can still be
         atomically replaced via os.replace().
+
+        Unix: ``fcntl.flock``. Windows: ``msvcrt.locking`` on the first byte
+        (``fcntl`` is not available on Windows).
         """
         lock_path = path.with_suffix(path.suffix + ".lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = open(lock_path, "w")
+        fd = open(lock_path, "a+b")
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            if fcntl:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            elif msvcrt:
+                fd.seek(0, os.SEEK_END)
+                if fd.tell() == 0:
+                    fd.write(b"\0")
+                    fd.flush()
+                fd.seek(0)
+                msvcrt.locking(fd.fileno(), msvcrt.LK_LOCK, 1)
             yield
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            try:
+                if fcntl:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                elif msvcrt:
+                    fd.seek(0)
+                    msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
             fd.close()
 
     @staticmethod

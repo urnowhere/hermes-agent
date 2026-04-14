@@ -1599,9 +1599,9 @@ class GatewayRunner:
                         error_code=None,
                         error_message=None,
                     )
-                    logger.info("✓ %s connected", platform.value)
+                    logger.info("[ok] %s connected", platform.value)
                 else:
-                    logger.warning("✗ %s failed to connect", platform.value)
+                    logger.warning("[fail] %s failed to connect", platform.value)
                     if adapter.has_fatal_error:
                         self._update_platform_runtime_status(
                             platform.value,
@@ -1641,7 +1641,7 @@ class GatewayRunner:
                             "next_retry": time.monotonic() + 30,
                         }
             except Exception as e:
-                logger.error("✗ %s error: %s", platform.value, e)
+                logger.error("[fail] %s error: %s", platform.value, e)
                 self._update_platform_runtime_status(
                     platform.value,
                     platform_state="retrying",
@@ -1935,7 +1935,7 @@ class GatewayRunner:
                             error_code=None,
                             error_message=None,
                         )
-                        logger.info("✓ %s reconnected successfully", platform.value)
+                        logger.info("[ok] %s reconnected successfully", platform.value)
 
                         # Rebuild channel directory with the new adapter
                         try:
@@ -2047,9 +2047,9 @@ class GatewayRunner:
                     logger.debug("✗ %s background-task cancel error: %s", platform.value, e)
                 try:
                     await adapter.disconnect()
-                    logger.info("✓ %s disconnected", platform.value)
+                    logger.info("[ok] %s disconnected", platform.value)
                 except Exception as e:
-                    logger.error("✗ %s disconnect error: %s", platform.value, e)
+                    logger.error("[fail] %s disconnect error: %s", platform.value, e)
 
             for _task in list(self._background_tasks):
                 if _task is self._stop_task:
@@ -8807,7 +8807,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # setups (each profile using a distinct HERMES_HOME) will naturally
     # allow concurrent instances without tripping this guard.
     import time as _time
-    from gateway.status import get_running_pid, remove_pid_file, terminate_pid
+    from gateway.status import get_running_pid, remove_pid_file, terminate_pid, _pid_is_running
     existing_pid = get_running_pid()
     if existing_pid is not None and existing_pid != os.getpid():
         if replace:
@@ -8827,11 +8827,9 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                 return False
             # Wait up to 10 seconds for the old process to exit
             for _ in range(20):
-                try:
-                    os.kill(existing_pid, 0)
-                    _time.sleep(0.5)
-                except (ProcessLookupError, PermissionError):
-                    break  # Process is gone
+                if not _pid_is_running(existing_pid):
+                    break
+                _time.sleep(0.5)
             else:
                 # Still alive after 10s — force kill
                 logger.warning(

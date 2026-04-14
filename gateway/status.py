@@ -29,6 +29,47 @@ _IS_WINDOWS = sys.platform == "win32"
 _UNSET = object()
 
 
+def _pid_is_running(pid: int) -> bool:
+    """Return True if a process *pid* appears to exist (best-effort).
+
+    Unix uses ``os.kill(pid, 0)``. Windows does not support signal 0 for
+    existence checks (``WinError 87``), so we use ``OpenProcess`` instead.
+    """
+    if pid <= 0:
+        return False
+    if _IS_WINDOWS:
+        return _pid_is_running_windows(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _pid_is_running_windows(pid: int) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32
+    OpenProcess = kernel32.OpenProcess
+    OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    OpenProcess.restype = wintypes.HANDLE
+    CloseHandle = kernel32.CloseHandle
+    CloseHandle.argtypes = (wintypes.HANDLE,)
+    CloseHandle.restype = wintypes.BOOL
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    ERROR_ACCESS_DENIED = 5
+
+    handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if handle:
+        CloseHandle(handle)
+        return True
+    return ctypes.get_last_error() == ERROR_ACCESS_DENIED
+
+
 def _get_pid_path() -> Path:
     """Return the path to the gateway PID file, respecting HERMES_HOME."""
     home = get_hermes_home()
@@ -311,9 +352,7 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
 
         stale = existing_pid is None
         if not stale:
-            try:
-                os.kill(existing_pid, 0)
-            except (ProcessLookupError, PermissionError):
+            if not _pid_is_running(existing_pid):
                 stale = True
             else:
                 current_start = _get_process_start_time(existing_pid)
@@ -324,7 +363,7 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
                 ):
                     stale = True
                 # Check if process is stopped (Ctrl+Z / SIGTSTP) — stopped
-                # processes still respond to os.kill(pid, 0) but are not
+                # processes still appear "alive" to _pid_is_running but are not
                 # actually running. Treat them as stale so --replace works.
                 if not stale:
                     try:
@@ -414,9 +453,7 @@ def get_running_pid() -> Optional[int]:
         remove_pid_file()
         return None
 
-    try:
-        os.kill(pid, 0)  # signal 0 = existence check, no actual signal sent
-    except (ProcessLookupError, PermissionError):
+    if not _pid_is_running(pid):
         remove_pid_file()
         return None
 
