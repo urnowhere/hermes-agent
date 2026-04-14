@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import List, NamedTuple, Optional
+from typing import Any, Callable, List, NamedTuple, Optional
 
 from hermes_cli.providers import (
     custom_provider_slug,
@@ -380,6 +380,200 @@ def get_authenticated_provider_slugs(
         return [p["slug"] for p in providers]
     except Exception:
         return []
+
+
+def create_model_picker_state(
+    providers: list[dict],
+    current_model: str,
+    current_provider: str,
+    *,
+    user_provs=None,
+    custom_provs=None,
+) -> dict[str, Any]:
+    """Create the canonical picker state shared by all frontends."""
+    default_idx = next((i for i, p in enumerate(providers) if p.get("is_current")), 0)
+    return {
+        "stage": "provider",
+        "providers": providers,
+        "selected": default_idx,
+        "current_model": current_model,
+        "current_provider": current_provider,
+        "user_provs": user_provs,
+        "custom_provs": custom_provs,
+    }
+
+
+def picker_provider_by_slug(providers: list[dict], provider_slug: str) -> Optional[dict]:
+    """Return the provider entry for a picker slug, if present."""
+    return next((p for p in providers if p.get("slug") == provider_slug), None)
+
+
+def picker_group_by_id(groups: list[dict], group_id: str) -> Optional[dict]:
+    """Return the group entry for a picker group id, if present."""
+    return next((g for g in groups if g.get("id") == group_id), None)
+
+
+def picker_transition_from_provider_selection(
+    provider_data: dict,
+    *,
+    current_model: str = "",
+    provider_model_loader: Optional[Callable[[dict], list[str]]] = None,
+) -> dict[str, Any]:
+    """Return picker-state updates after selecting a provider row."""
+    groups = provider_data.get("groups") or []
+    if provider_data.get("slug") == "openrouter" and not groups:
+        try:
+            from hermes_cli.models import openrouter_picker_group_entries
+
+            groups = openrouter_picker_group_entries()
+        except Exception:
+            groups = []
+    if provider_data.get("slug") == "openrouter" and groups:
+        current_vendor = current_model.split("/", 1)[0] if "/" in current_model else ""
+        return {
+            "stage": "openrouter_group",
+            "provider_data": provider_data,
+            "group_list": groups,
+            "group_data": None,
+            "selected": next(
+                (i for i, group in enumerate(groups) if group.get("id") == current_vendor),
+                0,
+            ),
+        }
+
+    model_list: list[str] = []
+    if provider_model_loader is not None:
+        try:
+            loaded = provider_model_loader(provider_data)
+            if loaded:
+                model_list = list(loaded)
+        except Exception:
+            model_list = []
+    if not model_list:
+        model_list = list(provider_data.get("models", []))
+
+    return {
+        "stage": "model",
+        "provider_data": provider_data,
+        "group_data": None,
+        "model_list": model_list,
+        "selected": 0,
+    }
+
+
+def picker_transition_from_group_selection(group_data: dict) -> dict[str, Any]:
+    """Return picker-state updates after selecting an OpenRouter group row."""
+    return {
+        "stage": "model",
+        "group_data": group_data,
+        "model_list": list(group_data.get("models") or []),
+        "selected": 0,
+    }
+
+
+def picker_current_entries(state: dict[str, Any]) -> list[Any]:
+    """Return the current selectable entries for the picker stage."""
+    stage = state.get("stage", "provider")
+    if stage == "provider":
+        return list(state.get("providers") or [])
+    if stage == "openrouter_group":
+        return list(state.get("group_list") or [])
+    return list(state.get("model_list") or [])
+
+
+def picker_select_index(
+    state: dict[str, Any],
+    index: int,
+    *,
+    provider_model_loader: Optional[Callable[[dict], list[str]]] = None,
+) -> Optional[str]:
+    """Apply a selection at the current stage. Returns final model id when chosen."""
+    entries = picker_current_entries(state)
+    if index < 0 or index >= len(entries):
+        return None
+
+    stage = state.get("stage", "provider")
+    if stage == "provider":
+        state.update(
+            picker_transition_from_provider_selection(
+                entries[index],
+                current_model=state.get("current_model") or "",
+                provider_model_loader=provider_model_loader,
+            )
+        )
+        return None
+    if stage == "openrouter_group":
+        state.update(picker_transition_from_group_selection(entries[index]))
+        return None
+    return entries[index]
+
+
+def picker_back(state: dict[str, Any]) -> bool:
+    """Move the picker back one stage. Returns False when already at root."""
+    stage = state.get("stage", "provider")
+    if stage == "openrouter_group":
+        provider_data = state.get("provider_data") or {}
+        state["stage"] = "provider"
+        state["selected"] = next(
+            (
+                i
+                for i, provider in enumerate(state.get("providers") or [])
+                if provider.get("slug") == provider_data.get("slug")
+            ),
+            0,
+        )
+        return True
+    if stage == "model":
+        group_data = state.get("group_data")
+        if group_data:
+            state["stage"] = "openrouter_group"
+            state["selected"] = next(
+                (
+                    i
+                    for i, group in enumerate(state.get("group_list") or [])
+                    if group.get("id") == group_data.get("id")
+                ),
+                0,
+            )
+            return True
+        provider_data = state.get("provider_data") or {}
+        state["stage"] = "provider"
+        state["selected"] = next(
+            (
+                i
+                for i, provider in enumerate(state.get("providers") or [])
+                if provider.get("slug") == provider_data.get("slug")
+            ),
+            0,
+        )
+        return True
+    return False
+
+
+def picker_view_metadata(state: dict[str, Any]) -> tuple[str, str]:
+    """Return ``(title, hint)`` for the current picker stage."""
+    stage = state.get("stage", "provider")
+    if stage == "provider":
+        return (
+            "⚙ Model Picker — Select Provider",
+            f"Current: {state.get('current_model', 'unknown')} on {state.get('current_provider', 'unknown')}",
+        )
+    if stage == "openrouter_group":
+        provider_data = state.get("provider_data") or {}
+        group_list = state.get("group_list") or []
+        return (
+            f"⚙ Model Picker — {provider_data.get('name', provider_data.get('slug', 'Provider'))}",
+            f"Select a vendor group ({len(group_list)} available)",
+        )
+
+    provider_data = state.get("provider_data") or {}
+    group_data = state.get("group_data") or {}
+    model_list = state.get("model_list") or []
+    title_suffix = provider_data.get("name", provider_data.get("slug", "Provider"))
+    if group_data:
+        title_suffix = f"{title_suffix} / {group_data.get('name', group_data.get('id', 'Group'))}"
+    hint = f"Select a model ({len(model_list)} available)" if model_list else "No models listed for this provider. Use Back or Cancel."
+    return (f"⚙ Model Picker — {title_suffix}", hint)
 
 
 def _resolve_alias_fallback(
@@ -761,9 +955,8 @@ def list_authenticated_providers(
 ) -> List[dict]:
     """Detect which providers have credentials and list their curated models.
 
-    Uses the curated model lists from hermes_cli/models.py (OPENROUTER_MODELS,
-    _PROVIDER_MODELS) — NOT the full models.dev catalog.  These are hand-picked
-    agentic models that work well as agent backends.
+    Uses the curated model lists from hermes_cli/models.py for direct providers
+    and the automated OpenRouter picker catalog for OpenRouter itself.
 
     Returns a list of dicts, each with:
       - slug: str — the --provider value to use
@@ -783,7 +976,7 @@ def list_authenticated_providers(
         get_provider_info as _mdev_pinfo,
     )
     from hermes_cli.auth import PROVIDER_REGISTRY
-    from hermes_cli.models import OPENROUTER_MODELS, _PROVIDER_MODELS
+    from hermes_cli.models import _PROVIDER_MODELS, openrouter_picker_model_ids
 
     results: List[dict] = []
     seen_slugs: set = set()
@@ -792,7 +985,7 @@ def list_authenticated_providers(
 
     # Build curated model lists keyed by hermes provider ID
     curated: dict[str, list[str]] = dict(_PROVIDER_MODELS)
-    curated["openrouter"] = [mid for mid, _ in OPENROUTER_MODELS]
+    curated["openrouter"] = openrouter_picker_model_ids()
     # "nous" shares OpenRouter's curated list if not separately defined
     if "nous" not in curated:
         curated["nous"] = curated["openrouter"]
@@ -828,7 +1021,7 @@ def list_authenticated_providers(
         pinfo = _mdev_pinfo(mdev_id)
         display_name = pinfo.name if pinfo else mdev_id
 
-        results.append({
+        provider_entry = {
             "slug": slug,
             "name": display_name,
             "is_current": slug == current_provider or mdev_id == current_provider,
@@ -836,7 +1029,8 @@ def list_authenticated_providers(
             "models": top,
             "total_models": total,
             "source": "built-in",
-        })
+        }
+        results.append(provider_entry)
         seen_slugs.add(slug)
 
     # --- 2. Check Hermes-only providers (nous, openai-codex, copilot, opencode-go) ---
@@ -1086,5 +1280,3 @@ def list_authenticated_providers(
     results.sort(key=lambda r: (not r["is_current"], -r["total_models"]))
 
     return results
-
-

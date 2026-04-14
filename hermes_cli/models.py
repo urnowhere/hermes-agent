@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import time
 import urllib.request
 import urllib.error
 from difflib import get_close_matches
@@ -20,42 +22,34 @@ COPILOT_EDITOR_VERSION = "vscode/1.104.1"
 COPILOT_REASONING_EFFORTS_GPT5 = ["minimal", "low", "medium", "high"]
 COPILOT_REASONING_EFFORTS_O_SERIES = ["low", "medium", "high"]
 
-
-# Fallback OpenRouter snapshot used when the live catalog is unavailable.
-# (model_id, display description shown in menus)
-OPENROUTER_MODELS: list[tuple[str, str]] = [
-    ("anthropic/claude-opus-4.6",       "recommended"),
-    ("anthropic/claude-sonnet-4.6",     ""),
-    ("qwen/qwen3.6-plus",               ""),
-    ("anthropic/claude-sonnet-4.5",     ""),
-    ("anthropic/claude-haiku-4.5",      ""),
-    ("openrouter/elephant-alpha",       "free"),
-    ("openai/gpt-5.4",                  ""),
-    ("openai/gpt-5.4-mini",             ""),
-    ("xiaomi/mimo-v2-pro",               ""),
-    ("openai/gpt-5.3-codex",            ""),
-    ("google/gemini-3-pro-image-preview", ""),
-    ("google/gemini-3-flash-preview",   ""),
-    ("google/gemini-3.1-pro-preview",     ""),
-    ("google/gemini-3.1-flash-lite-preview",   ""),
-    ("qwen/qwen3.5-plus-02-15",         ""),
-    ("qwen/qwen3.5-35b-a3b",            ""),
-    ("stepfun/step-3.5-flash",          ""),
-    ("minimax/minimax-m2.7",            ""),
-    ("minimax/minimax-m2.5",            ""),
-    ("z-ai/glm-5.1",                    ""),
-    ("z-ai/glm-5-turbo",                ""),
-    ("moonshotai/kimi-k2.5",            ""),
-    ("x-ai/grok-4.20",                  ""),
-    ("nvidia/nemotron-3-super-120b-a12b",      ""),
-    ("nvidia/nemotron-3-super-120b-a12b:free", "free"),
-    ("arcee-ai/trinity-large-preview:free", "free"),
-    ("arcee-ai/trinity-large-thinking",  ""),
-    ("openai/gpt-5.4-pro",              ""),
-    ("openai/gpt-5.4-nano",             ""),
-]
-
 _openrouter_catalog_cache: list[tuple[str, str]] | None = None
+_openrouter_catalog_cache_time: float = 0.0
+_OPENROUTER_CATALOG_CACHE_TTL = 24 * 60 * 60
+_OPENROUTER_PICKER_NOISE_PATTERNS: re.Pattern[str] = re.compile(
+    r"-tts\b|embedding|live-|-(preview|exp)-\d{2,4}[-_]|"
+    r"-image\b|-image-preview\b|-customtools\b",
+    re.IGNORECASE,
+)
+_OPENROUTER_EXCLUDED_PICKER_IDS: frozenset[str] = frozenset({
+    "openrouter/free",
+    "openrouter/auto",
+})
+_OPENROUTER_VENDOR_LABELS: dict[str, str] = {
+    "anthropic": "Anthropic",
+    "arcee-ai": "Arcee",
+    "deepseek": "DeepSeek",
+    "google": "Google",
+    "meta-llama": "Meta Llama",
+    "minimax": "MiniMax",
+    "moonshotai": "Moonshot",
+    "nvidia": "Nvidia",
+    "openai": "OpenAI",
+    "qwen": "Qwen",
+    "stepfun": "StepFun",
+    "x-ai": "X.AI",
+    "xiaomi": "Xiaomi",
+    "z-ai": "Z.AI",
+}
 
 
 def _codex_curated_models() -> list[str]:
@@ -614,19 +608,131 @@ def _openrouter_model_is_free(pricing: Any) -> bool:
         return False
 
 
+def _openrouter_live_item_is_agentic(item: dict[str, Any]) -> bool:
+    """Heuristic filter for OpenRouter models that are useful for Hermes."""
+    model_id = str(item.get("id") or "").strip()
+    if (
+        not model_id
+        or model_id in _OPENROUTER_EXCLUDED_PICKER_IDS
+        or _OPENROUTER_PICKER_NOISE_PATTERNS.search(model_id)
+    ):
+        return False
+
+    supported_parameters = {
+        str(param).strip().lower()
+        for param in (item.get("supported_parameters") or [])
+        if str(param).strip()
+    }
+    if "tools" not in supported_parameters and "tool_choice" not in supported_parameters:
+        return False
+
+    architecture = item.get("architecture")
+    if not isinstance(architecture, dict):
+        return False
+
+    input_modalities = {
+        str(modality).strip().lower()
+        for modality in (architecture.get("input_modalities") or [])
+        if str(modality).strip()
+    }
+    output_modalities = {
+        str(modality).strip().lower()
+        for modality in (architecture.get("output_modalities") or [])
+        if str(modality).strip()
+    }
+    return "text" in input_modalities and "text" in output_modalities
+
+
+def _openrouter_picker_sort_key(model_id: str) -> tuple[str, int, str]:
+    if "/" in model_id:
+        vendor, bare = model_id.split("/", 1)
+    else:
+        vendor, bare = "", model_id
+    return (vendor, 1 if bare.endswith(":free") else 0, bare)
+
+
+def _openrouter_catalog_cache_path():
+    from hermes_constants import get_hermes_home
+
+    return get_hermes_home() / "openrouter_models_cache.json"
+
+
+def _cache_is_fresh(cached_at: float) -> bool:
+    return cached_at > 0 and (time.time() - cached_at) < _OPENROUTER_CATALOG_CACHE_TTL
+
+
+def _set_openrouter_catalog_cache(models: list[tuple[str, str]], *, cached_at: float | None = None) -> None:
+    global _openrouter_catalog_cache, _openrouter_catalog_cache_time
+
+    _openrouter_catalog_cache = list(models)
+    _openrouter_catalog_cache_time = cached_at if cached_at is not None else time.time()
+
+
+def _load_openrouter_disk_cache() -> tuple[list[tuple[str, str]], float]:
+    try:
+        path = _openrouter_catalog_cache_path()
+        if not path.exists():
+            return ([], 0.0)
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+        if not isinstance(payload, dict):
+            return ([], 0.0)
+
+        cached_at = float(payload.get("fetched_at") or 0.0)
+        raw_models = payload.get("models")
+        if not isinstance(raw_models, list):
+            return ([], 0.0)
+
+        models: list[tuple[str, str]] = []
+        for item in raw_models:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                continue
+            model_id = str(item[0] or "").strip()
+            desc = str(item[1] or "").strip()
+            if model_id:
+                models.append((model_id, desc))
+        return (models, cached_at)
+    except Exception:
+        return ([], 0.0)
+
+
+def _save_openrouter_disk_cache(models: list[tuple[str, str]], *, cached_at: float) -> None:
+    try:
+        path = _openrouter_catalog_cache_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "fetched_at": cached_at,
+            "models": models,
+        }
+        tmp_path = path.with_name(f".{path.name}.tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=None, separators=(",", ":"))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        pass
+
+
 def fetch_openrouter_models(
     timeout: float = 8.0,
     *,
     force_refresh: bool = False,
 ) -> list[tuple[str, str]]:
-    """Return the curated OpenRouter picker list, refreshed from the live catalog when possible."""
-    global _openrouter_catalog_cache
+    """Return the canonical OpenRouter catalog as ``(model_id, desc)`` tuples."""
+    global _openrouter_catalog_cache, _openrouter_catalog_cache_time
 
-    if _openrouter_catalog_cache is not None and not force_refresh:
+    if (
+        _openrouter_catalog_cache is not None
+        and not force_refresh
+        and _cache_is_fresh(_openrouter_catalog_cache_time)
+    ):
         return list(_openrouter_catalog_cache)
 
-    fallback = list(OPENROUTER_MODELS)
-    preferred_ids = [mid for mid, _ in fallback]
+    disk_models, disk_cached_at = _load_openrouter_disk_cache()
+    if not force_refresh and disk_models and _cache_is_fresh(disk_cached_at):
+        _set_openrouter_catalog_cache(disk_models, cached_at=disk_cached_at)
+        return list(disk_models)
 
     try:
         req = urllib.request.Request(
@@ -636,41 +742,101 @@ def fetch_openrouter_models(
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode())
     except Exception:
-        return list(_openrouter_catalog_cache or fallback)
+        if disk_models:
+            _set_openrouter_catalog_cache(disk_models, cached_at=disk_cached_at)
+            return list(disk_models)
+        if _openrouter_catalog_cache is not None:
+            return list(_openrouter_catalog_cache)
+        return []
 
     live_items = payload.get("data", [])
     if not isinstance(live_items, list):
-        return list(_openrouter_catalog_cache or fallback)
+        if disk_models:
+            _set_openrouter_catalog_cache(disk_models, cached_at=disk_cached_at)
+            return list(disk_models)
+        if _openrouter_catalog_cache is not None:
+            return list(_openrouter_catalog_cache)
+        return []
 
-    live_by_id: dict[str, dict[str, Any]] = {}
+    discovered: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
     for item in live_items:
         if not isinstance(item, dict):
             continue
-        mid = str(item.get("id") or "").strip()
-        if not mid:
+        model_id = str(item.get("id") or "").strip()
+        if (
+            not model_id
+            or model_id in _OPENROUTER_EXCLUDED_PICKER_IDS
+            or model_id in seen
+        ):
             continue
-        live_by_id[mid] = item
+        if _openrouter_live_item_is_agentic(item):
+            discovered.append((
+                model_id,
+                "free" if _openrouter_model_is_free(item.get("pricing")) else "",
+            ))
+            seen.add(model_id)
 
-    curated: list[tuple[str, str]] = []
-    for preferred_id in preferred_ids:
-        live_item = live_by_id.get(preferred_id)
-        if live_item is None:
+    if not discovered:
+        if disk_models:
+            _set_openrouter_catalog_cache(disk_models, cached_at=disk_cached_at)
+            return list(disk_models)
+        if _openrouter_catalog_cache is not None:
+            return list(_openrouter_catalog_cache)
+        return []
+
+    discovered.sort(key=lambda item: _openrouter_picker_sort_key(item[0]))
+    cached_at = time.time()
+    _set_openrouter_catalog_cache(discovered, cached_at=cached_at)
+    _save_openrouter_disk_cache(discovered, cached_at=cached_at)
+    return list(discovered)
+
+
+def openrouter_picker_model_ids(*, force_refresh: bool = False) -> list[str]:
+    """Return the canonical automated OpenRouter picker catalog."""
+    return [mid for mid, _desc in fetch_openrouter_models(force_refresh=force_refresh)]
+
+
+def openrouter_vendor_label(vendor_slug: str) -> str:
+    """Return a human-friendly label for an OpenRouter vendor slug."""
+    label = _OPENROUTER_VENDOR_LABELS.get(vendor_slug)
+    if label:
+        return label
+    bits = [part for part in vendor_slug.replace("_", "-").split("-") if part]
+    return " ".join(part[:1].upper() + part[1:] for part in bits) or vendor_slug
+
+
+def openrouter_picker_groups(*, force_refresh: bool = False) -> list[tuple[str, tuple[str, ...]]]:
+    """Return OpenRouter picker groups as ``(vendor, models...)`` tuples."""
+    grouped: dict[str, list[str]] = {}
+    for model_id in openrouter_picker_model_ids(force_refresh=force_refresh):
+        if "/" not in model_id:
             continue
-        desc = "free" if _openrouter_model_is_free(live_item.get("pricing")) else ""
-        curated.append((preferred_id, desc))
+        vendor, _bare = model_id.split("/", 1)
+        grouped.setdefault(vendor, []).append(model_id)
+    return [
+        (vendor, tuple(models))
+        for vendor, models in sorted(grouped.items(), key=lambda item: item[0])
+    ]
 
-    if not curated:
-        return list(_openrouter_catalog_cache or fallback)
 
-    first_id, _ = curated[0]
-    curated[0] = (first_id, "recommended")
-    _openrouter_catalog_cache = curated
-    return list(curated)
+def openrouter_picker_group_entries(*, force_refresh: bool = False) -> list[dict[str, Any]]:
+    """Return OpenRouter picker groups with labels for UI presentation."""
+    return [
+        {
+            "id": vendor,
+            "name": openrouter_vendor_label(vendor),
+            "models": list(models),
+            "total_models": len(models),
+        }
+        for vendor, models in openrouter_picker_groups(force_refresh=force_refresh)
+    ]
 
 
 def model_ids(*, force_refresh: bool = False) -> list[str]:
-    """Return just the OpenRouter model-id strings."""
-    return [mid for mid, _ in fetch_openrouter_models(force_refresh=force_refresh)]
+    """Compatibility wrapper returning OpenRouter picker model IDs."""
+    return openrouter_picker_model_ids(force_refresh=force_refresh)
 
 
 
@@ -867,50 +1033,6 @@ _KNOWN_PROVIDER_NAMES: set[str] = (
 )
 
 
-def list_available_providers() -> list[dict[str, str]]:
-    """Return info about all providers the user could use with ``provider:model``.
-
-    Each dict has ``id``, ``label``, and ``aliases``.
-    Checks which providers have valid credentials configured.
-
-    Derives the provider list from :data:`CANONICAL_PROVIDERS` (single
-    source of truth shared with ``hermes model``, ``/model``, etc.).
-    """
-    # Derive display order from canonical list + custom
-    provider_order = [p.slug for p in CANONICAL_PROVIDERS] + ["custom"]
-
-    # Build reverse alias map
-    aliases_for: dict[str, list[str]] = {}
-    for alias, canonical in _PROVIDER_ALIASES.items():
-        aliases_for.setdefault(canonical, []).append(alias)
-
-    result = []
-    for pid in provider_order:
-        label = _PROVIDER_LABELS.get(pid, pid)
-        alias_list = aliases_for.get(pid, [])
-        # Check if this provider has credentials available
-        has_creds = False
-        try:
-            from hermes_cli.auth import get_auth_status, has_usable_secret
-            if pid == "custom":
-                custom_base_url = _get_custom_base_url() or ""
-                has_creds = bool(custom_base_url.strip())
-            elif pid == "openrouter":
-                has_creds = has_usable_secret(os.getenv("OPENROUTER_API_KEY", ""))
-            else:
-                status = get_auth_status(pid)
-                has_creds = bool(status.get("logged_in") or status.get("configured"))
-        except Exception:
-            pass
-        result.append({
-            "id": pid,
-            "label": label,
-            "aliases": alias_list,
-            "authenticated": has_creds,
-        })
-    return result
-
-
 def parse_model_input(raw: str, current_provider: str) -> tuple[str, str]:
     """Parse ``/model`` input into ``(provider, model)``.
 
@@ -958,31 +1080,6 @@ def _get_custom_base_url() -> str:
     except Exception:
         pass
     return ""
-
-
-def curated_models_for_provider(
-    provider: Optional[str],
-    *,
-    force_refresh: bool = False,
-) -> list[tuple[str, str]]:
-    """Return ``(model_id, description)`` tuples for a provider's model list.
-
-    Tries to fetch the live model list from the provider's API first,
-    falling back to the static ``_PROVIDER_MODELS`` catalog if the API
-    is unreachable.
-    """
-    normalized = normalize_provider(provider)
-    if normalized == "openrouter":
-        return fetch_openrouter_models(force_refresh=force_refresh)
-
-    # Try live API first (Codex, Nous, etc. all support /models)
-    live = provider_model_ids(normalized)
-    if live:
-        return [(m, "") for m in live]
-
-    # Fallback to static catalog
-    models = _PROVIDER_MODELS.get(normalized, [])
-    return [(m, "") for m in models]
 
 
 def detect_provider_for_model(

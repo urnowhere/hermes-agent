@@ -4480,16 +4480,15 @@ class HermesCLI:
     def _open_model_picker(self, providers: list, current_model: str, current_provider: str, user_provs=None, custom_provs=None) -> None:
         """Open prompt_toolkit-native /model picker modal."""
         self._capture_modal_input_snapshot()
-        default_idx = next((i for i, p in enumerate(providers) if p.get("is_current")), 0)
-        self._model_picker_state = {
-            "stage": "provider",
-            "providers": providers,
-            "selected": default_idx,
-            "current_model": current_model,
-            "current_provider": current_provider,
-            "user_provs": user_provs,
-            "custom_provs": custom_provs,
-        }
+        from hermes_cli.model_switch import create_model_picker_state
+
+        self._model_picker_state = create_model_picker_state(
+            providers,
+            current_model,
+            current_provider,
+            user_provs=user_provs,
+            custom_provs=custom_provs,
+        )
         self._invalidate(min_interval=0.0)
 
     def _close_model_picker(self) -> None:
@@ -4580,60 +4579,45 @@ class HermesCLI:
         if not state:
             return
         selected = state.get("selected", 0)
-        stage = state.get("stage")
-        if stage == "provider":
-            providers = state.get("providers") or []
-            if selected >= len(providers):
+        from hermes_cli.model_switch import picker_back, picker_current_entries, picker_select_index, switch_model
+        from hermes_cli.models import provider_model_ids
+
+        entries = picker_current_entries(state)
+        back_idx = len(entries)
+        cancel_idx = len(entries) + 1
+        if selected == back_idx:
+            if not picker_back(state):
                 self._close_model_picker()
-                return
-            provider_data = providers[selected]
-            model_list = []
-            try:
-                from hermes_cli.models import provider_model_ids
-                live = provider_model_ids(provider_data["slug"])
-                if live:
-                    model_list = live
-            except Exception:
-                pass
-            if not model_list:
-                model_list = provider_data.get("models", [])
-            state["stage"] = "model"
-            state["provider_data"] = provider_data
-            state["model_list"] = model_list
-            state["selected"] = 0
+            else:
+                self._invalidate(min_interval=0.0)
+            return
+        if selected >= cancel_idx:
+            self._close_model_picker()
+            return
+
+        chosen_model = picker_select_index(
+            state,
+            selected,
+            provider_model_loader=lambda provider: provider_model_ids(provider["slug"]),
+        )
+        if chosen_model is None:
             self._invalidate(min_interval=0.0)
             return
-        if stage == "model":
-            provider_data = state.get("provider_data") or {}
-            model_list = state.get("model_list") or []
-            back_idx = len(model_list)
-            cancel_idx = len(model_list) + 1
-            if selected == back_idx:
-                state["stage"] = "provider"
-                state["selected"] = next((i for i, p in enumerate(state.get("providers") or []) if p.get("slug") == provider_data.get("slug")), 0)
-                self._invalidate(min_interval=0.0)
-                return
-            if selected >= cancel_idx:
-                self._close_model_picker()
-                return
-            if selected < len(model_list):
-                from hermes_cli.model_switch import switch_model
-                chosen_model = model_list[selected]
-                result = switch_model(
-                    raw_input=chosen_model,
-                    current_provider=self.provider or "",
-                    current_model=self.model or "",
-                    current_base_url=self.base_url or "",
-                    current_api_key=self.api_key or "",
-                    is_global=persist_global,
-                    explicit_provider=provider_data.get("slug"),
-                    user_providers=state.get("user_provs"),
-                    custom_providers=state.get("custom_provs"),
-                )
-                self._close_model_picker()
-                self._apply_model_switch_result(result, persist_global)
-                return
-            self._close_model_picker()
+
+        provider_data = state.get("provider_data") or {}
+        result = switch_model(
+            raw_input=chosen_model,
+            current_provider=self.provider or "",
+            current_model=self.model or "",
+            current_base_url=self.base_url or "",
+            current_api_key=self.api_key or "",
+            is_global=persist_global,
+            explicit_provider=provider_data.get("slug"),
+            user_providers=state.get("user_provs"),
+            custom_providers=state.get("custom_provs"),
+        )
+        self._close_model_picker()
+        self._apply_model_switch_result(result, persist_global)
 
     def _handle_model_switch(self, cmd_original: str):
         """Handle /model command — switch model for this session.
@@ -4817,19 +4801,10 @@ class HermesCLI:
             return False
 
     def _show_model_and_providers(self):
-        """Show current model + provider and list all authenticated providers.
-
-        Shows current model + provider, then lists all authenticated
-        providers with their available models.
-        """
-        from hermes_cli.models import (
-            curated_models_for_provider, list_available_providers,
-            normalize_provider, _PROVIDER_LABELS,
-            get_pricing_for_provider, format_model_pricing_table,
-        )
+        """Show the current provider and point users at `/model` for switching."""
+        from hermes_cli.models import normalize_provider, _PROVIDER_LABELS
         from hermes_cli.auth import resolve_provider as _resolve_provider
 
-        # Resolve current provider
         raw_provider = normalize_provider(self.provider)
         if raw_provider == "auto":
             try:
@@ -4846,51 +4821,9 @@ class HermesCLI:
 
         print(f"\n  Current: {self.model} via {current_label}")
         print()
-
-        # Show all authenticated providers with their models
-        providers = list_available_providers()
-        authed = [p for p in providers if p["authenticated"]]
-        unauthed = [p for p in providers if not p["authenticated"]]
-
-        if authed:
-            print("  Authenticated providers & models:")
-            for p in authed:
-                is_active = p["id"] == current
-                marker = " ← active" if is_active else ""
-                print(f"    [{p['id']}]{marker}")
-                curated = curated_models_for_provider(p["id"])
-                # Fetch pricing for providers that support it (openrouter, nous)
-                pricing_map = get_pricing_for_provider(p["id"]) if p["id"] in ("openrouter", "nous") else {}
-                if curated and pricing_map:
-                    cur_model = self.model if is_active else ""
-                    for line in format_model_pricing_table(curated, pricing_map, current_model=cur_model):
-                        print(line)
-                elif curated:
-                    for mid, desc in curated:
-                        current_marker = " ← current" if (is_active and mid == self.model) else ""
-                        print(f"      {mid}{current_marker}")
-                elif p["id"] == "custom":
-                    from hermes_cli.models import _get_custom_base_url
-                    custom_url = _get_custom_base_url()
-                    if custom_url:
-                        print(f"      endpoint: {custom_url}")
-                    if is_active:
-                        print(f"      model: {self.model} ← current")
-                    print("      (use hermes model to change)")
-                else:
-                    print("      (use hermes model to change)")
-                print()
-
-        if unauthed:
-            names = ", ".join(p["label"] for p in unauthed)
-            print(f"  Not configured: {names}")
-            print("  Run: hermes setup")
-            print()
-
-        print("  To change model or provider, use: hermes model")
-
-
-    
+        print("  Use `/model` to browse and switch models.")
+        print("  Use `/model <name> --provider <slug>` to switch directly.")
+        print("  Run `hermes setup` to configure more providers.")
 
     @staticmethod
     def _resolve_personality_prompt(value) -> str:
@@ -8508,10 +8441,9 @@ class HermesCLI:
             state = self._model_picker_state
             if not state:
                 return
-            if state.get("stage") == "provider":
-                max_idx = len(state.get("providers") or [])
-            else:
-                max_idx = len(state.get("model_list") or []) + 1
+            from hermes_cli.model_switch import picker_current_entries
+
+            max_idx = len(picker_current_entries(state)) + 1
             state["selected"] = min(max_idx, state.get("selected", 0) + 1)
             event.app.invalidate()
 
@@ -9218,27 +9150,32 @@ class HermesCLI:
             state = cli_ref._model_picker_state
             if not state:
                 return []
+            from hermes_cli.model_switch import picker_current_entries, picker_view_metadata
+
             stage = state.get("stage", "provider")
+            title, hint = picker_view_metadata(state)
+            entries = picker_current_entries(state)
             if stage == "provider":
-                title = "⚙ Model Picker — Select Provider"
                 choices = []
-                for p in state.get("providers") or []:
+                for p in entries:
                     count = p.get("total_models", len(p.get("models", [])))
                     label = f"{p['name']} ({count} model{'s' if count != 1 else ''})"
                     if p.get("is_current"):
                         label += "  ← current"
                     choices.append(label)
-                choices.append("Cancel")
-                hint = f"Current: {state.get('current_model', 'unknown')} on {state.get('current_provider', 'unknown')}"
+            elif stage == "openrouter_group":
+                current_model = state.get("current_model") or ""
+                current_vendor = current_model.split("/", 1)[0] if "/" in current_model else ""
+                choices = []
+                for group in entries:
+                    count = group.get("total_models", len(group.get("models", [])))
+                    label = f"{group['name']} ({count} model{'s' if count != 1 else ''})"
+                    if group.get("id") == current_vendor:
+                        label += "  ← current"
+                    choices.append(label)
             else:
-                provider_data = state.get("provider_data") or {}
-                model_list = state.get("model_list") or []
-                title = f"⚙ Model Picker — {provider_data.get('name', provider_data.get('slug', 'Provider'))}"
-                choices = list(model_list) + ["← Back", "Cancel"]
-                if model_list:
-                    hint = f"Select a model ({len(model_list)} available)"
-                else:
-                    hint = "No models listed for this provider. Use Back or Cancel."
+                choices = list(entries)
+            choices += ["← Back", "Cancel"]
 
             box_width = _panel_box_width(title, [hint] + choices, min_width=46, max_width=84)
             inner_text_width = max(8, box_width - 6)

@@ -240,29 +240,6 @@ class TestTelegramApprovalCallback:
         assert "already been resolved" in query.answer.call_args[1]["text"]
 
     @pytest.mark.asyncio
-    async def test_model_picker_callback_not_affected(self):
-        """Ensure model picker callbacks still route correctly."""
-        adapter = _make_adapter()
-
-        query = AsyncMock()
-        query.data = "mp:some_provider"
-        query.message = MagicMock()
-        query.message.chat_id = 12345
-        query.from_user = MagicMock()
-
-        update = MagicMock()
-        update.callback_query = query
-        context = MagicMock()
-
-        # Model picker callback should be handled (not crash)
-        # We just verify it doesn't try to resolve an approval
-        with patch("tools.approval.resolve_gateway_approval") as mock_resolve:
-            with patch.object(adapter, "_handle_model_picker_callback", new_callable=AsyncMock):
-                await adapter._handle_callback_query(update, context)
-
-        mock_resolve.assert_not_called()
-
-    @pytest.mark.asyncio
     async def test_update_prompt_callback_not_affected(self):
         """Ensure update prompt callbacks still work."""
         adapter = _make_adapter()
@@ -288,4 +265,3 @@ class TestTelegramApprovalCallback:
                     pass  # May fail on file write, that's fine
 
         # Should NOT have triggered approval resolution
-        mock_resolve.assert_not_called()

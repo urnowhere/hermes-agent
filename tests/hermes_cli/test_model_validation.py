@@ -5,7 +5,6 @@ from unittest.mock import patch
 from hermes_cli.models import (
     copilot_model_api_mode,
     fetch_github_model_catalog,
-    curated_models_for_provider,
     fetch_api_models,
     github_model_reasoning_efforts,
     normalize_copilot_model_id,
@@ -118,30 +117,6 @@ class TestParseModelInput:
         # Empty model after second colon → no triple match, falls through
         assert provider == "custom"
         assert model == "name:"
-
-
-# -- curated_models_for_provider ---------------------------------------------
-
-class TestCuratedModelsForProvider:
-    def test_openrouter_returns_curated_list(self):
-        with patch(
-            "hermes_cli.models.fetch_openrouter_models",
-            return_value=[
-                ("anthropic/claude-opus-4.6", "recommended"),
-                ("qwen/qwen3.6-plus", ""),
-            ],
-        ):
-            models = curated_models_for_provider("openrouter")
-        assert len(models) > 0
-        assert any("claude" in m[0] for m in models)
-
-    def test_zai_returns_glm_models(self):
-        models = curated_models_for_provider("zai")
-        assert any("glm" in m[0] for m in models)
-
-    def test_unknown_provider_returns_empty(self):
-        assert curated_models_for_provider("totally-unknown") == []
-
 
 # -- normalize_provider ------------------------------------------------------
 

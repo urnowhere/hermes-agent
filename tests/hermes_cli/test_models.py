@@ -1,9 +1,10 @@
 """Tests for the hermes_cli models module."""
 
-from unittest.mock import patch, MagicMock
+import json
+from unittest.mock import patch
 
 from hermes_cli.models import (
-    OPENROUTER_MODELS, fetch_openrouter_models, model_ids, detect_provider_for_model,
+    fetch_openrouter_models, model_ids, detect_provider_for_model, openrouter_picker_groups, openrouter_picker_model_ids,
     filter_nous_free_models, _NOUS_ALLOWED_FREE_MODELS,
     is_nous_free_tier, partition_nous_models_by_tier,
     check_nous_free_tier, _FREE_TIER_CACHE_TTL,
@@ -11,7 +12,7 @@ from hermes_cli.models import (
 import hermes_cli.models as _models_mod
 
 LIVE_OPENROUTER_MODELS = [
-    ("anthropic/claude-opus-4.6", "recommended"),
+    ("anthropic/claude-opus-4.6", ""),
     ("qwen/qwen3.6-plus", ""),
     ("nvidia/nemotron-3-super-120b-a12b:free", "free"),
 ]
@@ -43,23 +44,17 @@ class TestModelIds:
         assert len(ids) == len(set(ids)), "Duplicate model IDs found"
 
 
-
-
-
-class TestOpenRouterModels:
-    def test_structure_is_list_of_tuples(self):
-        for entry in OPENROUTER_MODELS:
-            assert isinstance(entry, tuple) and len(entry) == 2
-            mid, desc = entry
-            assert isinstance(mid, str) and len(mid) > 0
-            assert isinstance(desc, str)
-
-    def test_at_least_5_models(self):
-        """Sanity check that the models list hasn't been accidentally truncated."""
-        assert len(OPENROUTER_MODELS) >= 5
-
-
 class TestFetchOpenRouterModels:
+    def _write_disk_cache(self, tmp_path, models, fetched_at):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        cache_path = hermes_home / "openrouter_models_cache.json"
+        cache_path.write_text(
+            json.dumps({"fetched_at": fetched_at, "models": models}),
+            encoding="utf-8",
+        )
+        return hermes_home, cache_path
+
     def test_live_fetch_recomputes_free_tags(self, monkeypatch):
         class _Resp:
             def __enter__(self):
@@ -69,24 +64,132 @@ class TestFetchOpenRouterModels:
                 return False
 
             def read(self):
-                return b'{"data":[{"id":"anthropic/claude-opus-4.6","pricing":{"prompt":"0.000015","completion":"0.000075"}},{"id":"qwen/qwen3.6-plus","pricing":{"prompt":"0.000000325","completion":"0.00000195"}},{"id":"nvidia/nemotron-3-super-120b-a12b:free","pricing":{"prompt":"0","completion":"0"}}]}'
+                return b'{"data":[{"id":"anthropic/claude-opus-4.6","pricing":{"prompt":"0.000015","completion":"0.000075"},"supported_parameters":["tools","tool_choice"],"architecture":{"input_modalities":["text","image"],"output_modalities":["text"]}},{"id":"qwen/qwen3.6-plus","pricing":{"prompt":"0.000000325","completion":"0.00000195"},"supported_parameters":["tools","tool_choice"],"architecture":{"input_modalities":["text"],"output_modalities":["text"]}},{"id":"nvidia/nemotron-3-super-120b-a12b:free","pricing":{"prompt":"0","completion":"0"},"supported_parameters":["tools","tool_choice"],"architecture":{"input_modalities":["text"],"output_modalities":["text"]}}]}'
 
         monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache", None)
         with patch("hermes_cli.models.urllib.request.urlopen", return_value=_Resp()):
             models = fetch_openrouter_models(force_refresh=True)
 
         assert models == [
-            ("anthropic/claude-opus-4.6", "recommended"),
-            ("qwen/qwen3.6-plus", ""),
+            ("anthropic/claude-opus-4.6", ""),
             ("nvidia/nemotron-3-super-120b-a12b:free", "free"),
+            ("qwen/qwen3.6-plus", ""),
         ]
 
-    def test_falls_back_to_static_snapshot_on_fetch_failure(self, monkeypatch):
+    def test_uses_fresh_disk_cache_without_hitting_api(self, monkeypatch, tmp_path):
         monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache", None)
+        monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache_time", 0.0)
+        monkeypatch.setattr("hermes_cli.models.time.time", lambda: 2_000_000.0)
+        hermes_home, _cache_path = self._write_disk_cache(
+            tmp_path,
+            [["openai/gpt-5.4", ""], ["anthropic/claude-opus-4.6", ""]],
+            2_000_000.0 - 60,
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        with patch("hermes_cli.models.urllib.request.urlopen") as mock_urlopen:
+            models = fetch_openrouter_models()
+
+        assert models == [
+            ("openai/gpt-5.4", ""),
+            ("anthropic/claude-opus-4.6", ""),
+        ]
+        mock_urlopen.assert_not_called()
+
+    def test_falls_back_to_stale_disk_cache_when_live_fetch_fails(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache", None)
+        monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache_time", 0.0)
+        monkeypatch.setattr("hermes_cli.models.time.time", lambda: 2_000_000.0)
+        hermes_home, _cache_path = self._write_disk_cache(
+            tmp_path,
+            [["openai/gpt-5.4", ""], ["anthropic/claude-opus-4.6", ""]],
+            2_000_000.0 - (_models_mod._OPENROUTER_CATALOG_CACHE_TTL + 10),
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
         with patch("hermes_cli.models.urllib.request.urlopen", side_effect=OSError("boom")):
             models = fetch_openrouter_models(force_refresh=True)
 
-        assert models == OPENROUTER_MODELS
+        assert models == [
+            ("openai/gpt-5.4", ""),
+            ("anthropic/claude-opus-4.6", ""),
+        ]
+
+    def test_refreshes_stale_disk_cache_from_api(self, monkeypatch, tmp_path):
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"data":[{"id":"qwen/qwen3.6-plus","pricing":{"prompt":"0.000000325","completion":"0.00000195"},"supported_parameters":["tools","tool_choice"],"architecture":{"input_modalities":["text"],"output_modalities":["text"]}}]}'
+
+        monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache", None)
+        monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache_time", 0.0)
+        monkeypatch.setattr("hermes_cli.models.time.time", lambda: 2_000_000.0)
+        hermes_home, cache_path = self._write_disk_cache(
+            tmp_path,
+            [["openai/gpt-5.4", ""]],
+            2_000_000.0 - (_models_mod._OPENROUTER_CATALOG_CACHE_TTL + 10),
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        with patch("hermes_cli.models.urllib.request.urlopen", return_value=_Resp()):
+            models = fetch_openrouter_models(force_refresh=True)
+
+        assert models == [("qwen/qwen3.6-plus", "")]
+        disk_payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        assert disk_payload["models"] == [["qwen/qwen3.6-plus", ""]]
+        assert disk_payload["fetched_at"] == 2_000_000.0
+
+    def test_returns_empty_when_payload_is_not_a_model_list_and_no_cache_exists(self, monkeypatch, tmp_path):
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"data":{"not":"a-list"}}'
+
+        monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache", None)
+        monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache_time", 0.0)
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        with patch("hermes_cli.models.urllib.request.urlopen", return_value=_Resp()):
+            models = fetch_openrouter_models(force_refresh=True)
+
+        assert models == []
+
+
+class TestOpenRouterPickerModelIds:
+    def test_uses_dynamic_catalog(self):
+        with patch("hermes_cli.models.fetch_openrouter_models", return_value=LIVE_OPENROUTER_MODELS):
+            ids = openrouter_picker_model_ids()
+
+        assert ids == [mid for mid, _ in LIVE_OPENROUTER_MODELS]
+
+
+class TestOpenRouterPickerGroups:
+    def test_groups_models_by_vendor(self):
+        with patch(
+            "hermes_cli.models.openrouter_picker_model_ids",
+            return_value=[
+                "anthropic/claude-opus-4.6",
+                "anthropic/claude-sonnet-4.6",
+                "openai/gpt-5.4",
+            ],
+        ):
+            groups = openrouter_picker_groups()
+
+        assert groups == [
+            ("anthropic", ("anthropic/claude-opus-4.6", "anthropic/claude-sonnet-4.6")),
+            ("openai", ("openai/gpt-5.4",)),
+        ]
 
 
 class TestFindOpenrouterSlug:
