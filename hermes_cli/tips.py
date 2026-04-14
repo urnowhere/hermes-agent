@@ -244,7 +244,7 @@ TIPS = [
     # --- Plugins ---
     "Three plugin types: general (tools/hooks), memory providers, and context engines.",
     "hermes plugins install owner/repo installs plugins directly from GitHub.",
-    "8 external memory providers available: Honcho, OpenViking, Mem0, Hindsight, and more.",
+    "9 external memory providers available: Honcho, OpenViking, Mem0, Hindsight, LanceDB, and more.",
     "Plugin hooks include pre_tool_call, post_tool_call, pre_llm_call, and post_llm_call.",
 
     # --- Miscellaneous ---
@@ -344,6 +344,5 @@ def get_random_tip(exclude_recent: int = 0) -> str:
             deduplication across sessions.
     """
     return random.choice(TIPS)
-
 
 

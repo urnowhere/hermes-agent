@@ -1,12 +1,12 @@
 ---
 sidebar_position: 4
 title: "Memory Providers"
-description: "External memory provider plugins — Honcho, OpenViking, Mem0, Hindsight, Holographic, RetainDB, ByteRover, Supermemory"
+description: "External memory provider plugins — Honcho, OpenViking, Mem0, Hindsight, Holographic, LanceDB, RetainDB, ByteRover, Supermemory"
 ---
 
 # Memory Providers
 
-Hermes Agent ships with 8 external memory provider plugins that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md. Only **one** external provider can be active at a time — the built-in memory is always active alongside it.
+Hermes Agent ships with 9 external memory provider plugins that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md. Only **one** external provider can be active at a time — the built-in memory is always active alongside it.
 
 ## Quick Start
 
@@ -22,7 +22,7 @@ Or set manually in `~/.hermes/config.yaml`:
 
 ```yaml
 memory:
-  provider: openviking   # or honcho, mem0, hindsight, holographic, retaindb, byterover, supermemory
+  provider: openviking   # or honcho, mem0, hindsight, holographic, lancedb, retaindb, byterover, supermemory
 ```
 
 ## How It Works
@@ -342,6 +342,45 @@ hermes config set memory.provider holographic
 
 ---
 
+### LanceDB
+
+Local-first semantic memory using LanceDB as the vector store with a small SQLite metadata index for dedupe, profile listing, and scoped forgetting.
+
+| | |
+|---|---|
+| **Best for** | Local semantic memory with explicit durable facts plus lighter episodic capture |
+| **Requires** | `pip install lancedb` + `OPENAI_API_KEY` (default) or `pip install sentence-transformers` for local embeddings |
+| **Data storage** | Local LanceDB directory under `$HERMES_HOME` |
+| **Cost** | Free (local) |
+
+**Tools:** `lancedb_search` (semantic search), `lancedb_store` (store durable memory), `lancedb_forget` (delete by id or query), `lancedb_profile` (durable profile view)
+
+**Setup:**
+```bash
+hermes memory setup    # select "lancedb"
+# Or manually:
+hermes config set memory.provider lancedb
+```
+
+**Config:** `$HERMES_HOME/lancedb.json`
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `db_path` | `$HERMES_HOME/lancedb` | Local LanceDB directory |
+| `table_name` | `memories` | LanceDB table name |
+| `embedding_backend` | `openai` | `openai` or `sentence-transformers` |
+| `embedding_model` | `text-embedding-3-small` | Embedding model name |
+| `memory_mode` | `hybrid` | `hybrid`, `context`, or `tools` |
+| `auto_recall` | `true` | Automatically inject relevant memories before turns |
+| `auto_capture` | `true` | Store user-assistant turns as episodic memories |
+
+**Storage model:**
+- `profile` — stable user identity and preferences
+- `memory` — durable facts, project decisions, constraints
+- `episode` — lower-priority conversation snippets
+
+---
+
 ### RetainDB
 
 Cloud memory API with hybrid search (Vector + BM25 + Reranking), 7 memory types, and delta compression.
@@ -467,6 +506,7 @@ echo 'SUPERMEMORY_API_KEY=***' >> ~/.hermes/.env
 | **Mem0** | Cloud | Paid | 3 | `mem0ai` | Server-side LLM extraction |
 | **Hindsight** | Cloud/Local | Free/Paid | 3 | `hindsight-client` | Knowledge graph + reflect synthesis |
 | **Holographic** | Local | Free | 2 | None | HRR algebra + trust scoring |
+| **LanceDB** | Local | Free | 4 | `lancedb` | Local semantic memory with remote or local embeddings |
 | **RetainDB** | Cloud | $20/mo | 5 | `requests` | Delta compression |
 | **ByteRover** | Local/Cloud | Free/Paid | 3 | `brv` CLI | Pre-compression extraction |
 | **Supermemory** | Cloud | Paid | 4 | `supermemory` | Context fencing + session graph ingest + multi-container |
@@ -475,7 +515,7 @@ echo 'SUPERMEMORY_API_KEY=***' >> ~/.hermes/.env
 
 Each provider's data is isolated per [profile](/docs/user-guide/profiles):
 
-- **Local storage providers** (Holographic, ByteRover) use `$HERMES_HOME/` paths which differ per profile
+- **Local storage providers** (Holographic, LanceDB, ByteRover) use `$HERMES_HOME/` paths which differ per profile
 - **Config file providers** (Honcho, Mem0, Hindsight, Supermemory) store config in `$HERMES_HOME/` so each profile has its own credentials
 - **Cloud providers** (RetainDB) auto-derive profile-scoped project names
 - **Env var providers** (OpenViking) are configured via each profile's `.env` file
