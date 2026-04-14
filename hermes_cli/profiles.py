@@ -197,23 +197,19 @@ def check_alias_collision(name: str) -> Optional[str]:
 
     # Check existing commands in PATH
     wrapper_dir = _get_wrapper_dir()
-    try:
-        result = subprocess.run(
-            ["which", name], capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0:
-            existing_path = result.stdout.strip()
-            # Allow overwriting our own wrappers
-            if existing_path == str(wrapper_dir / name):
-                try:
-                    content = (wrapper_dir / name).read_text()
-                    if "hermes -p" in content:
-                        return None  # it's our wrapper, safe to overwrite
-                except Exception:
-                    pass
-            return f"'{name}' conflicts with an existing command ({existing_path})"
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+    wrapper_name = f"{name}.cmd" if os.name == "nt" else name
+    wrapper_path = wrapper_dir / wrapper_name
+    existing_path = shutil.which(name)
+    if existing_path:
+        # Allow overwriting our own wrappers
+        if Path(existing_path).resolve() == wrapper_path.resolve():
+            try:
+                content = wrapper_path.read_text()
+                if "hermes -p" in content:
+                    return None  # it's our wrapper, safe to overwrite
+            except Exception:
+                pass
+        return f"'{name}' conflicts with an existing command ({existing_path})"
 
     return None  # safe
 
@@ -224,7 +220,7 @@ def _is_wrapper_dir_in_path() -> bool:
     return wrapper_dir in os.environ.get("PATH", "").split(os.pathsep)
 
 
-def create_wrapper_script(name: str) -> Optional[Path]:
+def create_wrapper_script(name: str, profile_name: Optional[str] = None) -> Optional[Path]:
     """Create a shell wrapper script at ~/.local/bin/<name>.
 
     Returns the path to the created wrapper, or None if creation failed.
@@ -236,10 +232,15 @@ def create_wrapper_script(name: str) -> Optional[Path]:
         print(f"⚠ Could not create {wrapper_dir}: {e}")
         return None
 
-    wrapper_path = wrapper_dir / name
+    wrapper_name = f"{name}.cmd" if os.name == "nt" else name
+    wrapper_path = wrapper_dir / wrapper_name
+    target_profile = profile_name or name
     try:
-        wrapper_path.write_text(f'#!/bin/sh\nexec hermes -p {name} "$@"\n')
-        wrapper_path.chmod(wrapper_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        if os.name == "nt":
+            wrapper_path.write_text(f'@echo off\nhermes -p {target_profile} %*\n')
+        else:
+            wrapper_path.write_text(f'#!/bin/sh\nexec hermes -p {target_profile} "$@"\n')
+            wrapper_path.chmod(wrapper_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
         return wrapper_path
     except OSError as e:
         print(f"⚠ Could not create wrapper at {wrapper_path}: {e}")
@@ -248,7 +249,8 @@ def create_wrapper_script(name: str) -> Optional[Path]:
 
 def remove_wrapper_script(name: str) -> bool:
     """Remove the wrapper script for a profile. Returns True if removed."""
-    wrapper_path = _get_wrapper_dir() / name
+    wrapper_name = f"{name}.cmd" if os.name == "nt" else name
+    wrapper_path = _get_wrapper_dir() / wrapper_name
     if wrapper_path.exists():
         try:
             # Verify it's our wrapper before removing
@@ -362,7 +364,8 @@ def list_profiles() -> List[ProfileInfo]:
             if not _PROFILE_ID_RE.match(name):
                 continue
             model, provider = _read_config_model(entry)
-            alias_path = wrapper_dir / name
+            wrapper_name = f"{name}.cmd" if os.name == "nt" else name
+            alias_path = wrapper_dir / wrapper_name
             profiles.append(ProfileInfo(
                 name=name,
                 path=entry,
@@ -542,7 +545,8 @@ def delete_profile(name: str, yes: bool = False) -> Path:
     ]
 
     # Check for service
-    wrapper_path = _get_wrapper_dir() / name
+    wrapper_name = f"{name}.cmd" if os.name == "nt" else name
+    wrapper_path = _get_wrapper_dir() / wrapper_name
     has_wrapper = wrapper_path.exists()
     if has_wrapper:
         items.append(f"Command alias ({wrapper_path})")

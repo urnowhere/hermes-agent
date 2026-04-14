@@ -966,7 +966,8 @@ def run_doctor(args):
                     parts.append("⚠ missing config")
                 if not (p.path / ".env").exists():
                     parts.append("no .env")
-                wrapper = wrapper_dir / p.name
+                wrapper_name = f"{p.name}.cmd" if os.name == "nt" else p.name
+                wrapper = wrapper_dir / wrapper_name
                 if not wrapper.exists():
                     parts.append("no alias")
                 status = ", ".join(parts) if parts else "configured"

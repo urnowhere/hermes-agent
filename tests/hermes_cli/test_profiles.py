@@ -8,6 +8,7 @@ and shell completion generation.
 import json
 import io
 import os
+import shutil
 import tarfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -52,6 +53,11 @@ def profile_env(tmp_path, monkeypatch):
     default_home.mkdir(exist_ok=True)
     monkeypatch.setenv("HERMES_HOME", str(default_home))
     return tmp_path
+
+
+def _expected_wrapper_path(base: Path, name: str) -> Path:
+    suffix = ".cmd" if os.name == "nt" else ""
+    return base / f"{name}{suffix}"
 
 
 # ===================================================================
@@ -341,9 +347,7 @@ class TestAliasCollision:
     """Tests for check_alias_collision()."""
 
     def test_normal_name_returns_none(self, profile_env):
-        # Mock 'which' to return not-found
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=1, stdout="")
+        with patch("hermes_cli.profiles.shutil.which", return_value=None):
             result = check_alias_collision("mybot")
         assert result is None
 
@@ -361,6 +365,24 @@ class TestAliasCollision:
         result = check_alias_collision("default")
         assert result is not None
         assert "reserved" in result.lower()
+
+
+class TestWrapperScripts:
+    def test_wrapper_is_resolvable_from_path(self, profile_env, monkeypatch):
+        from hermes_cli.profiles import create_wrapper_script
+
+        wrapper = create_wrapper_script("mybot")
+        original_path = os.environ.get("PATH", "")
+        monkeypatch.setenv("PATH", f"{wrapper.parent}{os.pathsep}{original_path}")
+
+        assert wrapper == _expected_wrapper_path(wrapper.parent, "mybot")
+        assert shutil.which("mybot") == str(wrapper)
+
+        content = wrapper.read_text()
+        if os.name == "nt":
+            assert content == "@echo off\nhermes -p mybot %*\n"
+        else:
+            assert content == '#!/bin/sh\nexec hermes -p mybot "$@"\n'
 
 
 # ===================================================================

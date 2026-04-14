@@ -39,6 +39,7 @@ def _make_hermes_tree(root: Path) -> None:
     (root / "cron").mkdir(exist_ok=True)
     (root / "cron" / "jobs.json").write_text("[]")
 
+
     # Memories
     (root / "memories").mkdir(exist_ok=True)
     (root / "memories" / "notes.json").write_text("{}")
@@ -66,6 +67,11 @@ def _make_hermes_tree(root: Path) -> None:
     # Logs (should be included)
     (root / "logs").mkdir(exist_ok=True)
     (root / "logs" / "agent.log").write_text("log line\n")
+
+
+def _expected_wrapper_path(base: Path, name: str) -> Path:
+    suffix = ".cmd" if os.name == "nt" else ""
+    return base / f"{name}{suffix}"
 
 
 # ---------------------------------------------------------------------------
@@ -872,11 +878,11 @@ class TestProfileRestoration:
         assert (hermes_home / "profiles" / "researcher" / "config.yaml").exists()
 
         # Wrapper scripts should be created
-        assert (wrapper_dir / "coder").exists()
-        assert (wrapper_dir / "researcher").exists()
+        assert _expected_wrapper_path(wrapper_dir, "coder").exists()
+        assert _expected_wrapper_path(wrapper_dir, "researcher").exists()
 
         # Wrappers should contain the right content
-        coder_wrapper = (wrapper_dir / "coder").read_text()
+        coder_wrapper = _expected_wrapper_path(wrapper_dir, "coder").read_text()
         assert "hermes -p coder" in coder_wrapper
 
     def test_import_skips_profile_dirs_without_config(self, tmp_path, monkeypatch):
@@ -902,8 +908,8 @@ class TestProfileRestoration:
         run_import(args)
 
         # Only valid profile should get a wrapper
-        assert (wrapper_dir / "valid").exists()
-        assert not (wrapper_dir / "empty").exists()
+        assert _expected_wrapper_path(wrapper_dir, "valid").exists()
+        assert not _expected_wrapper_path(wrapper_dir, "empty").exists()
 
     def test_import_without_profiles_module(self, tmp_path, monkeypatch):
         """Import gracefully handles missing profiles module (fresh install)."""

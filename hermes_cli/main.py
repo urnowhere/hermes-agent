@@ -4316,7 +4316,8 @@ def cmd_profile(args):
         model, provider = _read_config_model(profile_dir)
         gw = _check_gateway_running(profile_dir)
         skills = _count_skills(profile_dir)
-        wrapper = _get_wrapper_dir() / name
+        wrapper_name = f"{name}.cmd" if os.name == "nt" else name
+        wrapper = _get_wrapper_dir() / wrapper_name
 
         print(f"\nProfile: {name}")
         print(f"Path:    {profile_dir}")
@@ -4352,11 +4353,8 @@ def cmd_profile(args):
             if collision:
                 print(f"Error: {collision}")
                 sys.exit(1)
-            wrapper_path = create_wrapper_script(alias_name)
+            wrapper_path = create_wrapper_script(alias_name, profile_name=name)
             if wrapper_path:
-                # If custom name, write the profile name into the wrapper
-                if custom_name:
-                    wrapper_path.write_text(f'#!/bin/sh\nexec hermes -p {name} "$@"\n')
                 print(f"✓ Alias created: {wrapper_path}")
                 if not _is_wrapper_dir_in_path():
                     print(f"⚠ {_get_wrapper_dir()} is not in your PATH.")
