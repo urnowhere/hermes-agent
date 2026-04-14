@@ -1059,7 +1059,7 @@ def get_model_context_length(
         if ctx:
             return ctx
 
-    # 4b. NovitaAI /v1/models API (authoritative for Novita-hosted models)
+    # 4b. NovitaAI /v1/models API (authoritative for NovitaAI-hosted models)
     if provider == "novita" or (base_url and "api.novita.ai" in base_url):
         metadata = fetch_novita_model_metadata()
         if model in metadata:

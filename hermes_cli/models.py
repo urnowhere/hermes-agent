@@ -1790,7 +1790,7 @@ def _fetch_novita_models(timeout: float = 5.0) -> Optional[list[str]]:
 def _fetch_novita_pricing(timeout: float = 8.0) -> dict[str, dict[str, str]]:
     """Fetch pricing from NovitaAI /v1/models.
 
-    Novita uses ``input_token_price_per_m`` / ``output_token_price_per_m``
+    NovitaAI uses ``input_token_price_per_m`` / ``output_token_price_per_m``
     (integer, cost per million tokens in micro-dollars) instead of OpenRouter's
     ``pricing.prompt`` / ``pricing.completion`` (per-token float).
     Converts to the same per-token string format used by ``fetch_models_with_pricing``.
@@ -1820,7 +1820,7 @@ def _fetch_novita_pricing(timeout: float = 8.0) -> dict[str, dict[str, str]]:
         inp = item.get("input_token_price_per_m")
         out = item.get("output_token_price_per_m")
         if inp is not None or out is not None:
-            # Novita prices are in units of 0.0001 USD per million tokens
+            # NovitaAI prices are in units of 0.0001 USD per million tokens
             # (i.e. 1/100 of a cent per Mtok).
             # Convert to per-token dollar string for _format_price_per_mtok().
             # e.g. glm-5.1: 14000 → $1.40/Mtok → 1.40/1e6 = 1.4e-6 $/token

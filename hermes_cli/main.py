@@ -2451,7 +2451,7 @@ def _model_flow_novita(config, current_model=""):
         print("API key saved.")
         print()
 
-    # Fetch live model list: Novita API → models.dev → static fallback
+    # Fetch live model list: NovitaAI API → models.dev → static fallback
     from hermes_cli.models import _fetch_novita_models, get_pricing_for_provider, _PROVIDER_MODELS
     novita_models = _fetch_novita_models()
     if novita_models:
