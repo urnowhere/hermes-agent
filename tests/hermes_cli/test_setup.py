@@ -6,9 +6,9 @@ import types
 import pytest
 
 from hermes_cli.auth import get_active_provider
-from hermes_cli.config import load_config, save_config
 from hermes_cli import setup as setup_mod
-from hermes_cli.setup import setup_model_provider
+from hermes_cli.config import load_config, save_config
+from hermes_cli.setup import setup_model_provider, setup_tts
 
 
 def _maybe_keep_current_tts(question, choices):
@@ -492,3 +492,444 @@ def test_offer_launch_chat_manual_fallback_when_unresolvable(monkeypatch, capsys
 
     captured = capsys.readouterr()
     assert "Run 'hermes chat' manually" in captured.out
+
+def test_setup_tts_can_configure_piper_with_model_name(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config = load_config()
+
+    def fake_prompt_choice(question, choices, default=0):
+        if question == "Select TTS provider:":
+            return choices.index("Piper (local on-device, free, 40+ languages, 150+ voice models)")
+        if question == "How should Hermes use Piper models?":
+            return 0
+        if question == "Select Piper language:":
+            return choices.index("Polish")
+        if question == "Select Piper voice for Polish:":
+            return choices.index("Gosia (medium, ~63MB)")
+        raise AssertionError(f"Unexpected prompt_choice call: {question}")
+
+    monkeypatch.setattr("hermes_cli.setup.prompt_choice", fake_prompt_choice)
+    monkeypatch.setattr("hermes_cli.setup.prompt", lambda question, default=None, password=False: "piper")
+    monkeypatch.setattr("hermes_cli.setup.prompt_yes_no", lambda question, default=True: True)
+    monkeypatch.setattr("tools.tts_tool._resolve_piper_binary", lambda cfg: "/usr/local/bin/piper")
+    monkeypatch.setattr("hermes_cli.setup._download_piper_model_during_setup", lambda cfg: (True, None))
+    monkeypatch.setattr("hermes_cli.setup._check_piper_status", lambda cfg: (True, None))
+
+    setup_tts(config)
+    save_config(config)
+
+    reloaded = load_config()
+    assert reloaded["tts"]["provider"] == "piper"
+    assert reloaded["tts"]["piper"]["model"] == "pl_PL-gosia-medium"
+    assert reloaded["tts"]["piper"]["model_path"] == ""
+
+
+def test_setup_tts_can_configure_piper_with_local_model_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    model_path = tmp_path / "voice.onnx"
+    model_path.write_bytes(b"fake")
+    config = load_config()
+
+    def fake_prompt_choice(question, choices, default=0):
+        if question == "Select TTS provider:":
+            return choices.index("Piper (local on-device, free, 40+ languages, 150+ voice models)")
+        if question == "How should Hermes use Piper models?":
+            return choices.index("Local model path (manual/custom)")
+        raise AssertionError(f"Unexpected prompt_choice call: {question}")
+
+    prompt_answers = {
+        "Piper binary path": "/usr/local/bin/piper",
+        "Piper model path": str(model_path),
+    }
+
+    monkeypatch.setattr("hermes_cli.setup.prompt_choice", fake_prompt_choice)
+    monkeypatch.setattr("hermes_cli.setup.prompt", lambda question, default=None, password=False: prompt_answers[question])
+    monkeypatch.setattr("tools.tts_tool._resolve_piper_binary", lambda cfg: "/usr/local/bin/piper")
+    monkeypatch.setattr("hermes_cli.setup._check_piper_status", lambda cfg: (True, None))
+
+    setup_tts(config)
+    save_config(config)
+
+    reloaded = load_config()
+    assert reloaded["tts"]["provider"] == "piper"
+    assert reloaded["tts"]["piper"]["model_path"] == str(model_path)
+
+
+def test_setup_tts_keeps_current_provider_when_piper_binary_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config = load_config()
+
+    def fake_prompt_choice(question, choices, default=0):
+        if question == "Select TTS provider:":
+            return choices.index("Piper (local on-device, free, 40+ languages, 150+ voice models)")
+        raise AssertionError(f"Unexpected prompt_choice call: {question}")
+
+    monkeypatch.setattr("hermes_cli.setup.prompt_choice", fake_prompt_choice)
+    monkeypatch.setattr("hermes_cli.setup.prompt", lambda question, default=None, password=False: "piper")
+    monkeypatch.setattr("hermes_cli.setup.prompt_yes_no", lambda question, default=True: False)
+    monkeypatch.setattr(
+        "tools.tts_tool._resolve_piper_binary",
+        lambda cfg: (_ for _ in ()).throw(FileNotFoundError("Piper binary not found: piper")),
+    )
+
+    setup_tts(config)
+
+    assert config["tts"]["provider"] == "edge"
+
+
+def test_setup_tts_can_install_missing_piper_into_active_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config = load_config()
+    install_state = {"installed": False}
+
+    def fake_prompt_choice(question, choices, default=0):
+        if question == "Select TTS provider:":
+            return choices.index("Piper (local on-device, free, 40+ languages, 150+ voice models)")
+        if question == "How should Hermes use Piper models?":
+            return 0
+        if question == "Select Piper language:":
+            return choices.index("Polish")
+        if question == "Select Piper voice for Polish:":
+            return choices.index("Gosia (medium, ~63MB)")
+        raise AssertionError(f"Unexpected prompt_choice call: {question}")
+
+    def fake_resolve_binary(_cfg):
+        if not install_state["installed"]:
+            raise FileNotFoundError("Piper binary not found: piper")
+        return "/tmp/venv/bin/piper"
+
+    monkeypatch.setattr("hermes_cli.setup.prompt_choice", fake_prompt_choice)
+    monkeypatch.setattr("hermes_cli.setup.prompt", lambda question, default=None, password=False: "piper")
+    monkeypatch.setattr("hermes_cli.setup.prompt_yes_no", lambda question, default=True: True)
+    monkeypatch.setattr("tools.tts_tool._resolve_piper_binary", fake_resolve_binary)
+    monkeypatch.setattr(
+        "hermes_cli.setup._install_piper_cli",
+        lambda: install_state.__setitem__("installed", True) or True,
+    )
+    monkeypatch.setattr("hermes_cli.setup._download_piper_model_during_setup", lambda cfg: (True, None))
+    monkeypatch.setattr("hermes_cli.setup._check_piper_status", lambda cfg: (True, None))
+
+    setup_tts(config)
+    save_config(config)
+
+    reloaded = load_config()
+    assert install_state["installed"] is True
+    assert reloaded["tts"]["provider"] == "piper"
+    assert reloaded["tts"]["piper"]["model"] == "pl_PL-gosia-medium"
+
+
+def test_setup_tts_accepts_custom_piper_model_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config = load_config()
+
+    def fake_prompt_choice(question, choices, default=0):
+        if question == "Select TTS provider:":
+            return choices.index("Piper (local on-device, free, 40+ languages, 150+ voice models)")
+        if question == "How should Hermes use Piper models?":
+            return 0
+        if question == "Select Piper language:":
+            return choices.index("Other / any Piper model")
+        raise AssertionError(f"Unexpected prompt_choice call: {question}")
+
+    def fake_prompt(question, default=None, password=False):
+        if question == "Piper binary path":
+            return "piper"
+        if question == "Piper model id":
+            return "en_US-amy-medium"
+        raise AssertionError(f"Unexpected prompt call: {question}")
+
+    monkeypatch.setattr("hermes_cli.setup.prompt_choice", fake_prompt_choice)
+    monkeypatch.setattr("hermes_cli.setup.prompt", fake_prompt)
+    monkeypatch.setattr("hermes_cli.setup.prompt_yes_no", lambda question, default=True: False)
+    monkeypatch.setattr("tools.tts_tool._resolve_piper_binary", lambda cfg: "/usr/local/bin/piper")
+    monkeypatch.setattr("hermes_cli.setup._check_piper_status", lambda cfg: (True, None))
+
+    setup_tts(config)
+    save_config(config)
+
+    reloaded = load_config()
+    assert reloaded["tts"]["provider"] == "piper"
+    assert reloaded["tts"]["piper"]["model"] == "en_US-amy-medium"
+
+
+def test_setup_tts_can_select_ukrainian_piper_model_from_primary_menu(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config = load_config()
+
+    def fake_prompt_choice(question, choices, default=0):
+        if question == "Select TTS provider:":
+            return choices.index("Piper (local on-device, free, 40+ languages, 150+ voice models)")
+        if question == "How should Hermes use Piper models?":
+            return 0
+        if question == "Select Piper language:":
+            return choices.index("Ukrainian")
+        if question == "Select Piper voice for Ukrainian:":
+            return choices.index("Ukrainian Tts (medium, ~77MB)")
+        raise AssertionError(f"Unexpected prompt_choice call: {question}")
+
+    monkeypatch.setattr("hermes_cli.setup.prompt_choice", fake_prompt_choice)
+    monkeypatch.setattr("hermes_cli.setup.prompt", lambda question, default=None, password=False: "piper")
+    monkeypatch.setattr("hermes_cli.setup.prompt_yes_no", lambda question, default=True: False)
+    monkeypatch.setattr("tools.tts_tool._resolve_piper_binary", lambda cfg: "/usr/local/bin/piper")
+    monkeypatch.setattr("hermes_cli.setup._check_piper_status", lambda cfg: (True, None))
+
+    setup_tts(config)
+    save_config(config)
+
+    reloaded = load_config()
+    assert reloaded["tts"]["provider"] == "piper"
+    assert reloaded["tts"]["piper"]["model"] == "uk_UA-ukrainian_tts-medium"
+
+
+def test_setup_tts_can_select_russian_piper_model_from_more_languages(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config = load_config()
+
+    def fake_prompt_choice(question, choices, default=0):
+        if question == "Select TTS provider:":
+            return choices.index("Piper (local on-device, free, 40+ languages, 150+ voice models)")
+        if question == "How should Hermes use Piper models?":
+            return 0
+        if question == "Select Piper language:":
+            return choices.index("More languages")
+        if question == "Select Piper language (more):":
+            return choices.index("Russian")
+        if question == "Select Piper voice for Russian:":
+            return choices.index("Denis (medium, ~63MB)")
+        raise AssertionError(f"Unexpected prompt_choice call: {question}")
+
+    monkeypatch.setattr("hermes_cli.setup.prompt_choice", fake_prompt_choice)
+    monkeypatch.setattr("hermes_cli.setup.prompt", lambda question, default=None, password=False: "piper")
+    monkeypatch.setattr("hermes_cli.setup.prompt_yes_no", lambda question, default=True: False)
+    monkeypatch.setattr("tools.tts_tool._resolve_piper_binary", lambda cfg: "/usr/local/bin/piper")
+    monkeypatch.setattr("hermes_cli.setup._check_piper_status", lambda cfg: (True, None))
+
+    setup_tts(config)
+    save_config(config)
+
+    reloaded = load_config()
+    assert reloaded["tts"]["provider"] == "piper"
+    assert reloaded["tts"]["piper"]["model"] == "ru_RU-denis-medium"
+
+
+def test_setup_tts_can_go_back_from_piper_more_languages(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config = load_config()
+
+    calls = {"more": 0}
+
+    def fake_prompt_choice(question, choices, default=0):
+        if question == "Select TTS provider:":
+            return choices.index("Piper (local on-device, free, 40+ languages, 150+ voice models)")
+        if question == "How should Hermes use Piper models?":
+            return 0
+        if question == "Select Piper language:":
+            return choices.index("More languages") if calls["more"] == 0 else choices.index("Polish")
+        if question == "Select Piper language (more):":
+            calls["more"] += 1
+            return choices.index("Back")
+        if question == "Select Piper voice for Polish:":
+            return choices.index("Gosia (medium, ~63MB)")
+        raise AssertionError(f"Unexpected prompt_choice call: {question}")
+
+    monkeypatch.setattr("hermes_cli.setup.prompt_choice", fake_prompt_choice)
+    monkeypatch.setattr("hermes_cli.setup.prompt", lambda question, default=None, password=False: "piper")
+    monkeypatch.setattr("hermes_cli.setup.prompt_yes_no", lambda question, default=True: False)
+    monkeypatch.setattr("tools.tts_tool._resolve_piper_binary", lambda cfg: "/usr/local/bin/piper")
+    monkeypatch.setattr("hermes_cli.setup._check_piper_status", lambda cfg: (True, None))
+
+    setup_tts(config)
+    save_config(config)
+
+    reloaded = load_config()
+    assert reloaded["tts"]["provider"] == "piper"
+    assert reloaded["tts"]["piper"]["model"] == "pl_PL-gosia-medium"
+
+
+def test_setup_tts_can_go_back_from_local_piper_models(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    local_models_dir = tmp_path / "tts" / "piper"
+    local_models_dir.mkdir(parents=True)
+    (local_models_dir / "pl_PL-meski_wg_glos-medium.onnx").write_bytes(b"fake")
+    (local_models_dir / "pl_PL-meski_wg_glos-medium.onnx.json").write_text("{}")
+    config = load_config()
+
+    mode_calls = {"count": 0}
+
+    def fake_prompt_choice(question, choices, default=0):
+        if question == "Select TTS provider:":
+            return choices.index("Piper (local on-device, free, 40+ languages, 150+ voice models)")
+        if question == "How should Hermes use Piper models?":
+            mode_calls["count"] += 1
+            if mode_calls["count"] == 1:
+                return choices.index("Local downloaded models")
+            return choices.index("Local model path (manual/custom)")
+        if question == "Select local Piper model:":
+            return choices.index("Back")
+        raise AssertionError(f"Unexpected prompt_choice call: {question}")
+
+    def fake_prompt(question, default=None, password=False):
+        if question == "Piper binary path":
+            return "piper"
+        if question == "Piper model path":
+            return "/tmp/manual-piper.onnx"
+        raise AssertionError(f"Unexpected prompt call: {question}")
+
+    monkeypatch.setattr("hermes_cli.setup.prompt_choice", fake_prompt_choice)
+    monkeypatch.setattr("hermes_cli.setup.prompt", fake_prompt)
+    monkeypatch.setattr("tools.tts_tool._resolve_piper_binary", lambda cfg: "/usr/local/bin/piper")
+    monkeypatch.setattr("hermes_cli.setup._check_piper_status", lambda cfg: (True, None))
+
+    setup_tts(config)
+    save_config(config)
+
+    reloaded = load_config()
+    assert reloaded["tts"]["provider"] == "piper"
+    assert reloaded["tts"]["piper"]["model_path"] == "/tmp/manual-piper.onnx"
+
+
+def test_setup_tts_can_go_back_from_piper_voice_selection(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config = load_config()
+
+    calls = {"voice": 0}
+
+    def fake_prompt_choice(question, choices, default=0):
+        if question == "Select TTS provider:":
+            return choices.index("Piper (local on-device, free, 40+ languages, 150+ voice models)")
+        if question == "How should Hermes use Piper models?":
+            return 0
+        if question == "Select Piper language:":
+            return choices.index("Polish") if calls["voice"] == 0 else choices.index("German")
+        if question == "Select Piper voice for Polish:":
+            calls["voice"] += 1
+            return choices.index("Back")
+        if question == "Select Piper voice for German:":
+            return choices.index("Eva K (x_low, ~21MB)")
+        raise AssertionError(f"Unexpected prompt_choice call: {question}")
+
+    monkeypatch.setattr("hermes_cli.setup.prompt_choice", fake_prompt_choice)
+    monkeypatch.setattr("hermes_cli.setup.prompt", lambda question, default=None, password=False: "piper")
+    monkeypatch.setattr("hermes_cli.setup.prompt_yes_no", lambda question, default=True: False)
+    monkeypatch.setattr("tools.tts_tool._resolve_piper_binary", lambda cfg: "/usr/local/bin/piper")
+    monkeypatch.setattr("hermes_cli.setup._check_piper_status", lambda cfg: (True, None))
+
+    setup_tts(config)
+    save_config(config)
+
+    reloaded = load_config()
+    assert reloaded["tts"]["provider"] == "piper"
+    assert reloaded["tts"]["piper"]["model"] == "de_DE-eva_k-x_low"
+
+
+def test_setup_tts_existing_ready_piper_starts_from_model_menu(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config = load_config()
+    config["tts"]["provider"] = "piper"
+    config["tts"]["piper"] = {
+        "binary_path": "/usr/local/bin/piper",
+        "model": "pl_PL-gosia-medium",
+        "model_path": "",
+        "config_path": "",
+    }
+
+    def fake_prompt_choice(question, choices, default=0):
+        if question == "Select TTS provider:":
+            return choices.index("Piper (local on-device, free, 40+ languages, 150+ voice models)")
+        if question == "How should Hermes use Piper models?":
+            return choices.index("Keep current Piper settings")
+        raise AssertionError(f"Unexpected prompt_choice call: {question}")
+
+    def fail_prompt(question, default=None, password=False):
+        if question == "Piper binary path":
+            raise AssertionError("Existing ready Piper setup should not prompt for binary path first")
+        raise AssertionError(f"Unexpected prompt call: {question}")
+
+    monkeypatch.setattr("hermes_cli.setup.prompt_choice", fake_prompt_choice)
+    monkeypatch.setattr("hermes_cli.setup.prompt", fail_prompt)
+    monkeypatch.setattr("tools.tts_tool._resolve_piper_binary", lambda cfg: "/usr/local/bin/piper")
+    monkeypatch.setattr("hermes_cli.setup._check_piper_status", lambda cfg: (True, None))
+
+    setup_tts(config)
+    save_config(config)
+
+    reloaded = load_config()
+    assert reloaded["tts"]["provider"] == "piper"
+    assert reloaded["tts"]["piper"]["binary_path"] == "/usr/local/bin/piper"
+    assert reloaded["tts"]["piper"]["model"] == "pl_PL-gosia-medium"
+
+
+def test_setup_tts_existing_ready_piper_can_change_binary_path_via_advanced_settings(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config = load_config()
+    config["tts"]["provider"] = "piper"
+    config["tts"]["piper"] = {
+        "binary_path": "/usr/local/bin/piper",
+        "model": "pl_PL-gosia-medium",
+        "model_path": "",
+        "config_path": "",
+    }
+    prompt_calls = []
+    mode_calls = {"count": 0}
+
+    def fake_prompt_choice(question, choices, default=0):
+        if question == "Select TTS provider:":
+            return choices.index("Piper (local on-device, free, 40+ languages, 150+ voice models)")
+        if question == "How should Hermes use Piper models?":
+            mode_calls["count"] += 1
+            if mode_calls["count"] == 1:
+                return choices.index("Advanced settings")
+            return choices.index("Keep current Piper settings")
+        raise AssertionError(f"Unexpected prompt_choice call: {question}")
+
+    def fake_prompt(question, default=None, password=False):
+        prompt_calls.append(question)
+        if question == "Piper binary path":
+            return "/opt/piper/piper"
+        raise AssertionError(f"Unexpected prompt call: {question}")
+
+    monkeypatch.setattr("hermes_cli.setup.prompt_choice", fake_prompt_choice)
+    monkeypatch.setattr("hermes_cli.setup.prompt", fake_prompt)
+    monkeypatch.setattr("tools.tts_tool._resolve_piper_binary", lambda cfg: str(cfg.get("binary_path") or ""))
+    monkeypatch.setattr("hermes_cli.setup._check_piper_status", lambda cfg: (True, None))
+
+    setup_tts(config)
+    save_config(config)
+
+    reloaded = load_config()
+    assert prompt_calls == ["Piper binary path"]
+    assert reloaded["tts"]["piper"]["binary_path"] == "/opt/piper/piper"
+
+
+def test_setup_tts_can_select_local_downloaded_piper_model(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    local_models_dir = tmp_path / "tts" / "piper"
+    local_models_dir.mkdir(parents=True)
+    (local_models_dir / "pl_PL-meski_wg_glos-medium.onnx").write_bytes(b"fake")
+    (local_models_dir / "pl_PL-meski_wg_glos-medium.onnx.json").write_text("{}")
+    config = load_config()
+
+    def fake_prompt_choice(question, choices, default=0):
+        if question == "Select TTS provider:":
+            return choices.index("Piper (local on-device, free, 40+ languages, 150+ voice models)")
+        if question == "How should Hermes use Piper models?":
+            return choices.index("Local downloaded models")
+        if question == "Select local Piper model:":
+            return 0
+        raise AssertionError(f"Unexpected prompt_choice call: {question}")
+
+    monkeypatch.setattr("hermes_cli.setup.prompt_choice", fake_prompt_choice)
+    monkeypatch.setattr(
+        "hermes_cli.setup.prompt",
+        lambda question, default=None, password=False: "piper" if question == "Piper binary path" else "",
+    )
+    monkeypatch.setattr("tools.tts_tool._resolve_piper_binary", lambda cfg: "/usr/local/bin/piper")
+    monkeypatch.setattr("hermes_cli.setup._check_piper_status", lambda cfg: (True, None))
+
+    setup_tts(config)
+    save_config(config)
+
+    reloaded = load_config()
+    assert reloaded["tts"]["provider"] == "piper"
+    assert reloaded["tts"]["piper"]["model"] == "pl_PL-meski_wg_glos-medium"
+    assert reloaded["tts"]["piper"]["model_path"] == ""

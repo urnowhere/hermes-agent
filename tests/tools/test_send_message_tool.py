@@ -238,6 +238,10 @@ class TestSendTelegramMediaDelivery:
         bot.send_audio = AsyncMock()
         bot.send_document = AsyncMock()
         _install_telegram_mock(monkeypatch, bot)
+        monkeypatch.setattr(
+            "gateway.platforms.telegram._probe_audio_duration_seconds",
+            lambda _path: 5,
+        )
 
         result = asyncio.run(
             _send_telegram(
@@ -252,6 +256,9 @@ class TestSendTelegramMediaDelivery:
         bot.send_voice.assert_awaited_once()
         bot.send_audio.assert_not_awaited()
         bot.send_message.assert_not_awaited()
+        kwargs = bot.send_voice.await_args.kwargs
+        assert kwargs["filename"] == "voice.ogg"
+        assert kwargs["duration"] == 5
 
     def test_sends_audio_for_mp3(self, tmp_path, monkeypatch):
         audio_path = tmp_path / "clip.mp3"
@@ -265,6 +272,10 @@ class TestSendTelegramMediaDelivery:
         bot.send_audio = AsyncMock(return_value=SimpleNamespace(message_id=8))
         bot.send_document = AsyncMock()
         _install_telegram_mock(monkeypatch, bot)
+        monkeypatch.setattr(
+            "gateway.platforms.telegram._probe_audio_duration_seconds",
+            lambda _path: 9,
+        )
 
         result = asyncio.run(
             _send_telegram(
@@ -278,6 +289,9 @@ class TestSendTelegramMediaDelivery:
         assert result["success"] is True
         bot.send_audio.assert_awaited_once()
         bot.send_voice.assert_not_awaited()
+        kwargs = bot.send_audio.await_args.kwargs
+        assert kwargs["filename"] == "clip.mp3"
+        assert kwargs["duration"] == 9
 
     def test_missing_media_returns_error_without_leaking_raw_tag(self, monkeypatch):
         bot = MagicMock()
