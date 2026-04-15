@@ -118,9 +118,6 @@ browser:
 
 When enabled, Hermes sends a stable profile-scoped identity to Camofox. The Camofox server maps this identity to a persistent browser profile directory, so cookies, logins, and localStorage survive across restarts. Different Hermes profiles get different browser profiles (profile isolation).
 
-:::note
-The Camofox server must also be configured with `CAMOFOX_PROFILE_DIR` on the server side for persistence to work.
-:::
 
 #### VNC live view
 
