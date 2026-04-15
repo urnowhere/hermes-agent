@@ -10,10 +10,13 @@ Uses python-telegram-bot library for:
 import asyncio
 import json
 import logging
+import math
 import os
 import tempfile
 import html as _html
 import re
+import shutil
+import subprocess
 from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
@@ -89,6 +92,47 @@ from gateway.platforms.telegram_network import (
 def check_telegram_requirements() -> bool:
     """Check if Telegram dependencies are available."""
     return TELEGRAM_AVAILABLE
+
+
+def _probe_audio_duration_seconds(audio_path: str) -> Optional[int]:
+    """Return rounded-up audio duration in seconds when ffprobe is available."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+
+    try:
+        result = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                audio_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return None
+
+    raw_duration = result.stdout.strip().splitlines()
+    if not raw_duration:
+        return None
+
+    try:
+        seconds = float(raw_duration[0].strip())
+    except ValueError:
+        return None
+
+    if seconds <= 0:
+        return None
+
+    return max(1, int(math.ceil(seconds)))
 
 
 # Matches every character that MarkdownV2 requires to be backslash-escaped
@@ -1735,7 +1779,8 @@ class TelegramAdapter(BasePlatformAdapter):
         try:
             if not os.path.exists(audio_path):
                 return SendResult(success=False, error=self._missing_media_path_error("Audio", audio_path))
-            
+            duration = _probe_audio_duration_seconds(audio_path)
+            filename = os.path.basename(audio_path)
             with open(audio_path, "rb") as audio_file:
                 # .ogg files -> send as voice (round playable bubble)
                 if audio_path.endswith((".ogg", ".opus")):
@@ -1743,6 +1788,8 @@ class TelegramAdapter(BasePlatformAdapter):
                     msg = await self._bot.send_voice(
                         chat_id=int(chat_id),
                         voice=audio_file,
+                        duration=duration,
+                        filename=filename,
                         caption=caption[:1024] if caption else None,
                         reply_to_message_id=int(reply_to) if reply_to else None,
                         message_thread_id=self._message_thread_id_for_send(_voice_thread),
@@ -1753,6 +1800,8 @@ class TelegramAdapter(BasePlatformAdapter):
                     msg = await self._bot.send_audio(
                         chat_id=int(chat_id),
                         audio=audio_file,
+                        duration=duration,
+                        filename=filename,
                         caption=caption[:1024] if caption else None,
                         reply_to_message_id=int(reply_to) if reply_to else None,
                         message_thread_id=self._message_thread_id_for_send(_audio_thread),

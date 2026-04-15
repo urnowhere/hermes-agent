@@ -667,6 +667,15 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
 
             ext = os.path.splitext(media_path)[1].lower()
             try:
+                duration = None
+                filename = os.path.basename(media_path)
+                if ext in _AUDIO_EXTS:
+                    try:
+                        from gateway.platforms.telegram import _probe_audio_duration_seconds
+                        duration = _probe_audio_duration_seconds(media_path)
+                    except Exception:
+                        duration = None
+
                 with open(media_path, "rb") as f:
                     if ext in _IMAGE_EXTS:
                         last_msg = await bot.send_photo(
@@ -678,11 +687,19 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                         )
                     elif ext in _VOICE_EXTS and is_voice:
                         last_msg = await bot.send_voice(
-                            chat_id=int_chat_id, voice=f, **thread_kwargs
+                            chat_id=int_chat_id,
+                            voice=f,
+                            duration=duration,
+                            filename=filename,
+                            **thread_kwargs,
                         )
                     elif ext in _AUDIO_EXTS:
                         last_msg = await bot.send_audio(
-                            chat_id=int_chat_id, audio=f, **thread_kwargs
+                            chat_id=int_chat_id,
+                            audio=f,
+                            duration=duration,
+                            filename=filename,
+                            **thread_kwargs,
                         )
                     else:
                         last_msg = await bot.send_document(

@@ -10,6 +10,7 @@ Supports seven TTS providers:
 - Mistral (Voxtral TTS): Multilingual, native Opus, needs MISTRAL_API_KEY
 - Google Gemini TTS: Controllable, 30 prebuilt voices, needs GEMINI_API_KEY
 - NeuTTS (local, free, no API key): On-device TTS via neutts_cli, needs neutts installed
+- Piper (local, offline): Local neural TTS via Piper CLI and local voice models
 
 Output formats:
 - Opus (.ogg) for Telegram voice bubbles (requires ffmpeg for Edge TTS)
@@ -34,16 +35,19 @@ import queue
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
+import urllib.error
+import urllib.request
 import uuid
 from pathlib import Path
 from typing import Callable, Dict, Any, Optional
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
-from hermes_constants import display_hermes_home
-
+from hermes_constants import display_hermes_home, get_hermes_home
 logger = logging.getLogger(__name__)
+from piper_catalog import PIPER_VOICE_CATALOG_REF
 from tools.managed_tool_gateway import resolve_managed_tool_gateway
 from tools.tool_backend_helpers import managed_nous_tools_enabled, prefers_gateway, resolve_openai_audio_api_key
 from tools.xai_http import hermes_xai_user_agent
@@ -115,6 +119,8 @@ DEFAULT_GEMINI_TTS_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_TTS_SAMPLE_RATE = 24000
 GEMINI_TTS_CHANNELS = 1
 GEMINI_TTS_SAMPLE_WIDTH = 2  # 16-bit PCM (L16)
+DEFAULT_PIPER_BINARY = "piper"
+DEFAULT_PIPER_MODEL = "pl_PL-gosia-medium"
 
 def _get_default_output_dir() -> str:
     from hermes_constants import get_hermes_dir
@@ -139,6 +145,7 @@ PROVIDER_MAX_TEXT_LENGTH: Dict[str, int] = {
     "elevenlabs": 10000,  # fallback when model-aware lookup can't resolve (multilingual_v2)
     "neutts": 2000,       # local model, quality falls off on long text
     "kittentts": 2000,    # local 25MB model
+    "piper": 4000,        # local/offline CLI with model-dependent practical limits
 }
 
 # ElevenLabs caps vary by model_id. https://elevenlabs.io/docs/overview/models
@@ -196,6 +203,9 @@ def _resolve_max_text_length(
 
     return PROVIDER_MAX_TEXT_LENGTH.get(key, FALLBACK_MAX_TEXT_LENGTH)
 
+def _get_default_piper_models_dir() -> Path:
+    return get_hermes_home() / "tts" / "piper"
+
 
 # ===========================================================================
 # Config loader -- reads tts: section from ~/.hermes/config.yaml
@@ -232,6 +242,38 @@ def _has_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
+def _probe_audio_codec(audio_path: str) -> Optional[str]:
+    """Return the primary audio codec name for a file, if ffprobe is available."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+
+    try:
+        result = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=codec_name",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                audio_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return None
+
+    codec = result.stdout.strip().splitlines()
+    return codec[0].strip().lower() if codec else None
+
+
 def _convert_to_opus(mp3_path: str) -> Optional[str]:
     """
     Convert an MP3 file to OGG Opus format for Telegram voice bubbles.
@@ -248,8 +290,32 @@ def _convert_to_opus(mp3_path: str) -> Optional[str]:
     ogg_path = mp3_path.rsplit(".", 1)[0] + ".ogg"
     try:
         result = subprocess.run(
-            ["ffmpeg", "-i", mp3_path, "-acodec", "libopus",
-             "-ac", "1", "-b:a", "64k", "-vbr", "off", ogg_path, "-y"],
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                mp3_path,
+                "-vn",
+                "-map_metadata",
+                "-1",
+                "-c:a",
+                "libopus",
+                "-f",
+                "ogg",
+                "-ac",
+                "1",
+                "-ar",
+                "48000",
+                "-b:a",
+                "32k",
+                "-application",
+                "voip",
+                "-compression_level",
+                "10",
+                "-frame_duration",
+                "20",
+                ogg_path,
+            ],
             capture_output=True, timeout=30,
         )
         if result.returncode != 0:
@@ -257,7 +323,11 @@ def _convert_to_opus(mp3_path: str) -> Optional[str]:
                           result.returncode, result.stderr.decode('utf-8', errors='ignore')[:200])
             return None
         if os.path.exists(ogg_path) and os.path.getsize(ogg_path) > 0:
-            return ogg_path
+            codec = _probe_audio_codec(ogg_path)
+            if codec == "opus":
+                return ogg_path
+            logger.warning("ffmpeg conversion produced %s codec instead of opus: %s", codec or "unknown", ogg_path)
+            return None
     except subprocess.TimeoutExpired:
         logger.warning("ffmpeg OGG conversion timed out after 30s")
     except FileNotFoundError:
@@ -265,6 +335,20 @@ def _convert_to_opus(mp3_path: str) -> Optional[str]:
     except Exception as e:
         logger.warning("ffmpeg OGG conversion failed: %s", e, exc_info=True)
     return None
+
+
+def _convert_audio_with_ffmpeg(input_path: str, output_path: str, sample_rate: int = 0) -> str:
+    """Convert audio to a target path with optional sample-rate override."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise FileNotFoundError("ffmpeg")
+
+    cmd = [ffmpeg, "-i", input_path, "-y", "-loglevel", "error"]
+    if sample_rate and sample_rate > 0:
+        cmd.extend(["-ar", str(int(sample_rate))])
+    cmd.append(output_path)
+    subprocess.run(cmd, check=True, timeout=30)
+    return output_path
 
 
 # ===========================================================================
@@ -910,6 +994,210 @@ def _generate_kittentts(text: str, output_path: str, tts_config: Dict[str, Any])
 
     return output_path
 
+# Piper (local/offline CLI with local voice models)
+# ===========================================================================
+def _get_piper_config(tts_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Return Piper config with YAML-null guards applied."""
+    return dict(tts_config.get("piper") or {})
+
+
+def _resolve_piper_binary(piper_config: Dict[str, Any]) -> str:
+    """Resolve Piper CLI from config or PATH."""
+    raw_binary = str(piper_config.get("binary_path") or DEFAULT_PIPER_BINARY).strip()
+    if os.path.isabs(raw_binary) or os.sep in raw_binary:
+        if os.path.isfile(raw_binary):
+            return raw_binary
+        raise FileNotFoundError(
+            f"Piper binary not found: {raw_binary}. Install Piper CLI and re-run 'hermes setup tts'."
+        )
+
+    resolved = shutil.which(raw_binary)
+    if resolved:
+        return resolved
+
+    interpreter_sibling = Path(sys.executable).parent / raw_binary
+    if interpreter_sibling.is_file():
+        return str(interpreter_sibling)
+
+    raise FileNotFoundError(
+        f"Piper binary not found: {raw_binary}. Install Piper CLI and re-run 'hermes setup tts'."
+    )
+
+
+def _resolve_piper_models_dir(piper_config: Dict[str, Any]) -> Path:
+    """Return the Piper models directory under HERMES_HOME unless overridden."""
+    models_dir = str(piper_config.get("models_dir") or "").strip()
+    return Path(models_dir).expanduser() if models_dir else _get_default_piper_models_dir()
+
+
+def _resolve_piper_model_name(piper_config: Dict[str, Any]) -> str:
+    """Return configured Piper model name with a sensible default."""
+    return str(piper_config.get("model") or DEFAULT_PIPER_MODEL).strip()
+
+
+def _parse_piper_model_name(model_name: str) -> tuple[str, str, str]:
+    """Parse a Piper model id like ``pl_PL-gosia-medium``."""
+    normalized = (model_name or "").strip()
+    if not normalized:
+        raise ValueError("Piper model is not set")
+
+    expected = "Use a full Piper model id like en_US-lessac-medium or pl_PL-gosia-medium"
+    parts = normalized.split("-")
+    if len(parts) < 3 or "_" not in parts[0]:
+        raise ValueError(
+            f"Unsupported Piper model name: {normalized}. {expected}"
+        )
+
+    locale = parts[0]
+    quality = parts[-1]
+    voice = "-".join(parts[1:-1])
+    if not voice:
+        raise ValueError(
+            f"Unsupported Piper model name: {normalized}. {expected}"
+        )
+    return locale, voice, quality
+
+
+def _build_piper_voice_urls(model_name: str) -> tuple[str, str]:
+    """Return official download URLs for a Piper model and config."""
+    locale, voice, quality = _parse_piper_model_name(model_name)
+    language = locale.split("_", 1)[0].lower()
+    base = (
+        f"https://huggingface.co/rhasspy/piper-voices/resolve/{PIPER_VOICE_CATALOG_REF}/"
+        f"{quote(language)}/{quote(locale)}/{quote(voice)}/{quote(quality)}"
+    )
+    filename = quote(f"{model_name}.onnx")
+    return (
+        f"{base}/{filename}?download=true",
+        f"{base}/{filename}.json?download=true",
+    )
+
+
+def _download_piper_voice_file(url: str, destination: Path) -> None:
+    """Download a Piper voice asset to disk."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with urllib.request.urlopen(url, timeout=60) as response, open(destination, "wb") as out_file:
+        shutil.copyfileobj(response, out_file)
+
+
+def _ensure_piper_model_downloaded(model_name: str, models_dir: Path) -> tuple[Path, Path]:
+    """Ensure the named Piper model exists locally, downloading it if needed."""
+    model_path = models_dir / f"{model_name}.onnx"
+    config_path = models_dir / f"{model_name}.onnx.json"
+    if model_path.exists() and config_path.exists():
+        return model_path, config_path
+
+    model_url, config_url = _build_piper_voice_urls(model_name)
+    try:
+        if not model_path.exists():
+            _download_piper_voice_file(model_url, model_path)
+        if not config_path.exists():
+            _download_piper_voice_file(config_url, config_path)
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            f"Failed to download Piper voice '{model_name}' into {models_dir}: {exc}"
+        ) from exc
+
+    return model_path, config_path
+
+
+def _resolve_piper_model_paths(
+    piper_config: Dict[str, Any],
+    *,
+    allow_download: bool = True,
+) -> tuple[Path, Optional[Path], Optional[str], Path]:
+    """Resolve Piper model/config paths and chosen model name."""
+    model_path_raw = str(piper_config.get("model_path") or "").strip()
+    config_path_raw = str(piper_config.get("config_path") or "").strip()
+    models_dir = _resolve_piper_models_dir(piper_config)
+
+    if model_path_raw:
+        model_path = Path(model_path_raw).expanduser()
+        if not model_path.exists():
+            raise ValueError(f"Piper model_path does not exist: {model_path}")
+        config_path = Path(config_path_raw).expanduser() if config_path_raw else None
+        if config_path and not config_path.exists():
+            raise ValueError(f"Piper config_path does not exist: {config_path}")
+        if config_path is None:
+            inferred = model_path.with_suffix(model_path.suffix + ".json")
+            if inferred.exists():
+                config_path = inferred
+        return model_path, config_path, None, models_dir
+
+    model_name = _resolve_piper_model_name(piper_config)
+    if not allow_download:
+        model_path = models_dir / f"{model_name}.onnx"
+        config_path = Path(config_path_raw).expanduser() if config_path_raw else models_dir / f"{model_name}.onnx.json"
+        if not model_path.exists():
+            raise ValueError(f"Piper model is not downloaded yet: {model_path}")
+        if config_path and not config_path.exists():
+            raise ValueError(f"Piper config_path does not exist: {config_path}")
+        return model_path, config_path, model_name, models_dir
+
+    models_dir.mkdir(parents=True, exist_ok=True)
+    model_path, default_config_path = _ensure_piper_model_downloaded(model_name, models_dir)
+    config_path = Path(config_path_raw).expanduser() if config_path_raw else default_config_path
+    if config_path and not config_path.exists():
+        raise ValueError(f"Piper config_path does not exist: {config_path}")
+    return model_path, config_path, model_name, models_dir
+
+
+def _resolve_piper_generation_paths(output_path: str) -> tuple[str, Optional[str]]:
+    """Generate WAV natively, converting only when the requested extension differs."""
+    if output_path.endswith(".wav"):
+        return output_path, None
+    return output_path.rsplit(".", 1)[0] + ".wav", output_path
+
+
+def _build_piper_command(
+    text: str,
+    wav_path: str,
+    binary: str,
+    model_path: Path,
+    config_path: Optional[Path],
+    speaker: str,
+) -> tuple[list[str], str]:
+    """Build the Piper subprocess command and stdin payload."""
+    payload = text if text.endswith("\n") else text + "\n"
+    cmd = [binary, "--model", str(model_path), "--output_file", wav_path]
+    if speaker:
+        cmd.extend(["--speaker", speaker])
+    if config_path:
+        cmd.extend(["--config", str(config_path)])
+    return cmd, payload
+
+
+def _generate_piper(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
+    """Generate speech using Piper CLI with local or auto-downloaded models."""
+    piper_config = _get_piper_config(tts_config)
+    binary = _resolve_piper_binary(piper_config)
+    model_path, config_path, _model_name, _models_dir = _resolve_piper_model_paths(piper_config)
+    wav_path, final_output_path = _resolve_piper_generation_paths(output_path)
+    sample_rate = int(piper_config.get("sample_rate") or 0)
+    speaker = str(piper_config.get("speaker") or "").strip()
+
+    cmd, payload = _build_piper_command(text, wav_path, binary, model_path, config_path, speaker)
+    result = subprocess.run(
+        cmd,
+        input=payload,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip() or "unknown error"
+        raise RuntimeError(f"Piper synthesis failed: {stderr}")
+
+    if final_output_path:
+        if _has_ffmpeg():
+            _convert_audio_with_ffmpeg(wav_path, final_output_path, sample_rate=sample_rate)
+            os.remove(wav_path)
+        else:
+            os.rename(wav_path, final_output_path)
+        return final_output_path
+
+    return wav_path
+
 
 # ===========================================================================
 # Main tool function
@@ -964,12 +1252,14 @@ def text_to_speech_tool(
         file_path = Path(output_path).expanduser()
     else:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_dir = Path(DEFAULT_OUTPUT_DIR)
+        out_dir = Path(_get_default_output_dir())
         out_dir.mkdir(parents=True, exist_ok=True)
         # Use .ogg for Telegram with providers that support native Opus output,
         # otherwise fall back to .mp3 (Edge TTS will attempt ffmpeg conversion later).
         if want_opus and provider in ("openai", "elevenlabs", "mistral", "gemini"):
             file_path = out_dir / f"tts_{timestamp}.ogg"
+        elif provider in ("neutts", "piper"):
+            file_path = out_dir / f"tts_{timestamp}.wav"
         else:
             file_path = out_dir / f"tts_{timestamp}.mp3"
 
@@ -1048,6 +1338,10 @@ def text_to_speech_tool(
             logger.info("Generating speech with KittenTTS (local, ~25MB)...")
             _generate_kittentts(text, file_str, tts_config)
 
+        elif provider == "piper":
+            logger.info("Generating speech with Piper (local/offline)...")
+            _generate_piper(text, file_str, tts_config)
+
         else:
             # Default: Edge TTS (free), with NeuTTS as local fallback
             edge_available = True
@@ -1087,12 +1381,25 @@ def text_to_speech_tool(
         # Try Opus conversion for Telegram compatibility
         # Edge TTS outputs MP3, NeuTTS/KittenTTS output WAV — all need ffmpeg conversion
         voice_compatible = False
-        if provider in ("edge", "neutts", "minimax", "xai", "kittentts") and not file_str.endswith(".ogg"):
+        requires_telegram_opus_transcode = provider in ("edge", "neutts", "minimax", "xai", "kittentts", "piper")
+        if requires_telegram_opus_transcode and not file_str.endswith(".ogg"):
             opus_path = _convert_to_opus(file_str)
             if opus_path:
                 file_str = opus_path
                 voice_compatible = True
-        elif provider in ("elevenlabs", "openai", "mistral", "gemini"):
+            elif want_opus and provider == "piper":
+                return json.dumps({
+                    "success": False,
+                    "error": (
+                        f"{provider.title()} TTS generated audio, but Hermes could not convert it "
+                        "to a Telegram-compatible OGG/Opus voice note. Verify ffmpeg is installed "
+                        "and retry after checking the conversion logs."
+                    ),
+                }, ensure_ascii=False)
+        elif provider in ("elevenlabs", "openai"):
+            # These providers can output Opus natively if the path ends in .ogg.
+            voice_compatible = file_str.endswith(".ogg") and _probe_audio_codec(file_str) == "opus"
+        elif provider in ("mistral", "gemini"):
             voice_compatible = file_str.endswith(".ogg")
 
         file_size = os.path.getsize(file_str)
@@ -1141,6 +1448,15 @@ def check_tts_requirements() -> bool:
     Returns:
         bool: True if at least one provider can work.
     """
+    tts_config = _load_tts_config()
+    if _get_provider(tts_config) == "piper":
+        try:
+            piper_config = _get_piper_config(tts_config)
+            _resolve_piper_binary(piper_config)
+            _resolve_piper_model_paths(piper_config, allow_download=False)
+            return True
+        except Exception:
+            return False
     try:
         _import_edge_tts()
         return True
@@ -1471,8 +1787,13 @@ if __name__ == "__main__":
         f"{'set' if resolve_openai_audio_api_key() else 'not set (VOICE_TOOLS_OPENAI_KEY or OPENAI_API_KEY)'}"
     )
     print(f"  MiniMax:    {'API key set' if os.getenv('MINIMAX_API_KEY') else 'not set (MINIMAX_API_KEY)'}")
+    try:
+        piper_binary = _resolve_piper_binary(_get_piper_config(_load_tts_config()))
+    except Exception:
+        piper_binary = "not found"
+    print(f"  Piper:      {piper_binary}")
     print(f"  ffmpeg:     {'✅ found' if _has_ffmpeg() else '❌ not found (needed for Telegram Opus)'}")
-    print(f"\n  Output dir: {DEFAULT_OUTPUT_DIR}")
+    print(f"\n  Output dir: {_get_default_output_dir()}")
 
     config = _load_tts_config()
     provider = _get_provider(config)
@@ -1486,7 +1807,7 @@ from tools.registry import registry, tool_error
 
 TTS_SCHEMA = {
     "name": "text_to_speech",
-    "description": "Convert text to speech audio. Returns a MEDIA: path that the platform delivers as a voice message. On Telegram it plays as a voice bubble, on Discord/WhatsApp as an audio attachment. In CLI mode, saves to ~/voice-memos/. Voice and provider are user-configured, not model-selected.",
+    "description": f"Convert text to speech audio. Returns a MEDIA: path that the platform delivers as a voice message. On Telegram it plays as a voice bubble, on Discord/WhatsApp as an audio attachment. In CLI mode, saves to {display_hermes_home()}/audio_cache/. Voice and provider are user-configured, not model-selected.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -1496,7 +1817,7 @@ TTS_SCHEMA = {
             },
             "output_path": {
                 "type": "string",
-                "description": f"Optional custom file path to save the audio. Defaults to {display_hermes_home()}/audio_cache/<timestamp>.mp3"
+                "description": f"Optional custom file path to save the audio. Defaults to {display_hermes_home()}/audio_cache/<timestamp>.<ext>"
             }
         },
         "required": ["text"]
