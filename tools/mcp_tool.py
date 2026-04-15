@@ -70,6 +70,7 @@ Thread safety:
 """
 
 import asyncio
+import base64
 import concurrent.futures
 import inspect
 import json
@@ -81,6 +82,8 @@ import shutil
 import threading
 import time
 from typing import Any, Dict, List, Optional
+
+from gateway.platforms.base import cache_image_from_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -1377,11 +1380,56 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                     )
                 })
 
-            # Collect text from content blocks
+            # Collect text and binary media from content blocks.
             parts: List[str] = []
+            media_paths: List[str] = []
+
+            def _image_ext_from_mime(mime: str) -> str:
+                mime = (mime or "").lower()
+                if "png" in mime:
+                    return ".png"
+                if "jpeg" in mime or "jpg" in mime:
+                    return ".jpg"
+                if "webp" in mime:
+                    return ".webp"
+                if "gif" in mime:
+                    return ".gif"
+                if "bmp" in mime:
+                    return ".bmp"
+                return ".png"
+
             for block in (result.content or []):
                 if hasattr(block, "text"):
                     parts.append(block.text)
+                elif hasattr(block, "data") and hasattr(block, "mimeType"):
+                    mime = str(getattr(block, "mimeType", "") or "")
+                    raw_data = getattr(block, "data", b"")
+                    if isinstance(raw_data, str):
+                        # MCP image payloads are often base64 strings; accept
+                        # either plain base64 or data URIs.
+                        if raw_data.startswith("data:") and "," in raw_data:
+                            raw_data = raw_data.split(",", 1)[1]
+                        try:
+                            raw_bytes = base64.b64decode(raw_data)
+                        except Exception:
+                            raw_bytes = raw_data.encode("utf-8", errors="ignore")
+                    else:
+                        raw_bytes = bytes(raw_data)
+                    try:
+                        image_path = cache_image_from_bytes(raw_bytes, ext=_image_ext_from_mime(mime))
+                        media_paths.append(image_path)
+                        parts.append(f"MEDIA:{image_path}")
+                    except Exception as exc:
+                        logger.warning(
+                            "MCP image block could not be cached for %s/%s: %s",
+                            server_name, tool_name, exc,
+                        )
+                        parts.append(f"[image:{mime or 'unknown'}]")
+                else:
+                    logger.warning(
+                        "MCP tool %s/%s returned unsupported content block: %r",
+                        server_name, tool_name, block,
+                    )
             text_result = "\n".join(parts) if parts else ""
 
             # Combine content + structuredContent when both are present.
@@ -1389,14 +1437,14 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             # is machine-oriented (JSON metadata).  For an AI agent, content
             # is the primary payload; structuredContent supplements it.
             structured = getattr(result, "structuredContent", None)
+            payload = {"result": text_result}
+            if media_paths:
+                payload["media"] = media_paths
             if structured is not None:
-                if text_result:
-                    return json.dumps({
-                        "result": text_result,
-                        "structuredContent": structured,
-                    })
-                return json.dumps({"result": structured})
-            return json.dumps({"result": text_result})
+                payload["structuredContent"] = structured
+                if not text_result and not media_paths:
+                    return json.dumps({"result": structured})
+            return json.dumps(payload)
 
         try:
             return _run_on_mcp_loop(_call(), timeout=tool_timeout)
