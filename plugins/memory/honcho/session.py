@@ -666,7 +666,7 @@ class HonchoSessionManager:
 
         result: dict[str, str] = {}
         try:
-            user_ctx = self._fetch_peer_context(session.user_peer_id)
+            user_ctx = self._fetch_peer_context(session.user_peer_id, observer_peer_id=session.assistant_peer_id)
             result["representation"] = user_ctx["representation"]
             result["card"] = "\n".join(user_ctx["card"])
         except Exception as e:
@@ -862,32 +862,44 @@ class HonchoSessionManager:
             return [str(item) for item in card if item]
         return [str(card)]
 
-    def _fetch_peer_card(self, peer_id: str) -> list[str]:
+    def _fetch_peer_card(self, peer_id: str, observer_peer_id: str | None = None) -> list[str]:
         """Fetch a peer card directly from the peer object.
 
         This avoids relying on session.context(), which can return an empty
         peer_card for per-session messaging sessions even when the peer itself
         has a populated card.
         """
-        peer = self._get_or_create_peer(peer_id)
+        if self._ai_observe_others and observer_peer_id:
+            peer = self._get_or_create_peer(observer_peer_id)
+            getter_kwargs = {"target": peer_id}
+        else:
+            peer = self._get_or_create_peer(peer_id)
+            getter_kwargs = {}
         getter = getattr(peer, "get_card", None)
         if callable(getter):
-            return self._normalize_card(getter())
+            return self._normalize_card(getter(**getter_kwargs))
 
         legacy_getter = getattr(peer, "card", None)
         if callable(legacy_getter):
-            return self._normalize_card(legacy_getter())
+            return self._normalize_card(legacy_getter(**getter_kwargs))
 
         return []
 
-    def _fetch_peer_context(self, peer_id: str, search_query: str | None = None) -> dict[str, Any]:
+    def _fetch_peer_context(self, peer_id: str, search_query: str | None = None, observer_peer_id: str | None = None) -> dict[str, Any]:
         """Fetch representation + peer card directly from a peer object."""
-        peer = self._get_or_create_peer(peer_id)
+        if self._ai_observe_others and observer_peer_id:
+            peer = self._get_or_create_peer(observer_peer_id)
+            ctx_kwargs: dict[str, Any] = {"target": peer_id}
+        else:
+            peer = self._get_or_create_peer(peer_id)
+            ctx_kwargs = {}
+        if search_query is not None:
+            ctx_kwargs["search_query"] = search_query
         representation = ""
         card: list[str] = []
 
         try:
-            ctx = peer.context(search_query=search_query) if search_query else peer.context()
+            ctx = peer.context(**ctx_kwargs)
             representation = (
                 getattr(ctx, "representation", None)
                 or getattr(ctx, "peer_representation", None)
@@ -924,7 +936,7 @@ class HonchoSessionManager:
             return []
 
         try:
-            return self._fetch_peer_card(session.user_peer_id)
+            return self._fetch_peer_card(session.user_peer_id, observer_peer_id=session.assistant_peer_id)
         except Exception as e:
             logger.debug("Failed to fetch peer card from Honcho: %s", e)
             return []
@@ -950,7 +962,7 @@ class HonchoSessionManager:
             return ""
 
         try:
-            ctx = self._fetch_peer_context(session.user_peer_id, search_query=query)
+            ctx = self._fetch_peer_context(session.user_peer_id, search_query=query, observer_peer_id=session.assistant_peer_id)
             parts = []
             if ctx["representation"]:
                 parts.append(ctx["representation"])

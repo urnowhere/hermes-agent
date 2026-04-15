@@ -134,7 +134,9 @@ class TestFormatMigrationTranscript:
             {"role": "user", "content": "Hello", "timestamp": "2026-01-01T00:00:00"},
             {"role": "assistant", "content": "Hi!", "timestamp": "2026-01-01T00:01:00"},
         ]
-        result = HonchoSessionManager._format_migration_transcript("telegram:123", messages)
+        result = HonchoSessionManager._format_migration_transcript(
+            "telegram:123", messages
+        )
         assert isinstance(result, bytes)
         text = result.decode("utf-8")
         assert "<prior_conversation_history>" in text
@@ -165,7 +167,9 @@ class TestManagerCacheOps:
     def test_delete_cached_session(self):
         mgr = HonchoSessionManager()
         session = HonchoSession(
-            key="test", user_peer_id="u", assistant_peer_id="a",
+            key="test",
+            user_peer_id="u",
+            assistant_peer_id="a",
             honcho_session_id="s",
         )
         mgr._cache["test"] = session
@@ -178,8 +182,12 @@ class TestManagerCacheOps:
 
     def test_list_sessions(self):
         mgr = HonchoSessionManager()
-        s1 = HonchoSession(key="k1", user_peer_id="u", assistant_peer_id="a", honcho_session_id="s1")
-        s2 = HonchoSession(key="k2", user_peer_id="u", assistant_peer_id="a", honcho_session_id="s2")
+        s1 = HonchoSession(
+            key="k1", user_peer_id="u", assistant_peer_id="a", honcho_session_id="s1"
+        )
+        s2 = HonchoSession(
+            key="k2", user_peer_id="u", assistant_peer_id="a", honcho_session_id="s2"
+        )
         s1.add_message("user", "hi")
         mgr._cache["k1"] = s1
         mgr._cache["k2"] = s2
@@ -205,6 +213,7 @@ class TestPeerLookupHelpers:
 
     def test_get_peer_card_uses_direct_peer_lookup(self):
         mgr, session = self._make_cached_manager()
+        mgr._ai_observe_others = False
         user_peer = MagicMock()
         user_peer.get_card.return_value = ["Name: Robert"]
         mgr._get_or_create_peer = MagicMock(return_value=user_peer)
@@ -214,6 +223,7 @@ class TestPeerLookupHelpers:
 
     def test_search_context_uses_peer_context_response(self):
         mgr, session = self._make_cached_manager()
+        mgr._ai_observe_others = False
         user_peer = MagicMock()
         user_peer.context.return_value = SimpleNamespace(
             representation="Robert runs neuralancer",
@@ -229,6 +239,7 @@ class TestPeerLookupHelpers:
 
     def test_get_prefetch_context_fetches_user_and_ai_from_peer_api(self):
         mgr, session = self._make_cached_manager()
+        mgr._ai_observe_others = False
         user_peer = MagicMock()
         user_peer.context.return_value = SimpleNamespace(
             representation="User representation",
@@ -269,6 +280,113 @@ class TestPeerLookupHelpers:
         }
         ai_peer.context.assert_called_once_with()
 
+    # ------------------------------------------------------------------
+    # Observation-aware peer retrieval (_ai_observe_others)
+    # ------------------------------------------------------------------
+
+    def test_get_peer_card_cross_observation(self):
+        """When _ai_observe_others=True, get_peer_card routes through AI peer's get_card(target=...)."""
+        mgr, session = self._make_cached_manager()
+        mgr._ai_observe_others = True
+
+        ai_peer = MagicMock()
+        ai_peer.get_card.return_value = ["Name: Robert", "Role: Admin"]
+        mgr._get_or_create_peer = MagicMock(return_value=ai_peer)
+
+        result = mgr.get_peer_card(session.key)
+
+        assert result == ["Name: Robert", "Role: Admin"]
+        mgr._get_or_create_peer.assert_called_once_with(session.assistant_peer_id)
+        ai_peer.get_card.assert_called_once_with(target=session.user_peer_id)
+
+    def test_get_peer_card_unified_mode(self):
+        """When _ai_observe_others=False, get_peer_card uses direct peer without target=."""
+        mgr, session = self._make_cached_manager()
+        mgr._ai_observe_others = False
+
+        user_peer = MagicMock()
+        user_peer.get_card.return_value = ["Name: Robert"]
+        mgr._get_or_create_peer = MagicMock(return_value=user_peer)
+
+        result = mgr.get_peer_card(session.key)
+
+        assert result == ["Name: Robert"]
+        mgr._get_or_create_peer.assert_called_once_with(session.user_peer_id)
+        user_peer.get_card.assert_called_once_with()
+
+    def test_search_context_cross_observation(self):
+        """When _ai_observe_others=True, search_context routes through AI peer's context(target=...)."""
+        mgr, session = self._make_cached_manager()
+        mgr._ai_observe_others = True
+
+        ai_peer = MagicMock()
+        ai_peer.context.return_value = SimpleNamespace(
+            representation="Robert runs neuralancer",
+            peer_card=["Location: Melbourne"],
+        )
+        mgr._get_or_create_peer = MagicMock(return_value=ai_peer)
+
+        result = mgr.search_context(session.key, "neuralancer")
+
+        assert "Robert runs neuralancer" in result
+        assert "- Location: Melbourne" in result
+        mgr._get_or_create_peer.assert_called_once_with(session.assistant_peer_id)
+        ai_peer.context.assert_called_once_with(
+            target=session.user_peer_id, search_query="neuralancer"
+        )
+
+    def test_search_context_unified_mode(self):
+        """When _ai_observe_others=False, search_context uses direct peer without target=."""
+        mgr, session = self._make_cached_manager()
+        mgr._ai_observe_others = False
+
+        user_peer = MagicMock()
+        user_peer.context.return_value = SimpleNamespace(
+            representation="Robert runs neuralancer",
+            peer_card=["Location: Melbourne"],
+        )
+        mgr._get_or_create_peer = MagicMock(return_value=user_peer)
+
+        result = mgr.search_context(session.key, "neuralancer")
+
+        assert "Robert runs neuralancer" in result
+        assert "- Location: Melbourne" in result
+        mgr._get_or_create_peer.assert_called_once_with(session.user_peer_id)
+        user_peer.context.assert_called_once_with(search_query="neuralancer")
+
+    def test_get_prefetch_context_cross_observation(self):
+        """get_prefetch_context: user context uses AI peer as observer, AI self-context does not."""
+        mgr, session = self._make_cached_manager()
+        mgr._ai_observe_others = True
+
+        user_peer = MagicMock()
+        user_peer.context.return_value = SimpleNamespace(
+            representation="User representation",
+            peer_card=["Name: Robert"],
+        )
+        ai_peer = MagicMock()
+        ai_peer.context.return_value = SimpleNamespace(
+            representation="AI representation",
+            peer_card=["Owner: Robert"],
+        )
+        mgr._get_or_create_peer = MagicMock(side_effect=[user_peer, ai_peer])
+
+        result = mgr.get_prefetch_context(session.key)
+
+        assert result == {
+            "representation": "User representation",
+            "card": "Name: Robert",
+            "ai_representation": "AI representation",
+            "ai_card": "Owner: Robert",
+        }
+        # First call: AI peer as observer for user context
+        mgr._get_or_create_peer.assert_any_call(session.assistant_peer_id)
+        # AI peer's context should be called with target=user_peer_id
+        user_peer.context.assert_called_once_with(target=session.user_peer_id)
+        # Second call: AI peer fetches its own context (no observer)
+        mgr._get_or_create_peer.assert_any_call(session.assistant_peer_id)
+        ai_peer.context.assert_called_once_with()
+
 
 # ---------------------------------------------------------------------------
 # Message chunking
@@ -283,8 +401,13 @@ class TestPeerLookupHelpers:
 class TestToolsModeInitBehavior:
     """Verify initOnSessionStart controls session init timing in tools mode."""
 
-    def _make_provider_with_config(self, recall_mode="tools", init_on_session_start=False,
-                                    peer_name=None, user_id=None):
+    def _make_provider_with_config(
+        self,
+        recall_mode="tools",
+        init_on_session_start=False,
+        peer_name=None,
+        user_id=None,
+    ):
         """Create a HonchoMemoryProvider with mocked config and dependencies."""
         from plugins.memory.honcho.client import HonchoClientConfig
 
@@ -310,10 +433,21 @@ class TestToolsModeInitBehavior:
         if user_id:
             init_kwargs["user_id"] = user_id
 
-        with patch("plugins.memory.honcho.client.HonchoClientConfig.from_global_config", return_value=cfg), \
-             patch("plugins.memory.honcho.client.get_honcho_client", return_value=MagicMock()), \
-             patch("plugins.memory.honcho.session.HonchoSessionManager", return_value=mock_manager), \
-             patch("hermes_constants.get_hermes_home", return_value=MagicMock()):
+        with (
+            patch(
+                "plugins.memory.honcho.client.HonchoClientConfig.from_global_config",
+                return_value=cfg,
+            ),
+            patch(
+                "plugins.memory.honcho.client.get_honcho_client",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "plugins.memory.honcho.session.HonchoSessionManager",
+                return_value=mock_manager,
+            ),
+            patch("hermes_constants.get_hermes_home", return_value=MagicMock()),
+        ):
             provider.initialize(session_id="test-session-001", **init_kwargs)
 
         return provider, cfg
@@ -321,7 +455,8 @@ class TestToolsModeInitBehavior:
     def test_tools_lazy_default(self):
         """tools + initOnSessionStart=false → session NOT initialized after initialize()."""
         provider, _ = self._make_provider_with_config(
-            recall_mode="tools", init_on_session_start=False,
+            recall_mode="tools",
+            init_on_session_start=False,
         )
         assert provider._session_initialized is False
         assert provider._manager is None
@@ -330,7 +465,8 @@ class TestToolsModeInitBehavior:
     def test_tools_eager_init(self):
         """tools + initOnSessionStart=true → session IS initialized after initialize()."""
         provider, _ = self._make_provider_with_config(
-            recall_mode="tools", init_on_session_start=True,
+            recall_mode="tools",
+            init_on_session_start=True,
         )
         assert provider._session_initialized is True
         assert provider._manager is not None
@@ -338,30 +474,36 @@ class TestToolsModeInitBehavior:
     def test_tools_eager_prefetch_still_empty(self):
         """tools mode with eager init still returns empty from prefetch() (no auto-injection)."""
         provider, _ = self._make_provider_with_config(
-            recall_mode="tools", init_on_session_start=True,
+            recall_mode="tools",
+            init_on_session_start=True,
         )
         assert provider.prefetch("test query") == ""
 
     def test_tools_lazy_prefetch_empty(self):
         """tools mode with lazy init also returns empty from prefetch()."""
         provider, _ = self._make_provider_with_config(
-            recall_mode="tools", init_on_session_start=False,
+            recall_mode="tools",
+            init_on_session_start=False,
         )
         assert provider.prefetch("test query") == ""
 
     def test_explicit_peer_name_not_overridden_by_user_id(self):
         """Explicit peerName in config must not be replaced by gateway user_id."""
         _, cfg = self._make_provider_with_config(
-            recall_mode="tools", init_on_session_start=True,
-            peer_name="Kathie", user_id="8439114563",
+            recall_mode="tools",
+            init_on_session_start=True,
+            peer_name="Kathie",
+            user_id="8439114563",
         )
         assert cfg.peer_name == "Kathie"
 
     def test_user_id_used_when_no_peer_name(self):
         """Gateway user_id is used as peer_name when no explicit peerName configured."""
         _, cfg = self._make_provider_with_config(
-            recall_mode="tools", init_on_session_start=True,
-            peer_name=None, user_id="8439114563",
+            recall_mode="tools",
+            init_on_session_start=True,
+            peer_name=None,
+            user_id="8439114563",
         )
         assert cfg.peer_name == "8439114563"
 
@@ -436,7 +578,9 @@ class TestDialecticInputGuard:
 
         # Create a cached session so dialectic_query doesn't bail early
         session = HonchoSession(
-            key="test", user_peer_id="u", assistant_peer_id="a",
+            key="test",
+            user_peer_id="u",
+            assistant_peer_id="a",
             honcho_session_id="s",
         )
         mgr._cache["test"] = session
