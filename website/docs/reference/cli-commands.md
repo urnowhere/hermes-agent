@@ -65,7 +65,7 @@ hermes [global-options] <command> [subcommand/options]
 | `hermes backup` | Back up Hermes home directory to a zip file. |
 | `hermes import` | Restore a Hermes backup from a zip file. |
 | `hermes profile` | Manage profiles — multiple isolated Hermes instances. |
-| `hermes completion` | Print shell completion scripts (bash/zsh). |
+| `hermes completion` | Print shell completion scripts (bash/zsh/fish). |
 | `hermes version` | Show version information. |
 | `hermes update` | Pull latest code and reinstall dependencies. |
 | `hermes uninstall` | Remove Hermes from the system. |
@@ -831,10 +831,10 @@ hermes -p work chat -q "Hello from work profile"
 ## `hermes completion`
 
 ```bash
-hermes completion [bash|zsh]
+hermes completion [bash|zsh|fish]
 ```
 
-Print a shell completion script to stdout. Source the output in your shell profile for tab-completion of Hermes commands, subcommands, and profile names.
+Print a shell completion script to stdout. Source the output in your shell profile for tab-completion of all Hermes commands, subcommands, and profile names.
 
 Examples:
 
@@ -844,6 +844,9 @@ hermes completion bash >> ~/.bashrc
 
 # Zsh
 hermes completion zsh >> ~/.zshrc
+
+# Fish
+hermes completion fish > ~/.config/fish/completions/hermes.fish
 ```
 
 ## Maintenance commands

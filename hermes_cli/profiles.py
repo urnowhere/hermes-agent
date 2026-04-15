@@ -992,8 +992,8 @@ def rename_profile(old_name: str, new_name: str) -> Path:
 # ---------------------------------------------------------------------------
 
 def generate_bash_completion() -> str:
-    """Generate a bash completion script for hermes profile names."""
-    return '''# Hermes Agent profile completion
+    """Generate a bash completion script for hermes."""
+    return '''# Hermes Agent completion
 # Add to ~/.bashrc: eval "$(hermes completion bash)"
 
 _hermes_profiles() {
@@ -1006,9 +1006,10 @@ _hermes_profiles() {
 }
 
 _hermes_completion() {
-    local cur prev
+    local cur prev cmd
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
+    cmd="${COMP_WORDS[1]}"
 
     # Complete profile names after -p / --profile
     if [[ "$prev" == "-p" || "$prev" == "--profile" ]]; then
@@ -1016,23 +1017,111 @@ _hermes_completion() {
         return
     fi
 
-    # Complete profile subcommands
-    if [[ "${COMP_WORDS[1]}" == "profile" ]]; then
-        case "$prev" in
-            profile)
+    # Subcommand completions
+    case "$cmd" in
+        profile)
+            if [[ "$prev" == "profile" ]]; then
                 COMPREPLY=($(compgen -W "list use create delete show alias rename export import" -- "$cur"))
-                return
-                ;;
-            use|delete|show|alias|rename|export)
+            elif [[ "$prev" == "use" || "$prev" == "delete" || "$prev" == "show" || "$prev" == "alias" || "$prev" == "rename" || "$prev" == "export" ]]; then
                 COMPREPLY=($(compgen -W "$(_hermes_profiles)" -- "$cur"))
-                return
-                ;;
-        esac
-    fi
+            fi
+            return
+            ;;
+        gateway)
+            if [[ "$prev" == "gateway" ]]; then
+                COMPREPLY=($(compgen -W "run start stop restart status install uninstall setup" -- "$cur"))
+            fi
+            return
+            ;;
+        config)
+            if [[ "$prev" == "config" ]]; then
+                COMPREPLY=($(compgen -W "show edit set path env-path check migrate" -- "$cur"))
+            fi
+            return
+            ;;
+        cron)
+            if [[ "$prev" == "cron" ]]; then
+                COMPREPLY=($(compgen -W "list create add edit pause resume run remove rm delete status tick" -- "$cur"))
+            fi
+            return
+            ;;
+        sessions)
+            if [[ "$prev" == "sessions" ]]; then
+                COMPREPLY=($(compgen -W "list export delete prune stats rename browse" -- "$cur"))
+            fi
+            return
+            ;;
+        tools)
+            if [[ "$prev" == "tools" ]]; then
+                COMPREPLY=($(compgen -W "list disable enable" -- "$cur"))
+            fi
+            return
+            ;;
+        mcp)
+            if [[ "$prev" == "mcp" ]]; then
+                COMPREPLY=($(compgen -W "serve add remove rm list ls test configure config" -- "$cur"))
+            fi
+            return
+            ;;
+        auth)
+            if [[ "$prev" == "auth" ]]; then
+                COMPREPLY=($(compgen -W "add list remove reset" -- "$cur"))
+            fi
+            return
+            ;;
+        webhook)
+            if [[ "$prev" == "webhook" ]]; then
+                COMPREPLY=($(compgen -W "subscribe add list ls remove rm test" -- "$cur"))
+            fi
+            return
+            ;;
+        pairing)
+            if [[ "$prev" == "pairing" ]]; then
+                COMPREPLY=($(compgen -W "list approve revoke clear-pending" -- "$cur"))
+            fi
+            return
+            ;;
+        skills)
+            if [[ "$prev" == "skills" ]]; then
+                COMPREPLY=($(compgen -W "browse search install inspect list check update audit uninstall publish snapshot tap config" -- "$cur"))
+            fi
+            return
+            ;;
+        plugins)
+            if [[ "$prev" == "plugins" ]]; then
+                COMPREPLY=($(compgen -W "install update remove rm uninstall list ls enable disable" -- "$cur"))
+            fi
+            return
+            ;;
+        memory)
+            if [[ "$prev" == "memory" ]]; then
+                COMPREPLY=($(compgen -W "setup status off" -- "$cur"))
+            fi
+            return
+            ;;
+        debug)
+            if [[ "$prev" == "debug" ]]; then
+                COMPREPLY=($(compgen -W "share" -- "$cur"))
+            fi
+            return
+            ;;
+        claw)
+            if [[ "$prev" == "claw" ]]; then
+                COMPREPLY=($(compgen -W "migrate cleanup clean" -- "$cur"))
+            fi
+            return
+            ;;
+        logs)
+            if [[ "$prev" == "logs" ]]; then
+                COMPREPLY=($(compgen -W "agent errors gateway list" -- "$cur"))
+            fi
+            return
+            ;;
+    esac
 
     # Top-level subcommands
     if [[ "$COMP_CWORD" == 1 ]]; then
-        local commands="chat model gateway setup status cron doctor dump config skills tools mcp sessions profile update version"
+        local commands="chat model gateway setup whatsapp login logout auth status cron webhook doctor dump debug backup import config pairing skills plugins memory tools mcp sessions insights claw version update uninstall acp profile completion dashboard logs"
         COMPREPLY=($(compgen -W "$commands" -- "$cur"))
     fi
 }
@@ -1042,9 +1131,9 @@ complete -F _hermes_completion hermes
 
 
 def generate_zsh_completion() -> str:
-    """Generate a zsh completion script for hermes profile names."""
+    """Generate a zsh completion script for hermes."""
     return '''#compdef hermes
-# Hermes Agent profile completion
+# Hermes Agent completion
 # Add to ~/.zshrc: eval "$(hermes completion zsh)"
 
 _hermes() {
@@ -1057,7 +1146,7 @@ _hermes() {
     _arguments \\
         '-p[Profile name]:profile:($profiles)' \\
         '--profile[Profile name]:profile:($profiles)' \\
-        '1:command:(chat model gateway setup status cron doctor dump config skills tools mcp sessions profile update version)' \\
+        '1:command:(chat model gateway setup whatsapp login logout auth status cron webhook doctor dump debug backup import config pairing skills plugins memory tools mcp sessions insights claw version update uninstall acp profile completion dashboard logs)' \\
         '*::arg:->args'
 
     case $words[1] in
@@ -1065,11 +1154,277 @@ _hermes() {
             _arguments '1:action:(list use create delete show alias rename export import)' \\
                         '2:profile:($profiles)'
             ;;
+        gateway)
+            _arguments '1:action:(run start stop restart status install uninstall setup)'
+            ;;
+        config)
+            _arguments '1:action:(show edit set path env-path check migrate)'
+            ;;
+        cron)
+            _arguments '1:action:(list create add edit pause resume run remove rm delete status tick)'
+            ;;
+        sessions)
+            _arguments '1:action:(list export delete prune stats rename browse)'
+            ;;
+        tools)
+            _arguments '1:action:(list disable enable)'
+            ;;
+        mcp)
+            _arguments '1:action:(serve add remove rm list ls test configure config)'
+            ;;
+        auth)
+            _arguments '1:action:(add list remove reset)'
+            ;;
+        webhook)
+            _arguments '1:action:(subscribe add list ls remove rm test)'
+            ;;
+        pairing)
+            _arguments '1:action:(list approve revoke clear-pending)'
+            ;;
+        skills)
+            _arguments '1:action:(browse search install inspect list check update audit uninstall publish snapshot tap config)'
+            ;;
+        plugins)
+            _arguments '1:action:(install update remove rm uninstall list ls enable disable)'
+            ;;
+        memory)
+            _arguments '1:action:(setup status off)'
+            ;;
+        debug)
+            _arguments '1:action:(share)'
+            ;;
+        claw)
+            _arguments '1:action:(migrate cleanup clean)'
+            ;;
+        logs)
+            _arguments '1:log:(agent errors gateway list)'
+            ;;
     esac
 }
 
 _hermes "$@"
 '''
+
+
+def generate_fish_completion() -> str:
+    """Generate a fish completion script for hermes."""
+    return '''#!/bin/env fish
+# fish completion for hermes
+
+function __hermes_profiles
+    set -l profiles_dir "$HOME/.hermes/profiles"
+    if test -d "$profiles_dir"
+        ls "$profiles_dir" 2>/dev/null
+    end
+    echo default
+end
+
+function __hermes_needs_command
+    set -l cmd (commandline -opc)
+    # $cmd[1] is 'hermes', skip it
+    if test (count $cmd) -le 1
+        return 0
+    end
+    return 1
+end
+
+function __hermes_using_subcommand
+    set -l cmd (commandline -opc)
+    if test (count $cmd) -lt 2
+        return 1
+    end
+    contains -- $cmd[2] $argv
+end
+
+function __hermes_previous_arg
+    set -l cmd (commandline -opc)
+    if test (count $cmd) -lt 1
+        return 1
+    end
+    contains -- $cmd[-1] $argv
+end
+
+# Remove any pre-existing completions
+complete -c hermes -e
+
+# Top-level subcommands
+complete -c hermes -n __hermes_needs_command -f -a chat -d 'Start an interactive chat session'
+complete -c hermes -n __hermes_needs_command -f -a model -d 'Manage models'
+complete -c hermes -n __hermes_needs_command -f -a gateway -d 'Control the gateway service'
+complete -c hermes -n __hermes_needs_command -f -a setup -d 'Run initial setup'
+complete -c hermes -n __hermes_needs_command -f -a whatsapp -d 'Set up WhatsApp integration'
+complete -c hermes -n __hermes_needs_command -f -a login -d 'Authenticate with an inference provider'
+complete -c hermes -n __hermes_needs_command -f -a logout -d 'Clear authentication for a provider'
+complete -c hermes -n __hermes_needs_command -f -a auth -d 'Manage pooled provider credentials'
+complete -c hermes -n __hermes_needs_command -f -a status -d 'Show system status'
+complete -c hermes -n __hermes_needs_command -f -a cron -d 'Manage cron jobs'
+complete -c hermes -n __hermes_needs_command -f -a webhook -d 'Manage webhook subscriptions'
+complete -c hermes -n __hermes_needs_command -f -a doctor -d 'Diagnose and fix issues'
+complete -c hermes -n __hermes_needs_command -f -a dump -d 'Dump configuration and state'
+complete -c hermes -n __hermes_needs_command -f -a debug -d 'Debug utilities and log sharing'
+complete -c hermes -n __hermes_needs_command -f -a backup -d 'Back up Hermes home directory'
+complete -c hermes -n __hermes_needs_command -f -a import -d 'Restore a Hermes backup'
+complete -c hermes -n __hermes_needs_command -f -a config -d 'View and edit configuration'
+complete -c hermes -n __hermes_needs_command -f -a pairing -d 'Manage DM pairing codes'
+complete -c hermes -n __hermes_needs_command -f -a skills -d 'Manage agent skills'
+complete -c hermes -n __hermes_needs_command -f -a plugins -d 'Manage plugins'
+complete -c hermes -n __hermes_needs_command -f -a memory -d 'Configure external memory provider'
+complete -c hermes -n __hermes_needs_command -f -a tools -d 'Manage agent tools'
+complete -c hermes -n __hermes_needs_command -f -a mcp -d 'Manage MCP servers'
+complete -c hermes -n __hermes_needs_command -f -a sessions -d 'Manage conversation sessions'
+complete -c hermes -n __hermes_needs_command -f -a insights -d 'Show usage analytics'
+complete -c hermes -n __hermes_needs_command -f -a claw -d 'OpenClaw migration tools'
+complete -c hermes -n __hermes_needs_command -f -a version -d 'Show version'
+complete -c hermes -n __hermes_needs_command -f -a update -d 'Update hermes'
+complete -c hermes -n __hermes_needs_command -f -a uninstall -d 'Uninstall Hermes Agent'
+complete -c hermes -n __hermes_needs_command -f -a acp -d 'ACP server for IDE integration'
+complete -c hermes -n __hermes_needs_command -f -a profile -d 'Manage profiles'
+complete -c hermes -n __hermes_needs_command -f -a completion -d 'Print shell completion scripts'
+complete -c hermes -n __hermes_needs_command -f -a dashboard -d 'Start the web UI dashboard'
+complete -c hermes -n __hermes_needs_command -f -a logs -d 'View and filter log files'
+
+# Global flags
+complete -c hermes -n '__hermes_previous_arg -p --profile' -f -a "(__hermes_profiles)"
+
+# Gateway subcommands
+complete -c hermes -n '__hermes_using_subcommand gateway' -f -a run -d 'Run gateway in foreground'
+complete -c hermes -n '__hermes_using_subcommand gateway' -f -a start -d 'Start gateway service'
+complete -c hermes -n '__hermes_using_subcommand gateway' -f -a stop -d 'Stop gateway service'
+complete -c hermes -n '__hermes_using_subcommand gateway' -f -a restart -d 'Restart gateway service'
+complete -c hermes -n '__hermes_using_subcommand gateway' -f -a status -d 'Show gateway status'
+complete -c hermes -n '__hermes_using_subcommand gateway' -f -a install -d 'Install gateway service'
+complete -c hermes -n '__hermes_using_subcommand gateway' -f -a uninstall -d 'Uninstall gateway service'
+complete -c hermes -n '__hermes_using_subcommand gateway' -f -a setup -d 'Configure messaging platforms'
+
+# Config subcommands
+complete -c hermes -n '__hermes_using_subcommand config' -f -a show -d 'Show current configuration'
+complete -c hermes -n '__hermes_using_subcommand config' -f -a edit -d 'Open config in editor'
+complete -c hermes -n '__hermes_using_subcommand config' -f -a set -d 'Set a config value'
+complete -c hermes -n '__hermes_using_subcommand config' -f -a path -d 'Print config file path'
+complete -c hermes -n '__hermes_using_subcommand config' -f -a env-path -d 'Print .env file path'
+complete -c hermes -n '__hermes_using_subcommand config' -f -a check -d 'Check for missing/outdated config'
+complete -c hermes -n '__hermes_using_subcommand config' -f -a migrate -d 'Update config with new options'
+
+# Cron subcommands
+complete -c hermes -n '__hermes_using_subcommand cron' -f -a list -d 'List scheduled jobs'
+complete -c hermes -n '__hermes_using_subcommand cron' -f -a create -d 'Create a scheduled job'
+complete -c hermes -n '__hermes_using_subcommand cron' -f -a add -d 'Create a scheduled job'
+complete -c hermes -n '__hermes_using_subcommand cron' -f -a edit -d 'Edit an existing job'
+complete -c hermes -n '__hermes_using_subcommand cron' -f -a pause -d 'Pause a scheduled job'
+complete -c hermes -n '__hermes_using_subcommand cron' -f -a resume -d 'Resume a paused job'
+complete -c hermes -n '__hermes_using_subcommand cron' -f -a run -d 'Run a job on next tick'
+complete -c hermes -n '__hermes_using_subcommand cron' -f -a remove -d 'Remove a scheduled job'
+complete -c hermes -n '__hermes_using_subcommand cron' -f -a rm -d 'Remove a scheduled job'
+complete -c hermes -n '__hermes_using_subcommand cron' -f -a delete -d 'Remove a scheduled job'
+complete -c hermes -n '__hermes_using_subcommand cron' -f -a status -d 'Check if scheduler is running'
+complete -c hermes -n '__hermes_using_subcommand cron' -f -a tick -d 'Run due jobs once and exit'
+
+# Sessions subcommands
+complete -c hermes -n '__hermes_using_subcommand sessions' -f -a list -d 'List recent sessions'
+complete -c hermes -n '__hermes_using_subcommand sessions' -f -a export -d 'Export sessions to JSONL'
+complete -c hermes -n '__hermes_using_subcommand sessions' -f -a delete -d 'Delete a specific session'
+complete -c hermes -n '__hermes_using_subcommand sessions' -f -a prune -d 'Delete old sessions'
+complete -c hermes -n '__hermes_using_subcommand sessions' -f -a stats -d 'Show session store statistics'
+complete -c hermes -n '__hermes_using_subcommand sessions' -f -a rename -d 'Set or change a session title'
+complete -c hermes -n '__hermes_using_subcommand sessions' -f -a browse -d 'Interactive session picker'
+
+# Tools subcommands
+complete -c hermes -n '__hermes_using_subcommand tools' -f -a list -d 'Show tool status'
+complete -c hermes -n '__hermes_using_subcommand tools' -f -a disable -d 'Disable toolsets'
+complete -c hermes -n '__hermes_using_subcommand tools' -f -a enable -d 'Enable toolsets'
+
+# MCP subcommands
+complete -c hermes -n '__hermes_using_subcommand mcp' -f -a serve -d 'Run as MCP server'
+complete -c hermes -n '__hermes_using_subcommand mcp' -f -a add -d 'Add an MCP server'
+complete -c hermes -n '__hermes_using_subcommand mcp' -f -a remove -d 'Remove an MCP server'
+complete -c hermes -n '__hermes_using_subcommand mcp' -f -a rm -d 'Remove an MCP server'
+complete -c hermes -n '__hermes_using_subcommand mcp' -f -a list -d 'List configured servers'
+complete -c hermes -n '__hermes_using_subcommand mcp' -f -a ls -d 'List configured servers'
+complete -c hermes -n '__hermes_using_subcommand mcp' -f -a test -d 'Test server connection'
+complete -c hermes -n '__hermes_using_subcommand mcp' -f -a configure -d 'Toggle tool selection'
+complete -c hermes -n '__hermes_using_subcommand mcp' -f -a config -d 'Toggle tool selection'
+
+# Auth subcommands
+complete -c hermes -n '__hermes_using_subcommand auth' -f -a add -d 'Add a pooled credential'
+complete -c hermes -n '__hermes_using_subcommand auth' -f -a list -d 'List pooled credentials'
+complete -c hermes -n '__hermes_using_subcommand auth' -f -a remove -d 'Remove a pooled credential'
+complete -c hermes -n '__hermes_using_subcommand auth' -f -a reset -d 'Clear exhaustion status'
+
+# Webhook subcommands
+complete -c hermes -n '__hermes_using_subcommand webhook' -f -a subscribe -d 'Create a webhook subscription'
+complete -c hermes -n '__hermes_using_subcommand webhook' -f -a add -d 'Create a webhook subscription'
+complete -c hermes -n '__hermes_using_subcommand webhook' -f -a list -d 'List subscriptions'
+complete -c hermes -n '__hermes_using_subcommand webhook' -f -a ls -d 'List subscriptions'
+complete -c hermes -n '__hermes_using_subcommand webhook' -f -a remove -d 'Remove a subscription'
+complete -c hermes -n '__hermes_using_subcommand webhook' -f -a rm -d 'Remove a subscription'
+complete -c hermes -n '__hermes_using_subcommand webhook' -f -a test -d 'Send a test POST'
+
+# Pairing subcommands
+complete -c hermes -n '__hermes_using_subcommand pairing' -f -a list -d 'Show pending and approved users'
+complete -c hermes -n '__hermes_using_subcommand pairing' -f -a approve -d 'Approve a pairing code'
+complete -c hermes -n '__hermes_using_subcommand pairing' -f -a revoke -d 'Revoke user access'
+complete -c hermes -n '__hermes_using_subcommand pairing' -f -a clear-pending -d 'Clear all pending codes'
+
+# Skills subcommands
+complete -c hermes -n '__hermes_using_subcommand skills' -f -a browse -d 'Browse available skills'
+complete -c hermes -n '__hermes_using_subcommand skills' -f -a search -d 'Search skill registries'
+complete -c hermes -n '__hermes_using_subcommand skills' -f -a install -d 'Install a skill'
+complete -c hermes -n '__hermes_using_subcommand skills' -f -a inspect -d 'Preview a skill'
+complete -c hermes -n '__hermes_using_subcommand skills' -f -a list -d 'List installed skills'
+complete -c hermes -n '__hermes_using_subcommand skills' -f -a check -d 'Check for updates'
+complete -c hermes -n '__hermes_using_subcommand skills' -f -a update -d 'Update hub skills'
+complete -c hermes -n '__hermes_using_subcommand skills' -f -a audit -d 'Re-scan installed skills'
+complete -c hermes -n '__hermes_using_subcommand skills' -f -a uninstall -d 'Remove a hub skill'
+complete -c hermes -n '__hermes_using_subcommand skills' -f -a publish -d 'Publish a skill'
+complete -c hermes -n '__hermes_using_subcommand skills' -f -a snapshot -d 'Export/import configs'
+complete -c hermes -n '__hermes_using_subcommand skills' -f -a tap -d 'Manage skill sources'
+complete -c hermes -n '__hermes_using_subcommand skills' -f -a config -d 'Enable/disable skills'
+
+# Plugins subcommands
+complete -c hermes -n '__hermes_using_subcommand plugins' -f -a install -d 'Install a plugin'
+complete -c hermes -n '__hermes_using_subcommand plugins' -f -a update -d 'Pull latest changes'
+complete -c hermes -n '__hermes_using_subcommand plugins' -f -a remove -d 'Remove a plugin'
+complete -c hermes -n '__hermes_using_subcommand plugins' -f -a rm -d 'Remove a plugin'
+complete -c hermes -n '__hermes_using_subcommand plugins' -f -a uninstall -d 'Remove a plugin'
+complete -c hermes -n '__hermes_using_subcommand plugins' -f -a list -d 'List installed plugins'
+complete -c hermes -n '__hermes_using_subcommand plugins' -f -a ls -d 'List installed plugins'
+complete -c hermes -n '__hermes_using_subcommand plugins' -f -a enable -d 'Enable a plugin'
+complete -c hermes -n '__hermes_using_subcommand plugins' -f -a disable -d 'Disable a plugin'
+
+# Memory subcommands
+complete -c hermes -n '__hermes_using_subcommand memory' -f -a setup -d 'Interactive provider setup'
+complete -c hermes -n '__hermes_using_subcommand memory' -f -a status -d 'Show current config'
+complete -c hermes -n '__hermes_using_subcommand memory' -f -a off -d 'Disable external provider'
+
+# Debug subcommands
+complete -c hermes -n '__hermes_using_subcommand debug' -f -a share -d 'Upload debug report'
+
+# Claw subcommands
+complete -c hermes -n '__hermes_using_subcommand claw' -f -a migrate -d 'Migrate from OpenClaw'
+complete -c hermes -n '__hermes_using_subcommand claw' -f -a cleanup -d 'Archive leftover dirs'
+complete -c hermes -n '__hermes_using_subcommand claw' -f -a clean -d 'Archive leftover dirs'
+
+# Logs positional args
+complete -c hermes -n '__hermes_using_subcommand logs' -f -a agent -d 'View agent.log'
+complete -c hermes -n '__hermes_using_subcommand logs' -f -a errors -d 'View errors.log'
+complete -c hermes -n '__hermes_using_subcommand logs' -f -a gateway -d 'View gateway.log'
+complete -c hermes -n '__hermes_using_subcommand logs' -f -a list -d 'List available log files'
+
+# Profile subcommands
+complete -c hermes -n '__hermes_using_subcommand profile' -f -a list -d 'List all profiles'
+complete -c hermes -n '__hermes_using_subcommand profile' -f -a use -d 'Switch to a profile'
+complete -c hermes -n '__hermes_using_subcommand profile' -f -a create -d 'Create a new profile'
+complete -c hermes -n '__hermes_using_subcommand profile' -f -a delete -d 'Delete a profile'
+complete -c hermes -n '__hermes_using_subcommand profile' -f -a show -d 'Show profile details'
+complete -c hermes -n '__hermes_using_subcommand profile' -f -a alias -d 'Alias a profile'
+complete -c hermes -n '__hermes_using_subcommand profile' -f -a rename -d 'Rename a profile'
+complete -c hermes -n '__hermes_using_subcommand profile' -f -a export -d 'Export a profile'
+complete -c hermes -n '__hermes_using_subcommand profile' -f -a import -d 'Import a profile'
+
+# Profile subcommands that take a profile name argument
+complete -c hermes -n '__hermes_using_subcommand use delete show alias rename export' -f -a "(__hermes_profiles)"
+'''
+
 
 
 # ---------------------------------------------------------------------------

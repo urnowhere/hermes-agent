@@ -30,6 +30,7 @@ from hermes_cli.profiles import (
     import_profile,
     generate_bash_completion,
     generate_zsh_completion,
+    generate_fish_completion,
     _get_profiles_root,
     _get_default_hermes_home,
 )
@@ -673,7 +674,7 @@ class TestProfileIsolation:
 # ===================================================================
 
 class TestCompletion:
-    """Tests for bash/zsh completion generators."""
+    """Tests for bash/zsh/fish completion generators."""
 
     def test_bash_completion_contains_complete(self):
         script = generate_bash_completion()
@@ -692,6 +693,81 @@ class TestCompletion:
     def test_zsh_completion_has_hermes_function(self):
         script = generate_zsh_completion()
         assert "_hermes" in script
+
+    def test_fish_completion_has_complete(self):
+        script = generate_fish_completion()
+        assert len(script) > 0
+        assert "complete -c hermes" in script
+
+    def test_fish_completion_has_profiles_function(self):
+        script = generate_fish_completion()
+        assert "__hermes_profiles" in script
+
+    def test_fish_completion_has_subcommand_helpers(self):
+        script = generate_fish_completion()
+        assert "__hermes_needs_command" in script
+        assert "__hermes_using_subcommand" in script
+
+    def test_fish_completion_has_new_commands(self):
+        """Verify all new top-level commands are in fish completions."""
+        script = generate_fish_completion()
+        for cmd in ["dashboard", "logs", "webhook", "debug", "backup",
+                     "import", "whatsapp", "login", "logout", "auth",
+                     "pairing", "plugins", "memory", "insights", "claw",
+                     "uninstall", "acp", "completion"]:
+            assert f"-a {cmd} " in script, f"fish completion missing command: {cmd}"
+
+    def test_fish_completion_has_subcommand_completions(self):
+        """Verify subcommand completions for multi-level commands."""
+        script = generate_fish_completion()
+        # Gateway
+        assert "'__hermes_using_subcommand gateway'" in script
+        assert " -a run " in script
+        assert " -a restart " in script
+        # Config
+        assert "'__hermes_using_subcommand config'" in script
+        assert " -a edit " in script
+        # Cron
+        assert "'__hermes_using_subcommand cron'" in script
+        assert " -a tick " in script
+        # Sessions
+        assert "'__hermes_using_subcommand sessions'" in script
+        assert " -a browse " in script
+        # Skills
+        assert "'__hermes_using_subcommand skills'" in script
+        assert " -a inspect " in script
+
+    def test_bash_completion_has_new_commands(self):
+        """Verify all new top-level commands are in bash completions."""
+        script = generate_bash_completion()
+        assert "dashboard" in script
+        assert "logs" in script
+        assert "webhook" in script
+        assert "debug" in script
+        assert "insights" in script
+
+    def test_bash_completion_has_subcommand_completions(self):
+        """Verify bash subcommand completions for multi-level commands."""
+        script = generate_bash_completion()
+        assert '"run start stop restart status install uninstall setup"' in script
+        assert '"show edit set path env-path check migrate"' in script
+        assert '"list create add edit pause resume run' in script
+
+    def test_zsh_completion_has_new_commands(self):
+        """Verify all new top-level commands are in zsh completions."""
+        script = generate_zsh_completion()
+        assert "dashboard" in script
+        assert "logs" in script
+        assert "webhook" in script
+        assert "debug" in script
+        assert "insights" in script
+
+    def test_zsh_completion_has_subcommand_completions(self):
+        """Verify zsh subcommand completions for multi-level commands."""
+        script = generate_zsh_completion()
+        assert "run start stop restart status install uninstall setup" in script
+        assert "show edit set path env-path check migrate" in script
+        assert "browse search install inspect" in script
 
 
 # ===================================================================

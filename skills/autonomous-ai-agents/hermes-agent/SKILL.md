@@ -211,13 +211,19 @@ hermes auth reset PROVIDER  Clear exhaustion status
 ### Other
 
 ```
+hermes dashboard             Start web UI dashboard
+hermes logs [AGENT] [--f]    View and filter log files
+hermes webhook list/add/remove  Webhook subscriptions
+hermes debug share           Upload debug report
+hermes backup                Back up Hermes home
+hermes import FILE           Restore from backup
 hermes insights [--days N]  Usage analytics
 hermes update               Update to latest version
 hermes pairing list/approve/revoke  DM authorization
 hermes plugins list/install/remove  Plugin management
 hermes honcho setup/status  Honcho memory integration (requires honcho plugin)
 hermes memory setup/status/off  Memory provider config
-hermes completion bash|zsh  Shell completions
+hermes completion bash|zsh|fish  Shell completions
 hermes acp                  ACP server (IDE integration)
 hermes claw migrate         Migrate from OpenClaw
 hermes uninstall            Uninstall Hermes
