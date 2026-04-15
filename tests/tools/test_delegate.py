@@ -21,6 +21,8 @@ from tools.delegate_tool import (
     DELEGATE_BLOCKED_TOOLS,
     DELEGATE_TASK_SCHEMA,
     _get_max_concurrent_children,
+    _get_max_duration_seconds,
+    _run_single_child,
     MAX_DEPTH,
     check_delegate_requirements,
     delegate_task,
@@ -68,6 +70,26 @@ class TestDelegateRequirements(unittest.TestCase):
         self.assertIn("toolsets", props)
         self.assertIn("max_iterations", props)
         self.assertNotIn("maxItems", props["tasks"])  # removed — limit is now runtime-configurable
+
+
+class TestDelegationDurationConfig(unittest.TestCase):
+    def test_default_max_duration_seconds(self):
+        with patch("tools.delegate_tool._load_config", return_value={}):
+            self.assertEqual(_get_max_duration_seconds(), 1800.0)
+
+    def test_zero_disables_max_duration(self):
+        with patch("tools.delegate_tool._load_config", return_value={"max_duration_seconds": 0}):
+            self.assertIsNone(_get_max_duration_seconds())
+
+    def test_env_override_takes_precedence_over_config(self):
+        with patch.dict(os.environ, {"DELEGATION_MAX_DURATION_SECONDS": "12"}, clear=False):
+            with patch("tools.delegate_tool._load_config", return_value={"max_duration_seconds": 34}):
+                self.assertEqual(_get_max_duration_seconds(), 12.0)
+
+    def test_env_override_can_disable_duration_even_when_config_is_set(self):
+        with patch.dict(os.environ, {"DELEGATION_MAX_DURATION_SECONDS": "0"}, clear=False):
+            with patch("tools.delegate_tool._load_config", return_value={"max_duration_seconds": 34}):
+                self.assertIsNone(_get_max_duration_seconds())
 
 
 class TestChildSystemPrompt(unittest.TestCase):
@@ -232,6 +254,116 @@ class TestDelegateTask(unittest.TestCase):
 
             delegate_task(goal="Test tracking", parent_agent=parent)
             self.assertEqual(len(parent._active_children), 0)
+
+    def test_run_single_child_times_out(self):
+        parent = _make_mock_parent(depth=0)
+        parent._touch_activity = MagicMock()
+
+        class SlowChild:
+            def __init__(self):
+                self.tool_progress_callback = None
+                self._delegate_saved_tool_names = []
+                self._credential_pool = None
+                self._interrupt_requested = False
+                self._interrupt_message = None
+                self.model = "test/model"
+                self.session_prompt_tokens = 0
+                self.session_completion_tokens = 0
+
+            def get_activity_summary(self):
+                return {
+                    "current_tool": None,
+                    "api_call_count": 0,
+                    "max_iterations": 20,
+                    "last_activity_desc": "waiting for model response",
+                }
+
+            def interrupt(self, message=None):
+                self._interrupt_requested = True
+                self._interrupt_message = message
+
+            def run_conversation(self, user_message=None, **kwargs):
+                start = time.monotonic()
+                while not self._interrupt_requested and (time.monotonic() - start) < 5:
+                    time.sleep(0.02)
+                return {
+                    "final_response": "Operation interrupted by timeout.",
+                    "messages": [],
+                    "api_calls": 1,
+                    "completed": False,
+                    "interrupted": self._interrupt_requested,
+                    "interrupt_message": self._interrupt_message,
+                }
+
+            def close(self):
+                return None
+
+        child = SlowChild()
+        with patch("tools.delegate_tool._get_max_duration_seconds", return_value=0.1):
+            result = _run_single_child(
+                task_index=0,
+                goal="Review this diff",
+                child=child,
+                parent_agent=parent,
+            )
+        self.assertEqual(result["status"], "timeout")
+        self.assertEqual(result["exit_reason"], "timeout")
+        self.assertIn("max_duration_seconds", result["error"])
+        self.assertLess(result["duration_seconds"], 3.0)
+        self.assertTrue(child._interrupt_requested)
+        parent._touch_activity.assert_called()
+
+    def test_run_single_child_does_not_mark_completed_child_as_timeout_during_flush(self):
+        parent = _make_mock_parent(depth=0)
+
+        class FlushBarrier:
+            def _flush(self):
+                time.sleep(0.05)
+
+        class FastChild:
+            def __init__(self):
+                self.tool_progress_callback = FlushBarrier()
+                self._delegate_saved_tool_names = []
+                self._credential_pool = None
+                self.model = "test/model"
+                self.session_prompt_tokens = 0
+                self.session_completion_tokens = 0
+
+            def get_activity_summary(self):
+                return {
+                    "current_tool": None,
+                    "api_call_count": 1,
+                    "max_iterations": 20,
+                    "last_activity_desc": "completed",
+                }
+
+            def interrupt(self, message=None):
+                raise AssertionError("completed child should not be interrupted after return")
+
+            def run_conversation(self, user_message=None, **kwargs):
+                return {
+                    "final_response": "Finished successfully.",
+                    "messages": [],
+                    "api_calls": 1,
+                    "completed": True,
+                    "interrupted": False,
+                }
+
+            def close(self):
+                return None
+
+        child = FastChild()
+        with patch("tools.delegate_tool._get_max_duration_seconds", return_value=0.01):
+            result = _run_single_child(
+                task_index=0,
+                goal="Review this diff",
+                child=child,
+                parent_agent=parent,
+            )
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["exit_reason"], "completed")
+        self.assertEqual(result["summary"], "Finished successfully.")
+        self.assertNotIn("error", result)
 
     def test_child_inherits_runtime_credentials(self):
         parent = _make_mock_parent(depth=0)

@@ -20,6 +20,7 @@ import json
 import logging
 logger = logging.getLogger(__name__)
 import os
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -50,7 +51,9 @@ _SUBAGENT_TOOLSETS = sorted(
 _TOOLSET_LIST_STR = ", ".join(f"'{n}'" for n in _SUBAGENT_TOOLSETS)
 
 _DEFAULT_MAX_CONCURRENT_CHILDREN = 3
+_DEFAULT_MAX_DURATION_SECONDS = 1800
 MAX_DEPTH = 2  # parent (0) -> child (1) -> grandchild rejected (2)
+_TIMEOUT_INTERRUPT_PREFIX = "[delegate-timeout]"
 
 
 def _get_max_concurrent_children() -> int:
@@ -77,6 +80,38 @@ def _get_max_concurrent_children() -> int:
         except (TypeError, ValueError):
             pass
     return _DEFAULT_MAX_CONCURRENT_CHILDREN
+
+
+def _get_max_duration_seconds() -> Optional[float]:
+    """Read delegation.max_duration_seconds with env override and sane coercion.
+
+    Returns None when explicitly disabled with 0/negative values.
+    """
+    env_val = os.getenv("DELEGATION_MAX_DURATION_SECONDS")
+    if env_val:
+        try:
+            seconds = float(env_val)
+            return seconds if seconds > 0 else None
+        except (TypeError, ValueError):
+            logger.warning(
+                "DELEGATION_MAX_DURATION_SECONDS=%r is not a valid number; falling back to config/default",
+                env_val,
+            )
+
+    cfg = _load_config()
+    val = cfg.get("max_duration_seconds")
+    if val is not None:
+        try:
+            seconds = float(val)
+            return seconds if seconds > 0 else None
+        except (TypeError, ValueError):
+            logger.warning(
+                "delegation.max_duration_seconds=%r is not a valid number; using default %s",
+                val,
+                _DEFAULT_MAX_DURATION_SECONDS,
+            )
+    return float(_DEFAULT_MAX_DURATION_SECONDS)
+
 DEFAULT_MAX_ITERATIONS = 50
 _HEARTBEAT_INTERVAL = 30  # seconds between parent activity heartbeats during delegation
 DEFAULT_TOOLSETS = ["terminal", "file", "web"]
@@ -412,11 +447,10 @@ def _run_single_child(
     # Get the progress callback from the child agent
     child_progress_cb = getattr(child, 'tool_progress_callback', None)
 
-    # Restore parent tool names using the value saved before child construction
-    # mutated the global. This is the correct parent toolset, not the child's.
-    import model_tools
-    _saved_tool_names = getattr(child, "_delegate_saved_tool_names",
-                                list(model_tools._last_resolved_tool_names))
+    # Avoid importing model_tools on cold synthetic/test paths here.
+    # The child already carries the parent's saved tool names when delegation
+    # was constructed normally, and a fresh model_tools import can dominate the
+    # measured runtime for timeout-sensitive watchdog tests.
 
     child_pool = getattr(child, '_credential_pool', None)
     leased_cred_id = None
@@ -468,8 +502,43 @@ def _run_single_child(
     _heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
     _heartbeat_thread.start()
 
+    max_duration_seconds = _get_max_duration_seconds()
+    _timeout_stop = threading.Event()
+    _timeout_triggered = threading.Event()
+
+    def _timeout_loop():
+        if max_duration_seconds is None:
+            return
+        if _timeout_stop.wait(max_duration_seconds):
+            return
+        _timeout_triggered.set()
+        timeout_msg = (
+            f"{_TIMEOUT_INTERRUPT_PREFIX} subagent exceeded max_duration_seconds="
+            f"{max_duration_seconds:g}"
+        )
+        try:
+            child.interrupt(timeout_msg)
+        except Exception as exc:
+            logger.debug("Failed to interrupt timed-out child agent: %s", exc)
+        if parent_agent is not None:
+            touch = getattr(parent_agent, '_touch_activity', None)
+            if touch:
+                try:
+                    touch(f"delegate_task: timing out subagent {task_index}")
+                except Exception:
+                    pass
+
+    _timeout_thread = threading.Thread(target=_timeout_loop, daemon=True)
+    _timeout_thread.start()
+
     try:
         result = child.run_conversation(user_message=goal)
+
+        # Stop the timeout watchdog before post-processing the result so a child
+        # that completed just under the wall-clock limit cannot be reclassified
+        # as timed out while we flush progress or inspect the returned payload.
+        _timeout_stop.set()
+        _timeout_thread.join(timeout=5)
 
         # Flush any remaining batched progress to gateway
         if child_progress_cb and hasattr(child_progress_cb, '_flush'):
@@ -483,9 +552,16 @@ def _run_single_child(
         summary = result.get("final_response") or ""
         completed = result.get("completed", False)
         interrupted = result.get("interrupted", False)
+        interrupt_message = result.get("interrupt_message") or ""
+        timed_out = (
+            str(interrupt_message).startswith(_TIMEOUT_INTERRUPT_PREFIX)
+            or (_timeout_triggered.is_set() and interrupted and not completed)
+        )
         api_calls = result.get("api_calls", 0)
 
-        if interrupted:
+        if timed_out:
+            status = "timeout"
+        elif interrupted:
             status = "interrupted"
         elif summary:
             # A summary means the subagent produced usable output.
@@ -534,7 +610,9 @@ def _run_single_child(
                         tool_trace[-1].update(result_meta)
 
         # Determine exit reason
-        if interrupted:
+        if timed_out:
+            exit_reason = "timeout"
+        elif interrupted:
             exit_reason = "interrupted"
         elif completed:
             exit_reason = "completed"
@@ -560,7 +638,13 @@ def _run_single_child(
             },
             "tool_trace": tool_trace,
         }
-        if status == "failed":
+        if timed_out:
+            entry["error"] = (
+                f"Subagent exceeded max_duration_seconds={max_duration_seconds:g}"
+                if max_duration_seconds is not None else
+                "Subagent exceeded max duration"
+            )
+        elif status == "failed":
             entry["error"] = result.get("error", "Subagent did not produce a response.")
 
         return entry
@@ -578,10 +662,12 @@ def _run_single_child(
         }
 
     finally:
-        # Stop the heartbeat thread so it doesn't keep touching parent activity
-        # after the child has finished (or failed).
+        # Stop the heartbeat and timeout watchdog threads so they don't keep
+        # touching parent activity or firing after the child has finished.
         _heartbeat_stop.set()
+        _timeout_stop.set()
         _heartbeat_thread.join(timeout=5)
+        _timeout_thread.join(timeout=5)
 
         if child_pool is not None and leased_cred_id is not None:
             try:
@@ -591,11 +677,10 @@ def _run_single_child(
 
         # Restore the parent's tool names so the process-global is correct
         # for any subsequent execute_code calls or other consumers.
-        import model_tools
-
         saved_tool_names = getattr(child, "_delegate_saved_tool_names", None)
-        if isinstance(saved_tool_names, list):
-            model_tools._last_resolved_tool_names = list(saved_tool_names)
+        model_tools_mod = sys.modules.get("model_tools")
+        if isinstance(saved_tool_names, list) and model_tools_mod is not None:
+            model_tools_mod._last_resolved_tool_names = list(saved_tool_names)
 
         # Remove child from active tracking
 
