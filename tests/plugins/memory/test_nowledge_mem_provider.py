@@ -3,6 +3,7 @@ import json
 import os
 
 
+client_module = importlib.import_module("plugins.memory.nowledge-mem.client")
 provider_module = importlib.import_module("plugins.memory.nowledge-mem.provider")
 loader_module = importlib.import_module("plugins.memory")
 
@@ -336,3 +337,82 @@ def test_on_session_end_failed_append_does_not_advance_count(monkeypatch, tmp_pa
 
     assert provider._saved_message_count == 2
     assert provider._client.append_calls == []
+
+
+def test_client_thread_import_posts_payload_without_subprocess_argv(monkeypatch):
+    captured = {}
+
+    def _bad_run(*_args, **_kwargs):
+        raise AssertionError("thread import must not send transcript through argv")
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"success": true}'
+
+    def _fake_urlopen(request, **_kwargs):
+        captured["url"] = request.full_url
+        captured["body"] = request.data.decode("utf-8")
+        return _Response()
+
+    monkeypatch.setattr(client_module.subprocess, "run", _bad_run)
+    monkeypatch.setattr(client_module.urlrequest, "urlopen", _fake_urlopen)
+    monkeypatch.setenv("NMEM_API_URL", "http://mem.test")
+    monkeypatch.setenv("NMEM_API_KEY", "")
+
+    client = client_module.NowledgeMemClient(space="Research Agent")
+    result = client.import_thread(
+        "hermes-session-1",
+        [{"role": "user", "content": "x" * 100_000}],
+        title="Long session",
+    )
+
+    payload = json.loads(captured["body"])
+    assert result["success"] is True
+    assert captured["url"] == "http://mem.test/threads/import"
+    assert payload["thread_id"] == "hermes-session-1"
+    assert payload["metadata"]["space_id"] == "Research Agent"
+    assert payload["messages"][0]["content"] == "x" * 100_000
+
+
+def test_client_thread_append_posts_payload_without_subprocess_argv(monkeypatch):
+    captured = {}
+
+    def _bad_run(*_args, **_kwargs):
+        raise AssertionError("thread append must not send transcript through argv")
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"success": true, "messages_added": 1}'
+
+    def _fake_urlopen(request, **_kwargs):
+        captured["url"] = request.full_url
+        captured["body"] = request.data.decode("utf-8")
+        return _Response()
+
+    monkeypatch.setattr(client_module.subprocess, "run", _bad_run)
+    monkeypatch.setattr(client_module.urlrequest, "urlopen", _fake_urlopen)
+    monkeypatch.setenv("NMEM_API_URL", "http://mem.test")
+    monkeypatch.setenv("NMEM_API_KEY", "")
+
+    client = client_module.NowledgeMemClient()
+    result = client.append_thread(
+        "hermes/session 1",
+        [{"role": "assistant", "content": "y" * 100_000}],
+    )
+
+    payload = json.loads(captured["body"])
+    assert result["messages_added"] == 1
+    assert captured["url"] == "http://mem.test/threads/hermes%2Fsession%201/append"
+    assert payload["messages"][0]["content"] == "y" * 100_000

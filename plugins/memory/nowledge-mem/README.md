@@ -41,8 +41,9 @@ hermes config set memory.provider nowledge-mem
 Durable saves still happen through the native `nmem_` tools. In addition,
 the provider captures cleaned Hermes session transcripts at real session
 boundaries such as clean exit, `/new`, `/reset`, and gateway session expiry.
-The first flush uses `nmem t import`; later flushes in the same live Hermes
-session append only the delta with `nmem t append`.
+The first flush imports the transcript; later flushes in the same live Hermes
+session append only the delta. Transcript payloads use the Mem API directly so
+long sessions are not squeezed into shell arguments.
 
 ## Tools
 
