@@ -181,6 +181,26 @@ def _hermes_bin_dir() -> str:
     return d
 
 
+def _bundled_tirith_candidates() -> list[str]:
+    """Return candidate installed binary paths under $HERMES_HOME/bin."""
+    bin_dir = _hermes_bin_dir()
+    if platform.system() == "Windows":
+        return [
+            os.path.join(bin_dir, "tirith.exe"),
+            os.path.join(bin_dir, "tirith"),
+        ]
+    return [os.path.join(bin_dir, "tirith")]
+
+
+def _find_bundled_tirith() -> str | None:
+    """Return an installed tirith path from $HERMES_HOME/bin if present."""
+    is_windows = platform.system() == "Windows"
+    for candidate in _bundled_tirith_candidates():
+        if os.path.isfile(candidate) and (is_windows or os.access(candidate, os.X_OK)):
+            return candidate
+    return None
+
+
 def _detect_target() -> str | None:
     """Return the Rust target triple for the current platform, or None."""
     system = platform.system()
@@ -190,6 +210,8 @@ def _detect_target() -> str | None:
         plat = "apple-darwin"
     elif system == "Linux":
         plat = "unknown-linux-gnu"
+    elif system == "Windows":
+        plat = "pc-windows-msvc"
     else:
         return None
 
@@ -295,6 +317,9 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
         return None, "unsupported_platform"
 
     archive_name = f"tirith-{target}.tar.gz"
+    is_windows = target.endswith("-pc-windows-msvc")
+    if is_windows:
+        archive_name = f"tirith-{target}.zip"
     base_url = f"https://github.com/{_REPO}/releases/latest/download"
 
     tmpdir = tempfile.mkdtemp(prefix="tirith-install-")
@@ -345,23 +370,38 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
         if not _verify_checksum(archive_path, checksums_path, archive_name):
             return None, "checksum_failed"
 
-        with tarfile.open(archive_path, "r:gz") as tar:
-            # Extract only the tirith binary (safety: reject paths with ..)
-            for member in tar.getmembers():
-                if member.name == "tirith" or member.name.endswith("/tirith"):
-                    if ".." in member.name:
-                        continue
-                    member.name = "tirith"
-                    tar.extract(member, tmpdir)
-                    break
-            else:
-                log("tirith binary not found in archive")
-                return None, "binary_not_in_archive"
+        if is_windows:
+            import zipfile
+            with zipfile.ZipFile(archive_path, "r") as zf:
+                for member in zf.namelist():
+                    if member == "tirith.exe" or member.endswith("/tirith.exe"):
+                        if ".." in member:
+                            continue
+                        zf.extract(member, tmpdir)
+                        src = os.path.join(tmpdir, member)
+                        break
+                else:
+                    log("tirith binary not found in archive")
+                    return None, "binary_not_in_archive"
+            src_base = src  # reuse the path computed at extraction time
+        else:
+            with tarfile.open(archive_path, "r:gz") as tar:
+                for member in tar.getmembers():
+                    if member.name == "tirith" or member.name.endswith("/tirith"):
+                        if ".." in member.name:
+                            continue
+                        member.name = "tirith"
+                        tar.extract(member, tmpdir)
+                        break
+                else:
+                    log("tirith binary not found in archive")
+                    return None, "binary_not_in_archive"
+            src_base = os.path.join(tmpdir, "tirith")
 
-        src = os.path.join(tmpdir, "tirith")
-        dest = os.path.join(_hermes_bin_dir(), "tirith")
-        shutil.move(src, dest)
-        os.chmod(dest, os.stat(dest).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        dest = os.path.join(_hermes_bin_dir(), "tirith.exe" if is_windows else "tirith")
+        shutil.move(src_base, dest)
+        if not is_windows:
+            os.chmod(dest, os.stat(dest).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
         verification = "cosign + SHA-256" if cosign_verified else "SHA-256 only"
         logger.info("tirith installed to %s (%s)", dest, verification)
@@ -426,8 +466,8 @@ def _resolve_tirith_path(configured_path: str) -> str:
         _clear_install_failed()
         return found
 
-    hermes_bin = os.path.join(_hermes_bin_dir(), "tirith")
-    if os.path.isfile(hermes_bin) and os.access(hermes_bin, os.X_OK):
+    hermes_bin = _find_bundled_tirith()
+    if hermes_bin:
         _resolved_path = hermes_bin
         _install_failure_reason = ""
         _clear_install_failed()
@@ -490,8 +530,8 @@ def _background_install(*, log_failures: bool = True):
             _install_failure_reason = ""
             return
 
-        hermes_bin = os.path.join(_hermes_bin_dir(), "tirith")
-        if os.path.isfile(hermes_bin) and os.access(hermes_bin, os.X_OK):
+        hermes_bin = _find_bundled_tirith()
+        if hermes_bin:
             _resolved_path = hermes_bin
             _install_failure_reason = ""
             return
