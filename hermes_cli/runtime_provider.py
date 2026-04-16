@@ -447,6 +447,8 @@ def _resolve_openrouter_runtime(
                 use_config_base_url = True
         elif requested_norm == "custom" and cfg_provider == "custom":
             use_config_base_url = True
+        elif requested_norm == "openrouter" and cfg_provider == "openrouter":
+            use_config_base_url = True
 
     base_url = (
         (explicit_base_url or "").strip()
@@ -691,7 +693,7 @@ def resolve_runtime_provider(
             or env_openai_base_url
             or env_openrouter_base_url
         )
-        if cfg_base_url and cfg_provider in {"auto", "custom"}:
+        if cfg_base_url and cfg_provider in {"auto", "custom", "openrouter"}:
             has_custom_endpoint = True
         has_runtime_override = bool(explicit_api_key or explicit_base_url)
         should_use_pool = (
