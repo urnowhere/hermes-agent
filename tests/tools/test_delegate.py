@@ -627,6 +627,33 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertEqual(creds["api_key"], "local-key")
         self.assertEqual(creds["api_mode"], "chat_completions")
 
+    def test_direct_endpoint_respects_explicit_api_mode(self):
+        parent = _make_mock_parent(depth=0)
+        cfg = {
+            "model": "claude-sonnet-4",
+            "provider": "custom",
+            "base_url": "https://myfoundry.services.ai.azure.com/models/chat/completions/anthropic",
+            "api_key": "foundry-key",
+            "api_mode": "anthropic_messages",
+        }
+        creds = _resolve_delegation_credentials(cfg, parent)
+        self.assertEqual(creds["provider"], "custom")
+        self.assertEqual(creds["base_url"], cfg["base_url"])
+        self.assertEqual(creds["api_key"], "foundry-key")
+        self.assertEqual(creds["api_mode"], "anthropic_messages")
+
+    def test_direct_endpoint_auto_detects_anthropic_suffix(self):
+        parent = _make_mock_parent(depth=0)
+        cfg = {
+            "model": "claude-sonnet-4",
+            "provider": "custom",
+            "base_url": "https://myfoundry.services.ai.azure.com/models/chat/completions/anthropic",
+            "api_key": "foundry-key",
+        }
+        creds = _resolve_delegation_credentials(cfg, parent)
+        self.assertEqual(creds["provider"], "custom")
+        self.assertEqual(creds["api_mode"], "anthropic_messages")
+
     def test_direct_endpoint_falls_back_to_openai_api_key_env(self):
         parent = _make_mock_parent(depth=0)
         cfg = {
@@ -816,6 +843,43 @@ class TestDelegationProviderIntegration(unittest.TestCase):
             self.assertEqual(kwargs["base_url"], "http://localhost:1234/v1")
             self.assertEqual(kwargs["api_key"], "local-key")
             self.assertEqual(kwargs["api_mode"], "chat_completions")
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    def test_direct_anthropic_endpoint_reaches_child_agent_with_anthropic_api_mode(self, mock_creds, mock_cfg):
+        mock_cfg.return_value = {
+            "max_iterations": 45,
+            "model": "claude-sonnet-4",
+            "provider": "custom",
+            "base_url": "https://myfoundry.services.ai.azure.com/models/chat/completions/anthropic",
+            "api_key": "foundry-key",
+            "api_mode": "anthropic_messages",
+        }
+        mock_creds.return_value = {
+            "model": "claude-sonnet-4",
+            "provider": "custom",
+            "base_url": "https://myfoundry.services.ai.azure.com/models/chat/completions/anthropic",
+            "api_key": "foundry-key",
+            "api_mode": "anthropic_messages",
+        }
+        parent = _make_mock_parent(depth=0)
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.run_conversation.return_value = {
+                "final_response": "done", "completed": True, "api_calls": 1
+            }
+            MockAgent.return_value = mock_child
+
+            delegate_task(goal="Anthropic compat endpoint test", parent_agent=parent)
+
+            _, kwargs = MockAgent.call_args
+            self.assertEqual(kwargs["provider"], "custom")
+            self.assertEqual(
+                kwargs["base_url"],
+                "https://myfoundry.services.ai.azure.com/models/chat/completions/anthropic",
+            )
+            self.assertEqual(kwargs["api_mode"], "anthropic_messages")
 
     @patch("tools.delegate_tool._load_config")
     @patch("tools.delegate_tool._resolve_delegation_credentials")

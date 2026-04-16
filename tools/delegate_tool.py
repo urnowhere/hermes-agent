@@ -904,8 +904,11 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     configured_provider = str(cfg.get("provider") or "").strip() or None
     configured_base_url = str(cfg.get("base_url") or "").strip() or None
     configured_api_key = str(cfg.get("api_key") or "").strip() or None
+    configured_api_mode = str(cfg.get("api_mode") or "").strip().lower() or None
 
     if configured_base_url:
+        from hermes_cli.providers import determine_api_mode
+
         api_key = (
             configured_api_key
             or os.getenv("OPENAI_API_KEY", "").strip()
@@ -918,7 +921,9 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
 
         base_lower = configured_base_url.lower()
         provider = "custom"
-        api_mode = "chat_completions"
+        api_mode = determine_api_mode("custom", configured_base_url)
+        if configured_api_mode in {"chat_completions", "codex_responses", "anthropic_messages"}:
+            api_mode = configured_api_mode
         if "chatgpt.com/backend-api/codex" in base_lower:
             provider = "openai-codex"
             api_mode = "codex_responses"
