@@ -2339,6 +2339,159 @@ class TestRunConversation:
         mock_handle_function_call.assert_not_called()
 
 
+class TestMultimodalUserMessage:
+    """Tests for run_conversation accepting list user_message (vision turns).
+
+    The gateway sends a list of typed content blocks (text + image_url)
+    when the source platform attached an image and the active model
+    supports native vision.  These tests verify the plumbing accepts
+    that shape end-to-end without coercing to text.
+    """
+
+    # ---- Helper: _user_message_preview ----
+
+    def test_user_message_preview_string(self):
+        assert AIAgent._user_message_preview("hello world") == "hello world"
+
+    def test_user_message_preview_string_truncates(self):
+        assert AIAgent._user_message_preview("a" * 200, max_len=10) == "aaaaaaaaaa..."
+
+    def test_user_message_preview_none(self):
+        assert AIAgent._user_message_preview(None) == ""
+
+    def test_user_message_preview_text_only_list(self):
+        content = [{"type": "text", "text": "Hello world"}]
+        assert AIAgent._user_message_preview(content) == "Hello world"
+
+    def test_user_message_preview_multimodal_list(self):
+        content = [
+            {"type": "text", "text": "Look at this:"},
+            {"type": "image_url", "image_url": {"url": "https://x.com/y.png"}},
+        ]
+        result = AIAgent._user_message_preview(content)
+        assert "Look at this:" in result
+        assert "[image]" in result
+
+    def test_user_message_preview_image_only(self):
+        content = [{"type": "image_url", "image_url": {"url": "https://x.com/y.png"}}]
+        result = AIAgent._user_message_preview(content)
+        assert "[image]" in result
+
+    def test_user_message_preview_audio_block(self):
+        content = [
+            {"type": "text", "text": "Listen:"},
+            {"type": "input_audio", "audio_url": {"url": "data:audio/wav;base64,X"}},
+        ]
+        result = AIAgent._user_message_preview(content)
+        assert "Listen:" in result
+        assert "[audio]" in result
+
+    def test_user_message_preview_anthropic_image_block(self):
+        content = [{"type": "image", "source": {"type": "url", "url": "https://x.com/y.png"}}]
+        result = AIAgent._user_message_preview(content)
+        assert "[image]" in result
+
+    # ---- Helper: _sanitize_user_message_in_place ----
+
+    def test_sanitize_string_passes_through(self):
+        result = AIAgent._sanitize_user_message_in_place("clean text")
+        assert result == "clean text"
+
+    def test_sanitize_string_strips_surrogates(self):
+        # Lone high surrogate (invalid UTF-8)
+        dirty = "hello\ud83d world"
+        result = AIAgent._sanitize_user_message_in_place(dirty)
+        assert "\ud83d" not in result
+
+    def test_sanitize_list_walks_blocks(self):
+        content = [
+            {"type": "text", "text": "hello\ud83d world"},
+            {"type": "image_url", "image_url": {"url": "https://x.com/y.png"}},
+        ]
+        result = AIAgent._sanitize_user_message_in_place(content)
+        assert isinstance(result, list)
+        assert len(result) == 2
+        # Text block sanitized
+        assert "\ud83d" not in result[0]["text"]
+        # Image block untouched
+        assert result[1]["type"] == "image_url"
+        assert result[1]["image_url"]["url"] == "https://x.com/y.png"
+
+    def test_sanitize_list_does_not_mutate_input(self):
+        original = [{"type": "text", "text": "hello"}]
+        result = AIAgent._sanitize_user_message_in_place(original)
+        # Result is a new list with new dicts
+        assert result is not original
+        assert result[0] is not original[0]
+
+    # ---- run_conversation accepts list ----
+
+    def test_run_conversation_accepts_list_content(self, agent):
+        """End-to-end: passing a list user_message should produce a
+        multimodal user message in the API call."""
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+
+        resp = _mock_response(content="I see a cat", finish_reason="stop")
+        agent.client.chat.completions.create.return_value = resp
+
+        content = [
+            {"type": "text", "text": "What's in this photo?"},
+            {"type": "image_url", "image_url": {"url": "https://x.com/cat.png"}},
+        ]
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(content)
+
+        # Result should be successful
+        assert result["completed"] is True
+
+        # The API call should have received the multimodal content as a list
+        call_kwargs = agent.client.chat.completions.create.call_args.kwargs
+        api_messages = call_kwargs["messages"]
+        user_msgs = [m for m in api_messages if m.get("role") == "user"]
+        assert len(user_msgs) >= 1
+        last_user = user_msgs[-1]
+        assert isinstance(last_user["content"], list), (
+            "user message content was coerced to string — multimodal lost"
+        )
+        # Both blocks should still be there
+        block_types = [b.get("type") for b in last_user["content"]]
+        assert "text" in block_types or "input_text" in block_types
+        assert "image_url" in block_types or "input_image" in block_types
+
+    def test_run_conversation_string_still_works(self, agent):
+        """Backwards compat: passing a plain string still produces a string content."""
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+
+        resp = _mock_response(content="Hello back", finish_reason="stop")
+        agent.client.chat.completions.create.return_value = resp
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Hello")
+
+        assert result["completed"] is True
+        call_kwargs = agent.client.chat.completions.create.call_args.kwargs
+        api_messages = call_kwargs["messages"]
+        user_msgs = [m for m in api_messages if m.get("role") == "user"]
+        assert isinstance(user_msgs[-1]["content"], str)
+        assert user_msgs[-1]["content"] == "Hello"
+
+
 class TestRetryExhaustion:
     """Regression: retry_count > max_retries was dead code (off-by-one).
 
@@ -3096,6 +3249,206 @@ class TestAnthropicImageFallback:
             agent._build_api_kwargs(api_messages)
 
         assert mock_vision.await_count == 1
+
+
+class TestAnthropicNativeVision:
+    """Tests for capability-aware skip of the vision_analyze fallback.
+
+    When the active model has native vision support, the Anthropic
+    adapter handles image content blocks directly (line 829 in
+    anthropic_adapter.py).  The legacy preprocess that flattens images
+    to text descriptions should be skipped so the actual pixels reach
+    the model.
+    """
+
+    def test_model_supports_native_vision_caches_lookup(self, agent):
+        """Result is cached per (provider, model) tuple."""
+        agent.provider = "anthropic"
+        agent.model = "claude-opus-4-6"
+
+        with patch("agent.models_dev.get_model_capabilities") as mock_caps:
+            mock_caps.return_value = MagicMock(supports_vision=True)
+
+            assert agent._model_supports_native_vision() is True
+            assert agent._model_supports_native_vision() is True
+            # Lookup should only happen once
+            assert mock_caps.call_count == 1
+
+    def test_model_supports_native_vision_returns_false_when_unknown(self, agent):
+        """Unknown models default to False (safe legacy fallback)."""
+        agent.provider = "unknown"
+        agent.model = "fictional-model"
+        # Reset cache from any previous test
+        agent._native_vision_cache = None
+
+        with patch("agent.models_dev.get_model_capabilities", return_value=None):
+            assert agent._model_supports_native_vision() is False
+
+    def test_model_supports_native_vision_force_env_var(self, agent, monkeypatch):
+        """HERMES_FORCE_NATIVE_VISION=1 forces True regardless of lookup."""
+        monkeypatch.setenv("HERMES_FORCE_NATIVE_VISION", "1")
+        agent._native_vision_cache = None
+
+        with patch("agent.models_dev.get_model_capabilities", return_value=None):
+            assert agent._model_supports_native_vision() is True
+
+    def test_model_supports_native_vision_lookup_exception_safe(self, agent):
+        """If the capability lookup raises, return False (don't crash)."""
+        agent._native_vision_cache = None
+
+        with patch("agent.models_dev.get_model_capabilities", side_effect=RuntimeError("boom")):
+            assert agent._model_supports_native_vision() is False
+
+    def test_prepare_anthropic_skips_flatten_for_vision_capable_model(self, agent):
+        """Vision-capable models pass image blocks through unchanged."""
+        agent.api_mode = "anthropic_messages"
+        agent.provider = "anthropic"
+        agent.model = "claude-opus-4-6"
+        agent._native_vision_cache = None
+
+        api_messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What's this?"},
+                {"type": "image_url", "image_url": {"url": "https://x.com/y.png"}},
+            ],
+        }]
+
+        with (
+            patch("agent.models_dev.get_model_capabilities",
+                  return_value=MagicMock(supports_vision=True)),
+            patch("tools.vision_tools.vision_analyze_tool") as mock_vision,
+        ):
+            result = agent._prepare_anthropic_messages_for_api(api_messages)
+
+        # vision_analyze_tool should NOT have been called
+        mock_vision.assert_not_called()
+        # Image content blocks should be preserved
+        assert isinstance(result[0]["content"], list)
+        assert any(b.get("type") in ("image_url", "input_image") for b in result[0]["content"])
+
+    def test_prepare_anthropic_still_flattens_when_no_vision(self, agent):
+        """Non-vision models still get the legacy text-flatten fallback."""
+        agent.api_mode = "anthropic_messages"
+        agent.provider = "anthropic"
+        agent.model = "claude-old-no-vision"
+        agent._native_vision_cache = None
+
+        api_messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What's this?"},
+                {"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}},
+            ],
+        }]
+
+        with (
+            patch("agent.models_dev.get_model_capabilities",
+                  return_value=MagicMock(supports_vision=False)),
+            patch("tools.vision_tools.vision_analyze_tool",
+                  new=AsyncMock(return_value=json.dumps({"success": True, "analysis": "A cat."}))),
+        ):
+            result = agent._prepare_anthropic_messages_for_api(api_messages)
+
+        # Content should now be a string (flattened)
+        assert isinstance(result[0]["content"], str)
+        assert "A cat." in result[0]["content"]
+
+    def test_provider_prefix_fallback_for_unmapped_provider(self, agent):
+        """Aggregator providers (Nous, custom proxies) that aren't in
+        models.dev should still resolve via the upstream vendor when the
+        model name has a vendor prefix like ``anthropic/claude-sonnet-4.6``.
+        """
+        agent.provider = "nous"
+        agent.model = "anthropic/claude-sonnet-4.6"
+        agent._native_vision_cache = None
+
+        # First call (provider="nous") returns None — provider not catalogued.
+        # Second call (provider="anthropic", model="claude-sonnet-4.6") returns vision-capable.
+        def fake_caps(provider, model):
+            if provider == "anthropic" and model == "claude-sonnet-4.6":
+                return MagicMock(supports_vision=True)
+            return None
+
+        with patch("agent.models_dev.get_model_capabilities", side_effect=fake_caps):
+            assert agent._model_supports_native_vision() is True
+
+    def test_provider_prefix_fallback_no_slash_returns_false(self, agent):
+        """If model has no slash prefix, fallback shouldn't trigger."""
+        agent.provider = "unknown"
+        agent.model = "plain-model-name"
+        agent._native_vision_cache = None
+
+        with patch("agent.models_dev.get_model_capabilities", return_value=None):
+            assert agent._model_supports_native_vision() is False
+
+    def test_provider_prefix_fallback_unknown_vendor_returns_false(self):
+        """If both the provider AND the upstream vendor are unknown,
+        the result is False (safe legacy fallback)."""
+        from run_agent import AIAgent
+        # Use object.__new__ to skip __init__ side effects
+        agent = object.__new__(AIAgent)
+        agent.provider = "nous"
+        agent.model = "fictional/never-heard-of-it"
+        agent._native_vision_cache = None
+
+        with patch("agent.models_dev.get_model_capabilities", return_value=None):
+            assert agent._model_supports_native_vision() is False
+
+    def test_openrouter_catalog_fallback(self, agent):
+        """When the direct provider lookup and the vendor prefix strip
+        both fail, fall back to querying the OpenRouter catalog with the
+        full slug. Nous and most aggregators use OpenRouter-compatible
+        slugs so the OR catalog is a strong catch-all.
+        """
+        agent.provider = "nous"
+        agent.model = "moonshotai/kimi-k2.5"
+        agent._native_vision_cache = None
+
+        # Simulate the real situation: nous not mapped, moonshotai catalog
+        # empty, but openrouter catalog has the entry with vision=True.
+        def fake_caps(provider, model):
+            if provider == "openrouter" and model == "moonshotai/kimi-k2.5":
+                return MagicMock(supports_vision=True)
+            return None
+
+        with patch("agent.models_dev.get_model_capabilities", side_effect=fake_caps):
+            assert agent._model_supports_native_vision() is True
+
+    def test_openrouter_fallback_respects_non_vision_model(self, agent):
+        """If OpenRouter catalog says the model has no vision, return False."""
+        agent.provider = "nous"
+        agent.model = "moonshotai/kimi-k2"  # text-only variant
+        agent._native_vision_cache = None
+
+        def fake_caps(provider, model):
+            if provider == "openrouter" and model == "moonshotai/kimi-k2":
+                return MagicMock(supports_vision=False)
+            return None
+
+        with patch("agent.models_dev.get_model_capabilities", side_effect=fake_caps):
+            assert agent._model_supports_native_vision() is False
+
+    def test_openrouter_fallback_skipped_when_provider_is_openrouter(self, agent):
+        """If the provider is already 'openrouter', skip the redundant
+        second lookup — avoid infinite loop / wasted call."""
+        agent.provider = "openrouter"
+        agent.model = "moonshotai/kimi-k2.5"
+        agent._native_vision_cache = None
+
+        call_count = [0]
+        def fake_caps(provider, model):
+            call_count[0] += 1
+            return None
+
+        with patch("agent.models_dev.get_model_capabilities", side_effect=fake_caps):
+            agent._model_supports_native_vision()
+
+        # Exactly 2 calls: direct ("openrouter", "moonshotai/kimi-k2.5"),
+        # and the vendor prefix fallback ("moonshotai", "kimi-k2.5").
+        # The OpenRouter fallback must be skipped because provider is
+        # already openrouter.
+        assert call_count[0] == 2
 
 
 class TestFallbackAnthropicProvider:

@@ -37,7 +37,7 @@ import time
 import threading
 from types import SimpleNamespace
 import uuid
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 from openai import OpenAI
 import fire
 from datetime import datetime
@@ -86,6 +86,7 @@ from agent.prompt_builder import (
 from agent.model_metadata import (
     fetch_model_metadata,
     estimate_tokens_rough, estimate_messages_tokens_rough, estimate_request_tokens_rough,
+    count_message_chars,
     get_next_probe_tier, parse_context_limit_from_error,
     parse_available_output_tokens_from_error,
     save_context_length, is_local_endpoint,
@@ -3702,6 +3703,142 @@ class AIAgent:
         digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:24]
         return f"fc_{digest}"
 
+    @staticmethod
+    def _user_message_preview(user_message: Any, max_len: int = 80) -> str:
+        """Flatten a user message (str or multimodal list) to preview text.
+
+        Logging and display paths need a string, but ``user_message`` may
+        now be a list of typed content blocks.  Walks the list to extract
+        text fields and substitutes ``[image]``/``[audio]`` markers for
+        non-text blocks so the preview stays readable.
+        """
+        if user_message is None:
+            return ""
+        if isinstance(user_message, str):
+            return user_message[:max_len] + ("..." if len(user_message) > max_len else "")
+        if not isinstance(user_message, list):
+            text = str(user_message)
+            return text[:max_len] + ("..." if len(text) > max_len else "")
+        parts: List[str] = []
+        for block in user_message:
+            if isinstance(block, str):
+                if block:
+                    parts.append(block)
+                continue
+            if not isinstance(block, dict):
+                continue
+            btype = str(block.get("type", "") or "")
+            if btype in ("text", "input_text", "output_text"):
+                text = block.get("text", "")
+                if isinstance(text, str) and text:
+                    parts.append(text)
+            elif btype in ("image_url", "input_image", "image"):
+                parts.append("[image]")
+            elif btype in ("input_audio", "audio"):
+                parts.append("[audio]")
+        text = " ".join(parts)
+        return text[:max_len] + ("..." if len(text) > max_len else "")
+
+    @staticmethod
+    def _sanitize_user_message_in_place(user_message: Any) -> Any:
+        """Run surrogate sanitization across all text fields of a user message.
+
+        Plain strings get the legacy ``_sanitize_surrogates`` treatment.
+        For multimodal lists, walk the blocks and sanitize each text
+        field while leaving image/audio fields untouched.
+        """
+        if isinstance(user_message, str):
+            return _sanitize_surrogates(user_message)
+        if not isinstance(user_message, list):
+            return user_message
+        sanitized: List[Any] = []
+        for block in user_message:
+            if isinstance(block, str):
+                sanitized.append(_sanitize_surrogates(block))
+                continue
+            if not isinstance(block, dict):
+                sanitized.append(block)
+                continue
+            new_block = dict(block)
+            text = new_block.get("text")
+            if isinstance(text, str):
+                new_block["text"] = _sanitize_surrogates(text)
+            sanitized.append(new_block)
+        return sanitized
+
+    @staticmethod
+    def _chat_content_to_responses_content(content: Any, role: str) -> Any:
+        """Convert chat-style content to Codex Responses input format.
+
+        The Responses API accepts ``content`` as either a plain string
+        or a list of typed content items. ``str(content)`` would coerce
+        a multimodal list into Python repr (``[{'type': ...}]``) which
+        the API rejects as text. This walks the structure and emits the
+        right shape so vision-capable Codex/OpenAI Responses models can
+        receive native image input.
+
+        For user/tool roles, text blocks become ``input_text`` and image
+        blocks become ``input_image``. For assistant roles, text blocks
+        become ``output_text`` to match the Responses output format.
+        """
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return str(content)
+
+        text_type = "output_text" if role == "assistant" else "input_text"
+        out: List[Dict[str, Any]] = []
+        for block in content:
+            if isinstance(block, str):
+                if block:
+                    out.append({"type": text_type, "text": block})
+                continue
+            if not isinstance(block, dict):
+                continue
+            btype = str(block.get("type", "") or "")
+            if btype in ("text", "input_text", "output_text"):
+                text = block.get("text", "")
+                if isinstance(text, str) and text:
+                    out.append({"type": text_type, "text": text})
+            elif btype in ("image_url", "input_image"):
+                image_value = block.get("image_url", {})
+                if isinstance(image_value, dict):
+                    url = str(image_value.get("url", "") or "")
+                else:
+                    url = str(image_value or "")
+                if url:
+                    out.append({"type": "input_image", "image_url": url})
+            elif btype == "image":
+                # Anthropic-native block shape: source.type=base64|url
+                src = block.get("source")
+                if isinstance(src, dict):
+                    if src.get("type") == "base64":
+                        media_type = str(src.get("media_type", "image/jpeg") or "image/jpeg")
+                        data = str(src.get("data", "") or "")
+                        if data:
+                            out.append({
+                                "type": "input_image",
+                                "image_url": f"data:{media_type};base64,{data}",
+                            })
+                    elif src.get("type") == "url":
+                        url = str(src.get("url", "") or "")
+                        if url:
+                            out.append({"type": "input_image", "image_url": url})
+        return out
+
+    @staticmethod
+    def _responses_content_is_empty(content: Any) -> bool:
+        """True if Responses-API content has no user-visible text or media."""
+        if content is None:
+            return True
+        if isinstance(content, str):
+            return not content.strip()
+        if isinstance(content, list):
+            return len(content) == 0
+        return False
+
     def _chat_messages_to_responses_input(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Convert internal chat-style messages to Responses input items."""
         items: List[Dict[str, Any]] = []
@@ -3716,7 +3853,7 @@ class AIAgent:
 
             if role in {"user", "assistant"}:
                 content = msg.get("content", "")
-                content_text = str(content) if content is not None else ""
+                converted_content = self._chat_content_to_responses_content(content, role)
 
                 if role == "assistant":
                     # Replay encrypted reasoning items from previous turns
@@ -3739,8 +3876,8 @@ class AIAgent:
                                     seen_item_ids.add(item_id)
                                 has_codex_reasoning = True
 
-                    if content_text.strip():
-                        items.append({"role": "assistant", "content": content_text})
+                    if not self._responses_content_is_empty(converted_content):
+                        items.append({"role": "assistant", "content": converted_content})
                     elif has_codex_reasoning:
                         # The Responses API requires a following item after each
                         # reasoning item (otherwise: missing_following_item error).
@@ -3792,7 +3929,7 @@ class AIAgent:
                             })
                     continue
 
-                items.append({"role": role, "content": content_text})
+                items.append({"role": role, "content": converted_content})
                 continue
 
             if role == "tool":
@@ -6264,11 +6401,71 @@ class AIAgent:
             return suffix
         return "[A multimodal message was converted to text for Anthropic compatibility.]"
 
+    def _model_supports_native_vision(self) -> bool:
+        """Return True if the active model has native vision per models.dev.
+
+        Result is cached on the agent for the lifetime of the (provider,
+        model) tuple to avoid repeated cache lookups across turns.
+
+        Resolution order:
+        1. ``HERMES_FORCE_NATIVE_VISION=1`` env var → always True.
+        2. Direct lookup ``(provider, model)`` in models.dev catalog.
+        3. Provider-prefix fallback: when the model name has a vendor
+           prefix (``"anthropic/claude-sonnet-4.6"``) and the provider
+           itself isn't in the catalog, split on ``/`` and try the
+           upstream vendor's catalog instead.  Works for custom proxies
+           that pass through the direct vendor model name.
+        4. OpenRouter aggregator fallback: when the other paths fail
+           and the model name has a slash prefix, try the OpenRouter
+           catalog with the full slug.  Nous, custom OpenAI-compatible
+           proxies, and most aggregators use the same OpenRouter slug
+           format (``moonshotai/kimi-k2.5``, ``mistralai/mistral-small``)
+           so the OpenRouter catalog is a strong catch-all.
+        """
+        if os.environ.get("HERMES_FORCE_NATIVE_VISION") == "1":
+            return True
+
+        cache_key = (getattr(self, "provider", "") or "", getattr(self, "model", "") or "")
+        cached = getattr(self, "_native_vision_cache", None)
+        if cached is not None and cached.get("key") == cache_key:
+            return cached["value"]
+
+        provider, model = cache_key
+        result = False
+        try:
+            from agent.models_dev import get_model_capabilities
+            caps = get_model_capabilities(provider, model)
+            if caps is None and "/" in model:
+                # Fallback 1: upstream vendor catalog (for custom proxies
+                # where the model name already matches the vendor catalog).
+                vendor, vendor_model = model.split("/", 1)
+                caps = get_model_capabilities(vendor, vendor_model)
+            if caps is None and "/" in model and provider != "openrouter":
+                # Fallback 2: OpenRouter aggregator catalog. Nous and most
+                # custom proxies use OpenRouter-compatible slug format.
+                caps = get_model_capabilities("openrouter", model)
+            if caps is not None:
+                result = bool(caps.supports_vision)
+        except Exception as exc:
+            logger.debug("Native vision capability lookup failed: %s", exc)
+
+        self._native_vision_cache = {"key": cache_key, "value": result}
+        return result
+
     def _prepare_anthropic_messages_for_api(self, api_messages: list) -> list:
         if not any(
             isinstance(msg, dict) and self._content_has_image_parts(msg.get("content"))
             for msg in api_messages
         ):
+            return api_messages
+
+        # Vision-capable Anthropic models (Claude 3+, Opus 4.6, Sonnet 4.6,
+        # etc.) handle image content blocks natively. The anthropic_adapter
+        # already converts image_url/input_image blocks into Anthropic's
+        # native {"type": "image", "source": ...} format. Skip the legacy
+        # vision_analyze fallback path for these models so the actual pixels
+        # reach the model instead of a lossy text description.
+        if self._model_supports_native_vision():
             return api_messages
 
         transformed = copy.deepcopy(api_messages)
@@ -8102,7 +8299,7 @@ class AIAgent:
 
     def run_conversation(
         self,
-        user_message: str,
+        user_message: Union[str, List[Dict[str, Any]]],
         system_message: str = None,
         conversation_history: List[Dict[str, Any]] = None,
         task_id: str = None,
@@ -8113,7 +8310,11 @@ class AIAgent:
         Run a complete conversation with tool calling until completion.
 
         Args:
-            user_message (str): The user's message/question
+            user_message (str | list): The user's message/question. May be a
+                plain string OR a list of multimodal content blocks (text +
+                image_url/input_image) for vision-capable models. The
+                gateway sends a list when the source platform attached an
+                image and the active model declares native vision support.
             system_message (str): Custom system message (optional, overrides ephemeral_system_prompt if provided)
             conversation_history (List[Dict]): Previous conversation messages (optional)
             task_id (str): Unique identifier for this task to isolate VMs between concurrent tasks (optional, auto-generated if not provided)
@@ -8145,8 +8346,8 @@ class AIAgent:
         # Sanitize surrogate characters from user input.  Clipboard paste from
         # rich-text editors (Google Docs, Word, etc.) can inject lone surrogates
         # that are invalid UTF-8 and crash JSON serialization in the OpenAI SDK.
-        if isinstance(user_message, str):
-            user_message = _sanitize_surrogates(user_message)
+        # Walks into multimodal blocks so image-bearing turns are also clean.
+        user_message = self._sanitize_user_message_in_place(user_message)
         if isinstance(persist_user_message, str):
             persist_user_message = _sanitize_surrogates(persist_user_message)
 
@@ -8206,7 +8407,7 @@ class AIAgent:
         self.iteration_budget = IterationBudget(self.max_iterations)
 
         # Log conversation turn start for debugging/observability
-        _msg_preview = (user_message[:80] + "...") if len(user_message) > 80 else user_message
+        _msg_preview = self._user_message_preview(user_message, max_len=80)
         _msg_preview = _msg_preview.replace("\n", " ")
         logger.info(
             "conversation turn: session=%s model=%s provider=%s platform=%s history=%d msg=%r",
@@ -8233,7 +8434,16 @@ class AIAgent:
         self._user_turn_count += 1
 
         # Preserve the original user message (no nudge injection).
-        original_user_message = persist_user_message if persist_user_message is not None else user_message
+        # When user_message is multimodal, use a text preview so downstream
+        # string-only consumers (plugin hooks, trajectory saver, memory
+        # extraction) keep receiving a clean text representation while
+        # the API call still gets the full multimodal content.
+        if persist_user_message is not None:
+            original_user_message = persist_user_message
+        elif isinstance(user_message, str):
+            original_user_message = user_message
+        else:
+            original_user_message = self._user_message_preview(user_message, max_len=2_000_000)
 
         # Track memory nudge trigger (turn-based, checked here).
         # Skill trigger is checked AFTER the agent loop completes, based on
@@ -8254,7 +8464,7 @@ class AIAgent:
         self._persist_user_message_idx = current_turn_user_idx
         
         if not self.quiet_mode:
-            self._safe_print(f"💬 Starting conversation: '{user_message[:60]}{'...' if len(user_message) > 60 else ''}'")
+            self._safe_print(f"💬 Starting conversation: '{self._user_message_preview(user_message, max_len=60)}'")
         
         # ── System prompt (cached per session for prefix caching) ──
         # Built once on first call, reused for all subsequent calls.
@@ -8640,8 +8850,10 @@ class AIAgent:
                     new_tcs.append(tc)
                 am["tool_calls"] = new_tcs
 
-            # Calculate approximate request size for logging
-            total_chars = sum(len(str(msg)) for msg in api_messages)
+            # Calculate approximate request size for logging.  Skips
+            # base64 image/audio payloads so multimodal turns don't
+            # report inflated char counts.
+            total_chars = sum(count_message_chars(msg) for msg in api_messages)
             approx_tokens = estimate_messages_tokens_rough(api_messages)
             
             # Thinking spinner for quiet mode (animated during API call)
@@ -10954,7 +11166,7 @@ class AIAgent:
                         and self.valid_tool_names
                         and codex_ack_continuations < 2
                         and self._looks_like_codex_intermediate_ack(
-                            user_message=user_message,
+                            user_message=original_user_message,
                             assistant_content=final_response,
                             messages=messages,
                         )
@@ -11079,7 +11291,7 @@ class AIAgent:
         completed = final_response is not None and api_call_count < self.max_iterations
 
         # Save trajectory if enabled
-        self._save_trajectory(messages, user_message, completed)
+        self._save_trajectory(messages, original_user_message, completed)
 
         # Clean up VM and browser for this task after conversation completes
         self._cleanup_task_resources(effective_task_id)
