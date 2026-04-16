@@ -1,13 +1,33 @@
 import { useI18n } from "@/i18n/context";
+import type { Locale } from "@/i18n/types";
 
 /**
- * Compact language toggle — shows a clickable flag that switches between
- * English and Chinese.  Persists choice to localStorage.
+ * Compact language toggle — cycles through English → French → Chinese.
+ * Persists choice to localStorage.
  */
+const CYCLE: Record<Locale, Locale> = {
+  en: "fr",
+  fr: "zh",
+  zh: "en",
+};
+
+const FLAGS: Record<Locale, string> = {
+  en: "🇬🇧",
+  fr: "🇫🇷",
+  zh: "🇨🇳",
+};
+
+const LABELS: Record<Locale, string> = {
+  en: "EN",
+  fr: "FR",
+  zh: "中文",
+};
+
 export function LanguageSwitcher() {
   const { locale, setLocale, t } = useI18n();
 
-  const toggle = () => setLocale(locale === "en" ? "zh" : "en");
+  const next = CYCLE[locale];
+  const toggle = () => setLocale(next);
 
   return (
     <button
@@ -17,10 +37,10 @@ export function LanguageSwitcher() {
       title={t.language.switchTo}
       aria-label={t.language.switchTo}
     >
-      {/* Show the *other* language's flag as the clickable target */}
-      <span className="text-base leading-none">{locale === "en" ? "🇨🇳" : "🇬🇧"}</span>
+      {/* Show the *next* language's flag as the clickable target */}
+      <span className="text-base leading-none">{FLAGS[next]}</span>
       <span className="hidden sm:inline font-display tracking-wide uppercase text-[0.65rem]">
-        {locale === "en" ? "中文" : "EN"}
+        {LABELS[next]}
       </span>
     </button>
   );
