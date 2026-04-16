@@ -824,6 +824,17 @@ class SimplexAdapter(BasePlatformAdapter):
             chat_id, f"file://{image_path}", caption=caption, **kwargs
         )
 
+    async def send_video(
+        self,
+        chat_id: str,
+        video_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Send a video file via SimpleX (sent as file attachment)."""
+        return await self.send_document(chat_id, video_path, caption=caption)
+
     async def send_document(
         self,
         chat_id: str,
