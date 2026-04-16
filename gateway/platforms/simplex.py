@@ -811,6 +811,19 @@ class SimplexAdapter(BasePlatformAdapter):
             return SendResult(success=True)
         return SendResult(success=False, error="Failed to send image")
 
+    async def send_image_file(
+        self,
+        chat_id: str,
+        image_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Send a local image file via SimpleX."""
+        return await self.send_image(
+            chat_id, f"file://{image_path}", caption=caption, **kwargs
+        )
+
     async def send_document(
         self,
         chat_id: str,
