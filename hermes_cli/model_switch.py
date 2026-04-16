@@ -727,6 +727,14 @@ def switch_model(
     if not api_mode:
         api_mode = determine_api_mode(target_provider, base_url)
 
+    # OpenCode base URLs end with /v1 for OpenAI-compatible models, but
+    # Anthropic Messages requests need the provider root so the Anthropic SDK
+    # appends /v1/messages exactly once. Normalize the returned base URL here so
+    # session-scoped /model overrides in the gateway don't cache the wrong /v1
+    # endpoint for MiniMax/Claude Anthropic-mode requests.
+    if api_mode == "anthropic_messages" and target_provider in {"opencode-zen", "opencode-go"}:
+        base_url = re.sub(r"/v1/?$", "", base_url)
+
     # --- Get capabilities (legacy) ---
     capabilities = get_model_capabilities(target_provider, new_model)
 
