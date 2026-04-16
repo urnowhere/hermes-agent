@@ -9873,6 +9873,12 @@ class AIAgent:
                             self._vprint(f"{self.log_prefix}❌ Max compression attempts ({max_compression_attempts}) reached for payload-too-large error.", force=True)
                             self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
                             logging.error(f"{self.log_prefix}413 compression failed after {max_compression_attempts} attempts.")
+                            self._emit_status(f"⚠️ Request payload too large hit max compression attempts ({max_compression_attempts}) — trying fallback...")
+                            if self._try_activate_fallback():
+                                retry_count = 0
+                                compression_attempts = 0
+                                self._ephemeral_max_output_tokens = None
+                                continue
                             self._persist_session(messages, conversation_history)
                             return {
                                 "messages": messages,
@@ -9904,6 +9910,12 @@ class AIAgent:
                             self._vprint(f"{self.log_prefix}❌ Payload too large and cannot compress further.", force=True)
                             self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
                             logging.error(f"{self.log_prefix}413 payload too large. Cannot compress further.")
+                            self._emit_status("⚠️ Payload too large and cannot compress further — trying fallback...")
+                            if self._try_activate_fallback():
+                                retry_count = 0
+                                compression_attempts = 0
+                                self._ephemeral_max_output_tokens = None
+                                continue
                             self._persist_session(messages, conversation_history)
                             return {
                                 "messages": messages,
@@ -9957,6 +9969,12 @@ class AIAgent:
                                 self._vprint(f"{self.log_prefix}❌ Max compression attempts ({max_compression_attempts}) reached.", force=True)
                                 self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
                                 logging.error(f"{self.log_prefix}Context compression failed after {max_compression_attempts} attempts.")
+                                self._emit_status(f"⚠️ Context length exceeded hit max compression attempts ({max_compression_attempts}) — trying fallback...")
+                                if self._try_activate_fallback():
+                                    retry_count = 0
+                                    compression_attempts = 0
+                                    self._ephemeral_max_output_tokens = None
+                                    continue
                                 self._persist_session(messages, conversation_history)
                                 return {
                                     "messages": messages,
@@ -10009,6 +10027,12 @@ class AIAgent:
                             self._vprint(f"{self.log_prefix}❌ Max compression attempts ({max_compression_attempts}) reached.", force=True)
                             self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
                             logging.error(f"{self.log_prefix}Context compression failed after {max_compression_attempts} attempts.")
+                            self._emit_status(f"⚠️ Context length exceeded hit max compression attempts ({max_compression_attempts}) — trying fallback...")
+                            if self._try_activate_fallback():
+                                retry_count = 0
+                                compression_attempts = 0
+                                self._ephemeral_max_output_tokens = None
+                                continue
                             self._persist_session(messages, conversation_history)
                             return {
                                 "messages": messages,
@@ -10042,6 +10066,12 @@ class AIAgent:
                             self._vprint(f"{self.log_prefix}❌ Context length exceeded and cannot compress further.", force=True)
                             self._vprint(f"{self.log_prefix}   💡 The conversation has accumulated too much content. Try /new to start fresh, or /compress to manually trigger compression.", force=True)
                             logging.error(f"{self.log_prefix}Context length exceeded: {approx_tokens:,} tokens. Cannot compress further.")
+                            self._emit_status("⚠️ Context length exceeded and cannot compress further — trying fallback...")
+                            if self._try_activate_fallback():
+                                retry_count = 0
+                                compression_attempts = 0
+                                self._ephemeral_max_output_tokens = None
+                                continue
                             self._persist_session(messages, conversation_history)
                             return {
                                 "messages": messages,
