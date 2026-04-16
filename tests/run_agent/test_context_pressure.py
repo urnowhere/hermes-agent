@@ -208,6 +208,44 @@ class TestContextPressureFlags:
         captured = capsys.readouterr()
         assert "▰" not in captured.out
 
+    def test_emit_prefers_explicit_line_printer(self, agent):
+        """Explicit line_printer should override instance printers."""
+        agent.platform = "cli"
+        agent.status_callback = None
+        explicit = MagicMock()
+        instance_printer = MagicMock()
+        fallback_print = MagicMock()
+        agent._line_printer = instance_printer
+        agent._print_fn = fallback_print
+
+        compressor = MagicMock()
+        compressor.context_length = 200_000
+        compressor.threshold_tokens = 100_000
+
+        agent._emit_context_pressure(0.85, compressor, line_printer=explicit)
+
+        explicit.assert_called_once()
+        instance_printer.assert_not_called()
+        fallback_print.assert_not_called()
+
+    def test_emit_uses_instance_line_printer_before_print_fn(self, agent):
+        """CLI line_printer should win over _print_fn when both exist."""
+        agent.platform = "cli"
+        agent.status_callback = None
+        instance_printer = MagicMock()
+        fallback_print = MagicMock()
+        agent._line_printer = instance_printer
+        agent._print_fn = fallback_print
+
+        compressor = MagicMock()
+        compressor.context_length = 200_000
+        compressor.threshold_tokens = 100_000
+
+        agent._emit_context_pressure(0.85, compressor)
+
+        instance_printer.assert_called_once()
+        fallback_print.assert_not_called()
+
     def test_flag_reset_on_compression(self, agent):
         """After _compress_context, context pressure flag should reset."""
         agent._context_pressure_warned_at = 0.85

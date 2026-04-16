@@ -674,6 +674,9 @@ class AIAgent:
         # instead of going directly to stdout where patch_stdout's StdoutProxy
         # would mangle the escape sequences.  None = use builtins.print.
         self._print_fn = None
+        # Optional single-line status printer for ANSI-sensitive TUI paths
+        # such as context-pressure warnings.
+        self._line_printer = None
         self.background_review_callback = None  # Optional sync callback for gateway delivery
         self.skip_context_files = skip_context_files
         self.pass_session_id = pass_session_id
@@ -7910,12 +7913,14 @@ class AIAgent:
 
 
 
-    def _emit_context_pressure(self, compaction_progress: float, compressor) -> None:
+    def _emit_context_pressure(self, compaction_progress: float, compressor, line_printer=None) -> None:
         """Notify the user that context is approaching the compaction threshold.
 
         Args:
             compaction_progress: How close to compaction (0.0–1.0, where 1.0 = fires).
             compressor: The ContextCompressor instance (for threshold/context info).
+            line_printer: Optional callable to print a single line. When provided,
+                takes precedence over instance printers.
 
         Purely user-facing — does NOT modify the message stream.
         For CLI: prints a formatted line with a progress bar.
@@ -7935,7 +7940,11 @@ class AIAgent:
                 threshold_percent=threshold_pct,
                 compression_enabled=self.compression_enabled,
             )
-            self._safe_print(line)
+            emit = line_printer or self._line_printer or self._print_fn or print
+            try:
+                emit(line)
+            except (OSError, ValueError):
+                pass
 
         # Gateway / external consumers
         if self.status_callback:

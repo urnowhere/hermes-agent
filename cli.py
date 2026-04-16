@@ -2916,6 +2916,7 @@ class HermesCLI:
             # Route agent status output through prompt_toolkit so ANSI escape
             # sequences aren't garbled by patch_stdout's StdoutProxy (#2262).
             self.agent._print_fn = _cprint
+            self.agent._line_printer = _cprint
             self._active_agent_route_signature = (
                 effective_model,
                 runtime.get("provider"),
@@ -5847,6 +5848,8 @@ class HermesCLI:
                     skip_context_files=True,
                     persist_session=False,
                 )
+                btw_agent._print_fn = _cprint
+                btw_agent._line_printer = _cprint
 
                 btw_prompt = (
                     "[Ephemeral /btw side question. Answer using the conversation "
