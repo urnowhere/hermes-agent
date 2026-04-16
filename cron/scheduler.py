@@ -487,8 +487,14 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
         return False, f"Script execution failed: {exc}"
 
 
-def _build_job_prompt(job: dict) -> str:
-    """Build the effective prompt for a cron job, optionally loading one or more skills first."""
+def _build_job_prompt(job: dict) -> tuple[str, str]:
+    """Build the effective prompt and system hint for a cron job.
+
+    Returns:
+        (prompt, system_hint) — prompt is the user message, system_hint
+        is cron execution guidance to pass as the system_message so the
+        model treats it as behavioral instruction (not content to narrate).
+    """
     prompt = job.get("prompt", "")
     skills = job.get("skills")
 
@@ -518,10 +524,11 @@ def _build_job_prompt(job: dict) -> str:
                 f"{prompt}"
             )
 
-    # Always prepend cron execution guidance so the agent knows how
-    # delivery works and can suppress delivery when appropriate.
-    cron_hint = (
-        "[SYSTEM: You are running as a scheduled cron job. "
+    # Cron execution guidance — passed as system_message (not prepended
+    # to the user prompt) so the model treats it as behavioral instruction
+    # rather than content to acknowledge/narrate in the response.
+    cron_system_hint = (
+        "You are running as a scheduled cron job. "
         "DELIVERY: Your final response will be automatically delivered "
         "to the user — do NOT use send_message or try to deliver "
         "the output yourself. Just produce your report/output as your "
@@ -529,16 +536,15 @@ def _build_job_prompt(job: dict) -> str:
         "SILENT: If there is genuinely nothing new to report, respond "
         "with exactly \"[SILENT]\" (nothing else) to suppress delivery. "
         "Never combine [SILENT] with content — either report your "
-        "findings normally, or say [SILENT] and nothing more.]\n\n"
+        "findings normally, or say [SILENT] and nothing more."
     )
-    prompt = cron_hint + prompt
     if skills is None:
         legacy = job.get("skill")
         skills = [legacy] if legacy else []
 
     skill_names = [str(name).strip() for name in skills if str(name).strip()]
     if not skill_names:
-        return prompt
+        return prompt, cron_system_hint
 
     from tools.skills_tool import skill_view
 
@@ -574,7 +580,7 @@ def _build_job_prompt(job: dict) -> str:
 
     if prompt:
         parts.extend(["", f"The user has provided the following instruction alongside the skill invocation: {prompt}"])
-    return "\n".join(parts)
+    return "\n".join(parts), cron_system_hint
 
 
 def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
@@ -597,7 +603,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     
     job_id = job["id"]
     job_name = job["name"]
-    prompt = _build_job_prompt(job)
+    prompt, cron_system_hint = _build_job_prompt(job)
     origin = _resolve_origin(job)
     _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -775,7 +781,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         # env passthrough registrations) when the cron run hops into the worker
         # thread used for inactivity timeout monitoring.
         _cron_context = contextvars.copy_context()
-        _cron_future = _cron_pool.submit(_cron_context.run, agent.run_conversation, prompt)
+        _cron_future = _cron_pool.submit(_cron_context.run, agent.run_conversation, prompt, cron_system_hint)
         _inactivity_timeout = False
         try:
             if _cron_inactivity_limit is None:

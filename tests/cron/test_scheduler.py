@@ -896,7 +896,7 @@ class TestRunJobSkillBacked:
             register_env_passthrough(["NOTION_API_KEY"])
             return json.dumps({"success": True, "content": "# notion\nUse Notion."})
 
-        def _run_conversation(prompt):
+        def _run_conversation(prompt, system_message=None):
             from tools.env_passthrough import get_all_passthrough
 
             assert "NOTION_API_KEY" in get_all_passthrough()
@@ -953,7 +953,7 @@ class TestRunJobSkillBacked:
             register_credential_file("credentials/google_token.json")
             return json.dumps({"success": True, "content": "# google-workspace\nUse Google."})
 
-        def _run_conversation(prompt):
+        def _run_conversation(prompt, system_message=None):
             from tools.credential_files import _get_registered
 
             registered = _get_registered()
@@ -1170,33 +1170,32 @@ class TestSilentDelivery:
 
 
 class TestBuildJobPromptSilentHint:
-    """Verify _build_job_prompt always injects [SILENT] guidance."""
+    """Verify _build_job_prompt always returns [SILENT] guidance in system hint."""
 
     def test_hint_always_present(self):
         job = {"prompt": "Check for updates"}
-        result = _build_job_prompt(job)
-        assert "[SILENT]" in result
-        assert "Check for updates" in result
+        prompt, system_hint = _build_job_prompt(job)
+        assert "[SILENT]" in system_hint
+        assert "Check for updates" in prompt
 
     def test_hint_present_even_without_prompt(self):
         job = {"prompt": ""}
-        result = _build_job_prompt(job)
-        assert "[SILENT]" in result
+        prompt, system_hint = _build_job_prompt(job)
+        assert "[SILENT]" in system_hint
 
     def test_delivery_guidance_present(self):
         """Cron hint tells agents their final response is auto-delivered."""
         job = {"prompt": "Generate a report"}
-        result = _build_job_prompt(job)
-        assert "do NOT use send_message" in result
-        assert "automatically delivered" in result
+        prompt, system_hint = _build_job_prompt(job)
+        assert "do NOT use send_message" in system_hint
+        assert "automatically delivered" in system_hint
 
-    def test_delivery_guidance_precedes_user_prompt(self):
-        """System guidance appears before the user's prompt text."""
+    def test_delivery_guidance_in_system_hint_not_prompt(self):
+        """System guidance is in the system hint, not in the user prompt."""
         job = {"prompt": "My custom prompt"}
-        result = _build_job_prompt(job)
-        system_pos = result.index("do NOT use send_message")
-        prompt_pos = result.index("My custom prompt")
-        assert system_pos < prompt_pos
+        prompt, system_hint = _build_job_prompt(job)
+        assert "do NOT use send_message" not in prompt
+        assert "do NOT use send_message" in system_hint
 
 
 class TestBuildJobPromptMissingSkill:
@@ -1208,16 +1207,16 @@ class TestBuildJobPromptMissingSkill:
     def test_missing_skill_does_not_raise(self):
         """Job should run even when a referenced skill is not installed."""
         with patch("tools.skills_tool.skill_view", side_effect=self._missing_skill_view):
-            result = _build_job_prompt({"skills": ["ghost-skill"], "prompt": "do something"})
+            prompt, system_hint = _build_job_prompt({"skills": ["ghost-skill"], "prompt": "do something"})
         # prompt is preserved even though skill was skipped
-        assert "do something" in result
+        assert "do something" in prompt
 
     def test_missing_skill_injects_user_notice_into_prompt(self):
         """A system notice about the missing skill is injected into the prompt."""
         with patch("tools.skills_tool.skill_view", side_effect=self._missing_skill_view):
-            result = _build_job_prompt({"skills": ["ghost-skill"], "prompt": "do something"})
-        assert "ghost-skill" in result
-        assert "not found" in result.lower() or "skipped" in result.lower()
+            prompt, system_hint = _build_job_prompt({"skills": ["ghost-skill"], "prompt": "do something"})
+        assert "ghost-skill" in prompt
+        assert "not found" in prompt.lower() or "skipped" in prompt.lower()
 
     def test_missing_skill_logs_warning(self, caplog):
         """A warning is logged when a skill cannot be found."""
@@ -1235,9 +1234,9 @@ class TestBuildJobPromptMissingSkill:
             return json.dumps({"success": False, "error": f"Skill '{name}' not found."})
 
         with patch("tools.skills_tool.skill_view", side_effect=_mixed_skill_view):
-            result = _build_job_prompt({"skills": ["ghost-skill", "real-skill"], "prompt": "go"})
-        assert "Real skill content." in result
-        assert "go" in result
+            prompt, system_hint = _build_job_prompt({"skills": ["ghost-skill", "real-skill"], "prompt": "go"})
+        assert "Real skill content." in prompt
+        assert "go" in prompt
 
 
 class TestTickAdvanceBeforeRun:

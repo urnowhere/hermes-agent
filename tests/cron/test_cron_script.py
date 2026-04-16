@@ -188,7 +188,7 @@ class TestBuildJobPromptWithScript:
             "prompt": "Report any notable changes.",
             "script": str(script),
         }
-        prompt = _build_job_prompt(job)
+        prompt, system_hint = _build_job_prompt(job)
         assert "## Script Output" in prompt
         assert "new PR: #123 fix typo" in prompt
         assert "Report any notable changes." in prompt
@@ -200,7 +200,7 @@ class TestBuildJobPromptWithScript:
             "prompt": "Report status.",
             "script": "nonexistent_monitor.py",
         }
-        prompt = _build_job_prompt(job)
+        prompt, system_hint = _build_job_prompt(job)
         assert "## Script Error" in prompt
         assert "not found" in prompt.lower()
         assert "Report status." in prompt
@@ -209,7 +209,7 @@ class TestBuildJobPromptWithScript:
         from cron.scheduler import _build_job_prompt
 
         job = {"prompt": "Simple job."}
-        prompt = _build_job_prompt(job)
+        prompt, system_hint = _build_job_prompt(job)
         assert "## Script Output" not in prompt
         assert "Simple job." in prompt
 
@@ -223,7 +223,7 @@ class TestBuildJobPromptWithScript:
             "prompt": "Check status.",
             "script": str(script),
         }
-        prompt = _build_job_prompt(job)
+        prompt, system_hint = _build_job_prompt(job)
         assert "no output" in prompt.lower()
         assert "Check status." in prompt
 
