@@ -109,6 +109,10 @@ hermes chat -q "Hello"
 pytest tests/ -v
 ```
 
+Local `pytest` runs are serial by default. If you want xdist locally, prefer
+an explicit worker count like `-n 4`, or set `PYTEST_XDIST_AUTO_NUM_WORKERS=4`
+before using `-n auto`. CI can still use full `-n auto`.
+
 ---
 
 ## Project Structure

@@ -16,6 +16,37 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
+_LOCAL_XDIST_AUTO_WORKER_CAP = 4
+
+
+def _parse_positive_int(value: str | None) -> int | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = int(raw)
+    except ValueError:
+        return None
+    return parsed if parsed > 0 else None
+
+
+def pytest_xdist_auto_num_workers(config) -> int | None:
+    """Bound local ``-n auto`` runs to a sane default worker count.
+
+    The suite is fairly I/O-heavy and ``-n auto`` can overwhelm WSL/local
+    developer machines by spawning one worker per reported CPU.  Keep local
+    ``auto`` runs bounded while leaving CI and explicit overrides alone.
+    """
+    override = _parse_positive_int(os.getenv("PYTEST_XDIST_AUTO_NUM_WORKERS"))
+    if override is not None:
+        return override
+
+    cpu_count = os.cpu_count() or 1
+    if os.getenv("CI"):
+        return cpu_count
+    return min(cpu_count, _LOCAL_XDIST_AUTO_WORKER_CAP)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_hermes_home(tmp_path, monkeypatch):
     """Redirect HERMES_HOME to a temp dir so tests never write to ~/.hermes/."""
