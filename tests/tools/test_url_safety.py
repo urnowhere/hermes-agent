@@ -78,6 +78,18 @@ class TestIsSafeUrl:
         ]):
             assert is_safe_url("https://example.com") is True
 
+    def test_discord_cdn_allowlisted_even_if_resolved_to_non_global_ip(self):
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("198.18.0.239", 0)),
+        ]):
+            assert is_safe_url("https://cdn.discordapp.com/attachments/fake/file.ogg") is True
+
+    def test_discord_media_allowlisted_even_if_resolved_to_non_global_ip(self):
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("198.18.1.20", 0)),
+        ]):
+            assert is_safe_url("https://media.discordapp.net/attachments/fake/file.ogg") is True
+
     # ── New tests for hardened SSRF protection ──
 
     def test_cgnat_100_64_blocked(self):

@@ -29,6 +29,14 @@ _BLOCKED_HOSTNAMES = frozenset({
     "metadata.goog",
 })
 
+# Public CDNs that may legitimately resolve to non-global or testing ranges in
+# some corporate/VPN/DNS environments. These are safe allowlist exceptions for
+# user-supplied media coming from trusted platforms, not a blanket bypass.
+_ALLOWED_HOSTNAMES = frozenset({
+    "cdn.discordapp.com",
+    "media.discordapp.net",
+})
+
 # 100.64.0.0/10 (CGNAT / Shared Address Space, RFC 6598) is NOT covered by
 # ipaddress.is_private — it returns False for both is_private and is_global.
 # Must be blocked explicitly. Used by carrier-grade NAT, Tailscale/WireGuard
@@ -59,6 +67,12 @@ def is_safe_url(url: str) -> bool:
         hostname = (parsed.hostname or "").strip().lower()
         if not hostname:
             return False
+
+        # Allow known public CDN hostnames before IP heuristics. Some networks
+        # resolve them into private/test ranges via internal routing, which is
+        # still safe for these exact hosts and otherwise breaks Discord media.
+        if hostname in _ALLOWED_HOSTNAMES:
+            return True
 
         # Block known internal hostnames
         if hostname in _BLOCKED_HOSTNAMES:
