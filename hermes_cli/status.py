@@ -376,6 +376,7 @@ def show_status(args):
                 _gw_svc = get_service_name()
             except Exception:
                 _gw_svc = "hermes-gateway"
+            # Check user-level service first
             try:
                 result = subprocess.run(
                     ["systemctl", "--user", "is-active", _gw_svc],
@@ -384,10 +385,26 @@ def show_status(args):
                     timeout=5
                 )
                 is_active = result.stdout.strip() == "active"
+                manager = "systemd (user)"
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 is_active = False
+                manager = "systemd (user)"
+            # If not active at user level, check system-level service
+            if not is_active:
+                try:
+                    result = subprocess.run(
+                        ["systemctl", "is-active", _gw_svc],
+                        capture_output=True,
+                        text=True,
+                        timeout=5
+                    )
+                    is_active = result.stdout.strip() == "active"
+                    if is_active:
+                        manager = "systemd (system)"
+                except (FileNotFoundError, subprocess.TimeoutExpired):
+                    pass
             print(f"  Status:       {check_mark(is_active)} {'running' if is_active else 'stopped'}")
-            print("  Manager:      systemd (user)")
+            print(f"  Manager:      {manager}")
         
     elif sys.platform == 'darwin':
         from hermes_cli.gateway import get_launchd_label
