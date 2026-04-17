@@ -188,7 +188,7 @@ class TestBuildJobPromptWithScript:
             "prompt": "Report any notable changes.",
             "script": str(script),
         }
-        prompt, system_hint = _build_job_prompt(job)
+        prompt, system_hint, _script_no_output = _build_job_prompt(job)
         assert "## Script Output" in prompt
         assert "new PR: #123 fix typo" in prompt
         assert "Report any notable changes." in prompt
@@ -200,7 +200,7 @@ class TestBuildJobPromptWithScript:
             "prompt": "Report status.",
             "script": "nonexistent_monitor.py",
         }
-        prompt, system_hint = _build_job_prompt(job)
+        prompt, system_hint, _script_no_output = _build_job_prompt(job)
         assert "## Script Error" in prompt
         assert "not found" in prompt.lower()
         assert "Report status." in prompt
@@ -209,7 +209,7 @@ class TestBuildJobPromptWithScript:
         from cron.scheduler import _build_job_prompt
 
         job = {"prompt": "Simple job."}
-        prompt, system_hint = _build_job_prompt(job)
+        prompt, system_hint, _script_no_output = _build_job_prompt(job)
         assert "## Script Output" not in prompt
         assert "Simple job." in prompt
 
@@ -223,9 +223,39 @@ class TestBuildJobPromptWithScript:
             "prompt": "Check status.",
             "script": str(script),
         }
-        prompt, system_hint = _build_job_prompt(job)
+        prompt, system_hint, script_no_output = _build_job_prompt(job)
         assert "no output" in prompt.lower()
         assert "Check status." in prompt
+        # The flag must be set so run_job can short-circuit without an LLM call.
+        assert script_no_output is True
+
+    def test_run_job_short_circuits_on_empty_script_output(self, cron_env):
+        """When the pre-run script produces no output, run_job must return
+        [SILENT] immediately without instantiating AIAgent. This prevents
+        Haiku from narrating 'I don't have access…' into group chats."""
+        from unittest.mock import patch, MagicMock
+        from cron.scheduler import run_job
+
+        script = cron_env / "scripts" / "noop.py"
+        script.write_text("# nothing\n")
+        job = {
+            "id": "test-short-circuit",
+            "name": "test-job",
+            "prompt": "Alert only if script emits data",
+            "script": str(script),
+            "schedule": {"display": "every 30m"},
+        }
+
+        # Patch AIAgent so we can assert it was NEVER constructed.
+        with patch("run_agent.AIAgent") as agent_cls:
+            success, output, final_response, error = run_job(job)
+
+        agent_cls.assert_not_called()
+        assert success is True
+        assert final_response == "[SILENT]"
+        assert error is None
+        assert "[SILENT]" in output
+        assert "Short-circuited" in output
 
 
 class TestCronjobToolScript:

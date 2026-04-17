@@ -487,16 +487,21 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
         return False, f"Script execution failed: {exc}"
 
 
-def _build_job_prompt(job: dict) -> tuple[str, str]:
+def _build_job_prompt(job: dict) -> tuple[str, str, bool]:
     """Build the effective prompt and system hint for a cron job.
 
     Returns:
-        (prompt, system_hint) — prompt is the user message, system_hint
-        is cron execution guidance to pass as the system_message so the
-        model treats it as behavioral instruction (not content to narrate).
+        (prompt, system_hint, script_no_output) — prompt is the user
+        message, system_hint is cron execution guidance to pass as the
+        system_message so the model treats it as behavioral instruction
+        (not content to narrate). ``script_no_output`` is True when the
+        job has a data-collection script that ran successfully but
+        returned empty stdout: the caller should short-circuit the
+        agent run and return [SILENT] without burning tokens.
     """
     prompt = job.get("prompt", "")
     skills = job.get("skills")
+    script_no_output = False
 
     # Run data-collection script if configured, inject output as context.
     script_path = job.get("script")
@@ -512,6 +517,12 @@ def _build_job_prompt(job: dict) -> tuple[str, str]:
                     f"{prompt}"
                 )
             else:
+                # Script ran successfully but produced no output — there is
+                # semantically nothing for the agent to report. Flag so the
+                # caller can short-circuit to [SILENT] without an LLM call
+                # (Haiku otherwise tends to narrate "I don't have access to
+                # the script output…" and leak into group chats).
+                script_no_output = True
                 prompt = (
                     "[Script ran successfully but produced no output.]\n\n"
                     f"{prompt}"
@@ -529,12 +540,19 @@ def _build_job_prompt(job: dict) -> tuple[str, str]:
     # rather than content to acknowledge/narrate in the response.
     cron_system_hint = (
         "You are running as a scheduled cron job. "
-        "DELIVERY: Your final response will be automatically delivered "
-        "to the user — do NOT use send_message or try to deliver "
-        "the output yourself. Just produce your report/output as your "
-        "final response and the system handles the rest. "
-        "SILENT: If there is genuinely nothing new to report, respond "
-        "with exactly \"[SILENT]\" (nothing else) to suppress delivery. "
+        "DELIVERY: Your final response is delivered verbatim to the user. "
+        "Do NOT use send_message or try to deliver the output yourself — "
+        "just produce your report/output as your final response and the "
+        "system handles the rest. "
+        "OUTPUT DISCIPLINE: No preamble ('Here's the report', 'All tasks "
+        "completed'), no postamble ('Status: ✅ done', 'Let me know if…'), "
+        "no title headers unless the task asks for one, no horizontal "
+        "rules. Ship the artifact only. "
+        "SILENT: If there is genuinely nothing new to report — including "
+        "when the pre-run script produced no output — respond with exactly "
+        "\"[SILENT]\" (nothing else) to suppress delivery. Do NOT ask the "
+        "user for context, do NOT offer to search logs, do NOT narrate "
+        "what you would do: just say [SILENT] and stop. "
         "Never combine [SILENT] with content — either report your "
         "findings normally, or say [SILENT] and nothing more."
     )
@@ -544,7 +562,7 @@ def _build_job_prompt(job: dict) -> tuple[str, str]:
 
     skill_names = [str(name).strip() for name in skills if str(name).strip()]
     if not skill_names:
-        return prompt, cron_system_hint
+        return prompt, cron_system_hint, script_no_output
 
     from tools.skills_tool import skill_view
 
@@ -580,7 +598,7 @@ def _build_job_prompt(job: dict) -> tuple[str, str]:
 
     if prompt:
         parts.extend(["", f"The user has provided the following instruction alongside the skill invocation: {prompt}"])
-    return "\n".join(parts), cron_system_hint
+    return "\n".join(parts), cron_system_hint, script_no_output
 
 
 def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
@@ -603,9 +621,30 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     
     job_id = job["id"]
     job_name = job["name"]
-    prompt, cron_system_hint = _build_job_prompt(job)
+    prompt, cron_system_hint, script_no_output = _build_job_prompt(job)
     origin = _resolve_origin(job)
     _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
+
+    # Short-circuit: if the pre-run script returned success with no output,
+    # there is nothing to report. Skip the LLM call entirely — otherwise
+    # models (especially Haiku) tend to ignore the [SILENT] instruction and
+    # respond with "I don't have access to the script output, could you
+    # provide…", which leaks into group chats.
+    if script_no_output:
+        logger.info(
+            "Job '%s': pre-run script produced no output — short-circuiting to [SILENT] (no LLM call)",
+            job_name,
+        )
+        output = (
+            f"# Cron Job: {job_name}\n\n"
+            f"**Job ID:** {job_id}\n"
+            f"**Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"**Schedule:** {job.get('schedule', {}).get('display', 'unknown')}\n\n"
+            f"## Prompt\n\n{prompt}\n\n"
+            f"## Response\n\n[SILENT]\n"
+            f"_Short-circuited: pre-run script produced no output._\n"
+        )
+        return True, output, "[SILENT]", None
 
     logger.info("Running job '%s' (ID: %s)", job_name, job_id)
     logger.info("Prompt: %s", prompt[:100])
@@ -970,9 +1009,35 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                 # output is already saved above).  Failed jobs always deliver.
                 deliver_content = final_response if success else f"⚠️ Cron job '{job.get('name', job['id'])}' failed:\n{error}"
                 should_deliver = bool(deliver_content)
-                if should_deliver and success and SILENT_MARKER in deliver_content.strip().upper():
-                    logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
-                    should_deliver = False
+                if should_deliver and success:
+                    if SILENT_MARKER in deliver_content.strip().upper():
+                        logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
+                        should_deliver = False
+                    else:
+                        # Defensive backstop: some models (notably Haiku) ignore
+                        # the [SILENT] instruction and reply with a chatty
+                        # "I don't have access to the script output, could
+                        # you provide…" instead. Cron jobs should never ask
+                        # the user questions — detect these patterns in the
+                        # opening of the response and suppress delivery so
+                        # they don't leak into group chats.
+                        _sniff = deliver_content.strip().lower()[:400]
+                        _hallucination_markers = (
+                            "i don't have access to",
+                            "i do not have access to",
+                            "could you provide",
+                            "please provide the script",
+                            "please share the script",
+                            "can you share the script",
+                            "to retrieve and report",
+                        )
+                        if any(m in _sniff for m in _hallucination_markers):
+                            logger.warning(
+                                "Job '%s': suppressing delivery — response looks like a model "
+                                "hallucination asking for context (should have been [SILENT])",
+                                job["id"],
+                            )
+                            should_deliver = False
 
                 delivery_error = None
                 if should_deliver:

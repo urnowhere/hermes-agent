@@ -1168,34 +1168,103 @@ class TestSilentDelivery:
         save_mock.assert_called_once_with("monitor-job", "# full output")
         deliver_mock.assert_not_called()
 
+    def test_hallucinated_help_request_suppressed(self, caplog):
+        """Haiku sometimes replies 'I don't have access to the script output,
+        could you provide…' instead of [SILENT]. That is never legitimate
+        cron output — it must be suppressed so it doesn't leak into groups."""
+        bad_reply = (
+            "I don't have access to the script output from your previous "
+            "execution. To retrieve and report the alert, I need to:\n\n"
+            "1. Check if there's a log file\n"
+            "Could you provide:\n- The script path\n"
+        )
+        with patch("cron.scheduler.get_due_jobs", return_value=[self._make_job()]), \
+             patch("cron.scheduler.run_job", return_value=(True, "# output", bad_reply, None)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result") as deliver_mock, \
+             patch("cron.scheduler.mark_job_run"):
+            from cron.scheduler import tick
+            with caplog.at_level(logging.WARNING, logger="cron.scheduler"):
+                tick(verbose=False)
+        deliver_mock.assert_not_called()
+        assert any("hallucination" in r.message.lower() for r in caplog.records)
+
+    def test_legit_response_mentioning_access_still_delivers(self):
+        """The hallucination guard must not accidentally swallow legitimate
+        reports that happen to mention 'access' later in the body."""
+        legit = (
+            "Daily equity digest:\n- SPY +0.3%\n- QQQ -0.2%\n\n"
+            "Risk flag: XYZ lost access to its primary market maker today."
+        )
+        with patch("cron.scheduler.get_due_jobs", return_value=[self._make_job()]), \
+             patch("cron.scheduler.run_job", return_value=(True, "# output", legit, None)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result") as deliver_mock, \
+             patch("cron.scheduler.mark_job_run"):
+            from cron.scheduler import tick
+            tick(verbose=False)
+        deliver_mock.assert_called_once()
+
 
 class TestBuildJobPromptSilentHint:
     """Verify _build_job_prompt always returns [SILENT] guidance in system hint."""
 
     def test_hint_always_present(self):
         job = {"prompt": "Check for updates"}
-        prompt, system_hint = _build_job_prompt(job)
+        prompt, system_hint, _script_no_output = _build_job_prompt(job)
         assert "[SILENT]" in system_hint
         assert "Check for updates" in prompt
 
     def test_hint_present_even_without_prompt(self):
         job = {"prompt": ""}
-        prompt, system_hint = _build_job_prompt(job)
+        prompt, system_hint, _script_no_output = _build_job_prompt(job)
         assert "[SILENT]" in system_hint
 
     def test_delivery_guidance_present(self):
         """Cron hint tells agents their final response is auto-delivered."""
         job = {"prompt": "Generate a report"}
-        prompt, system_hint = _build_job_prompt(job)
-        assert "do NOT use send_message" in system_hint
-        assert "automatically delivered" in system_hint
+        prompt, system_hint, _script_no_output = _build_job_prompt(job)
+        assert "Do NOT use send_message" in system_hint
+        assert "delivered verbatim" in system_hint
 
     def test_delivery_guidance_in_system_hint_not_prompt(self):
         """System guidance is in the system hint, not in the user prompt."""
         job = {"prompt": "My custom prompt"}
-        prompt, system_hint = _build_job_prompt(job)
-        assert "do NOT use send_message" not in prompt
-        assert "do NOT use send_message" in system_hint
+        prompt, system_hint, _script_no_output = _build_job_prompt(job)
+        assert "Do NOT use send_message" not in prompt
+        assert "Do NOT use send_message" in system_hint
+
+
+class TestBuildJobPromptScriptNoOutput:
+    """Verify the script_no_output flag is set correctly so run_job can short-circuit."""
+
+    def test_flag_false_when_no_script(self):
+        """Jobs without a pre-run script never set the no-output flag."""
+        job = {"prompt": "Run something"}
+        _prompt, _hint, script_no_output = _build_job_prompt(job)
+        assert script_no_output is False
+
+    def test_flag_true_when_script_produces_empty_output(self, tmp_path):
+        """Successful-but-empty script output sets the flag so the LLM is skipped."""
+        script = tmp_path / "noop.py"
+        script.write_text("# emits nothing\n")
+        job = {"script": str(script), "prompt": "Report only if something happened"}
+        with patch("cron.scheduler._run_job_script", return_value=(True, "")):
+            _prompt, _hint, script_no_output = _build_job_prompt(job)
+        assert script_no_output is True
+
+    def test_flag_false_when_script_produces_output(self, tmp_path):
+        job = {"script": "anything.py", "prompt": "Parse script output"}
+        with patch("cron.scheduler._run_job_script", return_value=(True, "data here")):
+            _prompt, _hint, script_no_output = _build_job_prompt(job)
+        assert script_no_output is False
+
+    def test_flag_false_when_script_fails(self, tmp_path):
+        job = {"script": "anything.py", "prompt": "Parse script output"}
+        with patch("cron.scheduler._run_job_script", return_value=(False, "boom")):
+            _prompt, _hint, script_no_output = _build_job_prompt(job)
+        # Script failures must surface an error, not be silenced
+        assert script_no_output is False
 
 
 class TestBuildJobPromptMissingSkill:
@@ -1207,14 +1276,14 @@ class TestBuildJobPromptMissingSkill:
     def test_missing_skill_does_not_raise(self):
         """Job should run even when a referenced skill is not installed."""
         with patch("tools.skills_tool.skill_view", side_effect=self._missing_skill_view):
-            prompt, system_hint = _build_job_prompt({"skills": ["ghost-skill"], "prompt": "do something"})
+            prompt, system_hint, _script_no_output = _build_job_prompt({"skills": ["ghost-skill"], "prompt": "do something"})
         # prompt is preserved even though skill was skipped
         assert "do something" in prompt
 
     def test_missing_skill_injects_user_notice_into_prompt(self):
         """A system notice about the missing skill is injected into the prompt."""
         with patch("tools.skills_tool.skill_view", side_effect=self._missing_skill_view):
-            prompt, system_hint = _build_job_prompt({"skills": ["ghost-skill"], "prompt": "do something"})
+            prompt, system_hint, _script_no_output = _build_job_prompt({"skills": ["ghost-skill"], "prompt": "do something"})
         assert "ghost-skill" in prompt
         assert "not found" in prompt.lower() or "skipped" in prompt.lower()
 
@@ -1234,7 +1303,7 @@ class TestBuildJobPromptMissingSkill:
             return json.dumps({"success": False, "error": f"Skill '{name}' not found."})
 
         with patch("tools.skills_tool.skill_view", side_effect=_mixed_skill_view):
-            prompt, system_hint = _build_job_prompt({"skills": ["ghost-skill", "real-skill"], "prompt": "go"})
+            prompt, system_hint, _script_no_output = _build_job_prompt({"skills": ["ghost-skill", "real-skill"], "prompt": "go"})
         assert "Real skill content." in prompt
         assert "go" in prompt
 
