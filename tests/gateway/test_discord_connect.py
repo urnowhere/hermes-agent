@@ -120,17 +120,25 @@ class SlowSyncBot(FakeBot):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("allowed_users", "expected_members_intent"),
+    ("allowed_users", "enable_members_intent", "expected_members_intent"),
     [
-        ("769524422783664158", False),
-        ("abhey-gupta", True),
-        ("769524422783664158,abhey-gupta", True),
+        ("769524422783664158", None, False),
+        ("abhey-gupta", None, False),
+        ("769524422783664158,abhey-gupta", None, False),
+        ("abhey-gupta", "true", True),
+        ("769524422783664158,abhey-gupta", "1", True),
     ],
 )
-async def test_connect_only_requests_members_intent_when_needed(monkeypatch, allowed_users, expected_members_intent):
+async def test_connect_only_requests_members_intent_when_explicitly_enabled(
+    monkeypatch, allowed_users, enable_members_intent, expected_members_intent
+):
     adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
 
     monkeypatch.setenv("DISCORD_ALLOWED_USERS", allowed_users)
+    if enable_members_intent is None:
+        monkeypatch.delenv("DISCORD_ENABLE_MEMBERS_INTENT", raising=False)
+    else:
+        monkeypatch.setenv("DISCORD_ENABLE_MEMBERS_INTENT", enable_members_intent)
     monkeypatch.setattr("gateway.status.acquire_scoped_lock", lambda scope, identity, metadata=None: (True, None))
     monkeypatch.setattr("gateway.status.release_scoped_lock", lambda scope, identity: None)
 
