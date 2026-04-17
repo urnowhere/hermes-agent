@@ -32,6 +32,19 @@ if [ "$(id -u)" = "0" ]; then
             echo "Warning: chown failed (rootless container?) — continuing anyway"
     fi
 
+    # SSH server for Hermes Desktop connection.
+    # Inject authorized keys from host (mounted at /opt/data/.ssh/authorized_keys)
+    # so the Desktop app can SSH into this container without passwords.
+    SSH_AUTH_SRC="$HERMES_HOME/.ssh/authorized_keys"
+    if [ -f "$SSH_AUTH_SRC" ]; then
+        mkdir -p /root/.ssh
+        cp "$SSH_AUTH_SRC" /root/.ssh/authorized_keys
+        chmod 700 /root/.ssh
+        chmod 600 /root/.ssh/authorized_keys
+        /usr/sbin/sshd
+        echo "[entrypoint] sshd started (key-only auth)"
+    fi
+
     echo "Dropping root privileges"
     exec gosu hermes "$0" "$@"
 fi
