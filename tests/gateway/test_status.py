@@ -63,6 +63,24 @@ class TestGatewayPidState:
 
         assert status.get_running_pid() == os.getpid()
 
+    def test_get_running_pid_treats_oserror_as_stale(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        pid_path = tmp_path / "gateway.pid"
+        pid_path.write_text(json.dumps({
+            "pid": os.getpid(),
+            "kind": "hermes-gateway",
+            "argv": ["python", "-m", "hermes_cli.main", "gateway"],
+            "start_time": 123,
+        }))
+
+        def fake_kill(pid, sig):
+            raise OSError("Windows invalid handle")
+
+        monkeypatch.setattr(status.os, "kill", fake_kill)
+
+        assert status.get_running_pid() is None
+        assert not pid_path.exists()
+
 
 class TestGatewayRuntimeStatus:
     def test_write_runtime_status_overwrites_stale_pid_on_restart(self, tmp_path, monkeypatch):
@@ -199,6 +217,28 @@ class TestScopedLocks:
 
         def fake_kill(pid, sig):
             raise ProcessLookupError
+
+        monkeypatch.setattr(status.os, "kill", fake_kill)
+
+        acquired, existing = status.acquire_scoped_lock("telegram-bot-token", "secret", metadata={"platform": "telegram"})
+
+        assert acquired is True
+        payload = json.loads(lock_path.read_text())
+        assert payload["pid"] == os.getpid()
+        assert payload["metadata"]["platform"] == "telegram"
+
+    def test_acquire_scoped_lock_replaces_oserror_record(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
+        lock_path = tmp_path / "locks" / "telegram-bot-token-2bb80d537b1da3e3.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(json.dumps({
+            "pid": 99999,
+            "start_time": 123,
+            "kind": "hermes-gateway",
+        }))
+
+        def fake_kill(pid, sig):
+            raise OSError("Windows invalid parameter")
 
         monkeypatch.setattr(status.os, "kill", fake_kill)
 
