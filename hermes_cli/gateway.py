@@ -14,6 +14,10 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
+from hermes_cli.stdio import ensure_utf8_stdio
+
+ensure_utf8_stdio()
+
 from gateway.status import terminate_pid
 from gateway.restart import (
     DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,

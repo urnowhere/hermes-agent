@@ -50,6 +50,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+
 def _require_tty(command_name: str) -> None:
     """Exit with a clear error if stdin is not a terminal.
 
@@ -70,6 +71,10 @@ def _require_tty(command_name: str) -> None:
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(PROJECT_ROOT))
+
+from hermes_cli.stdio import ensure_utf8_stdio
+
+ensure_utf8_stdio()
 
 # ---------------------------------------------------------------------------
 # Profile override — MUST happen before any hermes module import.
