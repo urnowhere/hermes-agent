@@ -47,28 +47,35 @@ logger = logging.getLogger(__name__)
 # Import security scanner — agent-created skills get the same scrutiny as
 # community hub installs.
 try:
-    from tools.skills_guard import scan_skill, should_allow_install, format_scan_report
+    from tools.skills_guard import (
+        scan_skill,
+        should_allow_install,
+        should_allow_skill_edit,
+        format_scan_report,
+    )
     _GUARD_AVAILABLE = True
 except ImportError:
     _GUARD_AVAILABLE = False
 
 
-def _security_scan_skill(skill_dir: Path) -> Optional[str]:
+def _security_scan_skill(skill_dir: Path, before_result=None, changed_files=None) -> Optional[str]:
     """Scan a skill directory after write. Returns error string if blocked, else None."""
     if not _GUARD_AVAILABLE:
         return None
     try:
-        result = scan_skill(skill_dir, source="agent-created")
-        allowed, reason = should_allow_install(result)
+        after_result = scan_skill(skill_dir, source="agent-created")
+        allowed, reason = should_allow_skill_edit(
+            after_result,
+            before_result=before_result,
+            changed_files=changed_files,
+        )
+        if allowed is True:
+            return None
+        report = format_scan_report(after_result)
         if allowed is False:
-            report = format_scan_report(result)
             return f"Security scan blocked this skill ({reason}):\n{report}"
-        if allowed is None:
-            # "ask" verdict — for agent-created skills this means dangerous
-            # findings were detected.  Block the skill and include the report.
-            report = format_scan_report(result)
-            logger.warning("Agent-created skill blocked (dangerous findings): %s", reason)
-            return f"Security scan blocked this skill ({reason}):\n{report}"
+        logger.warning("Agent-created skill blocked (dangerous findings): %s", reason)
+        return f"Security scan blocked this skill ({reason}):\n{report}"
     except Exception as e:
         logger.warning("Security scan failed for %s: %s", skill_dir, e, exc_info=True)
     return None
@@ -376,12 +383,17 @@ def _edit_skill(name: str, content: str) -> Dict[str, Any]:
         return {"success": False, "error": f"Skill '{name}' is in an external directory and cannot be modified. Copy it to your local skills directory first."}
 
     skill_md = existing["path"] / "SKILL.md"
+    before_result = scan_skill(existing["path"], source="agent-created") if _GUARD_AVAILABLE else None
     # Back up original content for rollback
     original_content = skill_md.read_text(encoding="utf-8") if skill_md.exists() else None
     _atomic_write_text(skill_md, content)
 
     # Security scan — roll back on block
-    scan_error = _security_scan_skill(existing["path"])
+    scan_error = _security_scan_skill(
+        existing["path"],
+        before_result=before_result,
+        changed_files=[("SKILL.md", original_content, content)],
+    )
     if scan_error:
         if original_content is not None:
             _atomic_write_text(skill_md, original_content)
@@ -471,10 +483,15 @@ def _patch_skill(
             }
 
     original_content = content  # for rollback
+    before_result = scan_skill(skill_dir, source="agent-created") if _GUARD_AVAILABLE else None
     _atomic_write_text(target, new_content)
 
     # Security scan — roll back on block
-    scan_error = _security_scan_skill(skill_dir)
+    scan_error = _security_scan_skill(
+        skill_dir,
+        before_result=before_result,
+        changed_files=[(str(target.relative_to(skill_dir)), original_content, new_content)],
+    )
     if scan_error:
         _atomic_write_text(target, original_content)
         return {"success": False, "error": scan_error}
@@ -543,12 +560,17 @@ def _write_file(name: str, file_path: str, file_content: str) -> Dict[str, Any]:
     if err:
         return {"success": False, "error": err}
     target.parent.mkdir(parents=True, exist_ok=True)
+    before_result = scan_skill(existing["path"], source="agent-created") if _GUARD_AVAILABLE else None
     # Back up for rollback
     original_content = target.read_text(encoding="utf-8") if target.exists() else None
     _atomic_write_text(target, file_content)
 
     # Security scan — roll back on block
-    scan_error = _security_scan_skill(existing["path"])
+    scan_error = _security_scan_skill(
+        existing["path"],
+        before_result=before_result,
+        changed_files=[(file_path, original_content, file_content)],
+    )
     if scan_error:
         if original_content is not None:
             _atomic_write_text(target, original_content)
