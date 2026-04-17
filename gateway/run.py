@@ -5818,6 +5818,7 @@ class GatewayRunner:
                     user_id=source.user_id,
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
+                    smart_routed_primary=turn_route.get("primary"),
                 )
                 try:
                     return agent.run_conversation(
@@ -5999,6 +6000,7 @@ class GatewayRunner:
                     platform=platform_key,
                     session_db=None,
                     fallback_model=self._fallback_model,
+                    smart_routed_primary=turn_route.get("primary"),
                     skip_memory=True,
                     skip_context_files=True,
                     persist_session=False,
@@ -8875,6 +8877,7 @@ class GatewayRunner:
                     gateway_session_key=session_key,
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
+                    smart_routed_primary=turn_route.get("primary"),
                 )
                 if _cache_lock and _cache is not None:
                     with _cache_lock:
