@@ -4494,6 +4494,120 @@ class HermesCLI:
             _ask()
         return result[0]
 
+    def _resolve_editor_command(self) -> list[str] | None:
+        """Resolve an external editor command, supporting args like `code --wait`."""
+        import shlex
+
+        candidates: list[str] = []
+        env_editor = os.getenv("EDITOR") or os.getenv("VISUAL")
+        if env_editor:
+            candidates.append(env_editor)
+
+        candidates.extend((
+            "code --wait",
+            "codium --wait",
+            "subl -w",
+            "mate -w",
+            "gedit --wait",
+            "nano",
+            "nvim",
+            "vim",
+            "vi",
+            "micro",
+            "hx",
+            "notepad",
+        ))
+
+        for candidate in candidates:
+            try:
+                parts = shlex.split(candidate, posix=(os.name != "nt"))
+            except ValueError:
+                continue
+            if not parts:
+                continue
+            executable = parts[0]
+            if os.path.isabs(executable):
+                if os.path.exists(executable):
+                    return parts
+                continue
+            if shutil.which(executable):
+                return parts
+
+        return None
+
+    def _open_external_editor(self, initial_text: str = "") -> str | None:
+        """Open a temp file in an external editor and return saved content."""
+        import subprocess
+        import threading
+
+        editor_cmd = self._resolve_editor_command()
+        if not editor_cmd:
+            _cprint("  No editor found. Set $EDITOR or $VISUAL, or install a common terminal editor.")
+            return None
+
+        fd, temp_path = tempfile.mkstemp(prefix="hermes-editor-", suffix=".md")
+        os.close(fd)
+        temp_file = Path(temp_path)
+
+        try:
+            if initial_text:
+                temp_file.write_text(initial_text, encoding="utf-8")
+
+            def _launch_editor() -> None:
+                subprocess.run(editor_cmd + [str(temp_file)], check=False)
+
+            in_main_thread = threading.current_thread() is threading.main_thread()
+            if getattr(self, "_app", None) and in_main_thread:
+                from prompt_toolkit.application import run_in_terminal
+
+                was_visible = getattr(self, "_status_bar_visible", True)
+                self._status_bar_visible = False
+                self._app.invalidate()
+                try:
+                    run_in_terminal(_launch_editor)
+                finally:
+                    self._status_bar_visible = was_visible
+                    self._app.invalidate()
+            else:
+                _launch_editor()
+
+            edited_text = temp_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            _cprint(f"  Failed to launch editor: {exc}")
+            return None
+        finally:
+            try:
+                temp_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        if not edited_text.strip():
+            _cprint("  Editor cancelled (empty buffer).")
+            return None
+
+        return edited_text
+
+    def _handle_editor_command(self, cmd: str) -> None:
+        """Handle /editor [/edit] by composing a multiline prompt externally."""
+        parts = cmd.strip().split(None, 1)
+        initial_text = parts[1] if len(parts) > 1 else ""
+        edited_text = self._open_external_editor(initial_text=initial_text)
+        if not edited_text:
+            return
+
+        if not hasattr(self, "_pending_input"):
+            _cprint("  Editor unavailable: input queue not initialized.")
+            return
+
+        self._pending_input.put(edited_text)
+        preview = " ".join(edited_text.strip().split())
+        if len(preview) > 80:
+            preview = f"{preview[:80]}..."
+        if not preview:
+            preview = "[multiline prompt]"
+        prefix = "for the next turn: " if getattr(self, "_agent_running", False) else ""
+        _cprint(f"  Editor content queued {prefix}{preview}")
+
     def _open_model_picker(self, providers: list, current_model: str, current_provider: str, user_provs=None, custom_provs=None) -> None:
         """Open prompt_toolkit-native /model picker modal."""
         self._capture_modal_input_snapshot()
@@ -5572,6 +5686,8 @@ class HermesCLI:
             self._handle_background_command(cmd_original)
         elif canonical == "btw":
             self._handle_btw_command(cmd_original)
+        elif canonical == "editor":
+            self._handle_editor_command(cmd_original)
         elif canonical == "queue":
             # Extract prompt after "/queue " or "/q "
             parts = cmd_original.split(None, 1)
