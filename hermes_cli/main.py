@@ -3311,26 +3311,32 @@ def _build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
     if not (web_dir / "package.json").exists():
         return True
     import shutil
+    lockfile_exists = (web_dir / "package-lock.json").exists()
     npm = shutil.which("npm")
     if not npm:
         if fatal:
+            install_hint = "npm ci" if lockfile_exists else "npm install"
             print("Web UI frontend not built and npm is not available.")
-            print("Install Node.js, then run:  cd web && npm install && npm run build")
+            print(f"Install Node.js, then run:  cd web && {install_hint} && npm run build")
         return not fatal
+
+    install_cmd = [npm, "ci", "--silent"] if lockfile_exists else [npm, "install", "--silent"]
+    install_hint = "npm ci" if lockfile_exists else "npm install"
+
     print("→ Building web UI...")
-    r1 = subprocess.run([npm, "install", "--silent"], cwd=web_dir, capture_output=True)
+    r1 = subprocess.run(install_cmd, cwd=web_dir, capture_output=True)
     if r1.returncode != 0:
-        print(f"  {'✗' if fatal else '⚠'} Web UI npm install failed"
+        print(f"  {'✗' if fatal else '⚠'} Web UI {install_hint} failed"
               + ("" if fatal else " (hermes web will not be available)"))
         if fatal:
-            print("  Run manually:  cd web && npm install && npm run build")
+            print(f"  Run manually:  cd web && {install_hint} && npm run build")
         return False
     r2 = subprocess.run([npm, "run", "build"], cwd=web_dir, capture_output=True)
     if r2.returncode != 0:
         print(f"  {'✗' if fatal else '⚠'} Web UI build failed"
               + ("" if fatal else " (hermes web will not be available)"))
         if fatal:
-            print("  Run manually:  cd web && npm install && npm run build")
+            print(f"  Run manually:  cd web && {install_hint} && npm run build")
         return False
     print("  ✓ Web UI built")
     return True
