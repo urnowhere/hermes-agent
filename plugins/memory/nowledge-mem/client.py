@@ -267,6 +267,10 @@ class NowledgeMemClient:
         except RuntimeError as first_error:
             if not api_key:
                 raise
+
+            # Match nmem's proxy compatibility behavior: if a proxy strips
+            # auth headers, retry with the key in the query string; if the
+            # configured URL still includes /remote-api, retry once at root.
             for retry_url in self._retry_urls(url, api_key):
                 try:
                     return self._request_json(retry_url, body, headers)

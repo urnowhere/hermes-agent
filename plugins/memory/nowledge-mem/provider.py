@@ -474,7 +474,7 @@ class NowledgeMemProvider(MemoryProvider):
                 "key": "space_template",
                 "description": "Optional template like research-{identity}; used when space is empty",
                 "default": "",
-            }
+            },
         ]
 
     def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
