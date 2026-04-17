@@ -794,18 +794,29 @@ class SimplexAdapter(BasePlatformAdapter):
         if not file_path or not Path(file_path).exists():
             return SendResult(success=False, error="Image file not found")
 
-        # Send file via simplex-chat command
+        # Use /_send with filePath and msgContent type "image" so we can
+        # address the chat by numeric ID (the /f command only accepts
+        # display names, which breaks for group IDs).
+        composed = json.dumps(
+            [
+                {
+                    "filePath": file_path,
+                    "msgContent": {
+                        "type": "image",
+                        "image": "",
+                        "text": caption or "",
+                    },
+                }
+            ]
+        )
+
         if chat_id.startswith("group:"):
             group_id = chat_id[6:]
-            command = f"/f #{group_id} {file_path}"
+            command = f"/_send #{group_id} json {composed}"
         else:
-            command = f"/f @{chat_id} {file_path}"
+            command = f"/_send @{chat_id} json {composed}"
 
         result = await self._send_command(command)
-
-        # Send caption as a separate message if provided
-        if caption and result is not None:
-            await self.send(chat_id, caption)
 
         if result is not None:
             return SendResult(success=True)
@@ -847,16 +858,26 @@ class SimplexAdapter(BasePlatformAdapter):
         if not Path(file_path).exists():
             return SendResult(success=False, error="File not found")
 
+        # Use /_send with filePath to address by numeric ID (see send_image).
+        composed = json.dumps(
+            [
+                {
+                    "filePath": file_path,
+                    "msgContent": {
+                        "type": "file",
+                        "text": caption or "",
+                    },
+                }
+            ]
+        )
+
         if chat_id.startswith("group:"):
             group_id = chat_id[6:]
-            command = f"/f #{group_id} {file_path}"
+            command = f"/_send #{group_id} json {composed}"
         else:
-            command = f"/f @{chat_id} {file_path}"
+            command = f"/_send @{chat_id} json {composed}"
 
         result = await self._send_command(command)
-
-        if caption and result is not None:
-            await self.send(chat_id, caption)
 
         if result is not None:
             return SendResult(success=True)
