@@ -731,6 +731,15 @@ def discover_plugins() -> None:
     get_plugin_manager().discover_and_load()
 
 
+def get_plugin_cli_commands() -> Dict[str, dict]:
+    """Return a shallow copy of plugin-registered CLI commands.
+
+    Kept as a small convenience wrapper so callers don't need to reach into
+    the plugin manager singleton's private ``_cli_commands`` attribute.
+    """
+    return dict(get_plugin_manager()._cli_commands)
+
+
 def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
     """Invoke a lifecycle hook on all loaded plugins.
 

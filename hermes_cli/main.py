@@ -5711,17 +5711,30 @@ Examples:
     # own argparse tree.  No hardcoded plugin commands in main.py.
     # =========================================================================
     try:
+        import logging as _log
+        from hermes_cli.plugins import discover_plugins, get_plugin_cli_commands
         from plugins.memory import discover_plugin_cli_commands
-        for cmd_info in discover_plugin_cli_commands():
+
+        discover_plugins()
+        dynamic_commands = list(discover_plugin_cli_commands())
+        dynamic_commands.extend(get_plugin_cli_commands().values())
+
+        for cmd_info in dynamic_commands:
+            cmd_name = cmd_info["name"]
+            if cmd_name in subparsers.choices:
+                _log.getLogger(__name__).warning(
+                    "Skipping plugin CLI command '%s': subcommand already exists",
+                    cmd_name,
+                )
+                continue
             plugin_parser = subparsers.add_parser(
-                cmd_info["name"],
+                cmd_name,
                 help=cmd_info["help"],
                 description=cmd_info.get("description", ""),
                 formatter_class=__import__("argparse").RawDescriptionHelpFormatter,
             )
             cmd_info["setup_fn"](plugin_parser)
     except Exception as _exc:
-        import logging as _log
         _log.getLogger(__name__).debug("Plugin CLI discovery failed: %s", _exc)
 
     # =========================================================================

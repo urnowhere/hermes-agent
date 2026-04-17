@@ -12,7 +12,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -20,6 +20,7 @@ from hermes_cli.plugins import (
     PluginContext,
     PluginManager,
     PluginManifest,
+    get_plugin_cli_commands,
 )
 
 
@@ -62,6 +63,124 @@ class TestRegisterCliCommand:
         ctx.register_cli_command("nocb", "test", MagicMock())
         assert mgr._cli_commands["nocb"]["handler_fn"] is None
 
+
+class TestGetPluginCliCommands:
+    def test_returns_dict(self):
+        mgr = PluginManager()
+        mgr._cli_commands["foo"] = {"name": "foo", "help": "bar"}
+        with patch("hermes_cli.plugins.get_plugin_manager", return_value=mgr):
+            cmds = get_plugin_cli_commands()
+        assert cmds == {"foo": {"name": "foo", "help": "bar"}}
+        # Top-level is a copy — adding to result doesn't affect manager
+        cmds["new"] = {"name": "new"}
+        assert "new" not in mgr._cli_commands
+
+
+class TestMainParserPluginCliIntegration:
+    def test_general_plugin_command_is_wired_into_main_parser(self, monkeypatch):
+        import hermes_cli.main as main_mod
+        import hermes_cli.plugins as plugins_mod
+        import hermes_cli.config as config_mod
+        import plugins.memory as memory_plugins_mod
+
+        captured = {}
+
+        def fake_plugin_handler(args):
+            captured["command"] = args.command
+            captured["answer"] = args.answer
+
+        def fake_setup_fn(subparser):
+            subparser.add_argument("--answer", required=True)
+            subparser.set_defaults(func=fake_plugin_handler)
+
+        def fake_discover_plugins():
+            captured["discover_called"] = True
+
+        monkeypatch.setattr(config_mod, "get_container_exec_info", lambda: None)
+        monkeypatch.setattr(plugins_mod, "discover_plugins", fake_discover_plugins)
+        monkeypatch.setattr(
+            plugins_mod,
+            "get_plugin_cli_commands",
+            lambda: {
+                "plugcmd": {
+                    "name": "plugcmd",
+                    "help": "Test plugin command",
+                    "description": "Plugin command registered through PluginContext",
+                    "setup_fn": fake_setup_fn,
+                }
+            },
+        )
+        monkeypatch.setattr(
+            memory_plugins_mod,
+            "discover_plugin_cli_commands",
+            lambda: [],
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["hermes", "plugcmd", "--answer", "42"],
+        )
+
+        main_mod.main()
+
+        assert captured == {
+            "discover_called": True,
+            "command": "plugcmd",
+            "answer": "42",
+        }
+
+    def test_conflicting_plugin_command_does_not_block_later_plugin_commands(
+        self, monkeypatch, caplog
+    ):
+        import hermes_cli.main as main_mod
+        import hermes_cli.plugins as plugins_mod
+        import hermes_cli.config as config_mod
+        import plugins.memory as memory_plugins_mod
+
+        captured = {}
+
+        def fake_plugin_handler(args):
+            captured["command"] = args.command
+
+        def fake_setup_fn(subparser):
+            subparser.set_defaults(func=fake_plugin_handler)
+
+        monkeypatch.setattr(config_mod, "get_container_exec_info", lambda: None)
+        monkeypatch.setattr(plugins_mod, "discover_plugins", lambda: None)
+        monkeypatch.setattr(
+            plugins_mod,
+            "get_plugin_cli_commands",
+            lambda: {
+                "skills": {
+                    "name": "skills",
+                    "help": "Conflicts with built-in skills command",
+                    "setup_fn": fake_setup_fn,
+                },
+                "plugcmd": {
+                    "name": "plugcmd",
+                    "help": "A non-conflicting plugin command",
+                    "setup_fn": fake_setup_fn,
+                },
+            },
+        )
+        monkeypatch.setattr(
+            memory_plugins_mod,
+            "discover_plugin_cli_commands",
+            lambda: [],
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["hermes", "plugcmd"],
+        )
+
+        with caplog.at_level("WARNING"):
+            main_mod.main()
+
+        assert captured == {
+            "command": "plugcmd",
+        }
+        assert "Skipping plugin CLI command 'skills'" in caplog.text
 
 # ── Memory plugin CLI discovery ───────────────────────────────────────────
 
