@@ -63,6 +63,39 @@ class TestGatewayPidState:
 
         assert status.get_running_pid() == os.getpid()
 
+    def test_get_running_pid_handles_bare_oserror_from_os_kill(self, tmp_path, monkeypatch):
+        """Regression: Windows os.kill(pid, 0) can raise bare OSError (WinError 11).
+
+        Observed on Windows PM2 fork mode when the recorded PID belongs to a
+        process of a different architecture or in an inspection-blocked state.
+        The previous exception handler only caught ProcessLookupError and
+        PermissionError, so the bare OSError propagated out of get_running_pid
+        and crashed the gateway startup path, producing a tight restart loop
+        with the supervisor (observed: 2000+ restarts on PM2 + Windows 11).
+
+        This test uses os.getpid() for the recorded PID so the remove_pid_file
+        ownership guard (which refuses to remove files belonging to other
+        processes during --replace handoffs) does not mask the behaviour under
+        test: we only assert that the widened except clause swallows OSError
+        and returns None instead of propagating.
+        """
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        pid_path = tmp_path / "gateway.pid"
+        pid_path.write_text(json.dumps({
+            "pid": os.getpid(),
+            "kind": "hermes-gateway",
+            "argv": ["python", "-m", "hermes_cli.main", "gateway"],
+            "start_time": 123,
+        }))
+
+        def fake_kill(pid, sig):
+            raise OSError(11, "An attempt was made to load a program with an incorrect format")
+
+        monkeypatch.setattr(status.os, "kill", fake_kill)
+
+        # Primary guarantee: no exception escapes, function returns None.
+        assert status.get_running_pid() is None
+
 
 class TestGatewayRuntimeStatus:
     def test_write_runtime_status_overwrites_stale_pid_on_restart(self, tmp_path, monkeypatch):

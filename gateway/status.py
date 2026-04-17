@@ -432,7 +432,12 @@ def get_running_pid() -> Optional[int]:
 
     try:
         os.kill(pid, 0)  # signal 0 = existence check, no actual signal sent
-    except (ProcessLookupError, PermissionError):
+    except (ProcessLookupError, PermissionError, OSError):
+        # Windows os.kill(pid, 0) can raise bare OSError (e.g. WinError 11
+        # "incorrect format") for cross-architecture or inspection-blocked
+        # processes. ProcessLookupError/PermissionError are OSError subclasses,
+        # so the widened catch is a strict superset. Every failure here means
+        # "cannot confirm process is alive and ours" -> treat PID as stale.
         remove_pid_file()
         return None
 
