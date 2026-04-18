@@ -502,11 +502,9 @@ def _wsl_systemd_operational() -> bool:
 def supports_systemd_services() -> bool:
     if not is_linux() or is_termux() or is_container():
         return False
-    if shutil.which("systemctl") is None:
-        return False
     if is_wsl():
         return _wsl_systemd_operational()
-    return True
+    return shutil.which("systemctl") is not None
 
 
 def is_macos() -> bool:
