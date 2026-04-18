@@ -532,6 +532,53 @@ def _get_approval_timeout() -> int:
         return 60
 
 
+def _gateway_block_wait_timeout() -> int:
+    """Seconds to block the agent thread waiting for gateway /approve|/deny.
+
+    ``approval_timeout_per_command`` is the preferred YAML key; ``gateway_timeout``
+    remains as a backwards-compatible alias.
+    """
+    cfg = _get_approval_config()
+    for key in ("approval_timeout_per_command", "gateway_timeout"):
+        if key not in cfg:
+            continue
+        raw = cfg.get(key)
+        if raw is None:
+            continue
+        try:
+            return max(0, int(raw))
+        except (ValueError, TypeError):
+            continue
+    return 300
+
+
+def cancel_gateway_approvals_on_user_interrupt(
+    session_key: str, *, reason: str = "interrupt"
+) -> int:
+    """Deny all pending blocking gateway approvals for a session.
+
+    Used when the user sends ``/stop`` (or similar) so executor threads blocked
+    inside :func:`check_all_command_guards` wake up immediately instead of
+    waiting for the full gateway timeout (#8697 class).
+    """
+    if not session_key:
+        return 0
+    count = resolve_gateway_approval(session_key, "deny", resolve_all=True)
+    if count:
+        logger.info(
+            "Cancelled %d pending gateway approval(s) (session interrupt, reason=%s)",
+            count,
+            reason,
+            extra={
+                "hermes_event": "approval_cancelled",
+                "hermes_approval_cancel_reason": reason,
+                "hermes_approval_cancel_count": count,
+                "hermes_session_key_prefix": session_key[:48],
+            },
+        )
+    return count
+
+
 def _smart_approve(command: str, description: str) -> str:
     """Use the auxiliary LLM to assess risk and decide approval.
 
@@ -838,16 +885,23 @@ def check_all_command_guards(command: str, env_type: str,
             # 1800s) kills the agent while the user is still responding to
             # the approval prompt.  Mirrors the _wait_for_process() cadence
             # in tools/environments/base.py.
-            timeout = _get_approval_config().get("gateway_timeout", 300)
-            try:
-                timeout = int(timeout)
-            except (ValueError, TypeError):
-                timeout = 300
+            timeout = _gateway_block_wait_timeout()
 
             try:
                 from tools.environments.base import touch_activity_if_due
             except Exception:  # pragma: no cover
                 touch_activity_if_due = None
+
+            logger.debug(
+                "Gateway blocking approval wait started (timeout=%ss)",
+                timeout,
+                extra={
+                    "hermes_event": "gateway_approval_wait_start",
+                    "hermes_approval_timeout_s": timeout,
+                    "hermes_session_key_prefix": session_key[:48],
+                    "hermes_approval_command_preview": (command[:200] if command else ""),
+                },
+            )
 
             _now = time.monotonic()
             _deadline = _now + max(timeout, 0)

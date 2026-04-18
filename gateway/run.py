@@ -2968,6 +2968,10 @@ class GatewayRunner:
             # _interrupt_requested.  Force-clean _running_agents so the session
             # is unlocked and subsequent messages are processed normally.
             if _cmd_def_inner and _cmd_def_inner.name == "stop":
+                from tools.approval import cancel_gateway_approvals_on_user_interrupt
+
+                # Unblock threads stuck in tools.approval blocking wait (#8697).
+                cancel_gateway_approvals_on_user_interrupt(_quick_key, reason="stop")
                 running_agent = self._running_agents.get(_quick_key)
                 if running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
                     running_agent.interrupt("Stop requested")
@@ -2988,6 +2992,11 @@ class GatewayRunner:
             # doesn't get re-processed as a user message after the
             # interrupt completes.
             if _cmd_def_inner and _cmd_def_inner.name == "new":
+                from tools.approval import cancel_gateway_approvals_on_user_interrupt
+
+                cancel_gateway_approvals_on_user_interrupt(
+                    _quick_key, reason="session_reset"
+                )
                 running_agent = self._running_agents.get(_quick_key)
                 if running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
                     running_agent.interrupt("Session reset requested")
@@ -4728,6 +4737,9 @@ class GatewayRunner:
             logger.info("STOP (pending) for session %s — sentinel cleared", session_key[:20])
             return "⚡ Stopped. The agent hadn't started yet — you can continue this session."
         if agent:
+            from tools.approval import cancel_gateway_approvals_on_user_interrupt
+
+            cancel_gateway_approvals_on_user_interrupt(session_key, reason="stop")
             agent.interrupt("Stop requested")
             # Force-clean the session lock so a truly hung agent doesn't
             # keep it locked forever.
