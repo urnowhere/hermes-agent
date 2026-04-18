@@ -7053,7 +7053,14 @@ class AIAgent:
         if self.tools:
             api_kwargs["tools"] = self.tools
 
-        if self.max_tokens is not None:
+        # _ephemeral_max_output_tokens is set for one call during length-
+        # continuation retries to boost the output cap for models with a low
+        # default limit (e.g. GLM-4.7 on NVIDIA Build).
+        _ephemeral_out = getattr(self, "_ephemeral_max_output_tokens", None)
+        if _ephemeral_out is not None:
+            self._ephemeral_max_output_tokens = None  # consume immediately
+            api_kwargs.update(self._max_tokens_param(_ephemeral_out))
+        elif self.max_tokens is not None:
             api_kwargs.update(self._max_tokens_param(self.max_tokens))
         elif self._is_qwen_portal():
             # Qwen Portal defaults to a very low max_tokens when omitted.
@@ -10796,6 +10803,12 @@ class AIAgent:
                 continue
 
             if restart_with_length_continuation:
+                # Boost max_tokens on each continuation attempt so models
+                # with a low default output limit (e.g. GLM-4.7 on NVIDIA
+                # Build) have more room to finish instead of truncating again.
+                _boost_base = self.max_tokens if self.max_tokens else 4096
+                _boost = _boost_base * (length_continue_retries + 1)
+                self._ephemeral_max_output_tokens = min(_boost, 32768)
                 continue
 
             # Guard: if all retries exhausted without a successful response
