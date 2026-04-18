@@ -220,6 +220,10 @@ async def test_handle_message_persists_agent_token_counts(monkeypatch):
     runner.session_store.update_session.assert_called_once_with(
         session_entry.session_key,
         last_prompt_tokens=80,
+        input_tokens=120,
+        output_tokens=45,
+        total_tokens=165,
+        compression_count=0,
     )
 
 

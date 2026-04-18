@@ -4284,12 +4284,14 @@ class GatewayRunner:
                             skip_db=agent_persisted,
                         )
             
-            # Token counts and model are now persisted by the agent directly.
-            # Keep only last_prompt_tokens here for context-window tracking and
-            # compression decisions.
+            # Persist token counts to session store for /status display
             self.session_store.update_session(
                 session_entry.session_key,
                 last_prompt_tokens=agent_result.get("last_prompt_tokens", 0),
+                input_tokens=agent_result.get("input_tokens", 0),
+                output_tokens=agent_result.get("output_tokens", 0),
+                total_tokens=(agent_result.get("input_tokens", 0) + agent_result.get("output_tokens", 0)),
+                compression_count=agent_result.get("compression_count", 0),
             )
 
             # Auto voice reply: send TTS audio before the text response
@@ -4613,6 +4615,47 @@ class GatewayRunner:
             "",
             f"**Connected Platforms:** {', '.join(connected_platforms)}",
         ])
+
+        # Context window info
+        try:
+            from agent.model_metadata import DEFAULT_CONTEXT_LENGTHS, _strip_provider_prefix
+
+            model = _resolve_gateway_model()
+            if model:
+                bare = _strip_provider_prefix(model)
+                # Quick lookup: exact match, then substring (longest key first)
+                ctx_len = DEFAULT_CONTEXT_LENGTHS.get(bare)
+                if ctx_len is None:
+                    ctx_len = DEFAULT_CONTEXT_LENGTHS.get(model)
+                if ctx_len is None:
+                    # Substring match — find longest matching key
+                    best_key = ""
+                    for key in DEFAULT_CONTEXT_LENGTHS:
+                        if key in bare or bare.startswith(key):
+                            if len(key) > len(best_key):
+                                best_key = key
+                    if best_key:
+                        ctx_len = DEFAULT_CONTEXT_LENGTHS[best_key]
+
+                if ctx_len:
+                    # Current usage: prefer last_prompt_tokens from session
+                    used = session_entry.last_prompt_tokens
+                    pct = min(100, int(used / ctx_len * 100)) if ctx_len else 0
+
+                    def _fmt(n: int) -> str:
+                        if n >= 1_000_000:
+                            return f"{n / 1_000_000:.1f}M"
+                        if n >= 1_000:
+                            return f"{n // 1_000}k"
+                        return str(n)
+
+                    comp = session_entry.compression_count
+                    lines.append("")
+                    lines.append(f"📚 Context: {_fmt(used)}/{_fmt(ctx_len)} ({pct}%) · 🧹 Compactions: {comp}")
+                else:
+                    logger.debug("Status: no context_length found for model=%r bare=%r", model, bare)
+        except Exception:
+            logger.exception("Status: failed to compute context window info")
 
         return "\n".join(lines)
 
@@ -9052,6 +9095,7 @@ class GatewayRunner:
                             chat_id=source.chat_id,
                             config=_consumer_cfg,
                             metadata={"thread_id": _progress_thread_id} if _progress_thread_id else None,
+                            reply_to=event_message_id,
                         )
                         if _want_stream_deltas:
                             _stream_delta_cb = _stream_consumer.on_delta

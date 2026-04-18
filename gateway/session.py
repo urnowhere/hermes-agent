@@ -377,6 +377,9 @@ class SessionEntry:
     # this session (create a new session_id) so the user starts fresh.
     # Set by /stop to break stuck-resume loops (#7536).
     suspended: bool = False
+
+    # Total compression/compaction count across all agent runs in this session.
+    compression_count: int = 0
     
     def to_dict(self) -> Dict[str, Any]:
         result = {
@@ -397,6 +400,7 @@ class SessionEntry:
             "cost_status": self.cost_status,
             "memory_flushed": self.memory_flushed,
             "suspended": self.suspended,
+            "compression_count": self.compression_count,
         }
         if self.origin:
             result["origin"] = self.origin.to_dict()
@@ -434,6 +438,7 @@ class SessionEntry:
             cost_status=data.get("cost_status", "unknown"),
             memory_flushed=data.get("memory_flushed", False),
             suspended=data.get("suspended", False),
+            compression_count=data.get("compression_count", 0),
         )
 
 
@@ -775,6 +780,10 @@ class SessionStore:
         self,
         session_key: str,
         last_prompt_tokens: int = None,
+        input_tokens: int = None,
+        output_tokens: int = None,
+        total_tokens: int = None,
+        compression_count: int = None,
     ) -> None:
         """Update lightweight session metadata after an interaction."""
         with self._lock:
@@ -785,6 +794,14 @@ class SessionStore:
                 entry.updated_at = _now()
                 if last_prompt_tokens is not None:
                     entry.last_prompt_tokens = last_prompt_tokens
+                if input_tokens is not None:
+                    entry.input_tokens += input_tokens
+                if output_tokens is not None:
+                    entry.output_tokens += output_tokens
+                if total_tokens is not None:
+                    entry.total_tokens += total_tokens
+                if compression_count is not None:
+                    entry.compression_count += compression_count
                 self._save()
 
     def suspend_session(self, session_key: str) -> bool:

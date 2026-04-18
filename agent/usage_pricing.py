@@ -514,11 +514,16 @@ def normalize_usage(
     provider_name = (provider or "").strip().lower()
     mode = (api_mode or "").strip().lower()
 
+    reasoning_tokens = 0
+
     if mode == "anthropic_messages" or provider_name == "anthropic":
         input_tokens = _to_int(getattr(response_usage, "input_tokens", 0))
         output_tokens = _to_int(getattr(response_usage, "output_tokens", 0))
         cache_read_tokens = _to_int(getattr(response_usage, "cache_read_input_tokens", 0))
         cache_write_tokens = _to_int(getattr(response_usage, "cache_creation_input_tokens", 0))
+        output_details = getattr(response_usage, "output_tokens_details", None)
+        if output_details:
+            reasoning_tokens = _to_int(getattr(output_details, "reasoning_tokens", 0))
     elif mode == "codex_responses":
         input_total = _to_int(getattr(response_usage, "input_tokens", 0))
         output_tokens = _to_int(getattr(response_usage, "output_tokens", 0))
@@ -528,6 +533,9 @@ def normalize_usage(
             getattr(details, "cache_creation_tokens", 0) if details else 0
         )
         input_tokens = max(0, input_total - cache_read_tokens - cache_write_tokens)
+        output_details = getattr(response_usage, "output_tokens_details", None)
+        if output_details:
+            reasoning_tokens = _to_int(getattr(output_details, "reasoning_tokens", 0))
     else:
         prompt_total = _to_int(getattr(response_usage, "prompt_tokens", 0))
         output_tokens = _to_int(getattr(response_usage, "completion_tokens", 0))
@@ -537,11 +545,9 @@ def normalize_usage(
             getattr(details, "cache_write_tokens", 0) if details else 0
         )
         input_tokens = max(0, prompt_total - cache_read_tokens - cache_write_tokens)
-
-    reasoning_tokens = 0
-    output_details = getattr(response_usage, "output_tokens_details", None)
-    if output_details:
-        reasoning_tokens = _to_int(getattr(output_details, "reasoning_tokens", 0))
+        completion_details = getattr(response_usage, "completion_tokens_details", None)
+        if completion_details:
+            reasoning_tokens = _to_int(getattr(completion_details, "reasoning_tokens", 0))
 
     return CanonicalUsage(
         input_tokens=input_tokens,
