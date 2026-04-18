@@ -21,6 +21,12 @@ _interrupted_threads: set[int] = set()
 _lock = threading.Lock()
 
 
+def _current_thread_is_live_unlocked(tid: int | None) -> bool:
+    if tid is None:
+        return False
+    return any(thread.ident == tid for thread in threading.enumerate())
+
+
 def set_interrupt(active: bool, thread_id: int | None = None) -> None:
     """Set or clear interrupt for a specific thread.
 
@@ -45,6 +51,9 @@ def is_interrupted() -> bool:
     """
     tid = threading.current_thread().ident
     with _lock:
+        if tid in _interrupted_threads and not _current_thread_is_live_unlocked(tid):
+            _interrupted_threads.discard(tid)
+            return False
         return tid in _interrupted_threads
 
 

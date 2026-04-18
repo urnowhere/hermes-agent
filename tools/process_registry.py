@@ -338,9 +338,9 @@ class ProcessRegistry:
             # Try PTY mode for interactive CLI tools
             try:
                 if _IS_WINDOWS:
-                    from winpty import PtyProcess as _PtyProcessCls
+                    from winpty import PtyProcess as _PtyProcessCls  # type: ignore
                 else:
-                    from ptyprocess import PtyProcess as _PtyProcessCls
+                    from ptyprocess import PtyProcess as _PtyProcessCls  # type: ignore
                 user_shell = _find_shell()
                 pty_env = _sanitize_subprocess_env(os.environ, env_vars)
                 pty_env["PYTHONUNBUFFERED"] = "1"

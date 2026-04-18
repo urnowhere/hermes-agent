@@ -1055,6 +1055,15 @@ def _try_anthropic() -> Tuple[Optional[Any], Optional[str]]:
 
     from agent.anthropic_adapter import _is_oauth_token
     is_oauth = _is_oauth_token(token)
+    if not is_oauth and isinstance(token, str) and token and not token.startswith("sk-ant-api"):
+        token_lower = token.lower()
+        if (
+            token == os.getenv("CLAUDE_CODE_OAUTH_TOKEN", "")
+            or token == os.getenv("ANTHROPIC_TOKEN", "")
+            or "oauth" in token_lower
+            or "jwt" in token_lower
+        ):
+            is_oauth = True
     model = _API_KEY_PROVIDER_AUX_MODELS.get("anthropic", "claude-haiku-4-5-20251001")
     logger.debug("Auxiliary client: Anthropic native (%s) at %s (oauth=%s)", model, base_url, is_oauth)
     try:
@@ -1728,6 +1737,12 @@ def get_async_text_auxiliary_client(task: str = "", *, main_runtime: Optional[Di
         api_mode=api_mode,
         main_runtime=main_runtime,
     )
+
+
+def get_vision_auxiliary_client():
+    """Backward-compatible helper returning the auto-selected vision client."""
+    _provider, client, model = resolve_vision_provider_client()
+    return client, model
 
 
 _VISION_AUTO_PROVIDER_ORDER = (

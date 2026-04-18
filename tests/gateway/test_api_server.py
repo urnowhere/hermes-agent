@@ -24,6 +24,7 @@ from aiohttp.test_utils import AioHTTPTestCase, TestClient, TestServer
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.api_server import (
     APIServerAdapter,
+    API_SERVER_ADAPTER_KEY,
     ResponseStore,
     _CORS_HEADERS,
     _derive_chat_session_id,
@@ -218,15 +219,9 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
     """Create the aiohttp app from the adapter (without starting the full server)."""
     mws = [mw for mw in (cors_middleware, security_headers_middleware) if mw is not None]
     app = web.Application(middlewares=mws)
-    app["api_server_adapter"] = adapter
-    app.router.add_get("/health", adapter._handle_health)
-    app.router.add_get("/health/detailed", adapter._handle_health_detailed)
+    app[API_SERVER_ADAPTER_KEY] = adapter
+    adapter._register_routes(app)
     app.router.add_get("/v1/health", adapter._handle_health)
-    app.router.add_get("/v1/models", adapter._handle_models)
-    app.router.add_post("/v1/chat/completions", adapter._handle_chat_completions)
-    app.router.add_post("/v1/responses", adapter._handle_responses)
-    app.router.add_get("/v1/responses/{response_id}", adapter._handle_get_response)
-    app.router.add_delete("/v1/responses/{response_id}", adapter._handle_delete_response)
     return app
 
 
@@ -328,6 +323,34 @@ class TestHealthDetailedEndpoint:
             async with TestClient(TestServer(app)) as cli:
                 resp = await cli.get("/health/detailed")
                 assert resp.status == 200
+
+
+# ---------------------------------------------------------------------------
+# Browser UI endpoint
+# ---------------------------------------------------------------------------
+
+
+class TestBrowserUiEndpoint:
+    @pytest.mark.asyncio
+    async def test_root_serves_browser_ui(self, adapter):
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.get("/")
+            assert resp.status == 200
+            assert resp.content_type == "text/html"
+            html = await resp.text()
+            assert "Hermes Browser UI" in html
+            assert 'const CONFIG = {"apiBaseUrl": "/v1", "requiresApiKey": false, "defaultModel": "hermes-agent"};' in html
+            assert "/v1/responses" in html
+
+    @pytest.mark.asyncio
+    async def test_root_reflects_api_key_requirement(self, auth_adapter):
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.get("/")
+            assert resp.status == 200
+            html = await resp.text()
+            assert '"requiresApiKey": true' in html
 
 
 # ---------------------------------------------------------------------------

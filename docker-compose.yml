@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  hermes-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: hermes-backend
+    env_file: .env
+    volumes:
+      - hermes-data:/root/.hermes
+      - ./:/workspace
+    ports:
+      - "8765:8765"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8765/api/gui/metrics/global"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  hermes-frontend:
+    build:
+      context: ./web_console
+      dockerfile: Dockerfile.frontend
+    container_name: hermes-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      hermes-backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  hermes-data:

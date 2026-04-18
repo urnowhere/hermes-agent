@@ -32,6 +32,7 @@ import os
 import re
 import uuid
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Set
 
 try:
@@ -41,6 +42,8 @@ try:
 except ImportError:
     DINGTALK_STREAM_AVAILABLE = False
     dingtalk_stream = None  # type: ignore[assignment]
+    ChatbotHandler = object  # type: ignore[assignment]
+    ChatbotMessage = None  # type: ignore[assignment]
 
 try:
     import httpx
@@ -492,7 +495,10 @@ class _IncomingHandler(ChatbotHandler if DINGTALK_STREAM_AVAILABLE else object):
         """
         try:
             data = callback_message.data
-            chatbot_msg = ChatbotMessage.from_dict(data)
+            if ChatbotMessage is not None and hasattr(ChatbotMessage, "from_dict"):
+                chatbot_msg = ChatbotMessage.from_dict(data)
+            else:
+                chatbot_msg = SimpleNamespace(**data)
 
             # Ensure session_webhook is populated even if the SDK's
             # from_dict() did not map it (field name mismatch across
@@ -505,13 +511,22 @@ class _IncomingHandler(ChatbotHandler if DINGTALK_STREAM_AVAILABLE else object):
                 )
                 if webhook:
                     chatbot_msg.session_webhook = webhook
+            if not getattr(chatbot_msg, "sender_id", None):
+                chatbot_msg.sender_id = data.get("senderId") or data.get("sender_id") or ""
+            if not getattr(chatbot_msg, "conversation_id", None):
+                chatbot_msg.conversation_id = data.get("conversationId") or data.get("conversation_id") or ""
+            if not getattr(chatbot_msg, "msg_id", None):
+                chatbot_msg.msg_id = data.get("msgId") or data.get("msg_id") or ""
+            if not getattr(chatbot_msg, "msgtype", None):
+                chatbot_msg.msgtype = data.get("msgtype") or data.get("msgType") or ""
 
             # Fire-and-forget: return ACK immediately, process in background.
             asyncio.create_task(self._safe_on_message(chatbot_msg))
         except Exception:
             logger.exception("[DingTalk] Error preparing incoming message")
 
-        return dingtalk_stream.AckMessage.STATUS_OK, "OK"
+        ack_status = getattr(getattr(dingtalk_stream, "AckMessage", None), "STATUS_OK", 200)
+        return ack_status, "OK"
 
     async def _safe_on_message(self, chatbot_msg: "ChatbotMessage") -> None:
         """Wrapper that catches exceptions from _on_message."""

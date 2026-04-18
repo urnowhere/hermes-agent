@@ -270,15 +270,27 @@ def _get_cdp_override() -> str:
     launcher and connect directly to the supplied Chrome DevTools Protocol
     endpoint.
     """
+    _read_config = globals().get("read_raw_config")
+    if _read_config is None:
+        from hermes_cli.config import read_raw_config as _read_config
+
+    try:
+        cfg = _read_config()
+        browser_cfg = cfg.get("browser", {}) if isinstance(cfg, dict) else {}
+        if isinstance(browser_cfg, dict):
+            provider_key = normalize_browser_cloud_provider(browser_cfg.get("cloud_provider"))
+            if provider_key == "local" and browser_cfg.get("cloud_provider") is not None:
+                return ""
+    except Exception as e:
+        logger.debug("Could not read browser config for cdp override: %s", e)
+
     env_override = os.environ.get("BROWSER_CDP_URL", "").strip()
     if env_override:
         return _resolve_cdp_override(env_override)
 
     try:
-        from hermes_cli.config import read_raw_config
-
-        cfg = read_raw_config()
-        browser_cfg = cfg.get("browser", {})
+        cfg = _read_config()
+        browser_cfg = cfg.get("browser", {}) if isinstance(cfg, dict) else {}
         if isinstance(browser_cfg, dict):
             return _resolve_cdp_override(str(browser_cfg.get("cdp_url", "") or ""))
     except Exception as e:
@@ -359,7 +371,7 @@ def _browser_install_hint() -> str:
 
 
 def _requires_real_termux_browser_install(browser_cmd: str) -> bool:
-    return _is_termux_environment() and _is_local_mode() and browser_cmd.strip() == "npx agent-browser"
+    return _is_termux_environment() and _get_cloud_provider() is None and browser_cmd.strip() == "npx agent-browser"
 
 
 def _termux_browser_install_error() -> str:
@@ -1158,6 +1170,10 @@ def _run_browser_command(
         "--json",
         command
     ] + args
+    
+    if not session_info.get("cdp_url"):
+        cmd_parts.append("--chrome-args=--remote-debugging-port=9222")
+
     
     try:
         # Give each task its own socket directory to prevent concurrency conflicts.

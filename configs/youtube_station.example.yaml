@@ -1,0 +1,26 @@
+station:
+  name: Night Signal
+  tagline: Autonomous AI late-night radio
+  topics:
+    - AI news
+    - open source releases
+    - robotics
+    - indie hackers
+  output_dir: ./artifacts/youtube_station
+
+generation:
+  # Use provider: fallback for deterministic no-network planning.
+  # Set provider: openai and export OPENAI_API_KEY for LLM-authored segments.
+  provider: fallback
+  model: gpt-4.1-mini
+  api_key_env: OPENAI_API_KEY
+  voice: en-US-AvaMultilingualNeural
+  language: en-US
+  segment_duration_seconds: 90
+  words_per_segment: 180
+  temperature: 0.8
+
+streaming:
+  enabled: false
+  rtmp_url_env: YOUTUBE_RTMP_URL
+  rtmp_key_env: YOUTUBE_STREAM_KEY

@@ -427,6 +427,16 @@ DEFAULT_CONFIG = {
         },
     },
 
+    "gui": {
+        "enabled": False,
+        "host": "127.0.0.1",
+        "port": 8642,
+        "mount_path": "/app",
+        "require_api_key": False,
+        "open_browser": False,
+        "dev_server_url": "",
+    },
+
     # Filesystem checkpoints — automatic snapshots before destructive file ops.
     # When enabled, the agent takes a snapshot of the working directory once per
     # conversation turn (on first write_file/patch call).  Use /rollback to restore.
@@ -1633,6 +1643,50 @@ OPTIONAL_ENV_VARS = {
         "description": "Global HMAC secret for webhook signature validation (overridable per route in config.yaml).",
         "prompt": "Webhook secret",
         "url": None,
+        "password": True,
+        "category": "messaging",
+    },
+    "FEISHU_APP_ID": {
+        "description": "Feishu App ID for the bot",
+        "prompt": "Feishu App ID",
+        "url": "https://open.feishu.cn/app/",
+        "password": False,
+        "category": "messaging",
+    },
+    "FEISHU_APP_SECRET": {
+        "description": "Feishu App Secret",
+        "prompt": "Feishu App Secret",
+        "url": "https://open.feishu.cn/app/",
+        "password": True,
+        "category": "messaging",
+    },
+    "FEISHU_ENCRYPT_KEY": {
+        "description": "Feishu Encrypt Key (Event Subscription)",
+        "prompt": "Feishu Encrypt Key",
+        "url": "https://open.feishu.cn/app/",
+        "password": True,
+        "category": "messaging",
+        "advanced": True,
+    },
+    "FEISHU_VERIFICATION_TOKEN": {
+        "description": "Feishu Verification Token (Event Subscription)",
+        "prompt": "Feishu Verification Token",
+        "url": "https://open.feishu.cn/app/",
+        "password": True,
+        "category": "messaging",
+        "advanced": True,
+    },
+    "WECOM_BOT_ID": {
+        "description": "WeCom Bot ID",
+        "prompt": "WeCom Bot ID",
+        "url": "https://work.weixin.qq.com/",
+        "password": False,
+        "category": "messaging",
+    },
+    "WECOM_SECRET": {
+        "description": "WeCom Secret for the bot",
+        "prompt": "WeCom Secret",
+        "url": "https://work.weixin.qq.com/",
         "password": True,
         "category": "messaging",
     },

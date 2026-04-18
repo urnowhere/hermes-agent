@@ -41,11 +41,13 @@ except ImportError:
     web = None  # type: ignore[assignment]
 
 from gateway.config import Platform, PlatformConfig
+from gateway.platforms.api_server_ui import get_api_server_ui_html
 from gateway.platforms.base import (
     BasePlatformAdapter,
     SendResult,
     is_network_accessible,
 )
+from gateway.web_console import maybe_register_web_console
 
 logger = logging.getLogger(__name__)
 
@@ -240,13 +242,32 @@ _CORS_HEADERS = {
 
 
 if AIOHTTP_AVAILABLE:
+    # Aiohttp 3.9+ deprecates string keys for Application storage.
+    API_SERVER_ADAPTER_KEY = web.AppKey("api_server_adapter", object) if hasattr(web, "AppKey") else "api_server_adapter"
+
     @web.middleware
     async def cors_middleware(request, handler):
-        """Add CORS headers for explicitly allowed origins; handle OPTIONS preflight."""
-        adapter = request.app.get("api_server_adapter")
+        """Add CORS headers for explicitly allowed origins; handle OPTIONS preflight.
+
+        Web console GUI routes (/api/gui/*) are automatically CORS-open so
+        the hosted GUI (e.g. hermes.gary-labs.online) can connect to a user's
+        local backend without any .env configuration.  The /v1/* OpenAI-
+        compatible API routes remain locked down to explicitly configured
+        origins only.
+        """
+        adapter = request.app.get(API_SERVER_ADAPTER_KEY)
         origin = request.headers.get("Origin", "")
+
+        # Auto-allow any browser origin for web console GUI routes
+        is_gui_route = request.path.startswith("/api/gui/")
+
         cors_headers = None
-        if adapter is not None:
+        if is_gui_route and origin:
+            cors_headers = dict(_CORS_HEADERS)
+            cors_headers["Access-Control-Allow-Origin"] = origin
+            cors_headers["Vary"] = "Origin"
+            cors_headers["Access-Control-Max-Age"] = "600"
+        elif adapter is not None:
             if not adapter._origin_allowed(origin):
                 return web.Response(status=403)
             cors_headers = adapter._cors_headers_for_origin(origin)
@@ -569,6 +590,27 @@ class APIServerAdapter(BasePlatformAdapter):
     async def _handle_health(self, request: "web.Request") -> "web.Response":
         """GET /health — simple health check."""
         return web.json_response({"status": "ok", "platform": "hermes-agent"})
+
+    async def _handle_ui(self, request: "web.Request") -> "web.Response":
+        """GET / — lightweight browser chat UI for the local API server."""
+        html = get_api_server_ui_html(
+            api_base_url="/v1",
+            requires_api_key=bool(self._api_key),
+            default_model="hermes-agent",
+        )
+        return web.Response(text=html, content_type="text/html")
+
+    def _register_routes(self, app: "web.Application") -> None:
+        """Register API, browser UI, and web console routes on an aiohttp app."""
+        app.router.add_get("/", self._handle_ui)
+        app.router.add_get("/health", self._handle_health)
+        app.router.add_get("/v1/models", self._handle_models)
+        app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
+        app.router.add_post("/v1/responses", self._handle_responses)
+        app.router.add_get("/v1/responses/{response_id}", self._handle_get_response)
+        app.router.add_delete("/v1/responses/{response_id}", self._handle_delete_response)
+        app.router.add_get("/health/detailed", self._handle_health_detailed)
+        maybe_register_web_console(app, adapter=self)
 
     async def _handle_health_detailed(self, request: "web.Request") -> "web.Response":
         """GET /health/detailed — rich status for cross-container dashboard probing.
@@ -2312,15 +2354,12 @@ class APIServerAdapter(BasePlatformAdapter):
         try:
             mws = [mw for mw in (cors_middleware, body_limit_middleware, security_headers_middleware) if mw is not None]
             self._app = web.Application(middlewares=mws)
-            self._app["api_server_adapter"] = self
-            self._app.router.add_get("/health", self._handle_health)
-            self._app.router.add_get("/health/detailed", self._handle_health_detailed)
+            self._app[API_SERVER_ADAPTER_KEY] = self
+
+            # Register base routes, GUI, and dashboard-compatible health routes.
+            self._register_routes(self._app)
             self._app.router.add_get("/v1/health", self._handle_health)
-            self._app.router.add_get("/v1/models", self._handle_models)
-            self._app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
-            self._app.router.add_post("/v1/responses", self._handle_responses)
-            self._app.router.add_get("/v1/responses/{response_id}", self._handle_get_response)
-            self._app.router.add_delete("/v1/responses/{response_id}", self._handle_delete_response)
+            
             # Cron jobs management API
             self._app.router.add_get("/api/jobs", self._handle_list_jobs)
             self._app.router.add_post("/api/jobs", self._handle_create_job)

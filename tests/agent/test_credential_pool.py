@@ -269,7 +269,7 @@ def test_explicit_reset_timestamp_overrides_default_429_ttl(tmp_path, monkeypatc
                         "auth_type": "oauth",
                         "priority": 0,
                         "source": "manual:device_code",
-                        "access_token": "tok-1",
+                        "access_token": "***",
                         "last_status": "exhausted",
                         "last_status_at": time.time() - 7200,
                         "last_error_code": 429,

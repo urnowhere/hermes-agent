@@ -46,12 +46,24 @@ def _ensure_telegram_mock():
 
 _ensure_telegram_mock()
 
+import gateway.platforms.telegram as telegram_platform_mod
 from gateway.platforms.telegram import TelegramAdapter
 from gateway.config import Platform, PlatformConfig
 
 
 def _make_adapter(extra=None):
     """Create a TelegramAdapter with mocked internals."""
+    telegram_mod = sys.modules["telegram"]
+    telegram_mod.constants.ParseMode.MARKDOWN = getattr(
+        telegram_mod.constants.ParseMode, "MARKDOWN", "Markdown"
+    )
+    telegram_mod.constants.ParseMode.MARKDOWN_V2 = getattr(
+        telegram_mod.constants.ParseMode, "MARKDOWN_V2", "MarkdownV2"
+    )
+    telegram_mod.constants.ParseMode.HTML = getattr(
+        telegram_mod.constants.ParseMode, "HTML", "HTML"
+    )
+    telegram_platform_mod.ParseMode = telegram_mod.constants.ParseMode
     config = PlatformConfig(enabled=True, token="test-token", extra=extra or {})
     adapter = TelegramAdapter(config)
     adapter._bot = AsyncMock()

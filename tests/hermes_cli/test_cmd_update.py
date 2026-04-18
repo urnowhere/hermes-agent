@@ -121,7 +121,7 @@ class TestCmdUpdateBranchFallback:
         npm_calls = [
             (call.args[0], call.kwargs.get("cwd"))
             for call in mock_run.call_args_list
-            if call.args and call.args[0][0] == "/usr/bin/npm"
+            if call.args and call.args[0][0] == "/usr/bin/npm" and call.args[0][1] == "install"
         ]
 
         assert npm_calls == [
@@ -146,6 +146,14 @@ class TestCmdUpdateBranchFallback:
                     "--progress=false",
                 ],
                 PROJECT_ROOT / "ui-tui",
+            ),
+            (
+                [
+                    "/usr/bin/npm",
+                    "install",
+                    "--silent",
+                ],
+                PROJECT_ROOT / "web",
             ),
         ]
 

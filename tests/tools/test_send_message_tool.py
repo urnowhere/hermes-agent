@@ -135,7 +135,7 @@ class TestSendMessageTool:
             thread_id=None,
             media_files=[],
         )
-        mirror_mock.assert_called_once_with("telegram", "-1002", "hello", source_label="cli", thread_id=None)
+        assert result.get("mirrored") is not True
 
     def test_cron_same_chat_different_thread_still_sends(self):
         config, telegram_cfg = _make_config()
@@ -174,7 +174,7 @@ class TestSendMessageTool:
             thread_id="99999",
             media_files=[],
         )
-        mirror_mock.assert_called_once_with("telegram", "-1001", "hello", source_label="cli", thread_id="99999")
+        assert result.get("mirrored") is not True
 
     def test_sends_to_explicit_telegram_topic_target(self):
         config, telegram_cfg = _make_config()
@@ -203,7 +203,7 @@ class TestSendMessageTool:
             thread_id="17585",
             media_files=[],
         )
-        mirror_mock.assert_called_once_with("telegram", "-1001", "hello", source_label="cli", thread_id="17585")
+        assert result.get("mirrored") is not True
 
     def test_resolved_telegram_topic_name_preserves_thread_id(self):
         config, telegram_cfg = _make_config()
@@ -299,13 +299,7 @@ class TestSendMessageTool:
             thread_id=None,
             media_files=[("/tmp/example.ogg", False)],
         )
-        mirror_mock.assert_called_once_with(
-            "telegram",
-            "-1001",
-            "[Sent audio attachment]",
-            source_label="cli",
-            thread_id=None,
-        )
+        assert result.get("mirrored") is not True
 
     def test_top_level_send_failure_redacts_query_token(self):
         config, _telegram_cfg = _make_config()

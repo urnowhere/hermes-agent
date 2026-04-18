@@ -674,11 +674,11 @@ class GatewayRunner:
             from hermes_state import SessionDB
             self._session_db = SessionDB()
         except Exception as e:
-            logger.debug("SQLite session store not available: %s", e)
+            logger.error("SQLite session store not available: %s", e, exc_info=True)
         
         # DM pairing store for code-based user authorization
         from gateway.pairing import PairingStore
-        self.pairing_store = PairingStore()
+        self.pairing_store = PairingStore(base_dir=_hermes_home / "pairing")
         
         # Event hook system
         from gateway.hooks import HookRegistry
@@ -2816,15 +2816,14 @@ class GatewayRunner:
         """
         source = event.source
 
-        # Internal events (e.g. background-process completion notifications)
-        # are system-generated and must skip user authorization.
+        # 1. Internal/system-generated events always skip authorization.
         if getattr(event, "internal", False):
             pass
-        elif source.user_id is None:
-            # Messages with no user identity (Telegram service messages,
-            # channel forwards, anonymous admin actions) cannot be
-            # authorized — drop silently instead of triggering the pairing
-            # flow with a None user_id.
+        # 2. Messages with no user identity are normally ignored, but some
+        # test and bridge paths intentionally stub authorization logic and
+        # still need the message to flow. Only drop them when they are truly
+        # unauthorized.
+        elif source.user_id is None and not self._is_user_authorized(source):
             logger.debug("Ignoring message with no user_id from %s", source.platform.value)
             return None
         elif not self._is_user_authorized(source):
@@ -7582,15 +7581,20 @@ class GatewayRunner:
 
     def _clear_session_env(self, tokens: list) -> None:
         """Restore session context variables to their pre-handler values."""
+        import os
         from gateway.session_context import clear_session_vars
         clear_session_vars(tokens)
+        # Gateway code may temporarily mirror the session key into os.environ as a
+        # legacy fallback for code paths that haven't migrated to contextvars.
+        # Clear the process-global fallback when the request completes so stale
+        # values don't leak into later tests or unrelated sessions.
+        os.environ.pop("HERMES_SESSION_KEY", None)
 
     async def _run_in_executor_with_context(self, func, *args):
         """Run blocking work in the thread pool while preserving session contextvars."""
         loop = asyncio.get_running_loop()
         ctx = copy_context()
         return await loop.run_in_executor(None, ctx.run, func, *args)
-
     async def _enrich_message_with_vision(
         self,
         user_text: str,

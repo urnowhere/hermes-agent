@@ -452,7 +452,8 @@ class TestValidateApiNotFound:
     def test_dissimilar_model_shows_suggestions_not_autocorrect(self):
         """Models too different for auto-correction still get suggestions."""
         result = _validate("anthropic/claude-nonexistent")
-        assert result["accepted"] is True
+        assert result["accepted"] is False
+        assert result["persist"] is False
         assert result.get("corrected_model") is None
         assert "not found" in result["message"]
 
@@ -536,7 +537,8 @@ class TestValidateCodexAutoCorrection:
         codex_models = ["gpt-5.4-mini", "gpt-5.4", "gpt-5.3-codex"]
         with patch("hermes_cli.models.provider_model_ids", return_value=codex_models):
             result = validate_requested_model("totally-wrong", "openai-codex")
-        assert result["accepted"] is True
+        assert result["accepted"] is False
+        assert result["persist"] is False
         assert result["recognized"] is False
         assert result.get("corrected_model") is None
         assert "not found" in result["message"]

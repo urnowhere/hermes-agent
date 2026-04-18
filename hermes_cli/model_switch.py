@@ -958,8 +958,15 @@ def list_authenticated_providers(
         if not has_creds:
             continue
 
-        # Use curated list — look up by Hermes slug, fall back to overlay key
-        model_ids = curated.get(hermes_slug, []) or curated.get(pid, [])
+        if pid == "openai-codex" or hermes_slug == "openai-codex":
+            try:
+                from hermes_cli.codex_models import get_codex_model_ids
+                model_ids = get_codex_model_ids()
+            except Exception:
+                model_ids = curated.get(hermes_slug, []) or curated.get(pid, [])
+        else:
+            # Use curated list — look up by Hermes slug, fall back to overlay key
+            model_ids = curated.get(hermes_slug, []) or curated.get(pid, [])
         total = len(model_ids)
         top = model_ids[:max_models]
 

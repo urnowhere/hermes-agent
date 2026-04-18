@@ -35,6 +35,57 @@ PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+_HOST_ENV_VARS_TO_CLEAR = (
+    "OPENROUTER_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_TOKEN",
+    "GOOGLE_API_KEY",
+    "GEMINI_API_KEY",
+    "GEMINI_BASE_URL",
+    "DEEPSEEK_API_KEY",
+    "GLM_API_KEY",
+    "ZAI_API_KEY",
+    "Z_AI_API_KEY",
+    "KIMI_API_KEY",
+    "KIMI_BASE_URL",
+    "MINIMAX_API_KEY",
+    "MINIMAX_BASE_URL",
+    "MINIMAX_CN_API_KEY",
+    "MINIMAX_CN_BASE_URL",
+    "AI_GATEWAY_API_KEY",
+    "AI_GATEWAY_BASE_URL",
+    "KILOCODE_API_KEY",
+    "KILOCODE_BASE_URL",
+    "HF_TOKEN",
+    "OLLAMA_API_KEY",
+    "OLLAMA_BASE_URL",
+    "NOUS_API_KEY",
+    "DASHSCOPE_API_KEY",
+    "OPENCODE_ZEN_API_KEY",
+    "OPENCODE_GO_API_KEY",
+    "XAI_API_KEY",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "COPILOT_GITHUB_TOKEN",
+    "HERMES_COPILOT_ACP_COMMAND",
+    "COPILOT_CLI_PATH",
+    "HERMES_COPILOT_ACP_ARGS",
+    "COPILOT_ACP_BASE_URL",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_PROFILE",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "BROWSER_CDP_URL",
+    "CAMOFOX_URL",
+)
+
 
 # ── Credential env-var filter ──────────────────────────────────────────────
 #
@@ -248,6 +299,15 @@ def _hermetic_environment(tmp_path, monkeypatch):
         monkeypatch.setattr(_plugins_mod, "_plugin_manager", None)
     except Exception:
         pass
+    # Tests should not inherit the agent's current gateway/messaging surface.
+    # Individual tests that need gateway behavior set these explicitly.
+    monkeypatch.delenv("HERMES_SESSION_PLATFORM", raising=False)
+    monkeypatch.delenv("HERMES_SESSION_CHAT_ID", raising=False)
+    monkeypatch.delenv("HERMES_SESSION_CHAT_NAME", raising=False)
+    monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+    # Avoid inheriting host credentials or browser connection overrides.
+    for key in _HOST_ENV_VARS_TO_CLEAR:
+        monkeypatch.delenv(key, raising=False)
 
 
 # Backward-compat alias — old tests reference this fixture name. Keep it

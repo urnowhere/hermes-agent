@@ -121,45 +121,50 @@ class TestBuildChildProgressCallback:
         assert "search for papers" in output
 
     def test_gateway_batched_progress(self):
-        """Gateway path should batch tool calls and flush at BATCH_SIZE."""
+        """Gateway path relays each tool immediately and emits a batch summary at BATCH_SIZE."""
         parent = MagicMock()
         parent._delegate_spinner = None
         parent_cb = MagicMock()
         parent.tool_progress_callback = parent_cb
-        
+
         cb = _build_child_progress_callback(0, parent)
-        
-        # Send 4 tool calls — shouldn't flush yet (BATCH_SIZE = 5)
+
+        # Send 4 tool calls — immediate relays only, no batch summary yet.
         for i in range(4):
             cb("tool.started", f"tool_{i}", f"arg_{i}", {})
-        parent_cb.assert_not_called()
-        
-        # 5th call should trigger flush
+        immediate_calls = [call for call in parent_cb.call_args_list if call.args and call.args[0] == "subagent.tool"]
+        summary_calls = [call for call in parent_cb.call_args_list if call.args and call.args[0] == "subagent.progress"]
+        assert len(immediate_calls) == 4
+        assert len(summary_calls) == 0
+
+        # 5th call should trigger the first batch summary.
         cb("tool.started", "tool_4", "arg_4", {})
-        parent_cb.assert_called_once()
-        call_args = parent_cb.call_args
-        assert "tool_0" in call_args[0][1]
-        assert "tool_4" in call_args[0][1]
+        summary_calls = [call for call in parent_cb.call_args_list if call.args and call.args[0] == "subagent.progress"]
+        assert len(summary_calls) == 1
+        assert "tool_0" in summary_calls[0].args[2]
+        assert "tool_4" in summary_calls[0].args[2]
 
     def test_thinking_not_relayed_to_gateway(self):
-        """Thinking events should NOT be sent to gateway (too noisy)."""
+        """Thinking events are relayed to gateway as explicit subagent.thinking updates."""
         parent = MagicMock()
         parent._delegate_spinner = None
         parent_cb = MagicMock()
         parent.tool_progress_callback = parent_cb
-        
+
         cb = _build_child_progress_callback(0, parent)
         cb("_thinking", "some reasoning text")
-        
-        parent_cb.assert_not_called()
+
+        parent_cb.assert_called_once()
+        assert parent_cb.call_args.args[0] == "subagent.thinking"
+        assert parent_cb.call_args.args[2] == "some reasoning text"
 
     def test_parallel_callbacks_independent(self):
-        """Each child's callback should have independent batch state."""
+        """Each child's callback should have independent batch-summary state."""
         parent = MagicMock()
         parent._delegate_spinner = None
         parent_cb = MagicMock()
         parent.tool_progress_callback = parent_cb
-        
+
         cb0 = _build_child_progress_callback(0, parent)
         cb1 = _build_child_progress_callback(1, parent)
         
@@ -167,8 +172,9 @@ class TestBuildChildProgressCallback:
         for i in range(3):
             cb0(f"tool_{i}")
             cb1(f"other_{i}")
-        
-        parent_cb.assert_not_called()
+
+        summary_calls = [call for call in parent_cb.call_args_list if call.args and call.args[0] == "subagent.progress"]
+        assert not summary_calls
 
     def test_task_index_prefix_in_batch_mode(self):
         """Batch mode (task_count > 1) should show 1-indexed prefix for all tasks."""
@@ -321,7 +327,7 @@ class TestBatchFlush:
     """Tests for gateway batch flush on subagent completion."""
 
     def test_flush_sends_remaining_batch(self):
-        """_flush should send remaining tool names to gateway."""
+        """_flush should send the remaining batch summary to gateway."""
         parent = MagicMock()
         parent._delegate_spinner = None
         parent_cb = MagicMock()
@@ -333,12 +339,14 @@ class TestBatchFlush:
         cb("tool.started", "web_search", "query1", {})
         cb("tool.started", "read_file", "file.txt", {})
         cb("tool.started", "write_file", "out.txt", {})
-        parent_cb.assert_not_called()
+        summary_calls = [call for call in parent_cb.call_args_list if call.args and call.args[0] == "subagent.progress"]
+        assert not summary_calls
 
         # Flush should send the remaining 3
         cb._flush()
-        parent_cb.assert_called_once()
-        summary = parent_cb.call_args[0][1]
+        summary_calls = [call for call in parent_cb.call_args_list if call.args and call.args[0] == "subagent.progress"]
+        assert len(summary_calls) == 1
+        summary = summary_calls[0].args[2]
         assert "web_search" in summary
         assert "write_file" in summary
 
@@ -371,4 +379,3 @@ class TestBatchFlush:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-

@@ -191,11 +191,14 @@ _ensure_discord_mock()
 
 import discord as discord_mod_ref  # noqa: E402
 from gateway.platforms.discord import DiscordAdapter  # noqa: E402
+import gateway.platforms.discord as discord_platform_mod  # noqa: E402
 
 
 class TestDiscordSendImageFile:
     @pytest.fixture
     def adapter(self):
+        discord_platform_mod.discord = discord_mod_ref
+        discord_mod_ref.File = getattr(discord_mod_ref, "File", MagicMock)
         config = PlatformConfig(enabled=True, token="fake-token")
         a = DiscordAdapter(config)
         a._client = MagicMock()

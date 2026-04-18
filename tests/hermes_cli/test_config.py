@@ -69,6 +69,15 @@ class TestLoadConfigDefaults:
             assert "max_turns" not in config
             assert "terminal" in config
             assert config["terminal"]["backend"] == "local"
+            assert config["gui"] == {
+                "enabled": False,
+                "host": "127.0.0.1",
+                "port": 8642,
+                "mount_path": "/app",
+                "require_api_key": False,
+                "open_browser": False,
+                "dev_server_url": "",
+            }
             assert config["display"]["interim_assistant_messages"] is True
 
     def test_legacy_root_level_max_turns_migrates_to_agent_config(self, tmp_path):
@@ -113,6 +122,26 @@ class TestSaveAndLoadRoundtrip:
 
             reloaded = load_config()
             assert reloaded["terminal"]["timeout"] == 999
+
+    def test_gui_values_roundtrip(self, tmp_path):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            config = load_config()
+            config["gui"] = {
+                "enabled": True,
+                "host": "0.0.0.0",
+                "port": 9000,
+                "mount_path": "/console",
+                "require_api_key": True,
+                "open_browser": True,
+                "dev_server_url": "http://localhost:5173",
+            }
+            save_config(config)
+
+            reloaded = load_config()
+            assert reloaded["gui"] == config["gui"]
+
+            saved = yaml.safe_load((tmp_path / "config.yaml").read_text())
+            assert saved["gui"] == config["gui"]
 
 
 class TestSaveEnvValueSecure:

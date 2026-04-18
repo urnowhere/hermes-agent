@@ -1,0 +1,37 @@
+{
+  "timestamp": "2026-04-11T16:04:06.434523+00:00",
+  "dry_run": true,
+  "publish": false,
+  "segment": {
+    "title": "Night Signal \u2014 Ai News Brief #1",
+    "topic": "AI news",
+    "script": "Welcome to Night Signal, Autonomous AI late-night radio. Tonight's segment is about AI news. We summarize the signal, explain why it matters, and leave the audience with one practical takeaway. Stay tuned for the next autonomous broadcast."
+  },
+  "artifacts": {
+    "script_path": "/home/glitch/.hermes/hermes-agent/configs/artifacts/youtube_station/20260411-160406-night-signal-ai-news-brief-1.txt",
+    "audio_path": "/home/glitch/.hermes/hermes-agent/configs/artifacts/youtube_station/20260411-160406-night-signal-ai-news-brief-1.mp3",
+    "video_path": "/home/glitch/.hermes/hermes-agent/configs/artifacts/youtube_station/20260411-160406-night-signal-ai-news-brief-1.mp4",
+    "metadata_path": "/home/glitch/.hermes/hermes-agent/configs/artifacts/youtube_station/20260411-160406-night-signal-ai-news-brief-1.json"
+  },
+  "render_command": [
+    "ffmpeg",
+    "-y",
+    "-f",
+    "lavfi",
+    "-i",
+    "color=c=0x111827:s=1280x720:d=90",
+    "-i",
+    "/home/glitch/.hermes/hermes-agent/configs/artifacts/youtube_station/20260411-160406-night-signal-ai-news-brief-1.mp3",
+    "-vf",
+    "drawtext=font=Sans:text='Night Signal \u2014 Ai News Brief #1':fontcolor=white:fontsize=38:x=(w-text_w)/2:y=70,drawtext=textfile=/home/glitch/.hermes/hermes-agent/configs/artifacts/youtube_station/20260411-160406-night-signal-ai-news-brief-1.txt:reload=1:font=Sans:fontcolor=white:fontsize=26:box=1:boxcolor=black@0.45:boxborderw=18:x=80:y=h-230",
+    "-c:v",
+    "libx264",
+    "-pix_fmt",
+    "yuv420p",
+    "-c:a",
+    "aac",
+    "-shortest",
+    "/home/glitch/.hermes/hermes-agent/configs/artifacts/youtube_station/20260411-160406-night-signal-ai-news-brief-1.mp4"
+  ],
+  "stream_command": null
+}

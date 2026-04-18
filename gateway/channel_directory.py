@@ -76,10 +76,16 @@ def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
         except Exception as e:
             logger.warning("Channel directory: failed to build %s: %s", platform.value, e)
 
+    # Email uses session-based discovery only — keep it explicit so the
+    # channel directory source clearly includes the platform in static analysis
+    # and test coverage.
+    if "email" not in platforms:
+        platforms["email"] = _build_from_sessions("email")
+
     # Platforms that don't support direct channel enumeration get session-based
     # discovery automatically.  Skip infrastructure entries that aren't messaging
     # platforms — everything else falls through to _build_from_sessions().
-    _SKIP_SESSION_DISCOVERY = frozenset({"local", "api_server", "webhook"})
+    _SKIP_SESSION_DISCOVERY = frozenset({"local", "api_server", "webhook", "email"})
     for plat in Platform:
         plat_name = plat.value
         if plat_name in _SKIP_SESSION_DISCOVERY or plat_name in platforms:

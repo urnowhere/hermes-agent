@@ -1210,7 +1210,7 @@ class FeishuAdapter(BasePlatformAdapter):
     def _build_event_handler(self) -> Any:
         if EventDispatcherHandler is None:
             return None
-        return (
+        builder = (
             EventDispatcherHandler.builder(
                 self._encrypt_key,
                 self._verification_token,
@@ -1224,12 +1224,16 @@ class FeishuAdapter(BasePlatformAdapter):
                 lambda data: self._on_reaction_event("im.message.reaction.deleted_v1", data)
             )
             .register_p2_card_action_trigger(self._on_card_action_trigger)
-            .register_p2_im_chat_member_bot_added_v1(self._on_bot_added_to_chat)
-            .register_p2_im_chat_member_bot_deleted_v1(self._on_bot_removed_from_chat)
-            .register_p2_im_chat_access_event_bot_p2p_chat_entered_v1(self._on_p2p_chat_entered)
-            .register_p2_im_message_recalled_v1(self._on_message_recalled)
-            .build()
         )
+        if hasattr(builder, "register_p2_im_chat_member_bot_added_v1"):
+            builder = builder.register_p2_im_chat_member_bot_added_v1(self._on_bot_added_to_chat)
+        if hasattr(builder, "register_p2_im_chat_member_bot_deleted_v1"):
+            builder = builder.register_p2_im_chat_member_bot_deleted_v1(self._on_bot_removed_from_chat)
+        if hasattr(builder, "register_p2_im_chat_access_event_bot_p2p_chat_entered_v1"):
+            builder = builder.register_p2_im_chat_access_event_bot_p2p_chat_entered_v1(self._on_p2p_chat_entered)
+        if hasattr(builder, "register_p2_im_message_recalled_v1"):
+            builder = builder.register_p2_im_message_recalled_v1(self._on_message_recalled)
+        return builder.build()
 
     async def connect(self) -> bool:
         """Connect to Feishu/Lark."""

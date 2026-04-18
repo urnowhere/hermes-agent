@@ -55,6 +55,25 @@ class TestInterruptModule:
 
         set_interrupt(False, thread_id=t.ident)
 
+    def test_stale_dead_thread_interrupt_is_ignored(self, monkeypatch):
+        """Dead-thread interrupt entries must not leak into later ident reuse."""
+        import tools.interrupt as interrupt_mod
+
+        stale_tid = 424242
+        interrupt_mod._interrupted_threads.add(stale_tid)
+
+        class _FakeThread:
+            ident = stale_tid
+
+        monkeypatch.setattr(interrupt_mod.threading, 'current_thread', lambda: _FakeThread())
+        monkeypatch.setattr(interrupt_mod.threading, 'enumerate', lambda: [])
+
+        try:
+            assert interrupt_mod.is_interrupted() is False
+            assert stale_tid not in interrupt_mod._interrupted_threads
+        finally:
+            interrupt_mod._interrupted_threads.discard(stale_tid)
+
 
 # ---------------------------------------------------------------------------
 # Unit tests: pre-tool interrupt check

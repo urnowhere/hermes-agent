@@ -12,6 +12,8 @@ import pytest
 
 
 import uuid
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -79,15 +81,17 @@ def _make_413_error(*, use_status_code=True, message="Request entity too large")
 
 
 @pytest.fixture()
-def agent():
+def agent(monkeypatch):
     with (
         patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
         patch("run_agent.check_toolset_requirements", return_value={}),
         patch("run_agent.OpenAI"),
     ):
+        monkeypatch.setenv("CODEX_HOME", str(Path(tempfile.mkdtemp(prefix="codex-test-"))))
         a = AIAgent(
             api_key="test-key-1234567890",
             base_url="https://openrouter.ai/api/v1",
+            provider="openrouter",
             quiet_mode=True,
             skip_context_files=True,
             skip_memory=True,

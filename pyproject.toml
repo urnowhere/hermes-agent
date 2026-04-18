@@ -34,6 +34,8 @@ dependencies = [
   "edge-tts>=7.2.7,<8",
   # Skills Hub (GitHub App JWT auth — optional, only needed for bot identity)
   "PyJWT[crypto]>=2.12.0,<3",  # CVE-2026-32597
+  # System monitoring for gateway metrics and process inspection
+  "psutil>=5.9.0,<6",
 ]
 
 [project.optional-dependencies]
@@ -132,5 +134,6 @@ include = ["agent", "tools", "tools.*", "hermes_cli", "gateway", "gateway.*", "t
 testpaths = ["tests"]
 markers = [
     "integration: marks tests requiring external services (API keys, Modal, etc.)",
+    "ssh: marks tests that require an SSH-capable environment or SSH tooling",
 ]
 addopts = "-m 'not integration' -n auto"

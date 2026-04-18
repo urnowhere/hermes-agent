@@ -320,7 +320,7 @@ def disable_session_yolo(session_key: str) -> None:
 
 
 def clear_session(session_key: str) -> None:
-    """Remove all approval and yolo state for a given session."""
+    """Clear all session-specific approval state."""
     if not session_key:
         return
     with _lock:
@@ -328,6 +328,7 @@ def clear_session(session_key: str) -> None:
         _session_yolo.discard(session_key)
         _pending.pop(session_key, None)
         _gateway_queues.pop(session_key, None)
+        _gateway_notify_cbs.pop(session_key, None)
 
 
 def is_session_yolo_enabled(session_key: str) -> bool:

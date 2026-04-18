@@ -25,16 +25,25 @@ def _ensure_telegram_mock():
     if "telegram" in sys.modules and hasattr(sys.modules["telegram"], "__file__"):
         return
 
-    telegram_mod = MagicMock()
+    telegram_mod = sys.modules.get("telegram")
+    if telegram_mod is None or hasattr(telegram_mod, "__file__"):
+        telegram_mod = MagicMock()
+        sys.modules["telegram"] = telegram_mod
     telegram_mod.ext.ContextTypes.DEFAULT_TYPE = type(None)
-    telegram_mod.constants.ParseMode.MARKDOWN_V2 = "MarkdownV2"
-    telegram_mod.constants.ChatType.GROUP = "group"
-    telegram_mod.constants.ChatType.SUPERGROUP = "supergroup"
-    telegram_mod.constants.ChatType.CHANNEL = "channel"
-    telegram_mod.constants.ChatType.PRIVATE = "private"
+    parse_mode = SimpleNamespace(MARKDOWN_V2="MarkdownV2")
+    chat_type = SimpleNamespace(
+        GROUP="group",
+        SUPERGROUP="supergroup",
+        CHANNEL="channel",
+        PRIVATE="private",
+    )
+    telegram_mod.constants.ParseMode = parse_mode
+    telegram_mod.constants.ChatType = chat_type
+    telegram_mod.ParseMode = parse_mode
+    telegram_mod.ChatType = chat_type
 
-    for name in ("telegram", "telegram.ext", "telegram.constants", "telegram.request"):
-        sys.modules.setdefault(name, telegram_mod)
+    for name in ("telegram.ext", "telegram.constants", "telegram.request"):
+        sys.modules[name] = telegram_mod
 
 
 _ensure_telegram_mock()
@@ -42,8 +51,19 @@ _ensure_telegram_mock()
 from gateway.platforms.telegram import TelegramAdapter  # noqa: E402
 
 
+def _refresh_adapter_telegram_stubs() -> None:
+    """Refresh gateway.platforms.telegram globals from the current test mock."""
+    telegram_mod = sys.modules["telegram"]
+    import gateway.platforms.telegram as telegram_platform
+
+    telegram_platform.ParseMode = telegram_mod.constants.ParseMode
+    telegram_platform.ChatType = telegram_mod.constants.ChatType
+    telegram_platform.ContextTypes = telegram_mod.ext.ContextTypes
+
+
 def _make_adapter(dm_topics_config=None, group_topics_config=None):
     """Create a TelegramAdapter with optional DM/group topics config."""
+    _refresh_adapter_telegram_stubs()
     extra = {}
     if dm_topics_config is not None:
         extra["dm_topics"] = dm_topics_config

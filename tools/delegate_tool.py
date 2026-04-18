@@ -155,7 +155,7 @@ def _strip_blocked_tools(toolsets: List[str]) -> List[str]:
     return [t for t in toolsets if t not in blocked_toolset_names]
 
 
-def _build_child_progress_callback(task_index: int, goal: str, parent_agent, task_count: int = 1) -> Optional[callable]:
+def _build_child_progress_callback(task_index: int, goal: str | Any, parent_agent=None, task_count: int = 1) -> Optional[callable]:
     """Build a callback that relays child agent tool calls to the parent display.
 
     Two display paths:
@@ -165,6 +165,12 @@ def _build_child_progress_callback(task_index: int, goal: str, parent_agent, tas
     Returns None if no display mechanism is available, in which case the
     child agent runs with no progress callback (identical to current behavior).
     """
+    # Backward-compat: older tests/callers passed (task_index, parent_agent)
+    # before the goal label was threaded through this callback.
+    if parent_agent is None:
+        parent_agent = goal
+        goal = ""
+
     spinner = getattr(parent_agent, '_delegate_spinner', None)
     parent_cb = getattr(parent_agent, 'tool_progress_callback', None)
 
@@ -269,8 +275,8 @@ def _build_child_agent(
     toolsets: Optional[List[str]],
     model: Optional[str],
     max_iterations: int,
-    task_count: int,
     parent_agent,
+    task_count: int = 1,
     # Credential overrides from delegation config (provider:model resolution)
     override_provider: Optional[str] = None,
     override_base_url: Optional[str] = None,

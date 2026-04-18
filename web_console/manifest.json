@@ -1,0 +1,26 @@
+{
+  "name": "Hermes Web Console",
+  "short_name": "Hermes",
+  "description": "AI Agent Control Surface — chat, monitor, and manage your Hermes agent from any device.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0f",
+  "theme_color": "#818cf8",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["developer-tools", "productivity"],
+  "prefer_related_applications": false
+}

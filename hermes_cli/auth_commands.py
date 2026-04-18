@@ -333,7 +333,19 @@ def auth_remove_command(args) -> None:
     target = getattr(args, "target", None)
     if target is None:
         target = getattr(args, "index", None)
-    pool = load_pool(provider)
+
+    # Use the persisted credential pool directly instead of load_pool(), which
+    # may seed ephemeral external credentials (for example Codex CLI tokens)
+    # into the in-memory pool during inspection. Removal should operate on the
+    # user-managed auth store entries only.
+    from agent.credential_pool import CredentialPool, PooledCredential
+    from hermes_cli.auth import read_credential_pool
+
+    raw_entries = read_credential_pool(provider)
+    pool = CredentialPool(
+        provider,
+        [PooledCredential.from_dict(provider, payload) for payload in raw_entries],
+    )
     index, matched, error = pool.resolve_target(target)
     if matched is None or index is None:
         raise SystemExit(f"{error} Provider: {provider}.")
@@ -384,7 +396,7 @@ def auth_remove_command(args) -> None:
 
     elif removed.source == "device_code" and provider == "nous":
         from hermes_cli.auth import (
-            _load_auth_store, _save_auth_store, _auth_store_lock,
+            _load_auth_store, _save_auth_store, _auth_store_lock, suppress_credential_source,
         )
         with _auth_store_lock():
             auth_store = _load_auth_store()
@@ -393,6 +405,7 @@ def auth_remove_command(args) -> None:
                 del providers_dict[provider]
                 _save_auth_store(auth_store)
                 print(f"Cleared {provider} OAuth tokens from auth store")
+        suppress_credential_source(provider, "device_code")
 
     elif removed.source == "hermes_pkce" and provider == "anthropic":
         from hermes_constants import get_hermes_home

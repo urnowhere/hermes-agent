@@ -641,6 +641,7 @@ class AIAgent:
         interim_assistant_callback: callable = None,
         tool_gen_callback: callable = None,
         status_callback: callable = None,
+        gui_event_callback: callable = None,
         max_tokens: int = None,
         reasoning_config: Dict[str, Any] = None,
         service_tier: str = None,
@@ -686,6 +687,8 @@ class AIAgent:
             provider_sort (str): Sort providers by price/throughput/latency (optional)
             session_id (str): Pre-generated session ID for logging (optional, auto-generated if not provided)
             tool_progress_callback (callable): Callback function(tool_name, args_preview) for progress notifications
+            gui_event_callback (callable): Optional callback function(event_type, payload) used by the web console
+                wrapper to observe run and tool lifecycle events.
             clarify_callback (callable): Callback function(question, choices) -> str for interactive user questions.
                 Provided by the platform layer (CLI or gateway). If None, the clarify tool returns an error.
             max_tokens (int): Maximum tokens for model responses (optional, uses model default if not set)
@@ -819,7 +822,8 @@ class AIAgent:
         self.interim_assistant_callback = interim_assistant_callback
         self.status_callback = status_callback
         self.tool_gen_callback = tool_gen_callback
-
+        self.gui_event_callback = gui_event_callback
+        self._last_reported_tool = None  # Track for "new tool" mode
         
         # Tool execution state — allows _vprint during tool execution
         # even when stream consumers are registered (no tokens streaming then)
@@ -1948,6 +1952,16 @@ class AIAgent:
                 self.status_callback("lifecycle", message)
             except Exception:
                 logger.debug("status_callback error in _emit_status", exc_info=True)
+
+    def _emit_gui_event(self, event_type: str, **payload: Any) -> None:
+        """Best-effort GUI event callback used by web-console wrappers."""
+        cb = getattr(self, "gui_event_callback", None)
+        if cb is None:
+            return
+        try:
+            cb(event_type, payload)
+        except Exception:
+            logging.debug("GUI event callback error for %s", event_type, exc_info=True)
 
     def _current_main_runtime(self) -> Dict[str, str]:
         """Return the live main runtime for session-scoped auxiliary routing."""
@@ -3179,11 +3193,12 @@ class AIAgent:
         """
         self._interrupt_requested = True
         self._interrupt_message = message
+        thread_id = getattr(self, "_execution_thread_id", None)
         # Signal all tools to abort any in-flight operations immediately.
         # Scope the interrupt to this agent's execution thread so other
         # agents running in the same process (gateway) are not affected.
-        if self._execution_thread_id is not None:
-            _set_interrupt(True, self._execution_thread_id)
+        if thread_id is not None:
+            _set_interrupt(True, thread_id)
             self._interrupt_thread_signal_pending = False
         else:
             # The interrupt arrived before run_conversation() finished
@@ -5382,6 +5397,8 @@ class AIAgent:
         if getattr(self, "_stream_needs_break", False) and text and text.strip():
             self._stream_needs_break = False
             text = "\n\n" + text
+        self._emit_gui_event("message.assistant.delta", content=text)
+
         callbacks = [cb for cb in (self.stream_delta_callback, self._stream_callback) if cb is not None]
         delivered = False
         for cb in callbacks:
@@ -5395,6 +5412,7 @@ class AIAgent:
 
     def _fire_reasoning_delta(self, text: str) -> None:
         """Fire reasoning callback if registered."""
+        self._emit_gui_event("message.reasoning.delta", content=text)
         cb = self.reasoning_callback
         if cb is not None:
             try:
@@ -7011,7 +7029,7 @@ class AIAgent:
             # (gateway, batch, quiet) still get reasoning.
             # Any reasoning that wasn't shown during streaming is caught by the
             # CLI post-response display fallback (cli.py _reasoning_shown_this_turn).
-            if not self.stream_delta_callback and not self._stream_callback:
+            if not self.stream_delta_callback and not getattr(self, "_stream_callback", None):
                 try:
                     self.reasoning_callback(reasoning_text)
                 except Exception:
@@ -7628,12 +7646,20 @@ class AIAgent:
                     print(f"  📞 Tool {i}: {name}({list(args.keys())}) - {args_preview}")
 
         for tc, name, args in parsed_calls:
+            preview = _build_tool_preview(name, args)
             if self.tool_progress_callback:
                 try:
-                    preview = _build_tool_preview(name, args)
                     self.tool_progress_callback("tool.started", name, preview, args)
                 except Exception as cb_err:
                     logging.debug(f"Tool progress callback error: {cb_err}")
+            emit_gui_event = getattr(self, "_emit_gui_event", None)
+            if callable(emit_gui_event):
+                emit_gui_event(
+                    "tool.started",
+                    tool_name=name,
+                    tool_args=args,
+                    preview=preview,
+                )
 
         for tc, name, args in parsed_calls:
             if self.tool_start_callback:
@@ -7806,6 +7832,18 @@ class AIAgent:
             if subdir_hints:
                 function_result += subdir_hints
 
+            emit_gui_event = getattr(self, "_emit_gui_event", None)
+            if callable(emit_gui_event):
+                emit_gui_event(
+                    "tool.completed",
+                    tool_name=function_name,
+                    tool_args=function_args,
+                    duration=tool_duration,
+                    result_preview=function_result[:200] if len(function_result) > 200 else function_result,
+                    is_error=is_error,
+                )
+
+            # Append tool result message in order
             tool_msg = {
                 "role": "tool",
                 "content": function_result,
@@ -7879,9 +7917,11 @@ class AIAgent:
                     args_preview = args_str[:self.log_prefix_chars] + "..." if len(args_str) > self.log_prefix_chars else args_str
                     print(f"  📞 Tool {i}: {function_name}({list(function_args.keys())}) - {args_preview}")
 
+            preview = _build_tool_preview(function_name, function_args)
             if _block_msg is None:
                 self._current_tool = function_name
                 self._touch_activity(f"executing tool: {function_name}")
+
 
             # Set activity callback for long-running tool execution (terminal
             # commands, etc.) so the gateway's inactivity monitor doesn't kill
@@ -7895,10 +7935,15 @@ class AIAgent:
 
             if _block_msg is None and self.tool_progress_callback:
                 try:
-                    preview = _build_tool_preview(function_name, function_args)
                     self.tool_progress_callback("tool.started", function_name, preview, function_args)
                 except Exception as cb_err:
                     logging.debug(f"Tool progress callback error: {cb_err}")
+            self._emit_gui_event(
+                "tool.started",
+                tool_name=function_name,
+                tool_args=function_args,
+                preview=preview,
+            )
 
             if _block_msg is None and self.tool_start_callback:
                 try:
@@ -8161,6 +8206,15 @@ class AIAgent:
             subdir_hints = self._subdirectory_hints.check_tool_call(function_name, function_args)
             if subdir_hints:
                 function_result += subdir_hints
+
+            self._emit_gui_event(
+                "tool.completed",
+                tool_name=function_name,
+                tool_args=function_args,
+                duration=tool_duration,
+                result_preview=function_result[:200] if len(function_result) > 200 else function_result,
+                is_error=_is_error_result,
+            )
 
             tool_msg = {
                 "role": "tool",

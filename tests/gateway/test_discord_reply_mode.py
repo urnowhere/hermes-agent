@@ -23,36 +23,62 @@ def _ensure_discord_mock():
     if "discord" in sys.modules and hasattr(sys.modules["discord"], "__file__"):
         return
 
-    discord_mod = MagicMock()
+    discord_mod = sys.modules.get("discord")
+    if discord_mod is None or hasattr(discord_mod, "__file__"):
+        discord_mod = MagicMock()
+        sys.modules["discord"] = discord_mod
+
     discord_mod.Intents.default.return_value = MagicMock()
     discord_mod.Client = MagicMock
     discord_mod.File = MagicMock
-    discord_mod.DMChannel = type("DMChannel", (), {})
-    discord_mod.Thread = type("Thread", (), {})
-    discord_mod.ForumChannel = type("ForumChannel", (), {})
+    discord_mod.DMChannel = getattr(discord_mod, "DMChannel", type("DMChannel", (), {}))
+    discord_mod.Thread = getattr(discord_mod, "Thread", type("Thread", (), {}))
+    discord_mod.ForumChannel = getattr(discord_mod, "ForumChannel", type("ForumChannel", (), {}))
     discord_mod.ui = SimpleNamespace(View=object, button=lambda *a, **k: (lambda fn: fn), Button=object)
     discord_mod.ButtonStyle = SimpleNamespace(success=1, primary=2, secondary=2, danger=3, green=1, grey=2, blurple=2, red=3)
     discord_mod.Color = SimpleNamespace(orange=lambda: 1, green=lambda: 2, blue=lambda: 3, red=lambda: 4, purple=lambda: 5)
     discord_mod.Interaction = object
     discord_mod.Embed = MagicMock
+
+    class _FakeGroup:
+        def __init__(self, *, name, description, parent=None):
+            self.name = name
+            self.description = description
+            self.parent = parent
+            self._children = {}
+            if parent is not None:
+                parent.add_command(self)
+
+        def add_command(self, cmd):
+            self._children[cmd.name] = cmd
+
+    class _FakeCommand:
+        def __init__(self, *, name, description, callback, parent=None):
+            self.name = name
+            self.description = description
+            self.callback = callback
+            self.parent = parent
+
     discord_mod.app_commands = SimpleNamespace(
         describe=lambda **kwargs: (lambda fn: fn),
         choices=lambda **kwargs: (lambda fn: fn),
         Choice=lambda **kwargs: SimpleNamespace(**kwargs),
+        Group=_FakeGroup,
+        Command=_FakeCommand,
     )
 
-    ext_mod = MagicMock()
-    commands_mod = MagicMock()
+    ext_mod = sys.modules.get("discord.ext") or MagicMock()
+    commands_mod = sys.modules.get("discord.ext.commands") or MagicMock()
     commands_mod.Bot = MagicMock
     ext_mod.commands = commands_mod
 
-    sys.modules.setdefault("discord", discord_mod)
-    sys.modules.setdefault("discord.ext", ext_mod)
-    sys.modules.setdefault("discord.ext.commands", commands_mod)
+    sys.modules["discord.ext"] = ext_mod
+    sys.modules["discord.ext.commands"] = commands_mod
 
 
 _ensure_discord_mock()
 
+import gateway.platforms.discord as discord_platform_mod  # noqa: E402
 from gateway.platforms.discord import DiscordAdapter  # noqa: E402
 
 
@@ -291,22 +317,17 @@ class TestEnvVarOverride:
 # Tests for reply_to_text extraction in _handle_message
 # ------------------------------------------------------------------
 
-# Build FakeDMChannel as a subclass of the real discord.DMChannel when the
-# library is installed — this guarantees isinstance() checks pass in
-# production code regardless of test ordering or monkeypatch state.
-try:
-    import discord as _discord_lib
-    _DMChannelBase = _discord_lib.DMChannel
-except (ImportError, AttributeError):
-    _DMChannelBase = object
+def _make_dm_channel(channel_id: int = 100, name: str = "dm"):
+    """Build a DMChannel instance compatible with the adapter's live discord mock."""
+    dm_base = getattr(discord_platform_mod.discord, "DMChannel", object)
 
+    class FakeDMChannel(dm_base):
+        def __init__(self, channel_id: int = 100, name: str = "dm"):
+            # Do NOT call super().__init__() — real DMChannel requires State
+            self.id = channel_id
+            self.name = name
 
-class FakeDMChannel(_DMChannelBase):
-    """Minimal DM channel stub (skips mention / channel-allow checks)."""
-    def __init__(self, channel_id: int = 100, name: str = "dm"):
-        # Do NOT call super().__init__() — real DMChannel requires State
-        self.id = channel_id
-        self.name = name
+    return FakeDMChannel(channel_id=channel_id, name=name)
 
 
 def _make_message(*, content: str = "hi", reference=None):
@@ -319,7 +340,7 @@ def _make_message(*, content: str = "hi", reference=None):
         attachments=[],
         reference=reference,
         created_at=datetime.now(timezone.utc),
-        channel=FakeDMChannel(),
+        channel=_make_dm_channel(),
         author=author,
     )
 
@@ -327,6 +348,7 @@ def _make_message(*, content: str = "hi", reference=None):
 @pytest.fixture
 def reply_text_adapter(monkeypatch):
     """DiscordAdapter wired for _handle_message → handle_message capture."""
+    discord_platform_mod.discord = sys.modules["discord"]
     config = PlatformConfig(enabled=True, token="fake-token")
     adapter = DiscordAdapter(config)
     adapter._client = SimpleNamespace(user=SimpleNamespace(id=999))

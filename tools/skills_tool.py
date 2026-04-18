@@ -365,7 +365,10 @@ def _is_gateway_surface() -> bool:
     if os.getenv("HERMES_GATEWAY_SESSION"):
         return True
     from gateway.session_context import get_session_env
-    return bool(get_session_env("HERMES_SESSION_PLATFORM"))
+    return bool(
+        get_session_env("HERMES_SESSION_PLATFORM")
+        or os.getenv("HERMES_SESSION_PLATFORM")
+    )
 
 
 def _get_terminal_backend_name() -> str:

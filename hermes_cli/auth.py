@@ -839,15 +839,19 @@ def is_provider_explicitly_configured(provider_id: str) -> bool:
     except Exception:
         pass
 
-    # 2. Check config.yaml model.provider
+    # 2. Check config.yaml model.provider, but only if the user actually has a
+    # config file on disk. Falling back to DEFAULT_CONFIG would incorrectly mark
+    # the default provider as explicitly configured.
     try:
-        from hermes_cli.config import load_config
-        cfg = load_config()
-        model_cfg = cfg.get("model")
-        if isinstance(model_cfg, dict):
-            cfg_provider = (model_cfg.get("provider") or "").strip().lower()
-            if cfg_provider == normalized:
-                return True
+        from hermes_cli.config import get_config_path, load_config
+        config_path = get_config_path()
+        if config_path.exists():
+            cfg = load_config()
+            model_cfg = cfg.get("model")
+            if isinstance(model_cfg, dict):
+                cfg_provider = (model_cfg.get("provider") or "").strip().lower()
+                if cfg_provider == normalized:
+                    return True
     except Exception:
         pass
 
@@ -3024,6 +3028,86 @@ def _login_openai_codex(args, pconfig: ProviderConfig) -> None:
     from hermes_constants import display_hermes_home as _dhh
     print(f"  Auth state: {_dhh()}/auth.json")
     print(f"  Config updated: {config_path} (model.provider=openai-codex)")
+
+
+def _codex_device_code_request() -> Dict[str, Any]:
+    """Request a device code for Codex oauth and return the raw response dict."""
+    issuer = "https://auth.openai.com"
+    client_id = CODEX_OAUTH_CLIENT_ID
+
+    try:
+        with httpx.Client(timeout=httpx.Timeout(15.0)) as client:
+            resp = client.post(
+                f"{issuer}/api/accounts/deviceauth/usercode",
+                json={"client_id": client_id},
+                headers={"Content-Type": "application/json"},
+            )
+    except Exception as exc:
+        raise AuthError(
+            f"Failed to request device code: {exc}",
+            provider="openai-codex", code="device_code_request_failed",
+        )
+
+    if resp.status_code != 200:
+        raise AuthError(
+            f"Device code request returned status {resp.status_code}.",
+            provider="openai-codex", code="device_code_request_error",
+        )
+    return resp.json()
+
+
+def _codex_device_code_poll(device_auth_id: str, user_code: str) -> Optional[Dict[str, Any]]:
+    """Poll the token endpoint. Returns None if pending, or dict with tokens if complete."""
+    issuer = "https://auth.openai.com"
+    client_id = CODEX_OAUTH_CLIENT_ID
+
+    try:
+        with httpx.Client(timeout=httpx.Timeout(15.0)) as client:
+            poll_resp = client.post(
+                f"{issuer}/api/accounts/deviceauth/token",
+                json={"device_auth_id": device_auth_id, "user_code": user_code},
+                headers={"Content-Type": "application/json"},
+            )
+
+            if poll_resp.status_code == 200:
+                code_resp = poll_resp.json()
+            elif poll_resp.status_code in (403, 404):
+                return None  # Pending
+            else:
+                raise AuthError(
+                    f"Device auth polling returned status {poll_resp.status_code}.",
+                    provider="openai-codex", code="device_code_poll_error",
+                )
+    except Exception as exc:
+        if isinstance(exc, AuthError):
+            raise
+        raise AuthError(f"Poll failed: {exc}", provider="openai-codex", code="device_code_poll_error")
+
+    authorization_code = code_resp.get("authorization_code", "")
+    code_verifier = code_resp.get("code_verifier", "")
+    if not authorization_code or not code_verifier:
+        raise AuthError("Missing auth code/verifier.", provider="openai-codex", code="device_code_incomplete_exchange")
+
+    try:
+        with httpx.Client(timeout=httpx.Timeout(15.0)) as client:
+            token_resp = client.post(
+                CODEX_OAUTH_TOKEN_URL,
+                data={
+                    "grant_type": "authorization_code",
+                    "code": authorization_code,
+                    "redirect_uri": f"{issuer}/deviceauth/callback",
+                    "client_id": client_id,
+                    "code_verifier": code_verifier,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+    except Exception as exc:
+        raise AuthError(f"Token exchange failed: {exc}", provider="openai-codex", code="token_exchange_failed")
+
+    if token_resp.status_code != 200:
+        raise AuthError(f"Token exchange returned status {token_resp.status_code} - {token_resp.text}.", provider="openai-codex", code="token_exchange_error")
+
+    return token_resp.json()
 
 
 def _codex_device_code_login() -> Dict[str, Any]:

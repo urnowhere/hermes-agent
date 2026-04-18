@@ -81,6 +81,7 @@ def _ensure_discord_mock():
 
 _ensure_discord_mock()
 
+import gateway.platforms.discord as discord_platform_mod  # noqa: E402
 from gateway.platforms.discord import _build_allowed_mentions  # noqa: E402
 
 
@@ -98,6 +99,7 @@ _ENV_VARS = (
 def _clear_allowed_mention_env(monkeypatch):
     for name in _ENV_VARS:
         monkeypatch.delenv(name, raising=False)
+    discord_platform_mod.discord = sys.modules["discord"]
 
 
 def test_safe_defaults_block_everyone_and_roles():

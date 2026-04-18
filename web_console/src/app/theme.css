@@ -1,0 +1,863 @@
+:root {
+  --bg-dark: #09090b;
+  --bg-surface: #18181b;
+  --bg-surface-elevated: rgba(39, 39, 42, 0.6);
+  --border-light: rgba(255, 255, 255, 0.08);
+  --border-glow: rgba(129, 140, 248, 0.4);
+  --accent-primary: #818cf8;
+  --accent-secondary: #c084fc;
+  --text-main: #f4f4f5;
+  --text-muted: #a1a1aa;
+  --topbar-height: 56px;
+  color-scheme: dark;
+  font-family: 'Inter', system-ui, sans-serif;
+  background: var(--bg-dark);
+  color: var(--text-main);
+}
+
+:root[data-theme="light"] {
+  --bg-dark: #f8fafc;
+  --bg-surface: #ffffff;
+  --bg-surface-elevated: rgba(255, 255, 255, 0.9);
+  --border-light: rgba(0, 0, 0, 0.1);
+  --border-glow: rgba(99, 102, 241, 0.3);
+  --accent-primary: #6366f1;
+  --accent-secondary: #8b5cf6;
+  --text-main: #0f172a;
+  --text-muted: #64748b;
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg-dark);
+}
+
+button,
+textarea,
+input,
+select {
+  font: inherit;
+}
+
+/* ============================================================
+   APP SHELL
+   ============================================================ */
+
+.app-shell {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ============================================================
+   TOPBAR — unified header with brand + nav + actions
+   ============================================================ */
+
+.topbar {
+  height: var(--topbar-height);
+  padding: 0 20px;
+  border-bottom: 1px solid var(--border-light);
+  background: rgba(9, 9, 11, 0.92);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  flex-shrink: 0;
+}
+
+.topbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+.topbar-logo {
+  font-size: 1.3rem;
+  filter: drop-shadow(0 0 6px rgba(129, 140, 248, 0.5));
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.topbar-version {
+  font-size: 0.7rem;
+  color: #52525b;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.topbar-update-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: inherit;
+  padding: 0 2px;
+  font-size: 0.75rem;
+  transition: opacity 0.2s;
+}
+
+.topbar-profile-badge {
+  padding: 2px 8px;
+  background: rgba(56, 189, 248, 0.12);
+  color: #38bdf8;
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 0.7rem;
+  letter-spacing: 0.02em;
+}
+
+/* Navigation tabs in header */
+.topbar-nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 10px;
+  padding: 3px;
+  overflow-x: auto;
+  min-width: 0;
+  flex: 1;
+  max-width: 800px;
+  justify-content: flex-start;
+}
+
+
+.topbar-nav::-webkit-scrollbar {
+  display: none;
+}
+
+.topbar-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 500;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.topbar-nav-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-main);
+}
+
+.topbar-nav-item--active {
+  background: rgba(129, 140, 248, 0.15);
+  color: var(--accent-primary);
+  box-shadow: 0 1px 8px rgba(129, 140, 248, 0.1);
+}
+
+.topbar-nav-icon {
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+.topbar-nav-label {
+  line-height: 1;
+}
+
+/* Action buttons */
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.topbar-action-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 1.05rem;
+  padding: 7px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+}
+
+.topbar-action-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-main);
+}
+
+/* ============================================================
+   LAYOUT BODY — content + inspector (no sidebar)
+   ============================================================ */
+
+.layout-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* ============================================================
+   CONTENT AREA
+   ============================================================ */
+
+.content {
+  padding: 20px;
+  overflow-y: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+/* ============================================================
+   INSPECTOR PANEL
+   ============================================================ */
+
+.inspector {
+  width: 280px;
+  flex-shrink: 0;
+  padding: 16px;
+  background: rgba(24, 24, 27, 0.5);
+  border-left: 1px solid var(--border-light);
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.inspector-hidden {
+  width: 40px !important;
+  padding: 16px 4px !important;
+  overflow: hidden !important;
+}
+
+/* ============================================================
+   BOTTOM DRAWER
+   ============================================================ */
+
+.bottom-drawer {
+  margin: 0 12px 12px;
+  padding: 16px;
+  flex-shrink: 0;
+  border-radius: 14px;
+  border: 1px solid var(--border-light);
+  background: var(--bg-surface-elevated);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+}
+
+.bottom-drawer-hidden {
+  display: none !important;
+}
+
+/* ============================================================
+   SHARED CARD STYLES
+   ============================================================ */
+
+.hero-card,
+.panel-body,
+.chat-panel,
+.composer-card,
+.side-card,
+.run-status,
+.message-card,
+.sessions-card,
+.workspace-card,
+.feature-card {
+  border-radius: 14px;
+  border: 1px solid var(--border-light);
+  background: var(--bg-surface-elevated);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+}
+
+.hero-card,
+.chat-panel,
+.composer-card,
+.side-card,
+.run-status,
+.sessions-card,
+.workspace-card,
+.feature-card {
+  padding: 20px;
+}
+
+/* ============================================================
+   PANEL TABS
+   ============================================================ */
+
+.panel-tabs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.panel-tab {
+  padding: 6px 10px;
+  text-transform: capitalize;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-weight: 500;
+  font-size: 0.82rem;
+}
+
+.panel-tab:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-main);
+}
+
+.panel-tab-active {
+  background: rgba(129, 140, 248, 0.15) !important;
+  border-color: var(--border-glow) !important;
+  color: var(--accent-primary);
+}
+
+.panel-body {
+  padding: 12px;
+}
+
+/* ============================================================
+   MUTED TEXT
+   ============================================================ */
+
+.topbar p,
+.hero-card p,
+.panel-body p,
+.chat-panel-header p,
+.message-card-content,
+.side-card p,
+.composer-label,
+.sessions-card-header p,
+.session-row span,
+.session-preview-line,
+.workspace-card-header p,
+.workspace-static-row,
+.workspace-pre,
+.feature-card-header p,
+.feature-list-item span,
+.settings-field span {
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+/* ============================================================
+   ICON BUTTON (generic)
+   ============================================================ */
+
+.icon-button {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 1.1rem;
+  padding: 7px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+}
+
+.icon-button:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-main);
+}
+
+/* ============================================================
+   NAV / SESSION / WORKSPACE ROW BUTTONS
+   ============================================================ */
+
+.nav-button,
+.session-row,
+.workspace-row,
+.workspace-static-row {
+  width: 100%;
+  text-align: left;
+  padding: 12px 16px;
+  display: grid;
+  gap: 4px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-weight: 500;
+}
+
+.session-row:hover,
+.workspace-row:hover {
+  background: var(--bg-surface-elevated);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.workspace-static-row,
+.feature-list-item {
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+  padding: 14px;
+  transition: all 0.15s ease;
+}
+
+.feature-list-item:hover {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.nav-button-active,
+.panel-tab-active,
+.session-row-active,
+.workspace-row-active {
+  background: rgba(129, 140, 248, 0.15) !important;
+  border-color: var(--border-glow) !important;
+  color: var(--accent-primary);
+  box-shadow: 0 0 12px rgba(129, 140, 248, 0.08);
+}
+
+/* Primary action */
+.primary-action {
+  background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary)) !important;
+  color: white !important;
+  border: none !important;
+  box-shadow: 0 4px 14px rgba(129, 140, 248, 0.2) !important;
+}
+
+.primary-action:hover {
+  filter: brightness(1.1);
+  transform: translateY(-1px);
+}
+
+/* ============================================================
+   STATUS PILL
+   ============================================================ */
+
+.status-pill {
+  border: 1px solid rgba(129, 140, 248, 0.3);
+  background: rgba(129, 140, 248, 0.1);
+  color: var(--accent-primary);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--accent-primary);
+  font-size: 0.8rem;
+}
+
+/* ============================================================
+   CHAT LAYOUT
+   ============================================================ */
+
+.chat-layout {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  max-width: 900px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.chat-main-column {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+.chat-main-column .chat-panel {
+  flex: 1;
+  min-height: 300px;
+  max-height: 600px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-main-column .chat-panel .transcript-list {
+  flex: 1;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.chat-side-column {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+/* ============================================================
+   SESSIONS LAYOUT
+   ============================================================ */
+
+.sessions-layout,
+.feature-page-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(240px, 0.8fr);
+  gap: 16px;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ============================================================
+   WORKSPACE LAYOUT — fixed overlapping issue
+   ============================================================ */
+
+.workspace-layout {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr) 280px;
+  gap: 16px;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.workspace-column {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.workspace-card {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.workspace-card.file-viewer-card {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ============================================================
+   MESSAGES
+   ============================================================ */
+
+.transcript-list,
+.event-list,
+.session-preview-transcript {
+  display: grid;
+  gap: 10px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.message-card {
+  padding: 14px 18px;
+  border-radius: 14px;
+  margin-bottom: 2px;
+  animation: messageFadeIn 0.25s ease-out forwards;
+}
+
+@keyframes messageFadeIn {
+  0% { opacity: 0; transform: translateY(8px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+.message-card-title {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  color: var(--accent-primary);
+  margin-bottom: 8px;
+}
+
+.message-card-tool {
+  background: rgba(25, 35, 66, 0.96);
+}
+
+.message-card-system {
+  background: rgba(245, 158, 11, 0.05);
+  border-color: rgba(245, 158, 11, 0.15);
+}
+
+.message-card-system .message-card-title {
+  color: #fbbf24;
+}
+
+.message-card-user {
+  background: rgba(129, 140, 248, 0.05);
+  border-color: rgba(129, 140, 248, 0.15);
+}
+
+.message-card-user .message-card-title {
+  color: var(--text-muted);
+}
+
+/* ============================================================
+   COMPOSER
+   ============================================================ */
+
+.composer-toolbar,
+.composer-actions,
+.inline-actions,
+.run-status,
+.session-preview-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.composer-textarea,
+.settings-field input {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid var(--border-light);
+  background: rgba(0, 0, 0, 0.2);
+  color: var(--text-main);
+  padding: 14px;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  transition: border-color 0.2s;
+}
+
+.composer-textarea:focus,
+.settings-field input:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px rgba(129, 140, 248, 0.12);
+}
+
+.composer-textarea {
+  resize: vertical;
+  min-height: 100px;
+  margin: 10px 0 14px;
+}
+
+/* ============================================================
+   MISC
+   ============================================================ */
+
+.event-list li,
+.session-preview-line {
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: rgba(122, 162, 255, 0.06);
+}
+
+.workspace-pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
+/* ============================================================
+   FILE VIEWER — scrollable, editable code panel
+   ============================================================ */
+
+.file-viewer-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+  font-size: 0.82rem;
+  line-height: 1.6;
+  max-height: 50vh;
+}
+
+.file-viewer-gutter {
+  flex-shrink: 0;
+  padding: 12px 0;
+  text-align: right;
+  user-select: none;
+  color: rgba(148, 163, 184, 0.35);
+  background: rgba(0, 0, 0, 0.15);
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  min-width: 44px;
+}
+
+.file-viewer-line-num {
+  padding: 0 10px;
+  font-size: 0.72rem;
+  line-height: 1.6;
+}
+
+.file-viewer-pre {
+  flex: 1;
+  margin: 0;
+  padding: 12px 16px;
+  white-space: pre;
+  overflow-x: auto;
+  color: #e2e8f0;
+  min-width: 0;
+}
+
+.file-viewer-textarea {
+  flex: 1;
+  margin: 0;
+  padding: 12px 16px;
+  white-space: pre;
+  overflow-x: auto;
+  color: #e2e8f0;
+  background: transparent;
+  border: none;
+  outline: none;
+  resize: none;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  min-width: 0;
+  width: 100%;
+}
+
+.file-viewer-textarea:focus {
+  background: rgba(129, 140, 248, 0.03);
+}
+
+.file-viewer-btn {
+  padding: 4px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(129, 140, 248, 0.2);
+  background: rgba(129, 140, 248, 0.08);
+  color: #a5b4fc;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.file-viewer-btn:hover {
+  background: rgba(129, 140, 248, 0.18);
+  border-color: rgba(129, 140, 248, 0.4);
+}
+
+.file-viewer-btn-save {
+  background: rgba(74, 222, 128, 0.1);
+  border-color: rgba(74, 222, 128, 0.25);
+  color: #4ade80;
+}
+
+.file-viewer-btn-save:hover {
+  background: rgba(74, 222, 128, 0.2);
+  border-color: rgba(74, 222, 128, 0.45);
+}
+
+.settings-grid {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.settings-field {
+  display: grid;
+  gap: 6px;
+}
+
+.chat-panel-header,
+.sessions-card-header,
+.workspace-card-header,
+.feature-card-header {
+  margin-bottom: 14px;
+}
+
+.session-list,
+.workspace-list,
+.feature-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ============================================================
+   SCROLLBAR
+   ============================================================ */
+
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* ============================================================
+   SELECT STYLING (for reasoning effort dropdown)
+   ============================================================ */
+
+select option {
+  background: var(--bg-surface);
+  color: var(--text-main);
+}
+
+/* ============================================================
+   STREAMING CURSOR
+   ============================================================ */
+
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+@keyframes fadeInDown {
+  0% { opacity: 0; transform: translateY(-6px); }
+  100% { opacity: 1; transform: translateY(0); }
+}

@@ -1096,9 +1096,17 @@ class MatrixAdapter(BasePlatformAdapter):
 
     async def _sync_loop(self) -> None:
         """Continuously sync with the homeserver."""
+        import inspect
+
         client = self._client
         # Resume from the token stored during the initial sync.
-        next_batch = await client.sync_store.get_next_batch()
+        next_batch = None
+        sync_store = getattr(client, "sync_store", None)
+        if sync_store is not None and hasattr(sync_store, "get_next_batch"):
+            maybe_next_batch = sync_store.get_next_batch()
+            loaded_next_batch = await maybe_next_batch if inspect.isawaitable(maybe_next_batch) else maybe_next_batch
+            if isinstance(loaded_next_batch, str) and loaded_next_batch:
+                next_batch = loaded_next_batch
         while not self._closing:
             try:
                 sync_data = await client.sync(
@@ -1117,7 +1125,6 @@ class MatrixAdapter(BasePlatformAdapter):
                             _sync_msg,
                         )
                         return
-
                 if isinstance(sync_data, dict):
                     # Update joined rooms from sync response.
                     rooms_join = sync_data.get("rooms", {}).get("join", {})
@@ -1129,7 +1136,10 @@ class MatrixAdapter(BasePlatformAdapter):
                     nb = sync_data.get("next_batch")
                     if nb:
                         next_batch = nb
-                        await client.sync_store.put_next_batch(nb)
+                        if sync_store is not None and hasattr(sync_store, "put_next_batch"):
+                            maybe_put = sync_store.put_next_batch(nb)
+                            if inspect.isawaitable(maybe_put):
+                                await maybe_put
 
                     # Dispatch events to registered handlers so that
                     # _on_room_message / _on_reaction / _on_invite fire.
@@ -1139,6 +1149,16 @@ class MatrixAdapter(BasePlatformAdapter):
                             await asyncio.gather(*tasks)
                     except Exception as exc:
                         logger.warning("Matrix: sync event dispatch error: %s", exc)
+                else:
+                    try:
+                        from nio import SyncError  # type: ignore
+                    except Exception:
+                        SyncError = None  # type: ignore
+                    if SyncError is not None and isinstance(sync_data, SyncError):
+                        message = str(getattr(sync_data, "message", sync_data))
+                        if "m_unknown_token" in message.lower() or "invalid access token" in message.lower():
+                            logger.error("Matrix: permanent auth error: %s — stopping sync", message)
+                            return
 
             except asyncio.CancelledError:
                 return

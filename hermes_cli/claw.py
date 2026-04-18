@@ -542,11 +542,13 @@ def _cmd_cleanup(args):
         print_info("Stop OpenClaw first: systemctl --user stop openclaw-gateway.service")
         print()
         if not auto_yes:
-            if not sys.stdin.isatty():
+            if dry_run:
+                print_info("Dry run only — continuing despite running OpenClaw.")
+            elif not sys.stdin.isatty():
                 print_info("Non-interactive session — aborting. Stop OpenClaw and re-run.")
                 return
-            if not prompt_yes_no("Proceed anyway?", default=False):
-                print_info("Aborted. Stop OpenClaw first, then re-run: hermes claw cleanup")
+            elif not prompt_yes_no("Proceed anyway?", default=False):
+                print_info("Skipped.")
                 return
 
     total_archived = 0
