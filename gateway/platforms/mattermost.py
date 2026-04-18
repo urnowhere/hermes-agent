@@ -263,15 +263,22 @@ class MattermostAdapter(BasePlatformAdapter):
         formatted = self.format_message(content)
         chunks = self.truncate_message(formatted, MAX_POST_LENGTH)
 
+        # Thread support: prefer metadata thread_id (always the true root),
+        # fall back to reply_to. Mattermost rejects root_id pointing to a
+        # non-root post, so reply_to (which may be a reply's own id) is unsafe.
+        effective_root_id = (
+            (metadata.get("thread_id") if metadata else None)
+            or reply_to
+        )
+
         last_id = None
         for chunk in chunks:
             payload: Dict[str, Any] = {
                 "channel_id": chat_id,
                 "message": chunk,
             }
-            # Thread support: reply_to is the root post ID.
-            if reply_to and self._reply_mode == "thread":
-                payload["root_id"] = reply_to
+            if effective_root_id and self._reply_mode == "thread":
+                payload["root_id"] = effective_root_id
 
             data = await self._api_post("posts", payload)
             if not data or "id" not in data:
@@ -651,8 +658,15 @@ class MattermostAdapter(BasePlatformAdapter):
         sender_id = post.get("user_id", "")
         sender_name = data.get("sender_name", "").lstrip("@") or sender_id
 
-        # Thread support: if the post is in a thread, use root_id.
-        thread_id = post.get("root_id") or None
+        # Thread support: use root_id for replies, post id for new
+        # top-level messages (thread mode only), None otherwise.
+        root_id = post.get("root_id") or None
+        if root_id:
+            thread_id = root_id
+        elif self._reply_mode == "thread":
+            thread_id = post.get("id")
+        else:
+            thread_id = None
 
         # Determine message type.
         file_ids = post.get("file_ids") or []
