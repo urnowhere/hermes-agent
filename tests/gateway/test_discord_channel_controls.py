@@ -100,7 +100,7 @@ def make_message(*, channel, content: str, mentions=None):
     )
 
 
-# ── ignored_channels ─────────────────────────────────────────────────
+# -- ignored_channels -------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -200,7 +200,7 @@ async def test_dms_unaffected_by_ignored_channels(adapter, monkeypatch):
     adapter.handle_message.assert_awaited_once()
 
 
-# ── no_thread_channels ───────────────────────────────────────────────
+# -- no_thread_channels -----------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -281,7 +281,7 @@ async def test_no_thread_with_auto_thread_disabled_is_noop(adapter, monkeypatch)
     adapter.handle_message.assert_awaited_once()
 
 
-# ── config.py bridging ───────────────────────────────────────────────
+# -- config.py bridging -----------------------------------------------
 
 
 def test_config_bridges_ignored_channels(monkeypatch, tmp_path):

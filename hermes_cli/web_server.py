@@ -263,7 +263,7 @@ def _build_schema_from_config(
     config: Dict[str, Any],
     prefix: str = "",
 ) -> Dict[str, Dict[str, Any]]:
-    """Walk DEFAULT_CONFIG and produce a flat dot-path → field schema dict."""
+    """Walk DEFAULT_CONFIG and produce a flat dot-path -> field schema dict."""
     schema: Dict[str, Dict[str, Any]] = {}
     for key, value in config.items():
         full_key = f"{prefix}.{key}" if prefix else key
@@ -287,7 +287,7 @@ def _build_schema_from_config(
         else:
             entry: Dict[str, Any] = {
                 "type": _infer_type(value),
-                "description": full_key.replace(".", " → ").replace("_", " ").title(),
+                "description": full_key.replace(".", " -> ").replace("_", " ").title(),
                 "category": category,
             }
             # Apply manual overrides
@@ -508,7 +508,7 @@ async def search_sessions(q: str = "", limit: int = 20):
         db = SessionDB()
         try:
             # Auto-add prefix wildcards so partial words match
-            # e.g. "nimb" → "nimb*" matches "nimby"
+            # e.g. "nimb" -> "nimb*" matches "nimby"
             # Preserve quoted phrases and existing wildcards as-is
             import re
             terms = []
@@ -1102,23 +1102,23 @@ async def disconnect_oauth_provider(provider_id: str, request: Request):
 #
 #   PKCE (Anthropic):
 #     1. POST /api/providers/oauth/anthropic/start
-#          → server generates code_verifier + challenge, builds claude.ai
+#          -> server generates code_verifier + challenge, builds claude.ai
 #            authorize URL, stashes verifier in _oauth_sessions[session_id]
-#          → returns { session_id, flow: "pkce", auth_url }
+#          -> returns { session_id, flow: "pkce", auth_url }
 #     2. UI opens auth_url in a new tab. User authorizes, copies code.
 #     3. POST /api/providers/oauth/anthropic/submit { session_id, code }
-#          → server exchanges (code + verifier) → tokens at console.anthropic.com
-#          → persists to ~/.hermes/.anthropic_oauth.json AND credential pool
-#          → returns { ok: true, status: "approved" }
+#          -> server exchanges (code + verifier) -> tokens at console.anthropic.com
+#          -> persists to ~/.hermes/.anthropic_oauth.json AND credential pool
+#          -> returns { ok: true, status: "approved" }
 #
 #   Device code (Nous, OpenAI Codex):
 #     1. POST /api/providers/oauth/{nous|openai-codex}/start
-#          → server hits provider's device-auth endpoint
-#          → gets { user_code, verification_url, device_code, interval, expires_in }
-#          → spawns background poller thread that polls the token endpoint
+#          -> server hits provider's device-auth endpoint
+#          -> gets { user_code, verification_url, device_code, interval, expires_in }
+#          -> spawns background poller thread that polls the token endpoint
 #            every `interval` seconds until approved/expired
-#          → stores poll status in _oauth_sessions[session_id]
-#          → returns { session_id, flow: "device_code", user_code,
+#          -> stores poll status in _oauth_sessions[session_id]
+#          -> returns { session_id, flow: "device_code", user_code,
 #                      verification_url, expires_in, poll_interval }
 #     2. UI opens verification_url in a new tab and shows user_code.
 #     3. UI polls GET /api/providers/oauth/{provider}/poll/{session_id}
@@ -1736,7 +1736,7 @@ async def get_logs(
     except ImportError:
         COMPONENT_PREFIXES = {}
 
-    # Normalize "ALL" / "all" / empty → no filter. _matches_filters treats an
+    # Normalize "ALL" / "all" / empty -> no filter. _matches_filters treats an
     # empty tuple as "must match a prefix" (startswith(()) is always False),
     # so passing () instead of None silently drops every line.
     min_level = level if level and level.upper() != "ALL" else None
@@ -2316,5 +2316,5 @@ def start_server(
 
         threading.Thread(target=_open, daemon=True).start()
 
-    print(f"  Hermes Web UI → http://{host}:{port}")
+    print(f"  Hermes Web UI -> http://{host}:{port}")
     uvicorn.run(app, host=host, port=port, log_level="warning")

@@ -33,6 +33,7 @@ import json
 import logging
 import os
 import platform
+import tempfile
 import shlex
 import signal
 import subprocess
@@ -254,10 +255,13 @@ class ProcessRegistry:
         """Best-effort liveness check for host-visible PIDs."""
         if not pid:
             return False
+        if _IS_WINDOWS:
+            import psutil
+            return psutil.pid_exists(pid)
         try:
             os.kill(pid, 0)
             return True
-        except (ProcessLookupError, PermissionError):
+        except (ProcessLookupError, PermissionError, OSError):
             return False
 
     def _refresh_detached_session(self, session: Optional[ProcessSession]) -> Optional[ProcessSession]:
@@ -283,7 +287,11 @@ class ProcessRegistry:
     def _terminate_host_pid(pid: int) -> None:
         """Terminate a host-visible PID without requiring the original process handle."""
         if _IS_WINDOWS:
-            os.kill(pid, signal.SIGTERM)
+            import psutil
+            try:
+                psutil.Process(pid).terminate()
+            except psutil.NoSuchProcess:
+                pass
             return
 
         try:
@@ -300,10 +308,15 @@ class ProcessRegistry:
         if callable(get_temp_dir):
             try:
                 temp_dir = get_temp_dir()
-                if isinstance(temp_dir, str) and temp_dir.startswith("/"):
-                    return temp_dir.rstrip("/") or "/"
+                if isinstance(temp_dir, str):
+                    if _IS_WINDOWS and os.path.isdir(temp_dir) or temp_dir.startswith("/"):
+                        return temp_dir.rstrip("\\/")
+                    if not _IS_WINDOWS and temp_dir.startswith("/"):
+                        return temp_dir.rstrip("/") or "/"
             except Exception as exc:
                 logger.debug("Could not resolve environment temp dir: %s", exc)
+        if _IS_WINDOWS:
+            return tempfile.gettempdir().rstrip("\\/")
         return "/tmp"
 
     def spawn_local(
@@ -801,7 +814,14 @@ class ProcessRegistry:
                     session._pty.terminate(force=True)
                 except Exception:
                     if session.pid:
-                        os.kill(session.pid, signal.SIGTERM)
+                        if _IS_WINDOWS:
+                            import psutil
+                            try:
+                                psutil.Process(session.pid).terminate()
+                            except psutil.NoSuchProcess:
+                                pass
+                        else:
+                            os.kill(session.pid, signal.SIGTERM)
             elif session.process:
                 # Local process -- kill the process group
                 try:
@@ -1201,5 +1221,5 @@ registry.register(
     toolset="terminal",
     schema=PROCESS_SCHEMA,
     handler=_handle_process,
-    emoji="⚙️",
+    emoji="️",
 )

@@ -437,7 +437,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
                 else:
                     # Still not connected — warn but proceed (bridge may
                     # auto-reconnect later, e.g. after a code 515 restart).
-                    print(f"[{self.name}] ⚠ WhatsApp not connected after 30s")
+                    print(f"[{self.name}] [WARN] WhatsApp not connected after 30s")
                     print(f"[{self.name}]   Bridge log: {self._bridge_log}")
                     print(f"[{self.name}]   If session expired, re-pair: hermes whatsapp")
             
@@ -566,19 +566,19 @@ class WhatsAppAdapter(BasePlatformAdapter):
         result = re.sub(r"`[^`\n]+`", _save_code, result)
 
         # --- 3. Convert markdown formatting to WhatsApp syntax ---
-        # Bold: **text** or __text__ → *text*
+        # Bold: **text** or __text__ -> *text*
         result = re.sub(r"\*\*(.+?)\*\*", r"*\1*", result)
         result = re.sub(r"__(.+?)__", r"*\1*", result)
-        # Strikethrough: ~~text~~ → ~text~
+        # Strikethrough: ~~text~~ -> ~text~
         result = re.sub(r"~~(.+?)~~", r"~\1~", result)
         # Italic: *text* is already WhatsApp italic — leave as-is
         # _text_ is already WhatsApp italic — leave as-is
 
         # --- 4. Convert markdown headers to bold text ---
-        # # Header → *Header*
+        # # Header -> *Header*
         result = re.sub(r"^#{1,6}\s+(.+)$", r"*\1*", result, flags=re.MULTILINE)
 
-        # --- 5. Convert markdown links: [text](url) → text (url) ---
+        # --- 5. Convert markdown links: [text](url) -> text (url) ---
         result = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 (\2)", result)
 
         # --- 6. Restore protected sections ---

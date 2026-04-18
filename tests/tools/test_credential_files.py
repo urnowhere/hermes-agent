@@ -123,7 +123,7 @@ class TestSkillsDirectoryMount:
         with patch.dict(os.environ, {"HERMES_HOME": str(hermes_home)}):
             mounts = get_skills_directory_mount()
 
-        # No local skills dir → no local mount (external dirs may still appear)
+        # No local skills dir -> no local mount (external dirs may still appear)
         local_mounts = [m for m in mounts if m["container_path"].endswith("/skills")]
         assert local_mounts == []
 
@@ -416,7 +416,7 @@ class TestCacheDirectoryMounts:
         assert "/root/.hermes/cache/images" in container_paths
 
     def test_empty_hermes_home(self, tmp_path, monkeypatch):
-        """No cache dirs → empty list."""
+        """No cache dirs -> empty list."""
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
@@ -470,7 +470,7 @@ class TestIterCacheFiles:
         assert entries[0]["container_path"] == "/root/.hermes/cache/screenshots/session_abc/screen1.png"
 
     def test_empty_cache(self, tmp_path, monkeypatch):
-        """No cache dirs → empty list."""
+        """No cache dirs -> empty list."""
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))

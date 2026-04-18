@@ -92,7 +92,7 @@ def prompt_for_secret(cli, var_name: str, prompt: str, metadata=None) -> dict:
 
         stored = save_env_value_secure(var_name, value)
         _dhh = display_hermes_home()
-        cprint(f"\n{_DIM}  ✓ Stored secret in {_dhh}/.env as {var_name}{_RST}")
+        cprint(f"\n{_DIM}  [OK] Stored secret in {_dhh}/.env as {var_name}{_RST}")
         return {
             **stored,
             "skipped": False,
@@ -145,7 +145,7 @@ def prompt_for_secret(cli, var_name: str, prompt: str, metadata=None) -> dict:
 
             stored = save_env_value_secure(var_name, value)
             _dhh = display_hermes_home()
-            cprint(f"\n{_DIM}  ✓ Stored secret in {_dhh}/.env as {var_name}{_RST}")
+            cprint(f"\n{_DIM}  [OK] Stored secret in {_dhh}/.env as {var_name}{_RST}")
             return {
                 **stored,
                 "skipped": False,

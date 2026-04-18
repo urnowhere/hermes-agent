@@ -405,7 +405,7 @@ class PluginManager:
         self._plugin_commands: Dict[str, dict] = {}  # Slash commands registered by plugins
         self._discovered: bool = False
         self._cli_ref = None  # Set by CLI after plugin discovery
-        # Plugin skill registry: qualified name → metadata dict.
+        # Plugin skill registry: qualified name -> metadata dict.
         self._plugin_skills: Dict[str, Dict[str, Any]] = {}
 
     # -----------------------------------------------------------------------
@@ -791,7 +791,7 @@ def get_plugin_command_handler(name: str) -> Optional[Callable]:
 
 
 def get_plugin_commands() -> Dict[str, dict]:
-    """Return the full plugin commands dict (name → {handler, description, plugin}).
+    """Return the full plugin commands dict (name -> {handler, description, plugin}).
 
     Safe to call before discovery — returns an empty dict if no plugins loaded.
     """

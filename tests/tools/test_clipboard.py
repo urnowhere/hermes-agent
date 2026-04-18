@@ -41,9 +41,9 @@ FAKE_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
 FAKE_BMP = b"BM" + b"\x00" * 100
 
 
-# ═════════════════════════════════════════════════════════════════════════
+# -------------------------------------------------------------------------
 # Level 1: Clipboard module — platform dispatch + tool interactions
-# ═════════════════════════════════════════════════════════════════════════
+# -------------------------------------------------------------------------
 
 class TestSaveClipboardImage:
     def test_dispatches_to_macos_on_darwin(self, tmp_path):
@@ -79,7 +79,7 @@ class TestSaveClipboardImage:
         assert dest.parent.exists()
 
 
-# ── macOS ────────────────────────────────────────────────────────────────
+# -- macOS ----------------------------------------------------------------
 
 class TestMacosPngpaste:
     def test_success_writes_file(self, tmp_path):
@@ -201,7 +201,7 @@ class TestMacosOsascript:
             assert _macos_osascript(dest) is False
 
 
-# ── WSL detection ────────────────────────────────────────────────────────
+# -- WSL detection --------------------------------------------------------
 
 class TestIsWsl:
     def setup_method(self):
@@ -237,7 +237,7 @@ class TestIsWsl:
             m.assert_called_once()  # only read once
 
 
-# ── WSL (powershell.exe) ────────────────────────────────────────────────
+# -- WSL (powershell.exe) ------------------------------------------------
 
 class TestWslHasImage:
     def test_clipboard_has_image(self):
@@ -321,7 +321,7 @@ class TestWslSave:
             assert _wsl_save(dest) is False
 
 
-# ── Wayland (wl-paste) ──────────────────────────────────────────────────
+# -- Wayland (wl-paste) --------------------------------------------------
 
 class TestWaylandHasImage:
     def test_has_png(self):
@@ -419,7 +419,7 @@ class TestWaylandSave:
         assert "image/png" in extract_cmd
 
 
-# ── X11 (xclip) ─────────────────────────────────────────────────────────
+# -- X11 (xclip) ---------------------------------------------------------
 
 class TestXclipHasImage:
     def test_has_image(self):
@@ -479,10 +479,10 @@ class TestXclipSave:
             assert _xclip_save(tmp_path / "out.png") is False
 
 
-# ── Linux dispatch ──────────────────────────────────────────────────────
+# -- Linux dispatch ------------------------------------------------------
 
 class TestLinuxSave:
-    """Test that _linux_save dispatches correctly to WSL → Wayland → X11."""
+    """Test that _linux_save dispatches correctly to WSL -> Wayland -> X11."""
 
     def setup_method(self):
         import hermes_cli.clipboard as cb
@@ -530,7 +530,7 @@ class TestLinuxSave:
                     m.assert_called_once_with(dest)
 
 
-# ── Native Windows (PowerShell) ─────────────────────────────────────────
+# -- Native Windows (PowerShell) -----------------------------------------
 
 class TestWindowsHasImage:
     def setup_method(self):
@@ -650,7 +650,7 @@ class TestHasClipboardImageWin32:
                 m.assert_called_once()
 
 
-# ── BMP conversion ──────────────────────────────────────────────────────
+# -- BMP conversion ------------------------------------------------------
 
 class TestConvertToPng:
     def test_pillow_conversion(self, tmp_path):
@@ -757,7 +757,7 @@ class TestConvertToPng:
         assert dest.read_bytes() == original_data
 
 
-# ── has_clipboard_image dispatch ─────────────────────────────────────────
+# -- has_clipboard_image dispatch -----------------------------------------
 
 class TestHasClipboardImage:
     def setup_method(self):
@@ -810,9 +810,9 @@ class TestHasClipboardImage:
                         m.assert_called_once()
 
 
-# ═════════════════════════════════════════════════════════════════════════
-# Level 2: _preprocess_images_with_vision — image → text via vision tool
-# ═════════════════════════════════════════════════════════════════════════
+# -------------------------------------------------------------------------
+# Level 2: _preprocess_images_with_vision — image -> text via vision tool
+# -------------------------------------------------------------------------
 
 class TestPreprocessImagesWithVision:
     """Test vision-based image pre-processing for the CLI."""
@@ -923,12 +923,12 @@ class TestPreprocessImagesWithVision:
         assert str(img) in result  # path still included for retry
 
 
-# ═════════════════════════════════════════════════════════════════════════
+# -------------------------------------------------------------------------
 # Level 3: _try_attach_clipboard_image — state management
-# ═════════════════════════════════════════════════════════════════════════
+# -------------------------------------------------------------------------
 
 class TestTryAttachClipboardImage:
-    """Test the clipboard → state flow."""
+    """Test the clipboard -> state flow."""
 
     @pytest.fixture
     def cli(self):
@@ -1020,9 +1020,9 @@ class TestVoiceSubmission:
         assert cli._pending_input.get_nowait() == "hello"
 
 
-# ═════════════════════════════════════════════════════════════════════════
+# -------------------------------------------------------------------------
 # Level 4: Queue routing — tuple unpacking in process_loop
-# ═════════════════════════════════════════════════════════════════════════
+# -------------------------------------------------------------------------
 
 class TestQueueRouting:
     """Test that (text, images) tuples are correctly unpacked and routed."""

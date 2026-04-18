@@ -168,8 +168,9 @@ class TestStdinHelpers:
         assert result["status"] == "ok"
 
     def test_close_stdin_allows_eof_driven_process_to_finish(self, registry, tmp_path):
+        _py = "python"
         session = registry.spawn_local(
-            'python3 -c "import sys; print(sys.stdin.read().strip())"',
+            f'{_py} -c "import sys; print(sys.stdin.read().strip())"',
             cwd=str(tmp_path),
             use_pty=False,
         )
@@ -606,12 +607,18 @@ class TestKillProcess:
             calls.append((pid, sig))
 
         try:
-            with patch("tools.process_registry.os.kill", side_effect=fake_kill):
-                result = registry.kill_process(s.id)
-
-            assert result["status"] == "killed"
-            assert (424242, 0) in calls
-            assert (424242, signal.SIGTERM) in calls
+            if sys.platform == "win32":
+                with patch("psutil.pid_exists", return_value=True),                      patch("psutil.Process") as mock_proc:
+                    result = registry.kill_process(s.id)
+                    assert result["status"] == "killed"
+                    mock_proc.assert_called_with(424242)
+                    mock_proc.return_value.terminate.assert_called_once()
+            else:
+                with patch("tools.process_registry.os.kill", side_effect=fake_kill):
+                    result = registry.kill_process(s.id)
+                    assert result["status"] == "killed"
+                    assert (424242, 0) in calls
+                    assert (424242, signal.SIGTERM) in calls
         finally:
             registry._running.pop(s.id, None)
 

@@ -645,7 +645,7 @@ def _build_job_prompt(job: dict) -> str:
             f"[SYSTEM: The following skill(s) were listed for this job but could not be found "
             f"and were skipped: {', '.join(skipped)}. "
             f"Start your response with a brief notice so the user is aware, e.g.: "
-            f"'⚠️ Skill(s) not found and skipped: {', '.join(skipped)}']"
+            f"'[WARN]️ Skill(s) not found and skipped: {', '.join(skipped)}']"
         )
         parts.insert(0, notice)
 
@@ -992,7 +992,7 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
     
     Args:
         verbose: Whether to print status messages
-        adapters: Optional dict mapping Platform → live adapter (from gateway)
+        adapters: Optional dict mapping Platform -> live adapter (from gateway)
         loop: Optional asyncio event loop (from gateway) for live adapter sends
     
     Returns:
@@ -1042,7 +1042,7 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                 # Deliver the final response to the origin/target chat.
                 # If the agent responded with [SILENT], skip delivery (but
                 # output is already saved above).  Failed jobs always deliver.
-                deliver_content = final_response if success else f"⚠️ Cron job '{job.get('name', job['id'])}' failed:\n{error}"
+                deliver_content = final_response if success else f"[WARN]️ Cron job '{job.get('name', job['id'])}' failed:\n{error}"
                 should_deliver = bool(deliver_content)
                 if should_deliver and success and SILENT_MARKER in deliver_content.strip().upper():
                     logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)

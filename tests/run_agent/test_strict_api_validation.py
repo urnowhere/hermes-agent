@@ -13,7 +13,7 @@ sys.modules.setdefault("fal_client", types.SimpleNamespace())
 from run_agent import AIAgent
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# -- Helpers ------------------------------------------------------------------
 
 def _tool_defs(*names):
     return [

@@ -702,7 +702,7 @@ def prompt_enable_tool_gateway(config: Dict[str, object]) -> set[str]:
     ]
     if already_managed:
         for k in already_managed:
-            desc_parts.append(f"  ✓ {_GATEWAY_TOOL_LABELS[k]} — using Tool Gateway")
+            desc_parts.append(f"  [OK] {_GATEWAY_TOOL_LABELS[k]} — using Tool Gateway")
     if unconfigured:
         for k in unconfigured:
             desc_parts.append(f"  ○ {_GATEWAY_TOOL_LABELS[k]} — not configured")
@@ -772,7 +772,7 @@ def prompt_enable_tool_gateway(config: Dict[str, object]) -> set[str]:
         newly_switched = changed - set(already_managed)
         for key in sorted(newly_switched):
             label = _GATEWAY_TOOL_LABELS.get(key, key)
-            print(f"  ✓ {label}: enabled via Nous subscription")
+            print(f"  [OK] {label}: enabled via Nous subscription")
         if already_managed and not newly_switched:
             print("  (all tools already using Tool Gateway)")
     return changed

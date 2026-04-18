@@ -15,7 +15,7 @@ import pytest
 from gateway.config import Platform, PlatformConfig, HomeChannel
 
 
-# ── Config loading ──────────────────────────────────────────────────
+# -- Config loading --------------------------------------------------
 
 class TestSmsConfigLoading:
     """Verify _apply_env_overrides wires SMS correctly."""
@@ -53,7 +53,7 @@ class TestSmsConfigLoading:
             assert hc.name == "My Phone"
             assert hc.platform == Platform.SMS
 
-# ── Format / truncate ───────────────────────────────────────────────
+# -- Format / truncate -----------------------------------------------
 
 class TestSmsFormatAndTruncate:
     """Test SmsAdapter.format_message strips markdown."""
@@ -108,7 +108,7 @@ class TestSmsFormatAndTruncate:
         assert result == "a\n\nb"
 
 
-# ── Echo prevention ────────────────────────────────────────────────
+# -- Echo prevention ------------------------------------------------
 
 class TestSmsEchoPrevention:
     """Adapter should ignore messages from its own number."""
@@ -128,7 +128,7 @@ class TestSmsEchoPrevention:
             assert adapter._from_number == "+15550001111"
 
 
-# ── Requirements check ─────────────────────────────────────────────
+# -- Requirements check ---------------------------------------------
 
 class TestSmsRequirements:
     def test_check_sms_requirements_missing_sid(self):
@@ -162,9 +162,9 @@ class TestSmsRequirements:
                 assert result is False
 
 
-# ── Toolset verification ───────────────────────────────────────────
+# -- Toolset verification -------------------------------------------
 
-# ── Webhook host configuration ─────────────────────────────────────
+# -- Webhook host configuration -------------------------------------
 
 class TestWebhookHostConfig:
     """Verify SMS_WEBHOOK_HOST env var and default."""
@@ -216,7 +216,7 @@ class TestWebhookHostConfig:
             assert adapter._webhook_url == "https://example.com/webhooks/twilio"
 
 
-# ── Startup guard (fail-closed) ────────────────────────────────────
+# -- Startup guard (fail-closed) ------------------------------------
 
 class TestStartupGuard:
     """Adapter must refuse to start without SMS_WEBHOOK_URL."""
@@ -274,7 +274,7 @@ class TestStartupGuard:
             await adapter.disconnect()
 
 
-# ── Twilio signature validation ────────────────────────────────────
+# -- Twilio signature validation ------------------------------------
 
 def _compute_twilio_signature(auth_token, url, params):
     """Reference implementation of Twilio's signature algorithm."""
@@ -397,7 +397,7 @@ class TestTwilioSignatureValidation:
         ) is True
 
 
-# ── Webhook signature enforcement (handler-level) ──────────────────
+# -- Webhook signature enforcement (handler-level) ------------------
 
 class TestWebhookSignatureEnforcement:
     """Integration tests for signature validation in _handle_webhook."""

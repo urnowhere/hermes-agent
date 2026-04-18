@@ -152,7 +152,7 @@ def _sweep_expired_pastes(now: Optional[float] = None) -> tuple[int, int]:
 # ---------------------------------------------------------------------------
 
 _PRIVACY_NOTICE = """\
-⚠️  This will upload the following to a public paste service:
+[WARN]️  This will upload the following to a public paste service:
   • System info (OS, Python version, Hermes version, provider, which API keys
     are configured — NOT the actual keys)
   • Recent log lines (agent.log, errors.log, gateway.log — may contain
@@ -164,7 +164,7 @@ Pastes auto-delete after 6 hours.
 """
 
 _GATEWAY_PRIVACY_NOTICE = (
-    "⚠️ **Privacy notice:** This uploads system info + recent log tails "
+    "[WARN]️ **Privacy notice:** This uploads system info + recent log tails "
     "(may contain conversation fragments) to a public paste service. "
     "Full logs are NOT included from the gateway — use `hermes debug share` "
     "from the CLI for full log uploads.\n"
@@ -218,7 +218,35 @@ def _schedule_auto_delete(urls: list[str], delay_seconds: int = _AUTO_DELETE_SEC
     every ``hermes debug`` invocation.  If the user never runs ``hermes debug``
     again, paste.rs's own retention policy handles cleanup.
     """
-    _record_pending(urls, delay_seconds=delay_seconds)
+    import subprocess
+
+    paste_rs_urls = [u for u in urls if _extract_paste_id(u)]
+    if not paste_rs_urls:
+        return
+
+    # Build a tiny inline Python script.  No imports beyond stdlib.
+    url_list = ", ".join(f'"{u}"' for u in paste_rs_urls)
+    script = (
+        "import time, urllib.request; "
+        f"time.sleep({delay_seconds}); "
+        f"[urllib.request.urlopen(urllib.request.Request(u, method='DELETE', "
+        f"headers={{'User-Agent': 'hermes-agent/auto-delete'}}), timeout=15) "
+        f"for u in [{url_list}]]"
+    )
+
+    try:
+        kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True
+        subprocess.Popen(
+            [sys.executable, "-c", script],
+            **kwargs,
+        )
+    except Exception:
+        pass  # Best-effort; manual delete still available.
+
 
 
 def _delete_hint(url: str) -> str:
@@ -424,7 +452,7 @@ def collect_debug_report(*, log_lines: int = 200, dump_text: str = "") -> str:
         dump_text = _capture_dump()
     buf.write(dump_text)
 
-    # ── Recent log tails (summary only) ──────────────────────────────────
+    # -- Recent log tails (summary only) ----------------------------------
     buf.write("\n\n")
     buf.write(f"--- agent.log (last {log_lines} lines) ---\n")
     buf.write(_read_log_tail("agent", log_lines))
@@ -542,13 +570,13 @@ def run_debug_delete(args):
         try:
             ok = delete_paste(url)
             if ok:
-                print(f"  ✓ Deleted: {url}")
+                print(f"  [OK] Deleted: {url}")
             else:
-                print(f"  ✗ Failed to delete: {url} (unexpected response)")
+                print(f"  [ERR] Failed to delete: {url} (unexpected response)")
         except ValueError as exc:
-            print(f"  ✗ {exc}")
+            print(f"  [ERR] {exc}")
         except Exception as exc:
-            print(f"  ✗ Could not delete {url}: {exc}")
+            print(f"  [ERR] Could not delete {url}: {exc}")
 
 
 def run_debug(args):

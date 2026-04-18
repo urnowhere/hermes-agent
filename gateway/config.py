@@ -125,7 +125,7 @@ class SessionResetPolicy:
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SessionResetPolicy":
-        # Handle both missing keys and explicit null values (YAML null → None)
+        # Handle both missing keys and explicit null values (YAML null -> None)
         mode = data.get("mode")
         at_hour = data.get("at_hour")
         idle_minutes = data.get("idle_minutes")
@@ -491,7 +491,7 @@ def load_gateway_config() -> GatewayConfig:
             with open(config_yaml_path, encoding="utf-8") as f:
                 yaml_cfg = yaml.safe_load(f) or {}
 
-            # Map config.yaml keys → GatewayConfig.from_dict() schema.
+            # Map config.yaml keys -> GatewayConfig.from_dict() schema.
             # Each key overwrites whatever gateway.json may have set.
             sr = yaml_cfg.get("session_reset")
             if sr and isinstance(sr, dict):
@@ -596,7 +596,7 @@ def load_gateway_config() -> GatewayConfig:
                     plat_data["extra"] = extra
                 extra.update(bridged)
 
-            # Slack settings → env vars (env vars take precedence)
+            # Slack settings -> env vars (env vars take precedence)
             slack_cfg = yaml_cfg.get("slack", {})
             if isinstance(slack_cfg, dict):
                 if "require_mention" in slack_cfg and not os.getenv("SLACK_REQUIRE_MENTION"):
@@ -609,7 +609,7 @@ def load_gateway_config() -> GatewayConfig:
                         frc = ",".join(str(v) for v in frc)
                     os.environ["SLACK_FREE_RESPONSE_CHANNELS"] = str(frc)
 
-            # Discord settings → env vars (env vars take precedence)
+            # Discord settings -> env vars (env vars take precedence)
             discord_cfg = yaml_cfg.get("discord", {})
             if isinstance(discord_cfg, dict):
                 if "require_mention" in discord_cfg and not os.getenv("DISCORD_REQUIRE_MENTION"):
@@ -656,7 +656,7 @@ def load_gateway_config() -> GatewayConfig:
                         if yaml_key in allow_mentions_cfg and not os.getenv(env_key):
                             os.environ[env_key] = str(allow_mentions_cfg[yaml_key]).lower()
 
-            # Telegram settings → env vars (env vars take precedence)
+            # Telegram settings -> env vars (env vars take precedence)
             telegram_cfg = yaml_cfg.get("telegram", {})
             if isinstance(telegram_cfg, dict):
                 if "require_mention" in telegram_cfg and not os.getenv("TELEGRAM_REQUIRE_MENTION"):
@@ -701,7 +701,7 @@ def load_gateway_config() -> GatewayConfig:
                         frc = ",".join(str(v) for v in frc)
                     os.environ["WHATSAPP_FREE_RESPONSE_CHATS"] = str(frc)
 
-            # DingTalk settings → env vars (env vars take precedence)
+            # DingTalk settings -> env vars (env vars take precedence)
             dingtalk_cfg = yaml_cfg.get("dingtalk", {})
             if isinstance(dingtalk_cfg, dict):
                 if "require_mention" in dingtalk_cfg and not os.getenv("DINGTALK_REQUIRE_MENTION"):
@@ -719,7 +719,7 @@ def load_gateway_config() -> GatewayConfig:
                         allowed = ",".join(str(v) for v in allowed)
                     os.environ["DINGTALK_ALLOWED_USERS"] = str(allowed)
 
-            # Matrix settings → env vars (env vars take precedence)
+            # Matrix settings -> env vars (env vars take precedence)
             matrix_cfg = yaml_cfg.get("matrix", {})
             if isinstance(matrix_cfg, dict):
                 if "require_mention" in matrix_cfg and not os.getenv("MATRIX_REQUIRE_MENTION"):

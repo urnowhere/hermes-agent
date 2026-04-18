@@ -109,8 +109,8 @@ def curses_checklist(
                     y = draw_i + 3
                     if y >= max_y - 1 - footer_rows:
                         break
-                    check = "✓" if i in chosen else " "
-                    arrow = "→" if i == cursor else " "
+                    check = "[OK]" if i in chosen else " "
+                    arrow = "->" if i == cursor else " "
                     line = f" {arrow} [{check}] {items[i]}"
                     attr = curses.A_NORMAL
                     if i == cursor:
@@ -369,7 +369,7 @@ def curses_single_select(
                     y = draw_i + 3
                     if y >= max_y - 1:
                         break
-                    arrow = "→" if i == cursor else " "
+                    arrow = "->" if i == cursor else " "
                     line = f" {arrow} {all_items[i]}"
                     attr = curses.A_NORMAL
                     if i == cursor:
@@ -445,7 +445,7 @@ def _numbered_fallback(
 
     while True:
         for i, label in enumerate(items):
-            marker = color("[✓]", Colors.GREEN) if i in chosen else "[ ]"
+            marker = color("[[OK]]", Colors.GREEN) if i in chosen else "[ ]"
             print(f"  {marker} {i + 1:>2}. {label}")
         if status_fn:
             status_text = status_fn(chosen)

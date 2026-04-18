@@ -227,8 +227,8 @@ class _ApprovalEntry:
         self.result: Optional[str] = None  # "once"|"session"|"always"|"deny"
 
 
-_gateway_queues: dict[str, list] = {}        # session_key → [_ApprovalEntry, …]
-_gateway_notify_cbs: dict[str, object] = {}  # session_key → callable(approval_data)
+_gateway_queues: dict[str, list] = {}        # session_key -> [_ApprovalEntry, …]
+_gateway_notify_cbs: dict[str, object] = {}  # session_key -> callable(approval_data)
 
 
 def register_gateway_notify(session_key: str, cb) -> None:
@@ -236,7 +236,7 @@ def register_gateway_notify(session_key: str, cb) -> None:
 
     The callback signature is ``cb(approval_data: dict) -> None`` where
     *approval_data* contains ``command``, ``description``, and
-    ``pattern_keys``.  The callback bridges sync→async (runs in the agent
+    ``pattern_keys``.  The callback bridges sync->async (runs in the agent
     thread, must schedule the actual send on the event loop).
     """
     with _lock:
@@ -438,7 +438,7 @@ def prompt_dangerous_approval(command: str, description: str,
     try:
         while True:
             print()
-            print(f"  ⚠️  DANGEROUS COMMAND: {description}")
+            print(f"  [WARN]️  DANGEROUS COMMAND: {description}")
             print(f"      {command}")
             print()
             if allow_permanent:
@@ -467,23 +467,23 @@ def prompt_dangerous_approval(command: str, description: str,
 
             choice = result["choice"]
             if choice in ('o', 'once'):
-                print("      ✓ Allowed once")
+                print("      [OK] Allowed once")
                 return "once"
             elif choice in ('s', 'session'):
-                print("      ✓ Allowed for this session")
+                print("      [OK] Allowed for this session")
                 return "session"
             elif choice in ('a', 'always'):
                 if not allow_permanent:
-                    print("      ✓ Allowed for this session")
+                    print("      [OK] Allowed for this session")
                     return "session"
-                print("      ✓ Added to permanent allowlist")
+                print("      [OK] Added to permanent allowlist")
                 return "always"
             else:
-                print("      ✗ Denied")
+                print("      [ERR] Denied")
                 return "deny"
 
     except (EOFError, KeyboardInterrupt):
-        print("\n      ✗ Cancelled")
+        print("\n      [ERR] Cancelled")
         return "deny"
     finally:
         if "HERMES_SPINNER_PAUSE" in os.environ:
@@ -629,7 +629,7 @@ def check_dangerous_command(command: str, env_type: str,
             "command": command,
             "description": description,
             "message": (
-                f"⚠️ This command is potentially dangerous ({description}). "
+                f"[WARN]️ This command is potentially dangerous ({description}). "
                 f"Asking the user for approval.\n\n**Command:**\n```\n{command}\n```"
             ),
         }
@@ -735,7 +735,7 @@ def check_all_command_guards(command: str, env_type: str,
 
     session_key = get_current_session_key()
 
-    # Tirith block/warn → approvable warning with rich findings.
+    # Tirith block/warn -> approvable warning with rich findings.
     # Previously, tirith "block" was a hard block with no approval prompt.
     # Now both block and warn go through the approval flow so users can
     # inspect the explanation and approve if they understand the risk.
@@ -779,7 +779,7 @@ def check_all_command_guards(command: str, env_type: str,
                            "The command was assessed as genuinely dangerous. Do NOT retry.",
                 "smart_denied": True,
             }
-        # verdict == "escalate" → fall through to manual prompt
+        # verdict == "escalate" -> fall through to manual prompt
 
     # --- Phase 3: Approval ---
 
@@ -812,7 +812,7 @@ def check_all_command_guards(command: str, env_type: str,
             with _lock:
                 _gateway_queues.setdefault(session_key, []).append(entry)
 
-            # Notify the user (bridges sync agent thread → async gateway)
+            # Notify the user (bridges sync agent thread -> async gateway)
             try:
                 notify_cb(approval_data)
             except Exception as exc:
@@ -915,7 +915,7 @@ def check_all_command_guards(command: str, env_type: str,
             "command": command,
             "description": combined_desc,
             "message": (
-                f"⚠️ {combined_desc}. Asking the user for approval.\n\n**Command:**\n```\n{command}\n```"
+                f"[WARN]️ {combined_desc}. Asking the user for approval.\n\n**Command:**\n```\n{command}\n```"
             ),
         }
 

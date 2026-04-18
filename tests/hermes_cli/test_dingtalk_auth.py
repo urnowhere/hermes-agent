@@ -47,7 +47,7 @@ class TestApiPost:
 
 
 # ---------------------------------------------------------------------------
-# begin_registration — 2-step nonce → device_code chain
+# begin_registration — 2-step nonce -> device_code chain
 # ---------------------------------------------------------------------------
 
 

@@ -421,6 +421,10 @@ def _socket_safe_tmpdir() -> str:
     Linux ``tempfile.gettempdir()`` already returns ``/tmp``, so this is a
     no-op there.  On macOS we bypass ``TMPDIR`` and use ``/tmp`` directly
     (symlink to ``/private/tmp``, sticky-bit protected, always available).
+
+    On Windows, ``tempfile.gettempdir()`` returns the system temp folder
+    (e.g. ``C:\\Users\\...\\AppData\\Local\\Temp``), which is used for both
+    UDS (Windows 10 1803+) and TCP fallback paths in agent-browser.
     """
     if sys.platform == "darwin":
         return "/tmp"
@@ -644,19 +648,35 @@ def _reap_orphaned_browser_sessions():
             continue
 
         # Check if the daemon is still alive
+        is_alive = False
         try:
             os.kill(daemon_pid, 0)  # signal 0 = existence check
+            is_alive = True
         except ProcessLookupError:
-            # Already dead, just clean up the dir
-            shutil.rmtree(socket_dir, ignore_errors=True)
-            continue
+            pass
         except PermissionError:
-            # Alive but owned by someone else — leave it alone
+            if sys.platform == "win32":
+                # On Windows os.kill(pid, 0) raises PermissionError when the
+                # process is gone (can't open handle). Verify with psutil.
+                try:
+                    import psutil
+                    is_alive = psutil.pid_exists(daemon_pid)
+                except Exception:
+                    pass
+            else:
+                is_alive = True  # Unix: alive but owned by someone else
+
+        if not is_alive:
+            shutil.rmtree(socket_dir, ignore_errors=True)
             continue
 
         # Daemon is alive and its owner is dead (or legacy + untracked).  Reap.
         try:
-            os.kill(daemon_pid, signal.SIGTERM)
+            if sys.platform == "win32":
+                import psutil
+                psutil.Process(daemon_pid).terminate()
+            else:
+                os.kill(daemon_pid, signal.SIGTERM)
             logger.info("Reaped orphaned browser daemon PID %d (session %s)",
                         daemon_pid, session_name)
             reaped += 1
@@ -906,7 +926,7 @@ def _create_cdp_session(task_id: str, cdp_url: str) -> Dict[str, str]:
     """Create a session that connects to a user-supplied CDP endpoint."""
     import uuid
     session_name = f"cdp_{uuid.uuid4().hex[:10]}"
-    logger.info("Created CDP browser session %s → %s for task %s",
+    logger.info("Created CDP browser session %s -> %s for task %s",
                 session_name, cdp_url, task_id)
     return {
         "session_name": session_name,
@@ -2295,7 +2315,11 @@ def cleanup_browser(task_id: Optional[str] = None) -> None:
                 if os.path.isfile(pid_file):
                     try:
                         daemon_pid = int(Path(pid_file).read_text().strip())
-                        os.kill(daemon_pid, signal.SIGTERM)
+                        if sys.platform == "win32":
+                            import psutil
+                            psutil.Process(daemon_pid).terminate()
+                        else:
+                            os.kill(daemon_pid, signal.SIGTERM)
                         logger.debug("Killed daemon pid %s for %s", daemon_pid, session_name)
                     except (ProcessLookupError, ValueError, PermissionError, OSError):
                         logger.debug("Could not kill daemon pid for %s (already dead or inaccessible)", session_name)
@@ -2386,9 +2410,9 @@ if __name__ == "__main__":
     
     # Check requirements
     if check_browser_requirements():
-        print("✅ All requirements met")
+        print("[OK] All requirements met")
     else:
-        print("❌ Missing requirements:")
+        print("[ERR] Missing requirements:")
         try:
             browser_cmd = _find_agent_browser()
             if _requires_real_termux_browser_install(browser_cmd):

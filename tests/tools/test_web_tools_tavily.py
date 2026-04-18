@@ -14,13 +14,13 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 
-# ─── _tavily_request ─────────────────────────────────────────────────────────
+# --- _tavily_request ---------------------------------------------------------
 
 class TestTavilyRequest:
     """Test suite for the _tavily_request helper."""
 
     def test_raises_without_api_key(self):
-        """No TAVILY_API_KEY → ValueError with guidance."""
+        """No TAVILY_API_KEY -> ValueError with guidance."""
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TAVILY_API_KEY", None)
             from tools.web_tools import _tavily_request
@@ -60,7 +60,7 @@ class TestTavilyRequest:
                     _tavily_request("search", {"query": "test"})
 
 
-# ─── _normalize_tavily_search_results ─────────────────────────────────────────
+# --- _normalize_tavily_search_results -----------------------------------------
 
 class TestNormalizeTavilySearchResults:
     """Test search result normalization."""
@@ -98,7 +98,7 @@ class TestNormalizeTavilySearchResults:
         assert web[0]["description"] == ""
 
 
-# ─── _normalize_tavily_documents ──────────────────────────────────────────────
+# --- _normalize_tavily_documents ----------------------------------------------
 
 class TestNormalizeTavilyDocuments:
     """Test extract/crawl document normalization."""
@@ -158,7 +158,7 @@ class TestNormalizeTavilyDocuments:
         assert docs[0]["url"] == "https://fallback.com"
 
 
-# ─── web_search_tool (Tavily dispatch) ────────────────────────────────────────
+# --- web_search_tool (Tavily dispatch) ----------------------------------------
 
 class TestWebSearchTavily:
     """Test web_search_tool dispatch to Tavily."""
@@ -181,7 +181,7 @@ class TestWebSearchTavily:
             assert result["data"]["web"][0]["title"] == "Result"
 
 
-# ─── web_extract_tool (Tavily dispatch) ───────────────────────────────────────
+# --- web_extract_tool (Tavily dispatch) ---------------------------------------
 
 class TestWebExtractTavily:
     """Test web_extract_tool dispatch to Tavily."""
@@ -206,7 +206,7 @@ class TestWebExtractTavily:
             assert result["results"][0]["url"] == "https://example.com"
 
 
-# ─── web_crawl_tool (Tavily dispatch) ─────────────────────────────────────────
+# --- web_crawl_tool (Tavily dispatch) -----------------------------------------
 
 class TestWebCrawlTavily:
     """Test web_crawl_tool dispatch to Tavily."""

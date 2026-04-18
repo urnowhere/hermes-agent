@@ -25,7 +25,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 
-# ─── Subdomain Discovery (crt.sh) ──────────────────────────────────────────
+# --- Subdomain Discovery (crt.sh) ------------------------------------------
 
 def subdomains(domain, include_expired=False, limit=200):
     """Find subdomains via Certificate Transparency logs."""
@@ -61,7 +61,7 @@ def subdomains(domain, include_expired=False, limit=200):
     return {"domain": domain, "count": min(len(results), limit), "subdomains": results[:limit]}
 
 
-# ─── SSL Certificate Inspection ────────────────────────────────────────────
+# --- SSL Certificate Inspection --------------------------------------------
 
 def check_ssl(host, port=443, timeout=10):
     """Inspect the TLS certificate of a host."""
@@ -125,7 +125,7 @@ def check_ssl(host, port=443, timeout=10):
     }
 
 
-# ─── WHOIS Lookup ──────────────────────────────────────────────────────────
+# --- WHOIS Lookup ----------------------------------------------------------
 
 WHOIS_SERVERS = {
     "com": "whois.verisign-grs.com", "net": "whois.verisign-grs.com",
@@ -206,7 +206,7 @@ def whois_lookup(domain):
     return result
 
 
-# ─── DNS Records ───────────────────────────────────────────────────────────
+# --- DNS Records -----------------------------------------------------------
 
 def dns_records(domain, types=None):
     """Resolve DNS records using system DNS + Google DoH."""
@@ -245,7 +245,7 @@ def dns_records(domain, types=None):
     return {"domain": domain, "records": records}
 
 
-# ─── Domain Availability Check ─────────────────────────────────────────────
+# --- Domain Availability Check ---------------------------------------------
 
 def check_available(domain):
     """Check domain availability using passive signals (DNS + WHOIS + SSL)."""
@@ -324,7 +324,7 @@ def check_available(domain):
     return {"domain": domain, "verdict": verdict, "confidence": conf, "signals": signals}
 
 
-# ─── Bulk Analysis ─────────────────────────────────────────────────────────
+# --- Bulk Analysis ---------------------------------------------------------
 
 COMMAND_MAP = {
     "subdomains": subdomains,
@@ -360,7 +360,7 @@ def bulk_check(domains, checks=None, max_workers=5):
     return {"total": len(results), "checks": checks, "results": results}
 
 
-# ─── CLI Entry Point ───────────────────────────────────────────────────────
+# --- CLI Entry Point -------------------------------------------------------
 
 def main():
     if len(sys.argv) < 3:

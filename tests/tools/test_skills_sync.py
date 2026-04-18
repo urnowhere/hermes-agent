@@ -365,7 +365,7 @@ class TestSyncSkills:
             # Now change bundled content
             (bundled / "old-skill" / "SKILL.md").write_text("# Old v2 — improved")
 
-            # Second sync: should detect bundled changed + user unmodified → update
+            # Second sync: should detect bundled changed + user unmodified -> update
             result = sync_skills(quiet=True)
 
         assert "old-skill" in result["updated"]
@@ -557,7 +557,7 @@ class TestResetBundledSkill:
         (dest / "SKILL.md").write_text("---\nname: google-workspace\n---\n# GW v2 (upstream)\n")
         # Stale origin_hash — from some prior bundled version. User "restored" by pasting
         # the current bundled contents, so user_hash == current bundled_hash, but manifest
-        # still points at the stale hash → treated as user_modified forever.
+        # still points at the stale hash -> treated as user_modified forever.
         manifest_file.write_text("google-workspace:STALEHASH000000000000000000000000\n")
 
         with self._patches(bundled, skills_dir, manifest_file):

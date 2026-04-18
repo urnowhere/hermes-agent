@@ -11,7 +11,7 @@ from agent.model_metadata import _URL_TO_PROVIDER, _PROVIDER_PREFIXES
 from agent.models_dev import PROVIDER_TO_MODELS_DEV, list_agentic_models
 
 
-# ── Provider Registry ──
+# -- Provider Registry --
 
 class TestOllamaCloudProviderRegistry:
     def test_ollama_cloud_in_registry(self):
@@ -33,7 +33,7 @@ class TestOllamaCloudProviderRegistry:
         assert "ollama.com" in PROVIDER_REGISTRY["ollama-cloud"].inference_base_url
 
 
-# ── Provider Aliases ──
+# -- Provider Aliases --
 
 PROVIDER_ENV_VARS = (
     "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
@@ -69,7 +69,7 @@ class TestOllamaCloudAliases:
         assert normalize_provider("ollama-cloud") == "ollama-cloud"
 
 
-# ── Auto-detection ──
+# -- Auto-detection --
 
 class TestOllamaCloudAutoDetection:
     def test_auto_detects_ollama_api_key(self, monkeypatch):
@@ -77,7 +77,7 @@ class TestOllamaCloudAutoDetection:
         assert resolve_provider("auto") == "ollama-cloud"
 
 
-# ── Credential Resolution ──
+# -- Credential Resolution --
 
 class TestOllamaCloudCredentials:
     def test_resolve_with_ollama_api_key(self, monkeypatch):
@@ -103,7 +103,7 @@ class TestOllamaCloudCredentials:
         assert result["base_url"] == "https://ollama.com/v1"
 
 
-# ── Model Catalog (dynamic — no static list) ──
+# -- Model Catalog (dynamic — no static list) --
 
 class TestOllamaCloudModelCatalog:
     def test_no_static_model_list(self):
@@ -137,7 +137,7 @@ class TestOllamaCloudModelCatalog:
         assert "qwen3.5:397b" in result
 
 
-# ── Model Picker (list_authenticated_providers) ──
+# -- Model Picker (list_authenticated_providers) --
 
 class TestOllamaCloudModelPicker:
     def test_ollama_cloud_shows_model_count(self, tmp_path, monkeypatch):
@@ -174,7 +174,7 @@ class TestOllamaCloudModelPicker:
         assert ollama is None, "ollama-cloud should not appear without OLLAMA_API_KEY"
 
 
-# ── Merged Model Discovery ──
+# -- Merged Model Discovery --
 
 class TestOllamaCloudMergedDiscovery:
     def test_merges_live_and_models_dev(self, tmp_path, monkeypatch):
@@ -292,7 +292,7 @@ class TestOllamaCloudMergedDiscovery:
         assert result == []
 
 
-# ── Model Normalization ──
+# -- Model Normalization --
 
 class TestOllamaCloudModelNormalization:
     def test_passthrough_bare_name(self):
@@ -306,7 +306,7 @@ class TestOllamaCloudModelNormalization:
         assert normalize_model_for_provider("glm-5", "ollama-cloud") == "glm-5"
 
 
-# ── URL-to-Provider Mapping ──
+# -- URL-to-Provider Mapping --
 
 class TestOllamaCloudUrlMapping:
     def test_url_to_provider(self):
@@ -319,7 +319,7 @@ class TestOllamaCloudUrlMapping:
         assert "ollama" in _PROVIDER_PREFIXES
 
 
-# ── models.dev Integration ──
+# -- models.dev Integration --
 
 class TestOllamaCloudModelsDev:
     def test_ollama_cloud_mapped(self):
@@ -345,7 +345,7 @@ class TestOllamaCloudModelsDev:
         assert "some-embedding:latest" not in result  # no tool_call
 
 
-# ── Agent Init (no SyntaxError) ──
+# -- Agent Init (no SyntaxError) --
 
 class TestOllamaCloudAgentInit:
     def test_agent_imports_without_error(self):
@@ -370,7 +370,7 @@ class TestOllamaCloudAgentInit:
             assert agent.provider == "ollama-cloud"
 
 
-# ── providers.py New System ──
+# -- providers.py New System --
 
 class TestOllamaCloudProvidersNew:
     def test_overlay_exists(self):
@@ -401,7 +401,7 @@ class TestOllamaCloudProvidersNew:
         assert pdef.transport == "openai_chat"
 
 
-# ── Auxiliary Model ──
+# -- Auxiliary Model --
 
 class TestOllamaCloudAuxiliary:
     def test_aux_model_defined(self):

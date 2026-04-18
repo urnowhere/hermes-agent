@@ -1,7 +1,7 @@
 """Tests that load_cli_config() guards against lazy-import TERMINAL_CWD clobbering.
 
 When the gateway resolves TERMINAL_CWD at startup and cli.py is later
-imported lazily (via delegate_tool → CLI_CONFIG), load_cli_config() must
+imported lazily (via delegate_tool -> CLI_CONFIG), load_cli_config() must
 not overwrite the already-resolved value with os.getcwd().
 
 config.yaml terminal.cwd is the canonical source of truth.
@@ -49,7 +49,7 @@ class TestLazyImportGuard:
     """TERMINAL_CWD resolved by gateway must survive a lazy cli.py import."""
 
     def test_gateway_resolved_cwd_survives(self):
-        """Gateway set TERMINAL_CWD → lazy cli import must not clobber."""
+        """Gateway set TERMINAL_CWD -> lazy cli import must not clobber."""
         env = {"TERMINAL_CWD": "/home/user/workspace"}
         terminal_config = {"cwd": ".", "env_type": "local"}
         defaults = {"terminal": {"cwd": "."}, "_file_has_terminal": False}
@@ -89,7 +89,7 @@ class TestConfigCwdResolution:
         assert result == "/fake/getcwd"
 
     def test_remote_backend_pops_cwd(self):
-        """Remote backend + placeholder cwd → popped for backend default."""
+        """Remote backend + placeholder cwd -> popped for backend default."""
         env = {}
         terminal_config = {"cwd": ".", "env_type": "docker"}
         defaults = {"terminal": {"cwd": "."}, "_file_has_terminal": False}
@@ -98,7 +98,7 @@ class TestConfigCwdResolution:
         assert result == ""  # cwd popped, no env var set
 
     def test_remote_backend_with_prior_cwd_preserves(self):
-        """Remote backend + pre-resolved TERMINAL_CWD → adopted."""
+        """Remote backend + pre-resolved TERMINAL_CWD -> adopted."""
         env = {"TERMINAL_CWD": "/project"}
         terminal_config = {"cwd": ".", "env_type": "docker"}
         defaults = {"terminal": {"cwd": "."}, "_file_has_terminal": False}

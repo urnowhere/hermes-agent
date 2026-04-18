@@ -40,7 +40,7 @@ class TestParseAvailableOutputTokens:
         from agent.model_metadata import parse_available_output_tokens_from_error
         return parse_available_output_tokens_from_error(msg)
 
-    # ── Should detect and extract ────────────────────────────────────────
+    # -- Should detect and extract ----------------------------------------
 
     def test_anthropic_canonical_format(self):
         """Canonical Anthropic error: max_tokens: X > context_window: Y - input_tokens: Z = available_tokens: W"""
@@ -72,7 +72,7 @@ class TestParseAvailableOutputTokens:
         msg = "max_tokens: 9999 > context_window: 10000 - input_tokens: 9999 = available_tokens: 1"
         assert self._parse(msg) == 1
 
-    # ── Should NOT detect (returns None) ─────────────────────────────────
+    # -- Should NOT detect (returns None) ---------------------------------
 
     def test_prompt_too_long_is_not_output_cap_error(self):
         """'prompt is too long' errors must NOT be caught — they need context halving."""

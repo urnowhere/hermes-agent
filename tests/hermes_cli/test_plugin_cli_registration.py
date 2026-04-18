@@ -23,7 +23,7 @@ from hermes_cli.plugins import (
 )
 
 
-# ── PluginContext.register_cli_command ─────────────────────────────────────
+# -- PluginContext.register_cli_command -------------------------------------
 
 
 class TestRegisterCliCommand:
@@ -63,7 +63,7 @@ class TestRegisterCliCommand:
         assert mgr._cli_commands["nocb"]["handler_fn"] is None
 
 
-# ── Memory plugin CLI discovery ───────────────────────────────────────────
+# -- Memory plugin CLI discovery -------------------------------------------
 
 
 class TestMemoryPluginCliDiscovery:
@@ -170,10 +170,10 @@ class TestMemoryPluginCliDiscovery:
         assert len(cmds) == 0
 
 
-# ── Honcho register_cli ──────────────────────────────────────────────────
+# -- Honcho register_cli --------------------------------------------------
 
 
-# ── ProviderCollector no-op ──────────────────────────────────────────────
+# -- ProviderCollector no-op ----------------------------------------------
 
 
 class TestProviderCollectorCliNoop:

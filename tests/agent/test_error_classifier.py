@@ -12,7 +12,7 @@ from agent.error_classifier import (
 )
 
 
-# ── Helper: mock API errors ────────────────────────────────────────────
+# -- Helper: mock API errors --------------------------------------------
 
 class MockAPIError(Exception):
     """Simulates an OpenAI SDK APIStatusError."""
@@ -43,7 +43,7 @@ class ServerDisconnectedError(MockTransportError):
     pass
 
 
-# ── Test: FailoverReason enum ──────────────────────────────────────────
+# -- Test: FailoverReason enum ------------------------------------------
 
 class TestFailoverReason:
     def test_all_reasons_have_string_values(self):
@@ -62,7 +62,7 @@ class TestFailoverReason:
         assert expected == actual
 
 
-# ── Test: ClassifiedError ──────────────────────────────────────────────
+# -- Test: ClassifiedError ----------------------------------------------
 
 class TestClassifiedError:
     def test_is_auth_property(self):
@@ -85,7 +85,7 @@ class TestClassifiedError:
         assert e.message == ""
 
 
-# ── Test: Status code extraction ───────────────────────────────────────
+# -- Test: Status code extraction ---------------------------------------
 
 class TestExtractStatusCode:
     def test_from_status_code_attr(self):
@@ -113,7 +113,7 @@ class TestExtractStatusCode:
         assert _extract_status_code(ErrWeirdStatus()) is None
 
 
-# ── Test: Error body extraction ────────────────────────────────────────
+# -- Test: Error body extraction ----------------------------------------
 
 class TestExtractErrorBody:
     def test_from_body_attr(self):
@@ -124,7 +124,7 @@ class TestExtractErrorBody:
         assert _extract_error_body(Exception("generic")) == {}
 
 
-# ── Test: Error code extraction ────────────────────────────────────────
+# -- Test: Error code extraction ----------------------------------------
 
 class TestExtractErrorCode:
     def test_from_nested_error_code(self):
@@ -144,7 +144,7 @@ class TestExtractErrorCode:
         assert _extract_error_code({"error": {"message": "oops"}}) == ""
 
 
-# ── Test: 402 disambiguation ───────────────────────────────────────────
+# -- Test: 402 disambiguation -------------------------------------------
 
 class TestClassify402:
     """The critical 402 billing vs rate_limit disambiguation."""
@@ -191,12 +191,12 @@ class TestClassify402:
         assert result.reason == FailoverReason.billing
 
 
-# ── Test: Full classification pipeline ─────────────────────────────────
+# -- Test: Full classification pipeline ---------------------------------
 
 class TestClassifyApiError:
     """End-to-end classification tests."""
 
-    # ── Auth errors ──
+    # -- Auth errors --
 
     def test_401_classified_as_auth(self):
         e = MockAPIError("Unauthorized", status_code=401)
@@ -227,7 +227,7 @@ class TestClassifyApiError:
         result = classify_api_error(e, provider="openrouter")
         assert result.reason == FailoverReason.billing
 
-    # ── Billing ──
+    # -- Billing --
 
     def test_402_plain_billing(self):
         e = MockAPIError("Payment Required", status_code=402)
@@ -241,7 +241,7 @@ class TestClassifyApiError:
         assert result.reason == FailoverReason.rate_limit
         assert result.retryable is True
 
-    # ── Rate limit ──
+    # -- Rate limit --
 
     def test_429_rate_limit(self):
         e = MockAPIError("Too Many Requests", status_code=429)
@@ -265,7 +265,7 @@ class TestClassifyApiError:
         assert result.retryable is True
         assert result.should_rotate_credential is True
 
-    # ── Server errors ──
+    # -- Server errors --
 
     def test_500_server_error(self):
         e = MockAPIError("Internal Server Error", status_code=500)
@@ -288,7 +288,7 @@ class TestClassifyApiError:
         result = classify_api_error(e)
         assert result.reason == FailoverReason.overloaded
 
-    # ── Model not found ──
+    # -- Model not found --
 
     def test_404_model_not_found(self):
         e = MockAPIError("model not found", status_code=404)
@@ -302,7 +302,7 @@ class TestClassifyApiError:
         result = classify_api_error(e)
         assert result.reason == FailoverReason.model_not_found
 
-    # ── Payload too large ──
+    # -- Payload too large --
 
     def test_413_payload_too_large(self):
         e = MockAPIError("Request Entity Too Large", status_code=413)
@@ -310,7 +310,7 @@ class TestClassifyApiError:
         assert result.reason == FailoverReason.payload_too_large
         assert result.should_compress is True
 
-    # ── Context overflow ──
+    # -- Context overflow --
 
     def test_400_context_length(self):
         e = MockAPIError("context length exceeded: 250000 > 200000", status_code=400)
@@ -329,7 +329,7 @@ class TestClassifyApiError:
         assert result.reason == FailoverReason.context_overflow
 
     def test_400_generic_large_session(self):
-        """Generic 400 with large session → context overflow heuristic."""
+        """Generic 400 with large session -> context overflow heuristic."""
         e = MockAPIError(
             "Error",
             status_code=400,
@@ -339,7 +339,7 @@ class TestClassifyApiError:
         assert result.reason == FailoverReason.context_overflow
 
     def test_400_generic_small_session_is_format_error(self):
-        """Generic 400 with small session → format error, not context overflow."""
+        """Generic 400 with small session -> format error, not context overflow."""
         e = MockAPIError(
             "Error",
             status_code=400,
@@ -348,22 +348,22 @@ class TestClassifyApiError:
         result = classify_api_error(e, approx_tokens=1000, context_length=200000)
         assert result.reason == FailoverReason.format_error
 
-    # ── Server disconnect + large session ──
+    # -- Server disconnect + large session --
 
     def test_disconnect_large_session_context_overflow(self):
-        """Server disconnect with large session → context overflow."""
+        """Server disconnect with large session -> context overflow."""
         e = Exception("server disconnected without sending complete message")
         result = classify_api_error(e, approx_tokens=150000, context_length=200000)
         assert result.reason == FailoverReason.context_overflow
         assert result.should_compress is True
 
     def test_disconnect_small_session_timeout(self):
-        """Server disconnect with small session → timeout."""
+        """Server disconnect with small session -> timeout."""
         e = Exception("server disconnected without sending complete message")
         result = classify_api_error(e, approx_tokens=5000, context_length=200000)
         assert result.reason == FailoverReason.timeout
 
-    # ── Provider-specific: Anthropic thinking signature ──
+    # -- Provider-specific: Anthropic thinking signature --
 
     def test_anthropic_thinking_signature(self):
         e = MockAPIError(
@@ -375,13 +375,13 @@ class TestClassifyApiError:
         assert result.retryable is True
 
     def test_non_anthropic_400_with_signature_not_classified_as_thinking(self):
-        """400 with 'signature' but from non-Anthropic → format error."""
+        """400 with 'signature' but from non-Anthropic -> format error."""
         e = MockAPIError("invalid signature", status_code=400)
         result = classify_api_error(e, provider="openrouter", approx_tokens=0)
         # Without "thinking" in the message, it shouldn't be thinking_signature
         assert result.reason != FailoverReason.thinking_signature
 
-    # ── Provider-specific: Anthropic long-context tier ──
+    # -- Provider-specific: Anthropic long-context tier --
 
     def test_anthropic_long_context_tier(self):
         e = MockAPIError(
@@ -393,12 +393,12 @@ class TestClassifyApiError:
         assert result.should_compress is True
 
     def test_normal_429_not_long_context(self):
-        """Normal 429 without 'extra usage' + 'long context' → rate_limit."""
+        """Normal 429 without 'extra usage' + 'long context' -> rate_limit."""
         e = MockAPIError("Too Many Requests", status_code=429)
         result = classify_api_error(e, provider="anthropic")
         assert result.reason == FailoverReason.rate_limit
 
-    # ── Transport errors ──
+    # -- Transport errors --
 
     def test_read_timeout(self):
         e = ReadTimeout("Read timed out")
@@ -421,7 +421,7 @@ class TestClassifyApiError:
         result = classify_api_error(e)
         assert result.reason == FailoverReason.timeout
 
-    # ── Error code classification ──
+    # -- Error code classification --
 
     def test_error_code_resource_exhausted(self):
         e = MockAPIError(
@@ -447,7 +447,7 @@ class TestClassifyApiError:
         result = classify_api_error(e)
         assert result.reason == FailoverReason.context_overflow
 
-    # ── Message-only patterns (no status code) ──
+    # -- Message-only patterns (no status code) --
 
     def test_message_billing_pattern(self):
         e = Exception("insufficient credits to complete this request")
@@ -474,10 +474,10 @@ class TestClassifyApiError:
         result = classify_api_error(e)
         assert result.reason == FailoverReason.context_overflow
 
-    # ── Message-only usage limit disambiguation (no status code) ──
+    # -- Message-only usage limit disambiguation (no status code) --
 
     def test_message_usage_limit_transient_is_rate_limit(self):
-        """'usage limit' + 'try again' with no status code → rate_limit, not billing."""
+        """'usage limit' + 'try again' with no status code -> rate_limit, not billing."""
         e = Exception("usage limit exceeded, try again in 5 minutes")
         result = classify_api_error(e)
         assert result.reason == FailoverReason.rate_limit
@@ -486,7 +486,7 @@ class TestClassifyApiError:
         assert result.should_fallback is True
 
     def test_message_usage_limit_no_retry_signal_is_billing(self):
-        """'usage limit' with no transient signal and no status code → billing."""
+        """'usage limit' with no transient signal and no status code -> billing."""
         e = Exception("usage limit reached")
         result = classify_api_error(e)
         assert result.reason == FailoverReason.billing
@@ -494,20 +494,20 @@ class TestClassifyApiError:
         assert result.should_rotate_credential is True
 
     def test_message_quota_with_reset_window_is_rate_limit(self):
-        """'quota' + 'resets at' with no status code → rate_limit."""
+        """'quota' + 'resets at' with no status code -> rate_limit."""
         e = Exception("quota exceeded, resets at midnight UTC")
         result = classify_api_error(e)
         assert result.reason == FailoverReason.rate_limit
         assert result.retryable is True
 
     def test_message_limit_exceeded_with_wait_is_rate_limit(self):
-        """'limit exceeded' + 'wait' with no status code → rate_limit."""
+        """'limit exceeded' + 'wait' with no status code -> rate_limit."""
         e = Exception("key limit exceeded, please wait before retrying")
         result = classify_api_error(e)
         assert result.reason == FailoverReason.rate_limit
         assert result.retryable is True
 
-    # ── Unknown / fallback ──
+    # -- Unknown / fallback --
 
     def test_generic_exception_is_unknown(self):
         e = Exception("something weird happened")
@@ -515,10 +515,10 @@ class TestClassifyApiError:
         assert result.reason == FailoverReason.unknown
         assert result.retryable is True
 
-    # ── Format error ──
+    # -- Format error --
 
     def test_400_descriptive_format_error(self):
-        """400 with descriptive message (not context overflow) → format error."""
+        """400 with descriptive message (not context overflow) -> format error."""
         e = MockAPIError(
             "Invalid value for parameter 'temperature': must be between 0 and 2",
             status_code=400,
@@ -535,7 +535,7 @@ class TestClassifyApiError:
         assert result.retryable is False
 
     def test_400_flat_body_descriptive_not_context_overflow(self):
-        """Responses API flat body with descriptive error + large session → format error.
+        """Responses API flat body with descriptive error + large session -> format error.
 
         The Codex Responses API returns errors in flat body format:
         {"message": "...", "type": "..."} without an "error" wrapper.
@@ -553,7 +553,7 @@ class TestClassifyApiError:
         assert result.retryable is False
 
     def test_400_flat_body_generic_large_session_still_context_overflow(self):
-        """Flat body with generic 'Error' message + large session → context overflow.
+        """Flat body with generic 'Error' message + large session -> context overflow.
 
         Regression: the flat-body fallback must not break the existing heuristic
         for genuinely generic errors from providers that use flat bodies.
@@ -566,24 +566,24 @@ class TestClassifyApiError:
         result = classify_api_error(e, approx_tokens=100000, context_length=200000)
         assert result.reason == FailoverReason.context_overflow
 
-    # ── Peer closed + large session ──
+    # -- Peer closed + large session --
 
     def test_peer_closed_large_session(self):
         e = Exception("peer closed connection without sending complete message")
         result = classify_api_error(e, approx_tokens=130000, context_length=200000)
         assert result.reason == FailoverReason.context_overflow
 
-    # ── Chinese error messages ──
+    # -- Chinese error messages --
 
     def test_chinese_context_overflow(self):
         e = MockAPIError("超过最大长度限制", status_code=400)
         result = classify_api_error(e)
         assert result.reason == FailoverReason.context_overflow
 
-    # ── vLLM / local inference server error messages ──
+    # -- vLLM / local inference server error messages --
 
     def test_vllm_max_model_len_overflow(self):
-        """vLLM's 'exceeds the max_model_len' error → context_overflow."""
+        """vLLM's 'exceeds the max_model_len' error -> context_overflow."""
         e = MockAPIError(
             "The engine prompt length 1327246 exceeds the max_model_len 131072. "
             "Please reduce prompt.",
@@ -593,7 +593,7 @@ class TestClassifyApiError:
         assert result.reason == FailoverReason.context_overflow
 
     def test_vllm_prompt_length_exceeds(self):
-        """vLLM prompt length error → context_overflow."""
+        """vLLM prompt length error -> context_overflow."""
         e = MockAPIError(
             "prompt length 200000 exceeds maximum model length 131072",
             status_code=400,
@@ -602,19 +602,19 @@ class TestClassifyApiError:
         assert result.reason == FailoverReason.context_overflow
 
     def test_vllm_input_too_long(self):
-        """vLLM 'input is too long' error → context_overflow."""
+        """vLLM 'input is too long' error -> context_overflow."""
         e = MockAPIError("input is too long for model", status_code=400)
         result = classify_api_error(e)
         assert result.reason == FailoverReason.context_overflow
 
     def test_ollama_context_length_exceeded(self):
-        """Ollama 'context length exceeded' error → context_overflow."""
+        """Ollama 'context length exceeded' error -> context_overflow."""
         e = MockAPIError("context length exceeded", status_code=400)
         result = classify_api_error(e)
         assert result.reason == FailoverReason.context_overflow
 
     def test_llamacpp_slot_context(self):
-        """llama.cpp / llama-server 'slot context' error → context_overflow."""
+        """llama.cpp / llama-server 'slot context' error -> context_overflow."""
         e = MockAPIError(
             "slot context: 4096 tokens, prompt 8192 tokens — not enough space",
             status_code=400,
@@ -622,7 +622,7 @@ class TestClassifyApiError:
         result = classify_api_error(e)
         assert result.reason == FailoverReason.context_overflow
 
-    # ── Result metadata ──
+    # -- Result metadata --
 
     def test_provider_and_model_in_result(self):
         e = MockAPIError("fail", status_code=500)
@@ -641,7 +641,7 @@ class TestClassifyApiError:
         assert result.message == "Internal server error occurred"
 
 
-# ── Test: Adversarial / edge cases (from live testing) ─────────────────
+# -- Test: Adversarial / edge cases (from live testing) -----------------
 
 class TestAdversarialEdgeCases:
     """Edge cases discovered during live testing with real SDK objects."""

@@ -36,7 +36,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
-# ── Credential env-var filter ──────────────────────────────────────────────
+# -- Credential env-var filter ----------------------------------------------
 #
 # Any env var in the current process matching ONE of these patterns is
 # unset for every test. Developers' local keys cannot leak into assertions
@@ -282,7 +282,7 @@ def mock_config():
     }
 
 
-# ── Global test timeout ─────────────────────────────────────────────────────
+# -- Global test timeout -----------------------------------------------------
 # Kill any individual test that takes longer than 30 seconds.
 # Prevents hanging tests (subprocess spawns, blocking I/O) from stalling the
 # entire test suite.
@@ -327,11 +327,13 @@ def _ensure_current_event_loop(request):
 def _enforce_test_timeout():
     """Kill any individual test that takes longer than 30 seconds.
     SIGALRM is Unix-only; skip on Windows."""
-    if sys.platform == "win32":
+    if sys.platform == "win32" or not hasattr(signal, "SIGALRM"):
         yield
         return
     old = signal.signal(signal.SIGALRM, _timeout_handler)
     signal.alarm(30)
-    yield
-    signal.alarm(0)
-    signal.signal(signal.SIGALRM, old)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)

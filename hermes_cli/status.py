@@ -22,8 +22,8 @@ from tools.tool_backend_helpers import managed_nous_tools_enabled
 
 def check_mark(ok: bool) -> str:
     if ok:
-        return color("✓", Colors.GREEN)
-    return color("✗", Colors.RED)
+        return color("[OK]", Colors.GREEN)
+    return color("[ERR]", Colors.RED)
 
 def redact_key(key: str) -> str:
     """Redact an API key for display."""
@@ -88,9 +88,9 @@ def show_status(args):
     deep = getattr(args, 'deep', False)
     
     print()
-    print(color("┌─────────────────────────────────────────────────────────┐", Colors.CYAN))
-    print(color("│                 ⚕ Hermes Agent Status                  │", Colors.CYAN))
-    print(color("└─────────────────────────────────────────────────────────┘", Colors.CYAN))
+    print(color("+---------------------------------------------------------+", Colors.CYAN))
+    print(color("|                  Hermes Agent Status                  |", Colors.CYAN))
+    print(color("+---------------------------------------------------------+", Colors.CYAN))
     
     # =========================================================================
     # Environment
@@ -214,9 +214,9 @@ def show_status(args):
         print()
         print(color("◆ Nous Tool Gateway", Colors.CYAN, Colors.BOLD))
         if not features.nous_auth_present:
-            print("  Nous Portal   ✗ not logged in")
+            print("  Nous Portal   [ERR] not logged in")
         else:
-            print("  Nous Portal   ✓ managed tools available")
+            print("  Nous Portal   [OK] managed tools available")
         for feature in features.items():
             if feature.managed_by_nous:
                 state = "active via Nous subscription"
@@ -448,7 +448,7 @@ def show_status(args):
             pass
     
     print()
-    print(color("─" * 60, Colors.DIM))
+    print(color("-" * 60, Colors.DIM))
     print(color("  Run 'hermes doctor' for detailed diagnostics", Colors.DIM))
     print(color("  Run 'hermes setup' to configure", Colors.DIM))
     print()

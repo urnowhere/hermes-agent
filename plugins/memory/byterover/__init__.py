@@ -1,7 +1,7 @@
 """ByteRover memory plugin — MemoryProvider interface.
 
 Persistent memory via the ByteRover CLI (``brv``). Organizes knowledge into
-a hierarchical context tree with tiered retrieval (fuzzy text → LLM-driven
+a hierarchical context tree with tiered retrieval (fuzzy text -> LLM-driven
 search). Local-first with optional cloud sync.
 
 Original PR #3499 by hieuntg81, adapted to MemoryProvider ABC.

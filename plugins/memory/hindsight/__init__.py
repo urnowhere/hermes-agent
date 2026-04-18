@@ -298,7 +298,7 @@ class HindsightMemoryProvider(MemoryProvider):
         print(f"\n  Checking dependencies...")
         uv_path = shutil.which("uv")
         if not uv_path:
-            print("  ⚠ uv not found — install it: curl -LsSf https://astral.sh/uv/install.sh | sh")
+            print("  [WARN] uv not found — install it: curl -LsSf https://astral.sh/uv/install.sh | sh")
             print(f"  Then run manually: uv pip install --python {sys.executable} {' '.join(deps_to_install)}")
         else:
             try:
@@ -306,9 +306,9 @@ class HindsightMemoryProvider(MemoryProvider):
                     [uv_path, "pip", "install", "--python", sys.executable, "--quiet", "--upgrade"] + deps_to_install,
                     check=True, timeout=120, capture_output=True,
                 )
-                print(f"  ✓ Dependencies up to date")
+                print(f"  [OK] Dependencies up to date")
             except Exception as e:
-                print(f"  ⚠ Install failed: {e}")
+                print(f"  [WARN] Install failed: {e}")
                 print(f"  Run manually: uv pip install --python {sys.executable} {' '.join(deps_to_install)}")
 
         # Step 3: Mode-specific config
@@ -398,7 +398,7 @@ class HindsightMemoryProvider(MemoryProvider):
                     new_lines.append(f"{k}={v}")
             env_path.write_text("\n".join(new_lines) + "\n")
 
-        print(f"\n  ✓ Hindsight memory configured ({mode} mode)")
+        print(f"\n  [OK] Hindsight memory configured ({mode} mode)")
         if env_writes:
             print(f"  API keys saved to .env")
         print(f"\n  Start a new session to activate.\n")
@@ -583,7 +583,7 @@ class HindsightMemoryProvider(MemoryProvider):
                     current_provider = self._config.get("llm_provider", "")
                     current_model = self._config.get("llm_model", "")
                     current_base_url = self._config.get("llm_base_url") or os.environ.get("HINDSIGHT_API_LLM_BASE_URL", "")
-                    # Map openai_compatible/openrouter → openai for the daemon (OpenAI wire format)
+                    # Map openai_compatible/openrouter -> openai for the daemon (OpenAI wire format)
                     daemon_provider = "openai" if current_provider in ("openai_compatible", "openrouter") else current_provider
 
                     # Read saved profile config

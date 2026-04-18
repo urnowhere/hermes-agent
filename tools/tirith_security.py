@@ -375,7 +375,10 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
                 except OSError:
                     pass
                 return None, "cross_device_copy_failed"
-        os.chmod(dest, os.stat(dest).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        try:
+            os.chmod(dest, os.stat(dest).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        except OSError:
+            pass
 
         verification = "cosign + SHA-256" if cosign_verified else "SHA-256 only"
         logger.info("tirith installed to %s (%s)", dest, verification)
@@ -400,7 +403,7 @@ def _resolve_tirith_path(configured_path: str) -> str:
     For the default "tirith":
     1. PATH lookup via shutil.which
     2. $HERMES_HOME/bin/tirith (previously auto-installed)
-    3. Auto-install from GitHub releases → $HERMES_HOME/bin/tirith
+    3. Auto-install from GitHub releases -> $HERMES_HOME/bin/tirith
 
     Failed installs are cached for the process lifetime (and persisted to
     disk for 24h) to avoid repeated network attempts.

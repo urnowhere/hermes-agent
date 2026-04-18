@@ -7,10 +7,10 @@ from hermes_cli.main import _coalesce_session_name_args
 class TestCoalesceSessionNameArgs:
     """Ensure unquoted multi-word session names are merged into one token."""
 
-    # ── -c / --continue ──────────────────────────────────────────────────
+    # -- -c / --continue --------------------------------------------------
 
     def test_continue_multiword_unquoted(self):
-        """hermes -c Pokemon Agent Dev → -c 'Pokemon Agent Dev'"""
+        """hermes -c Pokemon Agent Dev -> -c 'Pokemon Agent Dev'"""
         assert _coalesce_session_name_args(
             ["-c", "Pokemon", "Agent", "Dev"]
         ) == ["-c", "Pokemon Agent Dev"]
@@ -54,7 +54,7 @@ class TestCoalesceSessionNameArgs:
             ["-c", "my", "project", "chat", "-q", "hello"]
         ) == ["-c", "my project", "chat", "-q", "hello"]
 
-    # ── -r / --resume ────────────────────────────────────────────────────
+    # -- -r / --resume ----------------------------------------------------
 
     def test_resume_multiword(self):
         """hermes -r My Session Name"""
@@ -74,7 +74,7 @@ class TestCoalesceSessionNameArgs:
             ["-r", "My", "Session", "-w"]
         ) == ["-r", "My Session", "-w"]
 
-    # ── combined flags ───────────────────────────────────────────────────
+    # -- combined flags ---------------------------------------------------
 
     def test_worktree_and_continue_multiword(self):
         """hermes -w -c Pokemon Agent Dev (the original failing case)"""
@@ -88,7 +88,7 @@ class TestCoalesceSessionNameArgs:
             ["-c", "Pokemon", "Agent", "Dev", "-w"]
         ) == ["-c", "Pokemon Agent Dev", "-w"]
 
-    # ── passthrough (no session flags) ───────────────────────────────────
+    # -- passthrough (no session flags) -----------------------------------
 
     def test_no_session_flags_passthrough(self):
         """hermes -w chat -q hello (nothing to merge)"""
@@ -98,16 +98,16 @@ class TestCoalesceSessionNameArgs:
     def test_empty_argv(self):
         assert _coalesce_session_name_args([]) == []
 
-    # ── subcommand boundary ──────────────────────────────────────────────
+    # -- subcommand boundary ----------------------------------------------
 
     def test_stops_at_sessions_subcommand(self):
-        """hermes -c my project sessions list → stops before 'sessions'"""
+        """hermes -c my project sessions list -> stops before 'sessions'"""
         assert _coalesce_session_name_args(
             ["-c", "my", "project", "sessions", "list"]
         ) == ["-c", "my project", "sessions", "list"]
 
     def test_stops_at_setup_subcommand(self):
-        """hermes -c my setup → 'setup' is a subcommand, not part of name"""
+        """hermes -c my setup -> 'setup' is a subcommand, not part of name"""
         assert _coalesce_session_name_args(
             ["-c", "my", "setup"]
         ) == ["-c", "my", "setup"]

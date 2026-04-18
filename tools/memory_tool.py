@@ -403,7 +403,7 @@ class MemoryStore:
         else:
             header = f"MEMORY (your personal notes) [{pct}% — {current:,}/{limit:,} chars]"
 
-        separator = "═" * 46
+        separator = "-" * 46
         return f"{separator}\n{header}\n{separator}\n{content}"
 
     @staticmethod

@@ -247,7 +247,7 @@ class TestSessionSearch:
             {"role": "assistant", "content": "hi there"},
         ]
 
-        # Mock async_call_llm to raise RuntimeError → summarizer returns None
+        # Mock async_call_llm to raise RuntimeError -> summarizer returns None
         from unittest.mock import AsyncMock, patch as _patch
         with _patch("tools.session_search_tool.async_call_llm",
                      new_callable=AsyncMock,
@@ -291,7 +291,7 @@ class TestSessionSearch:
         assert result["sessions_searched"] == 0
 
     def test_limit_none_coerced_to_default(self):
-        """Model sends limit=null → should fall back to 3, not TypeError."""
+        """Model sends limit=null -> should fall back to 3, not TypeError."""
         from unittest.mock import MagicMock
         from tools.session_search_tool import session_search
 
@@ -304,7 +304,7 @@ class TestSessionSearch:
         assert result["success"] is True
 
     def test_limit_type_object_coerced_to_default(self):
-        """Model sends limit as a type object → should fall back to 3, not TypeError."""
+        """Model sends limit as a type object -> should fall back to 3, not TypeError."""
         from unittest.mock import MagicMock
         from tools.session_search_tool import session_search
 
@@ -317,7 +317,7 @@ class TestSessionSearch:
         assert result["success"] is True
 
     def test_limit_string_coerced(self):
-        """Model sends limit as string '2' → should coerce to int."""
+        """Model sends limit as string '2' -> should coerce to int."""
         from unittest.mock import MagicMock
         from tools.session_search_tool import session_search
 

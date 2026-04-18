@@ -107,7 +107,7 @@ async def test_process_message_background_adds_and_swaps_reactions(adapter):
 
     assert raw_message.add_reaction.await_args_list[0].args == ("👀",)
     assert raw_message.remove_reaction.await_args_list[0].args == ("👀", adapter._client.user)
-    assert raw_message.add_reaction.await_args_list[1].args == ("✅",)
+    assert raw_message.add_reaction.await_args_list[1].args == ("[OK]",)
 
 
 @pytest.mark.asyncio

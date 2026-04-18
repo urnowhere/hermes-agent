@@ -126,7 +126,7 @@ class VoiceReceiver:
     completed utterances via a callback.
     """
 
-    SILENCE_THRESHOLD = 1.5    # seconds of silence → end of utterance
+    SILENCE_THRESHOLD = 1.5    # seconds of silence -> end of utterance
     MIN_SPEECH_DURATION = 0.5  # minimum seconds to process (skip noise)
     SAMPLE_RATE = 48000        # Discord native rate
     CHANNELS = 2               # Discord sends stereo
@@ -688,10 +688,10 @@ class DiscordAdapter(BasePlatformAdapter):
                         m.bot and m != self._client.user
                         for m in message.mentions
                     )
-                    # If other bots are mentioned but we're not → not for us
+                    # If other bots are mentioned but we're not -> not for us
                     if _other_bots_mentioned and not _self_mentioned:
                         return
-                    # If humans are mentioned but we're not → not for us
+                    # If humans are mentioned but we're not -> not for us
                     # (preserves old DISCORD_IGNORE_NO_MENTION=true behavior)
                     _ignore_no_mention = os.getenv(
                         "DISCORD_IGNORE_NO_MENTION", "true"
@@ -842,9 +842,9 @@ class DiscordAdapter(BasePlatformAdapter):
         if hasattr(message, "add_reaction"):
             await self._remove_reaction(message, "👀")
             if outcome == ProcessingOutcome.SUCCESS:
-                await self._add_reaction(message, "✅")
+                await self._add_reaction(message, "[OK]")
             elif outcome == ProcessingOutcome.FAILURE:
-                await self._add_reaction(message, "❌")
+                await self._add_reaction(message, "[ERR]")
 
     async def send(
         self,
@@ -2095,7 +2095,7 @@ class DiscordAdapter(BasePlatformAdapter):
         async def slash_btw(interaction: discord.Interaction, question: str):
             await self._run_simple_slash(interaction, f"/btw {question}")
 
-        # ── Auto-register any gateway-available commands not yet on the tree ──
+        # -- Auto-register any gateway-available commands not yet on the tree --
         # This ensures new commands added to COMMAND_REGISTRY in
         # hermes_cli/commands.py automatically appear as Discord slash
         # commands without needing a manual entry here.
@@ -2633,7 +2633,7 @@ class DiscordAdapter(BasePlatformAdapter):
             max_desc = 4088
             cmd_display = command if len(command) <= max_desc else command[: max_desc - 3] + "..."
             embed = discord.Embed(
-                title="⚠️ Command Approval Required",
+                title="[WARN]️ Command Approval Required",
                 description=f"```\n{cmd_display}\n```",
                 color=discord.Color.orange(),
             )
@@ -2668,7 +2668,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
             default_hint = f" (default: {default})" if default else ""
             embed = discord.Embed(
-                title="⚕ Update Needs Your Input",
+                title=" Update Needs Your Input",
                 description=f"{prompt}{default_hint}",
                 color=discord.Color.gold(),
             )
@@ -2693,7 +2693,7 @@ class DiscordAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Send an interactive select-menu model picker.
 
-        Two-step drill-down: provider dropdown → model dropdown.
+        Two-step drill-down: provider dropdown -> model dropdown.
         Uses Discord embeds + Select menus via ``ModelPickerView``.
         """
         if not self._client or not DISCORD_AVAILABLE:
@@ -2716,7 +2716,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 provider_label = current_provider
 
             embed = discord.Embed(
-                title="⚙ Model Configuration",
+                title=" Model Configuration",
                 description=(
                     f"Current model: `{current_model or 'unknown'}`\n"
                     f"Provider: {provider_label}\n\n"
@@ -3415,13 +3415,13 @@ if DISCORD_AVAILABLE:
             except Exception as exc:
                 logger.error("Failed to write update response: %s", exc)
 
-        @discord.ui.button(label="Yes", style=discord.ButtonStyle.green, emoji="✓")
+        @discord.ui.button(label="Yes", style=discord.ButtonStyle.green, emoji="[OK]")
         async def yes_btn(
             self, interaction: discord.Interaction, button: discord.ui.Button
         ):
             await self._respond(interaction, "y", discord.Color.green(), "Yes")
 
-        @discord.ui.button(label="No", style=discord.ButtonStyle.red, emoji="✗")
+        @discord.ui.button(label="No", style=discord.ButtonStyle.red, emoji="[ERR]")
         async def no_btn(
             self, interaction: discord.Interaction, button: discord.ui.Button
         ):
@@ -3435,7 +3435,7 @@ if DISCORD_AVAILABLE:
     class ModelPickerView(discord.ui.View):
         """Interactive select-menu view for model switching.
 
-        Two-step drill-down: provider dropdown → model dropdown.
+        Two-step drill-down: provider dropdown -> model dropdown.
         Edits the original message in-place as the user navigates.
         Times out after 2 minutes.
         """
@@ -3562,7 +3562,7 @@ if DISCORD_AVAILABLE:
 
             await interaction.response.edit_message(
                 embed=discord.Embed(
-                    title="⚙ Model Configuration",
+                    title=" Model Configuration",
                     description=f"Provider: **{pname}**\nSelect a model:{extra}",
                     color=discord.Color.blue(),
                 ),
@@ -3596,7 +3596,7 @@ if DISCORD_AVAILABLE:
             self.clear_items()
             await interaction.response.edit_message(
                 embed=discord.Embed(
-                    title="⚙ Model Switched",
+                    title=" Model Switched",
                     description=result_text,
                     color=discord.Color.green(),
                 ),
@@ -3620,7 +3620,7 @@ if DISCORD_AVAILABLE:
 
             await interaction.response.edit_message(
                 embed=discord.Embed(
-                    title="⚙ Model Configuration",
+                    title=" Model Configuration",
                     description=(
                         f"Current model: `{self.current_model or 'unknown'}`\n"
                         f"Provider: {provider_label}\n\n"
@@ -3636,7 +3636,7 @@ if DISCORD_AVAILABLE:
             self.clear_items()
             await interaction.response.edit_message(
                 embed=discord.Embed(
-                    title="⚙ Model Configuration",
+                    title=" Model Configuration",
                     description="Model selection cancelled.",
                     color=discord.Color.greyple(),
                 ),

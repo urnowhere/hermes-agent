@@ -370,7 +370,7 @@ class TestBlueBubblesAttachmentDownload:
         assert result == "/tmp/report.pdf"
 
     def test_download_returns_none_without_client(self, monkeypatch):
-        """No client → returns None gracefully."""
+        """No client -> returns None gracefully."""
         adapter = _make_adapter(monkeypatch)
         adapter.client = None
         import asyncio
@@ -391,7 +391,7 @@ class TestBlueBubblesWebhookUrl:
 
     def test_default_host(self, monkeypatch):
         adapter = _make_adapter(monkeypatch)
-        # Default webhook_host is 0.0.0.0 → normalized to localhost
+        # Default webhook_host is 0.0.0.0 -> normalized to localhost
         assert "localhost" in adapter._webhook_url
         assert str(adapter.webhook_port) in adapter._webhook_url
         assert adapter.webhook_path in adapter._webhook_url
@@ -513,7 +513,7 @@ class TestBlueBubblesWebhookRegistration:
     # -- _register_webhook --
 
     def test_register_fresh(self, monkeypatch):
-        """No existing webhook → POST creates one."""
+        """No existing webhook -> POST creates one."""
         import asyncio
         adapter = _make_adapter(monkeypatch)
         adapter.client = self._mock_client(

@@ -9,7 +9,7 @@ import pytest
 from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
 
 
-# ── _clean_for_display unit tests ────────────────────────────────────────
+# -- _clean_for_display unit tests ----------------------------------------
 
 
 class TestCleanForDisplay:
@@ -85,7 +85,7 @@ class TestCleanForDisplay:
         assert result == text
 
 
-# ── Integration: _send_or_edit strips MEDIA: ─────────────────────────────
+# -- Integration: _send_or_edit strips MEDIA: -----------------------------
 
 
 class TestFinalizeCapabilityGate:
@@ -285,7 +285,7 @@ class TestSendOrEditMediaStripping:
         adapter.edit_message.assert_called_once()
 
 
-# ── Integration: full stream run ─────────────────────────────────────────
+# -- Integration: full stream run -----------------------------------------
 
 
 class TestStreamRunMediaStripping:
@@ -324,7 +324,7 @@ class TestStreamRunMediaStripping:
         assert consumer.already_sent
 
 
-# ── Segment break (tool boundary) tests ──────────────────────────────────
+# -- Segment break (tool boundary) tests ----------------------------------
 
 
 class TestSegmentBreakOnToolBoundary:
@@ -600,7 +600,7 @@ class TestSegmentBreakOnToolBoundary:
         config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
         consumer = GatewayStreamConsumer(adapter, "chat_123", config)
 
-        # Simulate: text → tool boundary → text → tool boundary → text (3 segments)
+        # Simulate: text -> tool boundary -> text -> tool boundary -> text (3 segments)
         consumer.on_delta("Phase 1 text")
         consumer.on_delta(None)   # tool call boundary
         consumer.on_delta("Phase 2 text")
@@ -676,7 +676,7 @@ class TestSegmentBreakOnToolBoundary:
 
         # After the tool call, the model returns a SHORT final response that
         # does NOT start with the pre-tool prefix.  The continuation calculator
-        # would return empty (no prefix match → full text returned, but if the
+        # would return empty (no prefix match -> full text returned, but if the
         # streaming edit already showed pre_tool_text, the prefix-based logic
         # wrongly matches).  Simulate this by setting _last_sent_text to the
         # pre-tool content, then finishing with different post-tool content.
@@ -861,7 +861,7 @@ class TestCancelledConsumerSetsFlags:
         assert consumer.final_response_sent is False
 
 
-# ── Think-block filtering unit tests ─────────────────────────────────────
+# -- Think-block filtering unit tests -------------------------------------
 
 
 def _make_consumer() -> GatewayStreamConsumer:
@@ -1060,7 +1060,7 @@ class TestFilterAndAccumulateIntegration:
             pass
 
 
-# ── buffer_only mode tests ─────────────────────────────────────────────
+# -- buffer_only mode tests ---------------------------------------------
 
 
 class TestBufferOnlyMode:

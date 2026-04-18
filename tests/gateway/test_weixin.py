@@ -350,7 +350,7 @@ class TestWeixinChunkDelivery:
         result = asyncio.run(adapter.send("wxid_test123", "first\n\nsecond\n\nthird"))
 
         assert result.success is True
-        # 3 chunks, but chunk 2 fails once and retries → 4 _send_message calls total
+        # 3 chunks, but chunk 2 fails once and retries -> 4 _send_message calls total
         assert send_message_mock.await_count == 4
         # The retried chunk should reuse the same client_id for deduplication
         first_try = send_message_mock.await_args_list[1].kwargs
@@ -538,7 +538,7 @@ class TestWeixinBlankMessagePrevention:
         adapter._token_store.get = lambda account_id, chat_id: "ctx-token"
 
         result = asyncio.run(adapter.send("wxid_test123", ""))
-        # Empty content → no chunks → no _send_message calls
+        # Empty content -> no chunks -> no _send_message calls
         assert result.success is True
         send_message_mock.assert_not_awaited()
 

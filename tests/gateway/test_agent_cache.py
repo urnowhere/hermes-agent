@@ -1,7 +1,7 @@
 """Integration tests for gateway AIAgent caching.
 
 Verifies that the agent cache correctly:
-- Reuses agents across messages (same config → same instance)
+- Reuses agents across messages (same config -> same instance)
 - Rebuilds agents when config changes (model, provider, toolsets)
 - Updates reasoning_config in-place without rebuilding
 - Evicts on session reset
@@ -130,7 +130,7 @@ class TestAgentCacheLifecycle:
         assert cached[0] is agent1  # same instance
 
     def test_cache_miss_on_model_change(self):
-        """Model change produces different signature → cache miss."""
+        """Model change produces different signature -> cache miss."""
         from run_agent import AIAgent
 
         runner = _make_runner()
@@ -148,13 +148,13 @@ class TestAgentCacheLifecycle:
         with runner._agent_cache_lock:
             runner._agent_cache[session_key] = (agent1, old_sig)
 
-        # New model → different signature
+        # New model -> different signature
         new_sig = runner._agent_config_signature("anthropic/claude-opus-4.6", runtime, ["hermes-telegram"], "")
         assert new_sig != old_sig
 
         with runner._agent_cache_lock:
             cached = runner._agent_cache.get(session_key)
-        assert cached[1] != new_sig  # signature mismatch → would create new agent
+        assert cached[1] != new_sig  # signature mismatch -> would create new agent
 
     def test_evict_on_session_reset(self):
         """_evict_cached_agent removes the entry."""
@@ -322,7 +322,7 @@ class TestAgentCacheBoundedGrowth:
             runner._enforce_agent_cache_cap()
 
         assert "s0" in runner._agent_cache  # rescued by move_to_end
-        assert "s1" not in runner._agent_cache  # now oldest → evicted
+        assert "s1" not in runner._agent_cache  # now oldest -> evicted
         assert "s3" in runner._agent_cache
 
     def test_cap_triggers_cleanup_thread(self, monkeypatch):
@@ -813,7 +813,7 @@ class TestAgentCacheSpilloverLive:
         import time as _t
         _t.sleep(0.3)
 
-        # Now sA's user sends another message → a fresh agent goes in.
+        # Now sA's user sends another message -> a fresh agent goes in.
         a0_new = self._real_agent()
         with runner._agent_cache_lock:
             runner._agent_cache["sA"] = (a0_new, "sig")
@@ -838,9 +838,9 @@ class TestAgentCacheIdleResume:
     Idle-TTL evicts their cached agent.  They come back and send a message.
     The new agent built for the same session_id must inherit:
       - Conversation history (from SessionStore — outside cache concern)
-      - Terminal sandbox (same task_id → same _active_environments entry)
-      - Browser daemon (same task_id → same browser session)
-      - Background processes (same task_id → same process_registry entries)
+      - Terminal sandbox (same task_id -> same _active_environments entry)
+      - Browser daemon (same task_id -> same browser session)
+      - Background processes (same task_id -> same process_registry entries)
     The ONLY thing that should reset is the LLM client pool (rebuilt fresh).
     """
 

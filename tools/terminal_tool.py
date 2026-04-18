@@ -245,7 +245,12 @@ def _prompt_for_sudo_password(timeout_seconds: int = 45) -> str:
                     chars.append(c)
                 result["password"] = "".join(chars)
             else:
-                import termios
+                try:
+                    import termios
+                except ImportError:
+                    # termios not available (e.g. MSYS2/Git Bash on Windows)
+                    result["password"] = ""
+                    return
                 tty_fd = os.open("/dev/tty", os.O_RDONLY)
                 old_attrs = termios.tcgetattr(tty_fd)
                 new_attrs = termios.tcgetattr(tty_fd)
@@ -281,13 +286,13 @@ def _prompt_for_sudo_password(timeout_seconds: int = 45) -> str:
         time_module.sleep(0.2)
         
         print()
-        print("┌" + "─" * 58 + "┐")
-        print("│  🔐 SUDO PASSWORD REQUIRED" + " " * 30 + "│")
-        print("├" + "─" * 58 + "┤")
-        print("│  Enter password below (input is hidden), or:            │")
-        print("│    • Press Enter to skip (command fails gracefully)     │")
-        print(f"│    • Wait {timeout_seconds}s to auto-skip" + " " * 27 + "│")
-        print("└" + "─" * 58 + "┘")
+        print("+" + "-" * 58 + "+")
+        print("|  🔐 SUDO PASSWORD REQUIRED" + " " * 30 + "|")
+        print("├" + "-" * 58 + "┤")
+        print("|  Enter password below (input is hidden), or:            |")
+        print("|    • Press Enter to skip (command fails gracefully)     |")
+        print(f"|    • Wait {timeout_seconds}s to auto-skip" + " " * 27 + "|")
+        print("+" + "-" * 58 + "+")
         print()
         print("  Password (hidden): ", end="", flush=True)
         
@@ -299,7 +304,7 @@ def _prompt_for_sudo_password(timeout_seconds: int = 45) -> str:
             password = result["password"] or ""
             print()  # newline after hidden input
             if password:
-                print("  ✓ Password received (cached for this session)")
+                print("  [OK] Password received (cached for this session)")
             else:
                 print("  ⏭ Skipped - continuing without sudo")
             print()
@@ -1654,10 +1659,10 @@ if __name__ == "__main__":
     print(f"  Lifetime: {config['lifetime_seconds']}s")
 
     if not check_terminal_requirements():
-        print("\n❌ Requirements not met. Please check the messages above.")
+        print("\n[ERR] Requirements not met. Please check the messages above.")
         exit(1)
 
-    print("\n✅ All requirements met!")
+    print("\n[OK] All requirements met!")
     print("\nAvailable Tool:")
     print("  - terminal_tool: Execute commands in sandboxed environments")
 

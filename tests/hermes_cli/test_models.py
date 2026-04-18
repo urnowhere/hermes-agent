@@ -225,11 +225,11 @@ class TestFilterNousFreeModels:
     def test_mixed_scenario(self):
         """End-to-end: mix of paid, free-allowed, free-disallowed, allowlist-not-free."""
         models = [
-            "anthropic/claude-opus-4.6",       # paid, not allowlist → keep
-            "nvidia/nemotron-3-super-120b-a12b:free",  # free, not allowlist → drop
-            "xiaomi/mimo-v2-pro",              # free, allowlist → keep
-            "xiaomi/mimo-v2-omni",             # paid, allowlist → drop
-            "openai/gpt-5.4",                  # paid, not allowlist → keep
+            "anthropic/claude-opus-4.6",       # paid, not allowlist -> keep
+            "nvidia/nemotron-3-super-120b-a12b:free",  # free, not allowlist -> drop
+            "xiaomi/mimo-v2-pro",              # free, allowlist -> keep
+            "xiaomi/mimo-v2-omni",             # paid, allowlist -> drop
+            "openai/gpt-5.4",                  # paid, not allowlist -> keep
         ]
         pricing = {
             "anthropic/claude-opus-4.6": self._PAID,

@@ -290,7 +290,7 @@ def do_browse(page: int = 1, page_size: int = 20, source: str = "all",
     if page > 1:
         nav_parts.append(f"[cyan]--page {page - 1}[/] ← prev")
     if page < total_pages:
-        nav_parts.append(f"[cyan]--page {page + 1}[/] → next")
+        nav_parts.append(f"[cyan]--page {page + 1}[/] -> next")
 
     if nav_parts:
         c.print(f"  {' | '.join(nav_parts)}")
@@ -301,7 +301,7 @@ def do_browse(page: int = 1, page_size: int = 20, source: str = "all",
         c.print(f"  [dim]Sources: {', '.join(parts)}[/]")
 
     if timed_out:
-        c.print(f"  [yellow]⚡ Slow sources skipped: {', '.join(timed_out)} "
+        c.print(f"  [yellow] Slow sources skipped: {', '.join(timed_out)} "
                 f"— run again for cached results[/]")
 
     c.print("[dim]Tip: 'hermes skills search <query>' searches deeper across all registries[/]\n")

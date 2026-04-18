@@ -19,7 +19,7 @@ class TestPickerViewport:
         assert visible == 5
 
     def test_long_list_caps_visible_to_chrome_budget(self):
-        # 30 rows minus reserved_below=6 minus panel_chrome=6 → max_visible=18.
+        # 30 rows minus reserved_below=6 minus panel_chrome=6 -> max_visible=18.
         offset, visible = _compute(selected=0, scroll_offset=0, n=36, term_rows=30)
         assert visible == 18
         assert offset == 0

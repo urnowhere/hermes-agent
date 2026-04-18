@@ -12,9 +12,9 @@ import pytest
 from agent.model_metadata import query_ollama_num_ctx
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# -----------------------------------------------------------------------
 # Level 1: query_ollama_num_ctx — Ollama API interaction
-# ═══════════════════════════════════════════════════════════════════════
+# -----------------------------------------------------------------------
 
 
 def _mock_httpx_client(show_response_data, status_code=200):

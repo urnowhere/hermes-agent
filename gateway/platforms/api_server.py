@@ -2386,7 +2386,7 @@ class APIServerAdapter(BasePlatformAdapter):
             self._mark_connected()
             if not self._api_key:
                 logger.warning(
-                    "[%s] ⚠️  No API key configured (API_SERVER_KEY / platforms.api_server.key). "
+                    "[%s] [WARN]️  No API key configured (API_SERVER_KEY / platforms.api_server.key). "
                     "All requests will be accepted without authentication. "
                     "Set an API key for production deployments to prevent "
                     "unauthorized access to sessions, responses, and cron jobs.",

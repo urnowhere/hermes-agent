@@ -231,7 +231,7 @@ class MatrixAdapter(BasePlatformAdapter):
         self._closing = False
         self._startup_ts: float = 0.0
 
-        # Cache: room_id → bool (is DM)
+        # Cache: room_id -> bool (is DM)
         self._dm_rooms: Dict[str, bool] = {}
         # Set of room IDs we've joined
         self._joined_rooms: Set[str] = set()

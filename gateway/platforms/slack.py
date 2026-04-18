@@ -84,16 +84,16 @@ class SlackAdapter(BasePlatformAdapter):
         self._app: Optional[AsyncApp] = None
         self._handler: Optional[AsyncSocketModeHandler] = None
         self._bot_user_id: Optional[str] = None
-        self._user_name_cache: Dict[str, str] = {}  # user_id → display name
+        self._user_name_cache: Dict[str, str] = {}  # user_id -> display name
         self._socket_mode_task: Optional[asyncio.Task] = None
         # Multi-workspace support
-        self._team_clients: Dict[str, AsyncWebClient] = {}   # team_id → WebClient
-        self._team_bot_user_ids: Dict[str, str] = {}          # team_id → bot_user_id
-        self._channel_team: Dict[str, str] = {}                # channel_id → team_id
+        self._team_clients: Dict[str, AsyncWebClient] = {}   # team_id -> WebClient
+        self._team_bot_user_ids: Dict[str, str] = {}          # team_id -> bot_user_id
+        self._channel_team: Dict[str, str] = {}                # channel_id -> team_id
         # Dedup cache: prevents duplicate bot responses when Socket Mode
         # reconnects redeliver events.
         self._dedup = MessageDeduplicator()
-        # Track pending approval message_ts → resolved flag to prevent
+        # Track pending approval message_ts -> resolved flag to prevent
         # double-clicks on approval buttons.
         self._approval_resolved: Dict[str, bool] = {}
         # Track timestamps of messages sent by the bot so we can respond
@@ -110,7 +110,7 @@ class SlackAdapter(BasePlatformAdapter):
         # session + memory scoping.
         self._assistant_threads: Dict[Tuple[str, str], Dict[str, str]] = {}
         self._ASSISTANT_THREADS_MAX = 5000
-        # Cache for _fetch_thread_context results: cache_key → _ThreadContextCache
+        # Cache for _fetch_thread_context results: cache_key -> _ThreadContextCache
         self._thread_context_cache: Dict[str, _ThreadContextCache] = {}
         self._THREAD_CACHE_TTL = 60.0
 
@@ -158,7 +158,7 @@ class SlackAdapter(BasePlatformAdapter):
             primary_token = bot_tokens[0]
             self._app = AsyncApp(token=primary_token)
 
-            # Register each bot token and map team_id → client
+            # Register each bot token and map team_id -> client
             for token in bot_tokens:
                 client = AsyncWebClient(token=token)
                 auth_response = await client.auth_test()
@@ -261,7 +261,7 @@ class SlackAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
 
         try:
-            # Convert standard markdown → Slack mrkdwn
+            # Convert standard markdown -> Slack mrkdwn
             formatted = self.format_message(content)
 
             # Split long messages, preserving code block boundaries
@@ -432,7 +432,7 @@ class SlackAdapter(BasePlatformAdapter):
         )
         return SendResult(success=True, raw_response=result)
 
-    # ----- Markdown → mrkdwn conversion -----
+    # ----- Markdown -> mrkdwn conversion -----
 
     def format_message(self, content: str) -> str:
         """Convert standard markdown to Slack mrkdwn format.
@@ -466,7 +466,7 @@ class SlackAdapter(BasePlatformAdapter):
         # 2) Protect inline code (`...`)
         text = re.sub(r'(`[^`]+`)', lambda m: _ph(m.group(0)), text)
 
-        # 3) Convert markdown links [text](url) → <url|text>
+        # 3) Convert markdown links [text](url) -> <url|text>
         def _convert_markdown_link(m):
             label = m.group(1)
             url = m.group(2).strip()
@@ -496,7 +496,7 @@ class SlackAdapter(BasePlatformAdapter):
         text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
         text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
-        # 7) Convert headers (## Title) → *Title* (bold)
+        # 7) Convert headers (## Title) -> *Title* (bold)
         def _convert_header(m):
             inner = m.group(1).strip()
             # Strip redundant bold markers inside a header
@@ -507,14 +507,14 @@ class SlackAdapter(BasePlatformAdapter):
             r'^#{1,6}\s+(.+)$', _convert_header, text, flags=re.MULTILINE
         )
 
-        # 8) Convert bold+italic: ***text*** → *_text_* (Slack bold wrapping italic)
+        # 8) Convert bold+italic: ***text*** -> *_text_* (Slack bold wrapping italic)
         text = re.sub(
             r'\*\*\*(.+?)\*\*\*',
             lambda m: _ph(f'*_{m.group(1)}_*'),
             text,
         )
 
-        # 9) Convert bold: **text** → *text* (Slack bold)
+        # 9) Convert bold: **text** -> *text* (Slack bold)
         text = re.sub(
             r'\*\*(.+?)\*\*',
             lambda m: _ph(f'*{m.group(1)}*'),
@@ -522,14 +522,14 @@ class SlackAdapter(BasePlatformAdapter):
         )
 
         # 10) Convert italic: _text_ stays as _text_ (already Slack italic)
-        #     Single *text* → _text_ (Slack italic)
+        #     Single *text* -> _text_ (Slack italic)
         text = re.sub(
             r'(?<!\*)\*([^*\n]+)\*(?!\*)',
             lambda m: _ph(f'_{m.group(1)}_'),
             text,
         )
 
-        # 11) Convert strikethrough: ~~text~~ → ~text~
+        # 11) Convert strikethrough: ~~text~~ -> ~text~
         text = re.sub(
             r'~~(.+?)~~',
             lambda m: _ph(f'~{m.group(1)}~'),
@@ -593,7 +593,7 @@ class SlackAdapter(BasePlatformAdapter):
             client = self._get_client(chat_id) if chat_id else self._app.client
             result = await client.users_info(user=user_id)
             user = result.get("user", {})
-            # Prefer display_name → real_name → user_id
+            # Prefer display_name -> real_name -> user_id
             profile = user.get("profile", {})
             name = (
                 profile.get("display_name")
@@ -1283,7 +1283,7 @@ class SlackAdapter(BasePlatformAdapter):
 
             kwargs: Dict[str, Any] = {
                 "channel": chat_id,
-                "text": f"⚠️ Command approval required: {cmd_preview[:100]}",
+                "text": f"[WARN]️ Command approval required: {cmd_preview[:100]}",
                 "blocks": blocks,
             }
             if thread_ts:
@@ -1339,10 +1339,10 @@ class SlackAdapter(BasePlatformAdapter):
 
         # Update the message to show the decision and remove buttons
         label_map = {
-            "once": f"✅ Approved once by {user_name}",
-            "session": f"✅ Approved for session by {user_name}",
-            "always": f"✅ Approved permanently by {user_name}",
-            "deny": f"❌ Denied by {user_name}",
+            "once": f"[OK] Approved once by {user_name}",
+            "session": f"[OK] Approved for session by {user_name}",
+            "always": f"[OK] Approved permanently by {user_name}",
+            "deny": f"[ERR] Denied by {user_name}",
         }
         decision_text = label_map.get(choice, f"Resolved by {user_name}")
 
@@ -1667,7 +1667,7 @@ class SlackAdapter(BasePlatformAdapter):
                     raise
         raise last_exc
 
-    # ── Channel mention gating ─────────────────────────────────────────────
+    # -- Channel mention gating ---------------------------------------------
 
     def _slack_require_mention(self) -> bool:
         """Return whether channel messages require an explicit bot mention.

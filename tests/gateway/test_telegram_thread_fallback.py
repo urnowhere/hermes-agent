@@ -20,9 +20,9 @@ from gateway.config import PlatformConfig, Platform
 from gateway.platforms.base import SendResult
 
 
-# ── Fake telegram.error hierarchy ──────────────────────────────────────
+# -- Fake telegram.error hierarchy --------------------------------------
 # Mirrors the real python-telegram-bot hierarchy:
-#   BadRequest → NetworkError → TelegramError → Exception
+#   BadRequest -> NetworkError -> TelegramError -> Exception
 
 
 class FakeNetworkError(Exception):
@@ -329,7 +329,7 @@ async def test_thread_fallback_only_fires_once():
     )
 
     assert result.success is True
-    # First chunk: attempt with thread → fail → retry without → succeed
+    # First chunk: attempt with thread -> fail -> retry without -> succeed
     # Second chunk: should use thread_id=None directly (effective_thread_id
     # was cleared per-chunk but the metadata doesn't change between chunks)
     # The key point: the message was delivered despite the invalid thread

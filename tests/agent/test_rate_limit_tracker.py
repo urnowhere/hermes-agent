@@ -14,7 +14,7 @@ from agent.rate_limit_tracker import (
 )
 
 
-# ── Sample headers from Nous inference API ──────────────────────────────
+# -- Sample headers from Nous inference API ------------------------------
 
 NOUS_HEADERS = {
     "x-ratelimit-limit-requests": "800",
@@ -167,7 +167,7 @@ class TestFormatting:
         }
         state = parse_rate_limit_headers(headers)
         result = format_rate_limit_display(state)
-        assert "⚠" in result
+        assert "[WARN]" in result
 
     def test_format_compact(self):
         state = parse_rate_limit_headers(NOUS_HEADERS, provider="nous")

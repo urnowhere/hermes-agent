@@ -963,7 +963,7 @@ class TestBuildAnthropicKwargs:
         # Opus 4.7 added "xhigh" as a distinct effort level (low/medium/high/
         # xhigh/max). Opus 4.6 only supports low/medium/high/max — sending
         # "xhigh" there returns an API 400. Preserve the pre-migration
-        # behavior of aliasing xhigh→max on pre-4.7 adaptive models so users
+        # behavior of aliasing xhigh->max on pre-4.7 adaptive models so users
         # who prefer xhigh as their default don't 400 every request when
         # switching back to 4.6.
         kwargs = build_anthropic_kwargs(
@@ -1551,7 +1551,7 @@ class TestThinkingBlockSignatureManagement:
         ]
         _, result = convert_messages_to_anthropic(messages)
         # First assistant is non-last, so thinking is stripped completely.
-        # The original content was empty and thinking was unsigned → placeholder
+        # The original content was empty and thinking was unsigned -> placeholder
         first_assistant = result[0]
         assert first_assistant["role"] == "assistant"
         assert len(first_assistant["content"]) >= 1

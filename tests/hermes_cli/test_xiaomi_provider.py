@@ -210,7 +210,7 @@ class TestXiaomiNormalization:
 
 
 class TestXiaomiURLMapping:
-    """Test URL → provider inference for Xiaomi endpoints."""
+    """Test URL -> provider inference for Xiaomi endpoints."""
 
     def test_url_to_provider(self):
         from agent.model_metadata import _URL_TO_PROVIDER
@@ -277,7 +277,7 @@ class TestXiaomiProvidersModule:
 
 
 class TestXiaomiAuxiliary:
-    """Xiaomi auxiliary routing: vision → omni, non-vision → user's main model, never flash."""
+    """Xiaomi auxiliary routing: vision -> omni, non-vision -> user's main model, never flash."""
 
     def test_no_flash_in_aux_models(self):
         """mimo-v2-flash must NEVER be used for automatic aux routing."""

@@ -1,4 +1,4 @@
-"""Tests for payload/context-length → compression retry logic in AIAgent.
+"""Tests for payload/context-length -> compression retry logic in AIAgent.
 
 Verifies that:
 - HTTP 413 errors trigger history compression and retry
@@ -198,7 +198,7 @@ class TestHTTP413Compression:
         but if conversation_history still holds the original (pre-compression) list,
         _flush_messages_to_session_db computes flush_from = max(len(history), 0) which
         exceeds len(compressed_messages), so messages[flush_from:] is empty and nothing
-        is written to the new session → "Session found but has no messages" on resume.
+        is written to the new session -> "Session found but has no messages" on resume.
         """
         err_413 = _make_413_error()
         ok_resp = _mock_response(content="OK", finish_reason="stop")
@@ -400,7 +400,7 @@ class TestHTTP413Compression:
             patch.object(agent, "_save_trajectory"),
             patch.object(agent, "_cleanup_task_resources"),
         ):
-            # Compression returns same number of messages → can't compress further
+            # Compression returns same number of messages -> can't compress further
             mock_compress.return_value = (
                 [{"role": "user", "content": "hello"}],
                 "same prompt",

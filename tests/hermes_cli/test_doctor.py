@@ -159,7 +159,7 @@ def test_check_gateway_service_linger_skips_when_service_not_installed(monkeypat
     assert issues == []
 
 
-# ── Memory provider section (doctor should only check the *active* provider) ──
+# -- Memory provider section (doctor should only check the *active* provider) --
 
 
 class TestDoctorMemoryProviderSection:
@@ -291,7 +291,7 @@ def test_run_doctor_termux_does_not_mark_browser_available_without_agent_browser
         doctor_mod.run_doctor(Namespace(fix=False))
     out = buf.getvalue()
 
-    assert "✓ browser" not in out
+    assert "[OK] browser" not in out
     assert "browser" in out
     assert "system dependency not met" in out
     assert "agent-browser is not installed (expected in the tested Termux path)" in out

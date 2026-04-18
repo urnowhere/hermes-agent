@@ -187,7 +187,7 @@ _APPROVAL_LABEL_MAP: Dict[str, str] = {
     "deny": "Denied",
 }
 _FEISHU_BOT_MSG_TRACK_SIZE = 512                   # LRU size for tracking sent message IDs
-_FEISHU_REPLY_FALLBACK_CODES = frozenset({230011, 231003})  # reply target withdrawn/missing → create fallback
+_FEISHU_REPLY_FALLBACK_CODES = frozenset({230011, 231003})  # reply target withdrawn/missing -> create fallback
 _FEISHU_ACK_EMOJI = "OK"
 
 # QR onboarding constants
@@ -1065,14 +1065,14 @@ class FeishuAdapter(BasePlatformAdapter):
         self._webhook_runner: Optional[Any] = None
         self._webhook_site: Optional[Any] = None
         self._event_handler: Optional[Any] = None
-        self._seen_message_ids: Dict[str, float] = {}  # message_id → seen_at (time.time())
+        self._seen_message_ids: Dict[str, float] = {}  # message_id -> seen_at (time.time())
         self._seen_message_order: List[str] = []
         self._dedup_state_path = get_hermes_home() / "feishu_seen_message_ids.json"
         self._dedup_lock = threading.Lock()
-        self._sender_name_cache: Dict[str, tuple[str, float]] = {}  # sender_id → (name, expire_at)
-        self._webhook_rate_counts: Dict[str, tuple[int, float]] = {}  # rate_key → (count, window_start)
-        self._webhook_anomaly_counts: Dict[str, tuple[int, str, float]] = {}  # ip → (count, last_status, first_seen)
-        self._card_action_tokens: Dict[str, float] = {}  # token → first_seen_time
+        self._sender_name_cache: Dict[str, tuple[str, float]] = {}  # sender_id -> (name, expire_at)
+        self._webhook_rate_counts: Dict[str, tuple[int, float]] = {}  # rate_key -> (count, window_start)
+        self._webhook_anomaly_counts: Dict[str, tuple[int, str, float]] = {}  # ip -> (count, last_status, first_seen)
+        self._card_action_tokens: Dict[str, float] = {}  # token -> first_seen_time
         # Inbound events that arrived before the adapter loop was ready
         # (e.g. during startup/restart or network-flap reconnect). A single
         # drainer thread replays them as soon as the loop becomes available.
@@ -1080,8 +1080,8 @@ class FeishuAdapter(BasePlatformAdapter):
         self._pending_inbound_lock = threading.Lock()
         self._pending_drain_scheduled = False
         self._pending_inbound_max_depth = 1000  # cap queue; drop oldest beyond
-        self._chat_locks: Dict[str, asyncio.Lock] = {}  # chat_id → lock (per-chat serial processing)
-        self._sent_message_ids_to_chat: Dict[str, str] = {}  # message_id → chat_id (for reaction routing)
+        self._chat_locks: Dict[str, asyncio.Lock] = {}  # chat_id -> lock (per-chat serial processing)
+        self._sent_message_ids_to_chat: Dict[str, str] = {}  # message_id -> chat_id (for reaction routing)
         self._sent_message_id_order: List[str] = []  # LRU order for _sent_message_ids_to_chat
         self._chat_info_cache: Dict[str, Dict[str, Any]] = {}
         self._message_text_cache: Dict[str, Optional[str]] = {}
@@ -1093,7 +1093,7 @@ class FeishuAdapter(BasePlatformAdapter):
         self._media_batch_state = FeishuBatchState()
         self._pending_media_batches = self._media_batch_state.events
         self._pending_media_batch_tasks = self._media_batch_state.tasks
-        # Exec approval button state (approval_id → {session_key, message_id, chat_id})
+        # Exec approval button state (approval_id -> {session_key, message_id, chat_id})
         self._approval_state: Dict[int, Dict[str, str]] = {}
         self._approval_counter = itertools.count(1)
         self._load_seen_message_ids()
@@ -1479,7 +1479,7 @@ class FeishuAdapter(BasePlatformAdapter):
             card = {
                 "config": {"wide_screen_mode": True},
                 "header": {
-                    "title": {"content": "⚠️ Command Approval Required", "tag": "plain_text"},
+                    "title": {"content": "[WARN]️ Command Approval Required", "tag": "plain_text"},
                     "template": "orange",
                 },
                 "elements": [
@@ -1490,10 +1490,10 @@ class FeishuAdapter(BasePlatformAdapter):
                     {
                         "tag": "action",
                         "actions": [
-                            _btn("✅ Allow Once", "approve_once", "primary"),
-                            _btn("✅ Session", "approve_session"),
-                            _btn("✅ Always", "approve_always"),
-                            _btn("❌ Deny", "deny", "danger"),
+                            _btn("[OK] Allow Once", "approve_once", "primary"),
+                            _btn("[OK] Session", "approve_session"),
+                            _btn("[OK] Always", "approve_always"),
+                            _btn("[ERR] Deny", "deny", "danger"),
                         ],
                     },
                 ],
@@ -1523,7 +1523,7 @@ class FeishuAdapter(BasePlatformAdapter):
     @staticmethod
     def _build_resolved_approval_card(*, choice: str, user_name: str) -> Dict[str, Any]:
         """Build raw card JSON for a resolved approval action."""
-        icon = "❌" if choice == "deny" else "✅"
+        icon = "[ERR]" if choice == "deny" else "[OK]"
         label = _APPROVAL_LABEL_MAP.get(choice, "Resolved")
         return {
             "config": {"wide_screen_mode": True},
@@ -3108,7 +3108,7 @@ class FeishuAdapter(BasePlatformAdapter):
     async def _resolve_sender_name_from_api(self, sender_id: Optional[str]) -> Optional[str]:
         """Fetch the sender's display name from the Feishu contact API with a 10-minute cache.
 
-        ID-type detection mirrors openclaw: ou_ → open_id, on_ → union_id, else user_id.
+        ID-type detection mirrors openclaw: ou_ -> open_id, on_ -> union_id, else user_id.
         Failures are silently suppressed; the message pipeline must not block on name resolution.
         """
         if not sender_id or not self._client:
@@ -4120,7 +4120,7 @@ def _qr_register_inner(
     initial_domain: str,
     timeout_seconds: int,
 ) -> Optional[dict]:
-    """Run init → begin → poll → probe. Raises on network/protocol errors."""
+    """Run init -> begin -> poll -> probe. Raises on network/protocol errors."""
     print("  Connecting to Feishu / Lark...", end="", flush=True)
     _init_registration(initial_domain)
     begin = _begin_registration(initial_domain)

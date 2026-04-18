@@ -83,7 +83,7 @@ class TestBuiltinSkins:
 
         skin = load_skin("daylight")
         assert skin.name == "daylight"
-        assert skin.tool_prefix == "│"
+        assert skin.tool_prefix == "|"
         assert skin.get_color("banner_title") == "#0F172A"
         assert skin.get_color("status_bar_bg") == "#E5EDF8"
         assert skin.get_color("voice_status_bg") == "#E5EDF8"

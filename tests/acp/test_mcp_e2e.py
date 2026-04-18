@@ -1,9 +1,9 @@
 """End-to-end tests for ACP MCP server registration and tool-result reporting.
 
 Exercises the full flow through the ACP server layer:
-  new_session(mcpServers) → MCP tools registered → prompt() →
-    tool_progress_callback (ToolCallStart) →
-    step_callback with results (ToolCallUpdate with rawOutput) →
+  new_session(mcpServers) -> MCP tools registered -> prompt() ->
+    tool_progress_callback (ToolCallStart) ->
+    step_callback with results (ToolCallUpdate with rawOutput) ->
     session_update events arrive at the mock client
 """
 
@@ -48,12 +48,12 @@ def acp_agent(mock_manager):
 
 
 # ---------------------------------------------------------------------------
-# E2E: MCP registration → prompt → tool events
+# E2E: MCP registration -> prompt -> tool events
 # ---------------------------------------------------------------------------
 
 
 class TestMcpRegistrationE2E:
-    """Full flow: session with MCP servers → prompt with tool calls → ACP events."""
+    """Full flow: session with MCP servers -> prompt with tool calls -> ACP events."""
 
     @pytest.mark.asyncio
     async def test_session_with_mcp_servers_registers_tools(self, acp_agent, mock_manager):
@@ -113,7 +113,7 @@ class TestMcpRegistrationE2E:
 
     @pytest.mark.asyncio
     async def test_prompt_with_tool_calls_emits_acp_events(self, acp_agent, mock_manager):
-        """Prompt → agent fires callbacks → ACP ToolCallStart + ToolCallUpdate events."""
+        """Prompt -> agent fires callbacks -> ACP ToolCallStart + ToolCallUpdate events."""
         resp = await acp_agent.new_session(cwd="/tmp")
         session_id = resp.session_id
         state = mock_manager.get_session(session_id)

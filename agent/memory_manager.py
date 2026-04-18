@@ -120,7 +120,7 @@ class MemoryManager:
 
         self._providers.append(provider)
 
-        # Index tool names → provider for routing
+        # Index tool names -> provider for routing
         for schema in provider.get_tool_schemas():
             tool_name = schema.get("name", "")
             if tool_name and tool_name not in self._tool_to_provider:

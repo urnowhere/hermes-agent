@@ -428,9 +428,9 @@ class SignalAdapter(BasePlatformAdapter):
         is_group = bool(group_id)
 
         # Group message filtering — derived from SIGNAL_GROUP_ALLOWED_USERS:
-        # - No env var set → groups disabled (default safe behavior)
-        # - Env var set with group IDs → only those groups allowed
-        # - Env var set with "*" → all groups allowed
+        # - No env var set -> groups disabled (default safe behavior)
+        # - Env var set with group IDs -> only those groups allowed
+        # - Env var set with "*" -> all groups allowed
         # DM auth is fully handled by run.py (_is_user_authorized)
         if is_group:
             if not self.group_allow_from:
@@ -641,7 +641,7 @@ class SignalAdapter(BasePlatformAdapter):
             self._track_sent_timestamp(result)
             # Use the timestamp from the RPC result as a pseudo message_id.
             # Signal doesn't have real message IDs, but the stream consumer
-            # needs a truthy value to follow its edit→fallback path correctly.
+            # needs a truthy value to follow its edit->fallback path correctly.
             _msg_id = str(result.get("timestamp", "")) if isinstance(result, dict) else None
             return SendResult(success=True, message_id=_msg_id or None)
         return SendResult(success=False, error="RPC send failed")

@@ -228,27 +228,40 @@ def create_wrapper_script(name: str) -> Optional[Path]:
     """Create a shell wrapper script at ~/.local/bin/<name>.
 
     Returns the path to the created wrapper, or None if creation failed.
+    On Windows, creates a .bat file instead of a shell script.
     """
     wrapper_dir = _get_wrapper_dir()
     try:
         wrapper_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:
-        print(f"⚠ Could not create {wrapper_dir}: {e}")
+        print(f"[WARN] Could not create {wrapper_dir}: {e}")
         return None
 
-    wrapper_path = wrapper_dir / name
-    try:
-        wrapper_path.write_text(f'#!/bin/sh\nexec hermes -p {name} "$@"\n')
-        wrapper_path.chmod(wrapper_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-        return wrapper_path
-    except OSError as e:
-        print(f"⚠ Could not create wrapper at {wrapper_path}: {e}")
-        return None
+    if sys.platform == "win32":
+        wrapper_path = wrapper_dir / f"{name}.bat"
+        try:
+            wrapper_path.write_text(f'@echo off\nhermes -p {name} %*\n')
+            return wrapper_path
+        except OSError as e:
+            print(f"[WARN] Could not create wrapper at {wrapper_path}: {e}")
+            return None
+    else:
+        wrapper_path = wrapper_dir / name
+        try:
+            wrapper_path.write_text(f'#!/bin/sh\nexec hermes -p {name} "$@"\n')
+            wrapper_path.chmod(wrapper_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+            return wrapper_path
+        except OSError as e:
+            print(f"[WARN] Could not create wrapper at {wrapper_path}: {e}")
+            return None
 
 
 def remove_wrapper_script(name: str) -> bool:
     """Remove the wrapper script for a profile. Returns True if removed."""
-    wrapper_path = _get_wrapper_dir() / name
+    if sys.platform == "win32":
+        wrapper_path = _get_wrapper_dir() / f"{name}.bat"
+    else:
+        wrapper_path = _get_wrapper_dir() / name
     if wrapper_path.exists():
         try:
             # Verify it's our wrapper before removing
@@ -300,10 +313,23 @@ def _read_config_model(profile_dir: Path) -> tuple:
 
 def _check_gateway_running(profile_dir: Path) -> bool:
     """Check if a gateway is running for a given profile directory."""
+    pid_file = profile_dir / "gateway.pid"
     try:
-        from gateway.status import get_running_pid
-        return get_running_pid(profile_dir / "gateway.pid", cleanup_stale=False) is not None
-    except Exception:
+        raw = pid_file.read_text().strip()
+        if not raw:
+            return False
+        data = json.loads(raw) if raw.startswith("{") else {"pid": int(raw)}
+        pid = int(data["pid"])
+        if sys.platform == "win32":
+            import psutil
+            if not psutil.pid_exists(pid):
+                return False
+        else:
+            os.kill(pid, 0)  # existence check
+        return True
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError,
+            ProcessLookupError, PermissionError, OSError):
+
         return False
 
 
@@ -482,17 +508,17 @@ def seed_profile_skills(profile_dir: Path, quiet: bool = False) -> Optional[dict
         if result.returncode == 0 and result.stdout.strip():
             return json.loads(result.stdout.strip())
         if not quiet:
-            print(f"⚠ Skill seeding returned exit code {result.returncode}")
+            print(f"[WARN] Skill seeding returned exit code {result.returncode}")
             if result.stderr.strip():
                 print(f"  {result.stderr.strip()[:200]}")
         return None
     except subprocess.TimeoutExpired:
         if not quiet:
-            print("⚠ Skill seeding timed out (60s)")
+            print("[WARN] Skill seeding timed out (60s)")
         return None
     except Exception as e:
         if not quiet:
-            print(f"⚠ Skill seeding failed: {e}")
+            print(f"[WARN] Skill seeding failed: {e}")
         return None
 
 
@@ -542,7 +568,7 @@ def delete_profile(name: str, yes: bool = False) -> Path:
     for item in items:
         print(f"  • {item}")
     if gw_running:
-        print(f"  ⚠ Gateway is running — it will be stopped.")
+        print(f"  [WARN] Gateway is running — it will be stopped.")
 
     # Confirmation
     if not yes:
@@ -566,21 +592,21 @@ def delete_profile(name: str, yes: bool = False) -> Path:
     # 3. Remove wrapper script
     if has_wrapper:
         if remove_wrapper_script(name):
-            print(f"✓ Removed {wrapper_path}")
+            print(f"[OK] Removed {wrapper_path}")
 
     # 4. Remove profile directory
     try:
         shutil.rmtree(profile_dir)
-        print(f"✓ Removed {profile_dir}")
+        print(f"[OK] Removed {profile_dir}")
     except Exception as e:
-        print(f"⚠ Could not remove {profile_dir}: {e}")
+        print(f"[WARN] Could not remove {profile_dir}: {e}")
 
     # 5. Clear active_profile if it pointed to this profile
     try:
         active = get_active_profile()
         if active == name:
             set_active_profile("default")
-            print("✓ Active profile reset to default")
+            print("[OK] Active profile reset to default")
     except Exception:
         pass
 
@@ -616,7 +642,7 @@ def _cleanup_gateway_service(name: str, profile_dir: Path) -> None:
                     ["systemctl", "--user", "daemon-reload"],
                     capture_output=True, check=False, timeout=10,
                 )
-                print(f"✓ Service {svc_name} removed")
+                print(f"[OK] Service {svc_name} removed")
 
         elif _platform.system() == "Darwin":
             plist_path = get_launchd_plist_path()
@@ -626,9 +652,9 @@ def _cleanup_gateway_service(name: str, profile_dir: Path) -> None:
                     capture_output=True, check=False, timeout=10,
                 )
                 plist_path.unlink(missing_ok=True)
-                print(f"✓ Launchd service removed")
+                print(f"[OK] Launchd service removed")
     except Exception as e:
-        print(f"⚠ Service cleanup: {e}")
+        print(f"[WARN] Service cleanup: {e}")
     finally:
         if old_home is not None:
             os.environ["HERMES_HOME"] = old_home
@@ -649,25 +675,47 @@ def _stop_gateway_process(profile_dir: Path) -> None:
         raw = pid_file.read_text().strip()
         data = json.loads(raw) if raw.startswith("{") else {"pid": int(raw)}
         pid = int(data["pid"])
-        os.kill(pid, _signal.SIGTERM)
-        # Wait up to 10s for graceful shutdown
-        for _ in range(20):
-            _time.sleep(0.5)
+        if sys.platform == "win32":
+            import psutil
             try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                print(f"✓ Gateway stopped (PID {pid})")
+                proc = psutil.Process(pid)
+                proc.terminate()
+            except psutil.NoSuchProcess:
+                print("[OK] Gateway already stopped")
                 return
-        # Force kill
-        try:
-            os.kill(pid, _signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        print(f"✓ Gateway force-stopped (PID {pid})")
+            # Wait up to 10s for graceful shutdown
+            for _ in range(20):
+                _time.sleep(0.5)
+                if not psutil.pid_exists(pid):
+                    print(f"[OK] Gateway stopped (PID {pid})")
+                    return
+            # Force kill
+            try:
+                proc = psutil.Process(pid)
+                proc.kill()
+            except psutil.NoSuchProcess:
+                pass
+            print(f"[OK] Gateway force-stopped (PID {pid})")
+        else:
+            os.kill(pid, _signal.SIGTERM)
+            # Wait up to 10s for graceful shutdown
+            for _ in range(20):
+                _time.sleep(0.5)
+                try:
+                    os.kill(pid, 0)
+                except (ProcessLookupError, PermissionError):
+                    print(f"[OK] Gateway stopped (PID {pid})")
+                    return
+            # Force kill
+            try:
+                os.kill(pid, getattr(_signal, "SIGKILL", _signal.SIGTERM))
+            except (ProcessLookupError, PermissionError):
+                pass
+            print(f"[OK] Gateway force-stopped (PID {pid})")
     except (ProcessLookupError, PermissionError):
-        print("✓ Gateway already stopped")
+        print("[OK] Gateway already stopped")
     except Exception as e:
-        print(f"⚠ Could not stop gateway: {e}")
+        print(f"[WARN] Could not stop gateway: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -956,22 +1004,22 @@ def rename_profile(old_name: str, new_name: str) -> Path:
 
     # 2. Rename directory
     old_dir.rename(new_dir)
-    print(f"✓ Renamed {old_dir.name} → {new_dir.name}")
+    print(f"[OK] Renamed {old_dir.name} -> {new_dir.name}")
 
     # 3. Update wrapper script
     remove_wrapper_script(old_name)
     collision = check_alias_collision(new_name)
     if not collision:
         create_wrapper_script(new_name)
-        print(f"✓ Alias updated: {new_name}")
+        print(f"[OK] Alias updated: {new_name}")
     else:
-        print(f"⚠ Cannot create alias '{new_name}' — {collision}")
+        print(f"[WARN] Cannot create alias '{new_name}' — {collision}")
 
     # 4. Update active_profile if it pointed to old name
     try:
         if get_active_profile() == old_name:
             set_active_profile(new_name)
-            print(f"✓ Active profile updated: {new_name}")
+            print(f"[OK] Active profile updated: {new_name}")
     except Exception:
         pass
 

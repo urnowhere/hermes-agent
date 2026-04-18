@@ -1290,7 +1290,7 @@ if __name__ == "__main__":
         f"{'set' if resolve_openai_audio_api_key() else 'not set (VOICE_TOOLS_OPENAI_KEY or OPENAI_API_KEY)'}"
     )
     print(f"  MiniMax:    {'API key set' if os.getenv('MINIMAX_API_KEY') else 'not set (MINIMAX_API_KEY)'}")
-    print(f"  ffmpeg:     {'✅ found' if _has_ffmpeg() else '❌ not found (needed for Telegram Opus)'}")
+    print(f"  ffmpeg:     {'[OK] found' if _has_ffmpeg() else '[ERR] not found (needed for Telegram Opus)'}")
     print(f"\n  Output dir: {DEFAULT_OUTPUT_DIR}")
 
     config = _load_tts_config()

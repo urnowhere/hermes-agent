@@ -1,7 +1,7 @@
 """Test real interrupt propagation through delegate_task with actual AIAgent.
 
 This uses a real AIAgent with mocked HTTP responses to test the complete
-interrupt flow through _run_single_child → child.run_conversation().
+interrupt flow through _run_single_child -> child.run_conversation().
 """
 
 import json

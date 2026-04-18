@@ -493,7 +493,7 @@ class TestInlineThinkBlockExtraction(unittest.TestCase):
         agent = self._make_agent()
         api_msg = self._build_msg("Just a plain response.")
         result = agent._build_assistant_message(api_msg, "stop")
-        # No structured reasoning AND no inline think blocks → None
+        # No structured reasoning AND no inline think blocks -> None
         self.assertIsNone(result["reasoning"])
 
     def test_structured_reasoning_takes_priority(self):

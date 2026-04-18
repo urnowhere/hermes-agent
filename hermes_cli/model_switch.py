@@ -831,7 +831,7 @@ def list_authenticated_providers(
     # --- 1. Check Hermes-mapped providers ---
     for hermes_id, mdev_id in PROVIDER_TO_MODELS_DEV.items():
         # Skip aliases that map to the same models.dev provider (e.g.
-        # kimi-coding and kimi-coding-cn both → kimi-for-coding).
+        # kimi-coding and kimi-coding-cn both -> kimi-for-coding).
         # The first one with valid credentials wins (#10526).
         if mdev_id in seen_mdev_ids:
             continue
@@ -841,7 +841,7 @@ def list_authenticated_providers(
 
         # Prefer auth.py PROVIDER_REGISTRY for env var names — it's our
         # source of truth.  models.dev can have wrong mappings (e.g.
-        # minimax-cn → MINIMAX_API_KEY instead of MINIMAX_CN_API_KEY).
+        # minimax-cn -> MINIMAX_API_KEY instead of MINIMAX_CN_API_KEY).
         pconfig = PROVIDER_REGISTRY.get(hermes_id)
         if pconfig and pconfig.api_key_env_vars:
             env_vars = list(pconfig.api_key_env_vars)
@@ -880,7 +880,7 @@ def list_authenticated_providers(
     from hermes_cli.providers import HERMES_OVERLAYS
     from hermes_cli.auth import PROVIDER_REGISTRY as _auth_registry
 
-    # Build reverse mapping: models.dev ID → Hermes provider ID.
+    # Build reverse mapping: models.dev ID -> Hermes provider ID.
     # HERMES_OVERLAYS keys may be models.dev IDs (e.g. "github-copilot")
     # while _PROVIDER_MODELS and config.yaml use Hermes IDs ("copilot").
     _mdev_to_hermes = {v: k for k, v in PROVIDER_TO_MODELS_DEV.items()}
@@ -889,7 +889,7 @@ def list_authenticated_providers(
         if pid.lower() in seen_slugs:
             continue
 
-        # Resolve Hermes slug — e.g. "github-copilot" → "copilot"
+        # Resolve Hermes slug — e.g. "github-copilot" -> "copilot"
         hermes_slug = _mdev_to_hermes.get(pid, pid)
         if hermes_slug.lower() in seen_slugs:
             continue

@@ -1,12 +1,12 @@
 """Tests for Anthropic error handling in the agent retry loop.
 
 Covers all error paths in run_agent.py's run_conversation() for api_mode=anthropic_messages:
-- 429 rate limit → retried with backoff
-- 529 overloaded → retried with backoff
-- 400 bad request → non-retryable, immediate fail
-- 401 unauthorized → credential refresh + retry
-- 500 server error → retried with backoff
-- "prompt is too long" → context length error triggers compression
+- 429 rate limit -> retried with backoff
+- 529 overloaded -> retried with backoff
+- 400 bad request -> non-retryable, immediate fail
+- 401 unauthorized -> credential refresh + retry
+- 500 server error -> retried with backoff
+- "prompt is too long" -> context length error triggers compression
 """
 
 import asyncio
@@ -445,7 +445,7 @@ def test_401_refresh_fails_is_non_retryable(monkeypatch):
         )
     )
 
-    # 401 after failed refresh → non-retryable (falls through to is_client_error)
+    # 401 after failed refresh -> non-retryable (falls through to is_client_error)
     assert result["api_calls"] == 1
     assert "401" in str(result.get("final_response", "")) or "unauthorized" in str(result.get("final_response", "")).lower()
 

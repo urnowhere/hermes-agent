@@ -306,7 +306,7 @@ def test_mint_retry_uses_latest_rotated_refresh_token(tmp_path, monkeypatch):
 
 
 class TestLoginNousSkipKeepsCurrent:
-    """When a user runs `hermes model` → Nous Portal → Skip (keep current) after
+    """When a user runs `hermes model` -> Nous Portal -> Skip (keep current) after
     a successful OAuth login, the prior provider and model MUST be preserved.
 
     Regression: previously, _update_config_for_provider was called
@@ -369,7 +369,7 @@ class TestLoginNousSkipKeepsCurrent:
         monkeypatch.setattr(ns, "prompt_enable_tool_gateway", lambda cfg: None)
 
     def test_skip_keep_current_preserves_provider_and_model(self, tmp_path, monkeypatch):
-        """User picks Skip → config.yaml untouched, Nous creds still saved."""
+        """User picks Skip -> config.yaml untouched, Nous creds still saved."""
         import argparse
         import yaml
         from hermes_cli.auth import PROVIDER_REGISTRY, _login_nous
@@ -400,7 +400,7 @@ class TestLoginNousSkipKeepsCurrent:
         assert auth_after["providers"]["openrouter"]["api_key"] == "sk-or-fake"
 
     def test_picking_model_switches_to_nous(self, tmp_path, monkeypatch):
-        """User picks a Nous model → provider flips to nous with that model."""
+        """User picks a Nous model -> provider flips to nous with that model."""
         import argparse
         import yaml
         from hermes_cli.auth import PROVIDER_REGISTRY, _login_nous
@@ -426,7 +426,7 @@ class TestLoginNousSkipKeepsCurrent:
         assert auth_after["active_provider"] == "nous"
 
     def test_skip_with_no_prior_active_provider_clears_it(self, tmp_path, monkeypatch):
-        """Fresh install (no prior active_provider) → Skip clears active_provider
+        """Fresh install (no prior active_provider) -> Skip clears active_provider
         instead of leaving it as nous."""
         import argparse
         import yaml

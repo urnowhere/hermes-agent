@@ -223,7 +223,7 @@ def load_code_assist(
     project_id: str = "",
     user_agent_model: str = "",
 ) -> CodeAssistProjectInfo:
-    """Call ``POST /v1internal:loadCodeAssist`` with prod → sandbox fallback.
+    """Call ``POST /v1internal:loadCodeAssist`` with prod -> sandbox fallback.
 
     Returns whatever tier + project info Google reports. On VPC-SC violations,
     returns a synthetic ``standard-tier`` result so the chain can continue.

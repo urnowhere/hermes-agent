@@ -220,15 +220,15 @@ def get_tool_definitions(
                 resolved = resolve_toolset(toolset_name)
                 tools_to_include.update(resolved)
                 if not quiet_mode:
-                    print(f"✅ Enabled toolset '{toolset_name}': {', '.join(resolved) if resolved else 'no tools'}")
+                    print(f"[OK] Enabled toolset '{toolset_name}': {', '.join(resolved) if resolved else 'no tools'}")
             elif toolset_name in _LEGACY_TOOLSET_MAP:
                 legacy_tools = _LEGACY_TOOLSET_MAP[toolset_name]
                 tools_to_include.update(legacy_tools)
                 if not quiet_mode:
-                    print(f"✅ Enabled legacy toolset '{toolset_name}': {', '.join(legacy_tools)}")
+                    print(f"[OK] Enabled legacy toolset '{toolset_name}': {', '.join(legacy_tools)}")
             else:
                 if not quiet_mode:
-                    print(f"⚠️  Unknown toolset: {toolset_name}")
+                    print(f"[WARN]️  Unknown toolset: {toolset_name}")
 
     elif disabled_toolsets:
         from toolsets import get_all_toolsets
@@ -248,7 +248,7 @@ def get_tool_definitions(
                     print(f"🚫 Disabled legacy toolset '{toolset_name}': {', '.join(legacy_tools)}")
             else:
                 if not quiet_mode:
-                    print(f"⚠️  Unknown toolset: {toolset_name}")
+                    print(f"[WARN]️  Unknown toolset: {toolset_name}")
     else:
         from toolsets import get_all_toolsets
         for ts_name in get_all_toolsets():
@@ -444,7 +444,7 @@ def handle_function_call(
     Returns:
         Function result as a JSON string.
     """
-    # Coerce string arguments to their schema-declared types (e.g. "42"→42)
+    # Coerce string arguments to their schema-declared types (e.g. "42"->42)
     function_args = coerce_tool_args(function_name, function_args)
 
     try:

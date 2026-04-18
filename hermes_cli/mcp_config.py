@@ -33,19 +33,19 @@ _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MCP_PRESETS: Dict[str, Dict[str, Any]] = {}
 
 
-# ─── UI Helpers ───────────────────────────────────────────────────────────────
+# --- UI Helpers ---------------------------------------------------------------
 
 def _info(text: str):
     print(color(f"  {text}", Colors.DIM))
 
 def _success(text: str):
-    print(color(f"  ✓ {text}", Colors.GREEN))
+    print(color(f"  [OK] {text}", Colors.GREEN))
 
 def _warning(text: str):
-    print(color(f"  ⚠ {text}", Colors.YELLOW))
+    print(color(f"  [WARN] {text}", Colors.YELLOW))
 
 def _error(text: str):
-    print(color(f"  ✗ {text}", Colors.RED))
+    print(color(f"  [ERR] {text}", Colors.RED))
 
 
 def _confirm(question: str, default: bool = True) -> bool:
@@ -65,7 +65,7 @@ def _prompt(question: str, *, password: bool = False, default: str = "") -> str:
     return _shared_prompt(question, default=default, password=password)
 
 
-# ─── Config Helpers ───────────────────────────────────────────────────────────
+# --- Config Helpers -----------------------------------------------------------
 
 def _get_mcp_servers(config: Optional[dict] = None) -> Dict[str, dict]:
     """Return the ``mcp_servers`` dict from config, or empty dict."""
@@ -155,7 +155,7 @@ def _apply_mcp_preset(
     return url, command, cmd_args, True
 
 
-# ─── Discovery (temporary connect) ───────────────────────────────────────────
+# --- Discovery (temporary connect) -------------------------------------------
 
 def _probe_single_server(
     name: str, config: dict, connect_timeout: float = 30
@@ -214,7 +214,7 @@ def _unwrap_exception_group(exc: BaseException) -> Exception:
     return RuntimeError(str(exc))
 
 
-# ─── hermes mcp add ──────────────────────────────────────────────────────────
+# --- hermes mcp add ----------------------------------------------------------
 
 def cmd_mcp_add(args):
     """Add a new MCP server with discovery-first tool selection."""
@@ -272,7 +272,7 @@ def cmd_mcp_add(args):
             server_config["env"] = explicit_env
 
 
-    # ── Authentication ────────────────────────────────────────────────
+    # -- Authentication ------------------------------------------------
 
     if url and auth_type == "oauth":
         print()
@@ -323,7 +323,7 @@ def cmd_mcp_add(args):
                         "Authorization": f"Bearer ${{{env_key}}}"
                     }
 
-    # ── Discovery: connect and list tools ─────────────────────────────
+    # -- Discovery: connect and list tools -----------------------------
 
     print()
     print(color(f"  Connecting to '{name}'...", Colors.CYAN))
@@ -346,7 +346,7 @@ def cmd_mcp_add(args):
             _success(f"Saved '{name}' to config")
         return
 
-    # ── Tool selection ────────────────────────────────────────────────
+    # -- Tool selection ------------------------------------------------
 
     print()
     _success(f"Connected! Found {len(tools)} tool(s) from '{name}':")
@@ -397,7 +397,7 @@ def cmd_mcp_add(args):
         tool_count = len(tools)
         total = len(tools)
 
-    # ── Save ──────────────────────────────────────────────────────────
+    # -- Save ----------------------------------------------------------
 
     server_config["enabled"] = True
     _save_mcp_server(name, server_config)
@@ -407,7 +407,7 @@ def cmd_mcp_add(args):
     _info("Start a new session to use these tools.")
 
 
-# ─── hermes mcp remove ───────────────────────────────────────────────────────
+# --- hermes mcp remove -------------------------------------------------------
 
 def cmd_mcp_remove(args):
     """Remove an MCP server from config."""
@@ -439,7 +439,7 @@ def cmd_mcp_remove(args):
         pass
 
 
-# ─── hermes mcp list ──────────────────────────────────────────────────────────
+# --- hermes mcp list ----------------------------------------------------------
 
 def cmd_mcp_list(args=None):
     """List all configured MCP servers."""
@@ -461,7 +461,7 @@ def cmd_mcp_list(args=None):
 
     # Table header
     print(f"  {'Name':<16} {'Transport':<30} {'Tools':<12} {'Status':<10}")
-    print(f"  {'─' * 16} {'─' * 30} {'─' * 12} {'─' * 10}")
+    print(f"  {'-' * 16} {'-' * 30} {'-' * 12} {'-' * 10}")
 
     for name, cfg in servers.items():
         # Transport info
@@ -501,14 +501,14 @@ def cmd_mcp_list(args=None):
         enabled = cfg.get("enabled", True)
         if isinstance(enabled, str):
             enabled = enabled.lower() in ("true", "1", "yes")
-        status = color("✓ enabled", Colors.GREEN) if enabled else color("✗ disabled", Colors.DIM)
+        status = color("[OK] enabled", Colors.GREEN) if enabled else color("[ERR] disabled", Colors.DIM)
 
         print(f"  {name:<16} {transport:<30} {tools_str:<12} {status}")
 
     print()
 
 
-# ─── hermes mcp test ──────────────────────────────────────────────────────────
+# --- hermes mcp test ----------------------------------------------------------
 
 def cmd_mcp_test(args):
     """Test connection to an MCP server."""
@@ -528,10 +528,10 @@ def cmd_mcp_test(args):
 
     # Show transport info
     if "url" in cfg:
-        _info(f"Transport: HTTP → {cfg['url']}")
+        _info(f"Transport: HTTP -> {cfg['url']}")
     else:
         cmd = cfg.get("command", "?")
-        _info(f"Transport: stdio → {cmd}")
+        _info(f"Transport: stdio -> {cmd}")
 
     # Show auth info (masked)
     auth_type = cfg.get("auth", "")
@@ -579,7 +579,7 @@ def _interpolate_value(value: str) -> str:
     return re.sub(r"\$\{(\w+)\}", _replace, value)
 
 
-# ─── hermes mcp login ────────────────────────────────────────────────────────
+# --- hermes mcp login --------------------------------------------------------
 
 def cmd_mcp_login(args):
     """Force re-authentication for an OAuth-based MCP server.
@@ -636,7 +636,7 @@ def cmd_mcp_login(args):
         _error(f"Authentication failed: {exc}")
 
 
-# ─── hermes mcp configure ────────────────────────────────────────────────────
+# --- hermes mcp configure ----------------------------------------------------
 
 def cmd_mcp_configure(args):
     """Reconfigure which tools are enabled for an existing MCP server."""
@@ -719,7 +719,7 @@ def cmd_mcp_configure(args):
     server_entry = config.get("mcp_servers", {}).get(name, {})
 
     if len(chosen) == total:
-        # All selected → remove include/exclude (register all)
+        # All selected -> remove include/exclude (register all)
         server_entry.pop("tools", None)
     else:
         chosen_names = [tool_names[i] for i in sorted(chosen)]
@@ -735,7 +735,7 @@ def cmd_mcp_configure(args):
     _info("Start a new session for changes to take effect.")
 
 
-# ─── Dispatcher ───────────────────────────────────────────────────────────────
+# --- Dispatcher ---------------------------------------------------------------
 
 def mcp_command(args):
     """Main dispatcher for ``hermes mcp`` subcommands."""

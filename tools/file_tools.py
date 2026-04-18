@@ -76,7 +76,7 @@ def _is_blocked_device(filepath: str) -> bool:
 
     Uses the *literal* path — no symlink resolution — because the model
     specifies paths directly and realpath follows symlinks all the way
-    through (e.g. /dev/stdin → /proc/self/fd/0 → /dev/pts/0), defeating
+    through (e.g. /dev/stdin -> /proc/self/fd/0 -> /dev/pts/0), defeating
     the check.
     """
     normalized = os.path.expanduser(filepath)
@@ -135,11 +135,11 @@ _file_ops_cache: dict = {}
 #   "last_key":     the key of the most recent read/search call (or None)
 #   "consecutive":  how many times that exact call has been repeated in a row
 #   "read_history": set of (path, offset, limit) tuples for get_read_files_summary
-#   "dedup":        dict mapping (resolved_path, offset, limit) → mtime float
+#   "dedup":        dict mapping (resolved_path, offset, limit) -> mtime float
 #                   Used to skip re-reads of unchanged files.  Reset on
 #                   context compression (the original content is summarised
 #                   away so the model needs the full content again).
-#   "read_timestamps": dict mapping resolved_path → modification-time float
+#   "read_timestamps": dict mapping resolved_path -> modification-time float
 #                      recorded when the file was last read (or written) by
 #                      this task.  Used by write_file and patch to detect
 #                      external changes between the agent's read and write.
@@ -334,7 +334,7 @@ def clear_file_ops_cache(task_id: str = None):
 def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = "default") -> str:
     """Read a file with pagination and line numbers."""
     try:
-        # ── Device path guard ─────────────────────────────────────────
+        # -- Device path guard -----------------------------------------
         # Block paths that would hang the process (infinite output,
         # blocking on input).  Pure path check — no I/O.
         if _is_blocked_device(path):
@@ -347,7 +347,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
 
         _resolved = Path(path).expanduser().resolve()
 
-        # ── Binary file guard ─────────────────────────────────────────
+        # -- Binary file guard -----------------------------------------
         # Block binary files by extension (no I/O).
         if has_binary_extension(str(_resolved)):
             _ext = _resolved.suffix.lower()
@@ -358,7 +358,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
                 ),
             })
 
-        # ── Hermes internal path guard ────────────────────────────────
+        # -- Hermes internal path guard --------------------------------
         # Prevent prompt injection via catalog or hub metadata files.
         from hermes_constants import get_hermes_home as _get_hh
         _hermes_home = _get_hh().resolve()
@@ -379,7 +379,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
             except ValueError:
                 pass
 
-        # ── Dedup check ───────────────────────────────────────────────
+        # -- Dedup check -----------------------------------------------
         # If we already read this exact (path, offset, limit) and the
         # file hasn't been modified since, return a lightweight stub
         # instead of re-sending the same content.  Saves context tokens.
@@ -408,12 +408,12 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
             except OSError:
                 pass  # stat failed — fall through to full read
 
-        # ── Perform the read ──────────────────────────────────────────
+        # -- Perform the read ------------------------------------------
         file_ops = _get_file_ops(task_id)
         result = file_ops.read_file(path, offset, limit)
         result_dict = result.to_dict()
 
-        # ── Character-count guard ─────────────────────────────────────
+        # -- Character-count guard -------------------------------------
         # We're model-agnostic so we can't count tokens; characters are
         # the best proxy we have.  If the read produced an unreasonable
         # amount of content, reject it and tell the model to narrow down.
@@ -437,7 +437,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
                 "file_size": file_size,
             }, ensure_ascii=False)
 
-        # ── Redact secrets (after guard check to skip oversized content) ──
+        # -- Redact secrets (after guard check to skip oversized content) --
         if result.content:
             result.content = redact_sensitive_text(result.content)
             result_dict["content"] = result.content
@@ -453,7 +453,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
                 "to keep context usage efficient."
             ))
 
-        # ── Track for consecutive-loop detection ──────────────────────
+        # -- Track for consecutive-loop detection ----------------------
         read_key = ("read", path, offset, limit)
         with _read_tracker_lock:
             # Ensure "dedup" key exists (backward compat with old tracker state)

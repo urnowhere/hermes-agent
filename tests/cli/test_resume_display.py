@@ -48,11 +48,11 @@ def _make_cli(config_overrides=None, env_overrides=None, **kwargs):
         return HermesCLI(**kwargs)
 
 
-# ── Sample conversation histories for tests ──────────────────────────
+# -- Sample conversation histories for tests --------------------------
 
 
 def _simple_history():
-    """Two-turn conversation: user → assistant → user → assistant."""
+    """Two-turn conversation: user -> assistant -> user -> assistant."""
     return [
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "What is Python?"},
@@ -113,7 +113,7 @@ def _multimodal_history():
     ]
 
 
-# ── Tests for _display_resumed_history ───────────────────────────────
+# -- Tests for _display_resumed_history -------------------------------
 
 
 class TestDisplayResumedHistory:
@@ -368,7 +368,7 @@ class TestDisplayResumedHistory:
         assert "terminal" in output
 
 
-# ── Tests for _preload_resumed_session ──────────────────────────────
+# -- Tests for _preload_resumed_session ------------------------------
 
 
 class TestPreloadResumedSession:
@@ -474,7 +474,7 @@ class TestPreloadResumedSession:
         assert "1 user messages" not in output
 
 
-# ── Integration: _init_agent skips when preloaded ────────────────────
+# -- Integration: _init_agent skips when preloaded --------------------
 
 
 class TestInitAgentSkipsPreloaded:
@@ -498,7 +498,7 @@ class TestInitAgentSkipsPreloaded:
         mock_db.get_messages_as_conversation.assert_not_called()
 
 
-# ── Config default tests ─────────────────────────────────────────────
+# -- Config default tests ---------------------------------------------
 
 
 class TestResumeDisplayConfig:

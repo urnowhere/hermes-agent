@@ -17,7 +17,7 @@ from model_tools import (
 )
 
 
-# ── Low-level coercion helpers ────────────────────────────────────────────
+# -- Low-level coercion helpers --------------------------------------------
 
 
 class TestCoerceNumber:
@@ -135,7 +135,7 @@ class TestCoerceValue:
         assert _coerce_value("hello", ["number", "string"]) == "hello"
 
 
-# ── Full coerce_tool_args with registry ───────────────────────────────────
+# -- Full coerce_tool_args with registry -----------------------------------
 
 
 class TestCoerceToolArgs:

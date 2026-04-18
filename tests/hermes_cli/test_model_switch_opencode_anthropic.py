@@ -78,7 +78,7 @@ class TestOpenCodeGoV1Strip:
     """OpenCode Go: ``/model minimax-*`` must strip /v1."""
 
     def test_switch_to_minimax_m27_strips_v1(self):
-        """GLM-5 → MiniMax-M2.7: base_url loses trailing /v1."""
+        """GLM-5 -> MiniMax-M2.7: base_url loses trailing /v1."""
         result = _run_opencode_switch(
             raw_input="minimax-m2.7",
             current_provider="opencode-go",
@@ -151,7 +151,7 @@ class TestOpenCodeZenV1Strip:
     """OpenCode Zen: ``/model claude-*`` must strip /v1."""
 
     def test_switch_to_claude_sonnet_strips_v1(self):
-        """Gemini → Claude on opencode-zen: /v1 stripped."""
+        """Gemini -> Claude on opencode-zen: /v1 stripped."""
         result = _run_opencode_switch(
             raw_input="claude-sonnet-4-6",
             current_provider="opencode-zen",

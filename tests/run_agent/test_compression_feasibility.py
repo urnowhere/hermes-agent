@@ -3,8 +3,8 @@ auxiliary compression model's context is smaller than the main model's
 compression threshold.
 
 Two-phase design:
-  1. __init__  → runs the check, prints via _vprint (CLI), stores warning
-  2. run_conversation (first call) → replays stored warning through
+  1. __init__  -> runs the check, prints via _vprint (CLI), stores warning
+  2. run_conversation (first call) -> replays stored warning through
      status_callback (gateway platforms)
 """
 
@@ -48,7 +48,7 @@ def _make_agent(
     return agent
 
 
-# ── Core warning logic ──────────────────────────────────────────────
+# -- Core warning logic ----------------------------------------------
 
 
 @patch("agent.model_metadata.get_model_context_length", return_value=32_768)
@@ -271,7 +271,7 @@ def test_just_below_threshold_warns(mock_get_client, mock_ctx_len):
     assert "small-model" in messages[0]
 
 
-# ── Two-phase: __init__ + run_conversation replay ───────────────────
+# -- Two-phase: __init__ + run_conversation replay -------------------
 
 
 @patch("agent.model_metadata.get_model_context_length", return_value=32_768)

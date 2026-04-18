@@ -21,7 +21,7 @@ from hermes_cli.plugins_cmd import (
 )
 
 
-# ── _sanitize_plugin_name ─────────────────────────────────────────────────
+# -- _sanitize_plugin_name -------------------------------------------------
 
 
 class TestSanitizePluginName:
@@ -64,7 +64,7 @@ class TestSanitizePluginName:
             _sanitize_plugin_name("", tmp_path)
 
 
-# ── _resolve_git_url ──────────────────────────────────────────────────────
+# -- _resolve_git_url ------------------------------------------------------
 
 
 class TestResolveGitUrl:
@@ -99,7 +99,7 @@ class TestResolveGitUrl:
             _resolve_git_url("a/b/c")
 
 
-# ── _repo_name_from_url ──────────────────────────────────────────────────
+# -- _repo_name_from_url --------------------------------------------------
 
 
 class TestRepoNameFromUrl:
@@ -123,10 +123,10 @@ class TestRepoNameFromUrl:
         assert _repo_name_from_url("ssh://git@github.com/owner/repo.git") == "repo"
 
 
-# ── plugins_command dispatch ──────────────────────────────────────────────
+# -- plugins_command dispatch ----------------------------------------------
 
 
-# ── _read_manifest ────────────────────────────────────────────────────────
+# -- _read_manifest --------------------------------------------------------
 
 
 class TestReadManifest:
@@ -156,7 +156,7 @@ class TestReadManifest:
         assert result == {}
 
 
-# ── cmd_install tests ─────────────────────────────────────────────────────────
+# -- cmd_install tests ---------------------------------------------------------
 
 
 class TestCmdInstall:
@@ -212,7 +212,7 @@ class TestCmdInstall:
         mock_display_after_install.assert_not_called()
 
 
-# ── cmd_update tests ─────────────────────────────────────────────────────────
+# -- cmd_update tests ---------------------------------------------------------
 
 
 class TestCmdUpdate:
@@ -257,7 +257,7 @@ class TestCmdUpdate:
         assert exc_info.value.code == 1
 
 
-# ── cmd_remove tests ─────────────────────────────────────────────────────────
+# -- cmd_remove tests ---------------------------------------------------------
 
 
 class TestCmdRemove:
@@ -296,7 +296,7 @@ class TestCmdRemove:
         assert exc_info.value.code == 1
 
 
-# ── cmd_list tests ─────────────────────────────────────────────────────────
+# -- cmd_list tests ---------------------------------------------------------
 
 
 class TestCmdList:
@@ -331,7 +331,7 @@ class TestCmdList:
         cmd_list()
 
 
-# ── _copy_example_files tests ─────────────────────────────────────────────────
+# -- _copy_example_files tests -------------------------------------------------
 
 
 class TestCopyExampleFiles:
@@ -504,7 +504,7 @@ class TestPromptPluginEnvVars:
         mock_save.assert_not_called()
 
 
-# ── curses_radiolist ─────────────────────────────────────────────────────
+# -- curses_radiolist -----------------------------------------------------
 
 
 class TestCursesRadiolist:
@@ -525,7 +525,7 @@ class TestCursesRadiolist:
             assert result == 1
 
 
-# ── Provider discovery helpers ───────────────────────────────────────────
+# -- Provider discovery helpers -------------------------------------------
 
 
 class TestProviderDiscovery:
@@ -586,7 +586,7 @@ class TestProviderDiscovery:
             assert result == []
 
 
-# ── Auto-activation fix ──────────────────────────────────────────────────
+# -- Auto-activation fix --------------------------------------------------
 
 
 class TestNoAutoActivation:

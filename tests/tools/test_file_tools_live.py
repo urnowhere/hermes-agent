@@ -26,7 +26,7 @@ from tools.environments.local import LocalEnvironment
 from tools.file_operations import ShellFileOperations
 
 
-# ── Shared noise detection ───────────────────────────────────────────────
+# -- Shared noise detection -----------------------------------------------
 # Known shell noise patterns that should never appear in command output.
 
 _ALL_NOISE_PATTERNS = [
@@ -52,7 +52,7 @@ def _assert_clean(text: str, context: str = "output"):
         )
 
 
-# ── Fixtures ─────────────────────────────────────────────────────────────
+# -- Fixtures -------------------------------------------------------------
 
 # Deterministic file content used across tests. Every byte is known,
 # so any unexpected text in results is immediately caught.
@@ -86,7 +86,7 @@ def populated_dir(tmp_path):
     return tmp_path
 
 
-# ── LocalEnvironment.execute() ───────────────────────────────────────────
+# -- LocalEnvironment.execute() -------------------------------------------
 
 class TestLocalEnvironmentExecute:
     def test_echo_exact_output(self, env):
@@ -146,7 +146,7 @@ class TestLocalEnvironmentExecute:
         _assert_clean(result["output"])
 
 
-# ── _has_command ─────────────────────────────────────────────────────────
+# -- _has_command ---------------------------------------------------------
 
 class TestHasCommand:
     def test_finds_echo(self, ops):
@@ -172,7 +172,7 @@ class TestHasCommand:
             "Neither rg nor grep found -- search_files will break"
 
 
-# ── read_file ────────────────────────────────────────────────────────────
+# -- read_file ------------------------------------------------------------
 
 class TestReadFile:
     def test_exact_content(self, ops, tmp_path):
@@ -230,7 +230,7 @@ class TestReadFile:
         _assert_clean(result.content)
 
 
-# ── write_file ───────────────────────────────────────────────────────────
+# -- write_file -----------------------------------------------------------
 
 class TestWriteFile:
     def test_write_and_verify(self, ops, tmp_path):
@@ -278,7 +278,7 @@ class TestWriteFile:
         _assert_clean(result.content)
 
 
-# ── patch_replace ────────────────────────────────────────────────────────
+# -- patch_replace --------------------------------------------------------
 
 class TestPatchReplace:
     def test_exact_replacement(self, ops, tmp_path):
@@ -303,7 +303,7 @@ class TestPatchReplace:
         assert Path(path).read_text() == "line1\nREPLACED\nline3\n"
 
 
-# ── search ───────────────────────────────────────────────────────────────
+# -- search ---------------------------------------------------------------
 
 class TestSearch:
     def test_content_search_finds_exact_match(self, ops, populated_dir):
@@ -360,7 +360,7 @@ class TestSearch:
             _assert_clean(m.path)
 
 
-# ── _expand_path ─────────────────────────────────────────────────────────
+# -- _expand_path ---------------------------------------------------------
 
 class TestExpandPath:
     def test_tilde_exact(self, ops):
@@ -400,7 +400,7 @@ class TestExpandPath:
             assert "~" not in result
 
 
-# ── Terminal output cleanliness ──────────────────────────────────────────
+# -- Terminal output cleanliness ------------------------------------------
 
 class TestTerminalOutputCleanliness:
     """Every command the agent might run must produce noise-free output."""

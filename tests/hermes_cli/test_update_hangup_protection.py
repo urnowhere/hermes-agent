@@ -190,6 +190,8 @@ class TestInstallHangupProtection:
         if hasattr(_cfg, "_HERMES_HOME_CACHE"):
             _cfg._HERMES_HOME_CACHE = None  # type: ignore[attr-defined]
 
+        if not hasattr(signal, "SIGHUP"):
+            pytest.skip("SIGHUP not available on this platform")
         original_handler = signal.getsignal(signal.SIGHUP)
         state = _install_hangup_protection(gateway_mode=False)
 

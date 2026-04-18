@@ -80,7 +80,7 @@ _VALID_RECALL_MODES = {"hybrid", "context", "tools"}
 
 
 def _normalize_recall_mode(val: str) -> str:
-    """Normalize legacy recall mode values (e.g. 'auto' → 'hybrid')."""
+    """Normalize legacy recall mode values (e.g. 'auto' -> 'hybrid')."""
     val = _RECALL_MODE_ALIASES.get(val, val)
     return val if val in _VALID_RECALL_MODES else "hybrid"
 

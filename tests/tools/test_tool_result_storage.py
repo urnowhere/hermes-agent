@@ -24,7 +24,7 @@ from tools.tool_result_storage import (
 )
 
 
-# ── generate_preview ──────────────────────────────────────────────────
+# -- generate_preview --------------------------------------------------
 
 class TestGeneratePreview:
     def test_short_content_unchanged(self):
@@ -65,7 +65,7 @@ class TestGeneratePreview:
         assert has_more is False
 
 
-# ── _heredoc_marker ───────────────────────────────────────────────────
+# -- _heredoc_marker ---------------------------------------------------
 
 class TestHeredocMarker:
     def test_default_marker_when_no_collision(self):
@@ -79,7 +79,7 @@ class TestHeredocMarker:
         assert marker not in content
 
 
-# ── _write_to_sandbox ─────────────────────────────────────────────────
+# -- _write_to_sandbox -------------------------------------------------
 
 class TestWriteToSandbox:
     def test_success(self):
@@ -163,7 +163,7 @@ class TestResolveStorageDir:
         assert _resolve_storage_dir(env) == "/data/data/com.termux/files/usr/tmp/hermes-results"
 
 
-# ── _build_persisted_message ──────────────────────────────────────────
+# -- _build_persisted_message ------------------------------------------
 
 class TestBuildPersistedMessage:
     def test_structure(self):
@@ -202,7 +202,7 @@ class TestBuildPersistedMessage:
         assert "MB" in msg
 
 
-# ── maybe_persist_tool_result ─────────────────────────────────────────
+# -- maybe_persist_tool_result -----------------------------------------
 
 class TestMaybePersistToolResult:
     def test_below_threshold_returns_unchanged(self):
@@ -419,7 +419,7 @@ class TestMaybePersistToolResult:
         assert PERSISTED_OUTPUT_TAG in result
 
 
-# ── enforce_turn_budget ───────────────────────────────────────────────
+# -- enforce_turn_budget -----------------------------------------------
 
 class TestEnforceTurnBudget:
     def test_under_budget_no_changes(self):
@@ -491,7 +491,7 @@ class TestEnforceTurnBudget:
         assert result == []
 
 
-# ── Per-tool threshold integration ────────────────────────────────────
+# -- Per-tool threshold integration ------------------------------------
 
 class TestPerToolThresholds:
     """Verify registry wiring for per-tool thresholds."""

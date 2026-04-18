@@ -61,7 +61,7 @@ def _require_boto3():
 def _get_bedrock_runtime_client(region: str):
     """Get or create a cached ``bedrock-runtime`` client for the given region.
 
-    Uses the default AWS credential chain (env vars → profile → instance role).
+    Uses the default AWS credential chain (env vars -> profile -> instance role).
     """
     if region not in _bedrock_runtime_client_cache:
         boto3 = _require_boto3()
@@ -94,7 +94,7 @@ def reset_client_cache():
 # Priority order matches OpenClaw's resolveAwsSdkEnvVarName():
 #   1. AWS_BEARER_TOKEN_BEDROCK (Bedrock-specific bearer token)
 #   2. AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY (explicit IAM credentials)
-#   3. AWS_PROFILE (named profile → SSO, assume-role, etc.)
+#   3. AWS_PROFILE (named profile -> SSO, assume-role, etc.)
 #   4. Implicit: instance role, ECS task role, Lambda execution role
 _AWS_CREDENTIAL_ENV_VARS = [
     "AWS_BEARER_TOKEN_BEDROCK",
@@ -183,7 +183,7 @@ def has_aws_credentials(env: Optional[Dict[str, str]] = None) -> bool:
 def resolve_bedrock_region(env: Optional[Dict[str, str]] = None) -> str:
     """Resolve the AWS region for Bedrock API calls.
 
-    Priority: AWS_REGION → AWS_DEFAULT_REGION → us-east-1 (fallback).
+    Priority: AWS_REGION -> AWS_DEFAULT_REGION -> us-east-1 (fallback).
     """
     env = env if env is not None else os.environ
     return (
@@ -245,7 +245,7 @@ def is_anthropic_bedrock_model(model_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Message format conversion: OpenAI → Bedrock Converse
+# Message format conversion: OpenAI -> Bedrock Converse
 # ---------------------------------------------------------------------------
 
 def convert_tools_to_converse(tools: List[Dict]) -> List[Dict]:
@@ -283,8 +283,8 @@ def _convert_content_to_converse(content) -> List[Dict]:
     """Convert OpenAI message content (string or list) to Converse content blocks.
 
     Handles:
-      - Plain text strings → [{"text": "..."}]
-      - Content arrays with text/image_url parts → mixed text/image blocks
+      - Plain text strings -> [{"text": "..."}]
+      - Content arrays with text/image_url parts -> mixed text/image blocks
 
     Filters out empty text blocks — Bedrock's Converse API rejects messages
     where a text content block has an empty ``text`` field (ValidationException:
@@ -341,11 +341,11 @@ def convert_messages_to_converse(
       - ``converse_messages`` is the conversation in Converse format
 
     Handles:
-      - System messages → extracted as system prompt
-      - User messages → ``{"role": "user", "content": [...]}``
-      - Assistant messages → ``{"role": "assistant", "content": [...]}``
-      - Tool calls → ``{"toolUse": {"toolUseId": ..., "name": ..., "input": ...}}``
-      - Tool results → ``{"toolResult": {"toolUseId": ..., "content": [...]}}``
+      - System messages -> extracted as system prompt
+      - User messages -> ``{"role": "user", "content": [...]}``
+      - Assistant messages -> ``{"role": "assistant", "content": [...]}``
+      - Tool calls -> ``{"toolUse": {"toolUseId": ..., "name": ..., "input": ...}}``
+      - Tool results -> ``{"toolResult": {"toolUseId": ..., "content": [...]}}``
 
     Converse requires strict user/assistant alternation. Consecutive messages
     with the same role are merged into a single message.
@@ -370,7 +370,7 @@ def convert_messages_to_converse(
             continue
 
         if role == "tool":
-            # Tool result messages → merge into the preceding user turn
+            # Tool result messages -> merge into the preceding user turn
             tool_call_id = msg.get("tool_call_id", "")
             result_content = content if isinstance(content, str) else json.dumps(content)
             tool_result_block = {
@@ -451,7 +451,7 @@ def convert_messages_to_converse(
 
 
 # ---------------------------------------------------------------------------
-# Response format conversion: Bedrock Converse → OpenAI
+# Response format conversion: Bedrock Converse -> OpenAI
 # ---------------------------------------------------------------------------
 
 def _converse_stop_reason_to_openai(stop_reason: str) -> str:
@@ -743,7 +743,7 @@ def build_converse_kwargs(
         if converse_tools:
             # Some Bedrock models don't support tool/function calling (e.g.
             # DeepSeek R1, reasoning-only models).  Sending toolConfig to
-            # these models causes a ValidationException → retry loop → failure.
+            # these models causes a ValidationException -> retry loop -> failure.
             # Strip tools for known non-tool-calling models and warn the user.
             # Ref: PR #7920 feedback from @ptlally, pattern from PR #4346.
             if _model_supports_tool_use(model):
@@ -972,7 +972,7 @@ def _extract_provider_from_arn(arn: str) -> str:
     """Extract the model provider from a Bedrock model ARN.
 
     Example: "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-v2"
-    → "anthropic"
+    -> "anthropic"
     """
     match = re.search(r"foundation-model/([^.]+)", arn)
     return match.group(1) if match else ""

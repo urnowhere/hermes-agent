@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 
 
 # ---------------------------------------------------------------------------
-# Test 1: Agent heuristic — generic 400 with large session → compression
+# Test 1: Agent heuristic — generic 400 with large session -> compression
 # ---------------------------------------------------------------------------
 
 
@@ -66,7 +66,7 @@ class TestGeneric400Heuristic:
         ctx_len = 200000
         is_large_session = approx_tokens > ctx_len * 0.4 or len(api_messages) > 80
         is_generic_error = len(error_msg.strip()) < 30
-        assert not is_large_session  # Small session → heuristic doesn't fire
+        assert not is_large_session  # Small session -> heuristic doesn't fire
 
     def test_generic_400_with_large_token_count_triggers_heuristic(self):
         """A generic 400 with high token count should be treated as
@@ -87,7 +87,7 @@ class TestGeneric400Heuristic:
         is_generic_error = len(error_msg.strip()) < 30
         assert is_large_session
         assert is_generic_error
-        # Both conditions true → should be treated as context overflow
+        # Both conditions true -> should be treated as context overflow
 
     def test_generic_400_with_many_messages_triggers_heuristic(self):
         """A generic 400 with >80 messages should trigger the heuristic
@@ -112,7 +112,7 @@ class TestGeneric400Heuristic:
         approx_tokens = 100000
 
         is_generic_error = len(error_msg.strip()) < 30
-        assert not is_generic_error  # Long specific message → heuristic doesn't fire
+        assert not is_generic_error  # Long specific message -> heuristic doesn't fire
 
     def test_descriptive_context_error_caught_by_phrases(self):
         """Descriptive context-length errors should still be caught by
@@ -155,7 +155,7 @@ class TestGatewaySkipsPersistenceOnFailure:
         ``not final_response`` which was always truthy after conversion."""
         agent_result = {
             "failed": True,
-            "final_response": "⚠️ Request payload too large: max compression attempts reached.",
+            "final_response": "[WARN]️ Request payload too large: max compression attempts reached.",
             "messages": [],
         }
         agent_failed_early = bool(agent_result.get("failed"))

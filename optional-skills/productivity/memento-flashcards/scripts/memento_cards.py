@@ -72,7 +72,7 @@ def _out(obj: object) -> None:
     sys.stdout.write("\n")
 
 
-# ── Subcommands ──────────────────────────────────────────────────────────────
+# -- Subcommands --------------------------------------------------------------
 
 def cmd_add(args: argparse.Namespace) -> None:
     data = _load()
@@ -290,7 +290,7 @@ def cmd_delete_collection(args: argparse.Namespace) -> None:
     _out({"ok": True, "deleted_count": removed, "collection": args.collection})
 
 
-# ── CLI ──────────────────────────────────────────────────────────────────────
+# -- CLI ----------------------------------------------------------------------
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Memento flashcard manager")

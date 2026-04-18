@@ -471,7 +471,7 @@ class TestUtf16Len:
         assert utf16_len("你好") == 2
 
     def test_emoji_surrogate_pair(self):
-        # 😀 (U+1F600) is outside BMP → 2 UTF-16 code units
+        # 😀 (U+1F600) is outside BMP -> 2 UTF-16 code units
         assert utf16_len("😀") == 2
 
     def test_mixed(self):
@@ -530,7 +530,7 @@ class TestTruncateMessageUtf16:
 
     def test_emoji_near_limit_triggers_split(self):
         """A message at 4096 codepoints but >4096 UTF-16 units must split."""
-        # 2049 emoji = 2049 codepoints but 4098 UTF-16 units → exceeds 4096
+        # 2049 emoji = 2049 codepoints but 4098 UTF-16 units -> exceeds 4096
         msg = "😀" * 2049
         assert len(msg) == 2049  # Python len sees 2049 chars
         assert utf16_len(msg) == 4098  # but it's 4098 UTF-16 units

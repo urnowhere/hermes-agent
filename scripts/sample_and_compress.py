@@ -54,7 +54,7 @@ def load_dataset_from_hf(dataset_name: str) -> List[Dict[str, Any]]:
         # Try loading with default config
         ds = load_dataset(dataset_name, split="train")
     except Exception as e:
-        print(f"   ⚠️  Error loading {dataset_name}: {e}")
+        print(f"   [WARN]️  Error loading {dataset_name}: {e}")
         return []
     
     # Convert to list of dicts
@@ -70,7 +70,7 @@ def load_dataset_from_hf(dataset_name: str) -> List[Dict[str, Any]]:
             # Assume the whole item is the entry
             entries.append(dict(item))
     
-    print(f"   ✅ Loaded {len(entries):,} entries from {dataset_name}")
+    print(f"   [OK] Loaded {len(entries):,} entries from {dataset_name}")
     return entries
 
 
@@ -152,7 +152,7 @@ def sample_from_datasets(
         entries = load_dataset_from_hf(dataset_name)
         
         if not entries:
-            print(f"   ⚠️  Skipping {dataset_name} (no entries loaded)")
+            print(f"   [WARN]️  Skipping {dataset_name} (no entries loaded)")
             continue
         
         # Add source metadata to each entry
@@ -191,7 +191,7 @@ def sample_from_datasets(
                 filtered_entries.append(entry)
                 token_counts.append(token_count)
     
-    print(f"\n   ✅ Found {len(filtered_entries):,} trajectories >= {min_tokens:,} tokens")
+    print(f"\n   [OK] Found {len(filtered_entries):,} trajectories >= {min_tokens:,} tokens")
     
     if token_counts:
         avg_tokens = sum(token_counts) / len(token_counts)
@@ -199,11 +199,11 @@ def sample_from_datasets(
     
     # Random sample from the filtered pool
     if len(filtered_entries) <= total_samples:
-        print(f"\n⚠️  Only {len(filtered_entries):,} trajectories available, using all of them")
+        print(f"\n[WARN]️  Only {len(filtered_entries):,} trajectories available, using all of them")
         sampled = filtered_entries
     else:
         sampled = random.sample(filtered_entries, total_samples)
-        print(f"\n✅ Randomly sampled {len(sampled):,} trajectories from pool of {len(filtered_entries):,}")
+        print(f"\n[OK] Randomly sampled {len(sampled):,} trajectories from pool of {len(filtered_entries):,}")
     
     # Show source distribution
     source_counts = {}
@@ -252,7 +252,7 @@ def save_samples_for_compression(
             for entry in batch:
                 f.write(json.dumps(entry, ensure_ascii=False) + '\n')
     
-    print(f"   ✅ Saved {num_batches} batch files")
+    print(f"   [OK] Saved {num_batches} batch files")
 
 
 def run_compression(input_dir: Path, output_dir: Path, config_path: str):
@@ -309,7 +309,7 @@ def merge_output_to_single_jsonl(input_dir: Path, output_file: Path):
         for entry in all_entries:
             f.write(json.dumps(entry, ensure_ascii=False) + '\n')
     
-    print(f"   ✅ Merged {len(all_entries):,} entries into {output_file.name}")
+    print(f"   [OK] Merged {len(all_entries):,} entries into {output_file.name}")
     return output_file
 
 
@@ -376,7 +376,7 @@ def main(
         )
         
         if not samples:
-            print("❌ No samples collected. Exiting.")
+            print("[ERR] No samples collected. Exiting.")
             return
         
         # Step 2: Save to JSONL files
@@ -387,7 +387,7 @@ def main(
     # Step 3: Run compression
     config_path = base_dir / config
     if not config_path.exists():
-        print(f"❌ Config not found: {config_path}")
+        print(f"[ERR] Config not found: {config_path}")
         return
     
     run_compression(sampled_dir, compressed_dir, str(config_path))
@@ -396,7 +396,7 @@ def main(
     merge_output_to_single_jsonl(compressed_dir, final_output)
     
     print("\n" + "=" * 70)
-    print("✅ COMPLETE!")
+    print("[OK] COMPLETE!")
     print("=" * 70)
     print(f"\n📁 Raw samples:        {sampled_dir}")
     print(f"📁 Compressed batches: {compressed_dir}")

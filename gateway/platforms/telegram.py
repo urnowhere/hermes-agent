@@ -111,9 +111,9 @@ def _strip_mdv2(text: str) -> str:
     # Remove MarkdownV2 italic markers that format_message converted from *italic*
     # Use word boundary (\b) to avoid breaking snake_case like my_variable_name
     cleaned = re.sub(r'(?<!\w)_([^_]+)_(?!\w)', r'\1', cleaned)
-    # Remove MarkdownV2 strikethrough markers (~text~ → text)
+    # Remove MarkdownV2 strikethrough markers (~text~ -> text)
     cleaned = re.sub(r'~([^~]+)~', r'\1', cleaned)
-    # Remove MarkdownV2 spoiler markers (||text|| → text)
+    # Remove MarkdownV2 spoiler markers (||text|| -> text)
     cleaned = re.sub(r'\|\|([^|]+)\|\|', r'\1', cleaned)
     return cleaned
 
@@ -246,7 +246,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._dm_topics_config: List[Dict[str, Any]] = self.config.extra.get("dm_topics", [])
         # Interactive model picker state per chat
         self._model_picker_state: Dict[str, dict] = {}
-        # Approval button state: message_id → session_key
+        # Approval button state: message_id -> session_key
         self._approval_state: Dict[int, str] = {}
 
     @staticmethod
@@ -765,7 +765,7 @@ class TelegramAdapter(BasePlatformAdapter):
             webhook_url = os.getenv("TELEGRAM_WEBHOOK_URL", "").strip()
 
             if webhook_url:
-                # ── Webhook mode ─────────────────────────────────────
+                # -- Webhook mode -------------------------------------
                 # Telegram pushes updates to our HTTP endpoint.  This
                 # enables cloud platforms (Fly.io, Railway) to auto-wake
                 # suspended machines on inbound HTTP traffic.
@@ -789,7 +789,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     self.name, webhook_port, webhook_path,
                 )
             else:
-                # ── Polling mode (default) ───────────────────────────
+                # -- Polling mode (default) ---------------------------
                 # Clear any stale webhook first so polling doesn't inherit a
                 # previous webhook registration and silently stop receiving updates.
                 delete_webhook = getattr(self._bot, "delete_webhook", None)
@@ -1174,11 +1174,11 @@ class TelegramAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
         try:
             default_hint = f" (default: {default})" if default else ""
-            text = f"⚕ *Update needs your input:*\n\n{prompt}{default_hint}"
+            text = f" *Update needs your input:*\n\n{prompt}{default_hint}"
             keyboard = InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("✓ Yes", callback_data="update_prompt:y"),
-                    InlineKeyboardButton("✗ No", callback_data="update_prompt:n"),
+                    InlineKeyboardButton("[OK] Yes", callback_data="update_prompt:y"),
+                    InlineKeyboardButton("[ERR] No", callback_data="update_prompt:n"),
                 ]
             ])
             msg = await self._bot.send_message(
@@ -1209,7 +1209,7 @@ class TelegramAdapter(BasePlatformAdapter):
         try:
             cmd_preview = command[:3800] + "..." if len(command) > 3800 else command
             text = (
-                f"⚠️ <b>Command Approval Required</b>\n\n"
+                f"[WARN]️ <b>Command Approval Required</b>\n\n"
                 f"<pre>{_html.escape(cmd_preview)}</pre>\n\n"
                 f"Reason: {_html.escape(description)}"
             )
@@ -1227,12 +1227,12 @@ class TelegramAdapter(BasePlatformAdapter):
 
             keyboard = InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("✅ Allow Once", callback_data=f"ea:once:{approval_id}"),
-                    InlineKeyboardButton("✅ Session", callback_data=f"ea:session:{approval_id}"),
+                    InlineKeyboardButton("[OK] Allow Once", callback_data=f"ea:once:{approval_id}"),
+                    InlineKeyboardButton("[OK] Session", callback_data=f"ea:session:{approval_id}"),
                 ],
                 [
-                    InlineKeyboardButton("✅ Always", callback_data=f"ea:always:{approval_id}"),
-                    InlineKeyboardButton("❌ Deny", callback_data=f"ea:deny:{approval_id}"),
+                    InlineKeyboardButton("[OK] Always", callback_data=f"ea:always:{approval_id}"),
+                    InlineKeyboardButton("[ERR] Deny", callback_data=f"ea:deny:{approval_id}"),
                 ],
             ])
 
@@ -1269,7 +1269,7 @@ class TelegramAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Send an interactive inline-keyboard model picker.
 
-        Two-step drill-down: provider selection → model selection.
+        Two-step drill-down: provider selection -> model selection.
         Edits the same message in-place as the user navigates.
         """
         if not self._bot:
@@ -1288,19 +1288,19 @@ class TelegramAdapter(BasePlatformAdapter):
                 count = p.get("total_models", len(p.get("models", [])))
                 label = f"{p['name']} ({count})"
                 if p.get("is_current"):
-                    label = f"✓ {label}"
+                    label = f"[OK] {label}"
                 # Compact callback data: mp:<slug>  (max 64 bytes)
                 buttons.append(
                     InlineKeyboardButton(label, callback_data=f"mp:{p['slug']}")
                 )
 
             rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
-            rows.append([InlineKeyboardButton("✗ Cancel", callback_data="mx")])
+            rows.append([InlineKeyboardButton("[ERR] Cancel", callback_data="mx")])
             keyboard = InlineKeyboardMarkup(rows)
 
             provider_label = get_label(current_provider)
             text = (
-                f"⚙ *Model Configuration*\n\n"
+                f" *Model Configuration*\n\n"
                 f"Current model: `{current_model or 'unknown'}`\n"
                 f"Provider: {provider_label}\n\n"
                 f"Select a provider:"
@@ -1363,12 +1363,12 @@ class TelegramAdapter(BasePlatformAdapter):
                 nav.append(InlineKeyboardButton("◀ Prev", callback_data=f"mg:{page - 1}"))
             nav.append(InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="mx:noop"))
             if page < total_pages - 1:
-                nav.append(InlineKeyboardButton("Next ▶", callback_data=f"mg:{page + 1}"))
+                nav.append(InlineKeyboardButton("Next >", callback_data=f"mg:{page + 1}"))
             rows.append(nav)
 
         rows.append([
             InlineKeyboardButton("◀ Back", callback_data="mb"),
-            InlineKeyboardButton("✗ Cancel", callback_data="mx"),
+            InlineKeyboardButton("[ERR] Cancel", callback_data="mx"),
         ])
 
         page_info = f" ({start + 1}–{end} of {total})" if total_pages > 1 else ""
@@ -1415,7 +1415,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
             await query.edit_message_text(
                 text=(
-                    f"⚙ *Model Configuration*\n\n"
+                    f" *Model Configuration*\n\n"
                     f"Provider: *{pname}*{page_info}\n"
                     f"Select a model:{extra}"
                 ),
@@ -1449,7 +1449,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
             await query.edit_message_text(
                 text=(
-                    f"⚙ *Model Configuration*\n\n"
+                    f" *Model Configuration*\n\n"
                     f"Provider: *{pname}*{page_info}\n"
                     f"Select a model:{extra}"
                 ),
@@ -1514,13 +1514,13 @@ class TelegramAdapter(BasePlatformAdapter):
                 count = p.get("total_models", len(p.get("models", [])))
                 label = f"{p['name']} ({count})"
                 if p.get("is_current"):
-                    label = f"✓ {label}"
+                    label = f"[OK] {label}"
                 buttons.append(
                     InlineKeyboardButton(label, callback_data=f"mp:{p['slug']}")
                 )
 
             rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
-            rows.append([InlineKeyboardButton("✗ Cancel", callback_data="mx")])
+            rows.append([InlineKeyboardButton("[ERR] Cancel", callback_data="mx")])
             keyboard = InlineKeyboardMarkup(rows)
 
             try:
@@ -1530,7 +1530,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
             await query.edit_message_text(
                 text=(
-                    f"⚙ *Model Configuration*\n\n"
+                    f" *Model Configuration*\n\n"
                     f"Current model: `{state['current_model'] or 'unknown'}`\n"
                     f"Provider: {provider_label}\n\n"
                     f"Select a provider:"
@@ -1593,10 +1593,10 @@ class TelegramAdapter(BasePlatformAdapter):
 
                 # Map choice to human-readable label
                 label_map = {
-                    "once": "✅ Approved once",
-                    "session": "✅ Approved for session",
-                    "always": "✅ Approved permanently",
-                    "deny": "❌ Denied",
+                    "once": "[OK] Approved once",
+                    "session": "[OK] Approved for session",
+                    "always": "[OK] Approved permanently",
+                    "deny": "[ERR] Denied",
                 }
                 user_display = getattr(query.from_user, "first_name", "User")
                 label = label_map.get(choice, "Resolved")
@@ -1638,7 +1638,7 @@ class TelegramAdapter(BasePlatformAdapter):
         label = "Yes" if answer == "y" else "No"
         try:
             await query.edit_message_text(
-                text=f"⚕ Update prompt answered: *{label}*",
+                text=f" Update prompt answered: *{label}*",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=None,
             )
@@ -2035,7 +2035,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
         text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', _convert_link, text)
 
-        # 4) Convert markdown headers (## Title) → bold *Title*
+        # 4) Convert markdown headers (## Title) -> bold *Title*
         def _convert_header(m):
             inner = m.group(1).strip()
             # Strip redundant bold markers that may appear inside a header
@@ -2046,14 +2046,14 @@ class TelegramAdapter(BasePlatformAdapter):
             r'^#{1,6}\s+(.+)$', _convert_header, text, flags=re.MULTILINE
         )
 
-        # 5) Convert bold: **text** → *text* (MarkdownV2 bold)
+        # 5) Convert bold: **text** -> *text* (MarkdownV2 bold)
         text = re.sub(
             r'\*\*(.+?)\*\*',
             lambda m: _ph(f'*{_escape_mdv2(m.group(1))}*'),
             text,
         )
 
-        # 6) Convert italic: *text* (single asterisk) → _text_ (MarkdownV2 italic)
+        # 6) Convert italic: *text* (single asterisk) -> _text_ (MarkdownV2 italic)
         #    [^*\n]+ prevents matching across newlines (which would corrupt
         #    bullet lists using * markers and multi-line content).
         text = re.sub(
@@ -2062,21 +2062,21 @@ class TelegramAdapter(BasePlatformAdapter):
             text,
         )
 
-        # 7) Convert strikethrough: ~~text~~ → ~text~ (MarkdownV2)
+        # 7) Convert strikethrough: ~~text~~ -> ~text~ (MarkdownV2)
         text = re.sub(
             r'~~(.+?)~~',
             lambda m: _ph(f'~{_escape_mdv2(m.group(1))}~'),
             text,
         )
 
-        # 8) Convert spoiler: ||text|| → ||text|| (protect from | escaping)
+        # 8) Convert spoiler: ||text|| -> ||text|| (protect from | escaping)
         text = re.sub(
             r'\|\|(.+?)\|\|',
             lambda m: _ph(f'||{_escape_mdv2(m.group(1))}||'),
             text,
         )
 
-        # 9) Convert blockquotes: > at line start → protect > from escaping
+        # 9) Convert blockquotes: > at line start -> protect > from escaping
         #    Handle both regular blockquotes (> text) and expandable blockquotes
         #    (Telegram MarkdownV2: **> for expandable start, || to end the quote)
         def _convert_blockquote(m):
@@ -2144,7 +2144,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
         return text
     
-    # ── Group mention gating ──────────────────────────────────────────────
+    # -- Group mention gating ----------------------------------------------
 
     def _telegram_require_mention(self) -> bool:
         """Return whether group chats should require an explicit bot trigger."""
@@ -2962,7 +2962,7 @@ class TelegramAdapter(BasePlatformAdapter):
             timestamp=message.date,
         )
 
-    # ── Message reactions (processing lifecycle) ──────────────────────────
+    # -- Message reactions (processing lifecycle) --------------------------
 
     def _reactions_enabled(self) -> bool:
         """Check if message reactions are enabled via config/env."""

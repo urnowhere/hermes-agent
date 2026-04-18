@@ -30,7 +30,7 @@ except ImportError:
     pytest.skip("atroposlib not installed", allow_module_level=True)
 
 
-# ─── Mock server infrastructure ─────────────────────────────────────────
+# --- Mock server infrastructure -----------------------------------------
 
 
 @dataclass
@@ -128,7 +128,7 @@ def make_tool_response(
     )
 
 
-# ─── Tests ───────────────────────────────────────────────────────────────
+# --- Tests ---------------------------------------------------------------
 
 
 class TestAgentResult:

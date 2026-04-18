@@ -106,7 +106,7 @@ def _make_discord_adapter(reply_to_mode: str = "first"):
     adapter = DiscordAdapter(config)
 
     # Mock the Discord client and channel.
-    # ref_message.to_reference() → a distinct sentinel: the adapter now wraps
+    # ref_message.to_reference() -> a distinct sentinel: the adapter now wraps
     # the fetched Message via to_reference(fail_if_not_exists=False) so a
     # deleted target degrades to "send without reply chip" instead of a 400.
     mock_channel = AsyncMock()
@@ -326,7 +326,7 @@ def _make_message(*, content: str = "hi", reference=None):
 
 @pytest.fixture
 def reply_text_adapter(monkeypatch):
-    """DiscordAdapter wired for _handle_message → handle_message capture."""
+    """DiscordAdapter wired for _handle_message -> handle_message capture."""
     config = PlatformConfig(enabled=True, token="fake-token")
     adapter = DiscordAdapter(config)
     adapter._client = SimpleNamespace(user=SimpleNamespace(id=999))

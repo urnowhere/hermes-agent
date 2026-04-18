@@ -6,7 +6,7 @@ from agent.display import get_tool_emoji
 
 
 class TestGetToolEmoji:
-    """Verify the skin → registry → fallback resolution chain."""
+    """Verify the skin -> registry -> fallback resolution chain."""
 
     def test_returns_registry_emoji_when_no_skin(self):
         """Registry-registered emoji is used when no skin is active."""
@@ -64,7 +64,7 @@ class TestGetToolEmoji:
         with mock_patch("agent.display._get_skin", return_value=skin), \
              mock_patch.dict(sys.modules, {"tools.registry": mock_module}):
             result = get_tool_emoji("unknown_tool")
-            assert result == "⚡"
+            assert result == ""
 
     def test_custom_default(self):
         """Custom default is returned when nothing matches."""
@@ -75,8 +75,8 @@ class TestGetToolEmoji:
             mock_module = MagicMock()
             mock_module.registry = mock_reg
             with mock_patch.dict(sys.modules, {"tools.registry": mock_module}):
-                result = get_tool_emoji("x", default="⚙️")
-                assert result == "⚙️"
+                result = get_tool_emoji("x", default="️")
+                assert result == "️"
 
     def test_skin_override_only_for_matching_tool(self):
         """Skin override for one tool doesn't affect others."""

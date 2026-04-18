@@ -1,4 +1,4 @@
-"""Tests for SSE client disconnect → agent task cancellation.
+"""Tests for SSE client disconnect -> agent task cancellation.
 
 When a streaming /v1/chat/completions client disconnects mid-stream
 (network drop, browser tab close), the agent is interrupted via

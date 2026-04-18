@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Request translation: OpenAI → Gemini
+# Request translation: OpenAI -> Gemini
 # =============================================================================
 
 _ROLE_MAP_OPENAI_TO_GEMINI = {
@@ -315,7 +315,7 @@ def wrap_code_assist_request(
 
 
 # =============================================================================
-# Response translation: Gemini → OpenAI
+# Response translation: Gemini -> OpenAI
 # =============================================================================
 
 def _translate_gemini_response(

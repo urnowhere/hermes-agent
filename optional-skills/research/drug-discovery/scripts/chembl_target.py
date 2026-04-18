@@ -18,7 +18,7 @@ def get(endpoint):
         print(f"API error: {e}", file=sys.stderr); return None
 
 def main():
-    parser = argparse.ArgumentParser(description="ChEMBL target → active compounds")
+    parser = argparse.ArgumentParser(description="ChEMBL target -> active compounds")
     parser.add_argument("target")
     parser.add_argument("--min-pchembl", type=float, default=6.0)
     parser.add_argument("--limit", type=int, default=10)

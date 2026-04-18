@@ -270,7 +270,7 @@ def sample_toolsets_from_distribution(distribution_name: str) -> List[str]:
     for toolset_name, probability in dist["toolsets"].items():
         # Validate toolset exists
         if not validate_toolset(toolset_name):
-            print(f"⚠️  Warning: Toolset '{toolset_name}' in distribution '{distribution_name}' is not valid")
+            print(f"[WARN]️  Warning: Toolset '{toolset_name}' in distribution '{distribution_name}' is not valid")
             continue
         
         # Roll the dice - if random value is less than probability, include this toolset
@@ -310,7 +310,7 @@ def print_distribution_info(distribution_name: str) -> None:
     """
     dist = get_distribution(distribution_name)
     if not dist:
-        print(f"❌ Unknown distribution: {distribution_name}")
+        print(f"[ERR] Unknown distribution: {distribution_name}")
         return
     
     print(f"\n📊 Distribution: {distribution_name}")

@@ -36,7 +36,7 @@ def _mock_client(base_url="https://openrouter.ai/api/v1", api_key="fb-key"):
     return mock
 
 
-# ── Chain initialisation ──────────────────────────────────────────────────
+# -- Chain initialisation --------------------------------------------------
 
 
 class TestFallbackChainInit:
@@ -82,7 +82,7 @@ class TestFallbackChainInit:
         assert agent._fallback_chain == []
 
 
-# ── Chain advancement ─────────────────────────────────────────────────────
+# -- Chain advancement -----------------------------------------------------
 
 
 class TestFallbackChainAdvancement:

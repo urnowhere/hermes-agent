@@ -262,8 +262,8 @@ def _strategy_trimmed_boundary(content: str, pattern: str) -> List[Tuple[int, in
 def _build_orig_to_norm_map(original: str) -> List[int]:
     """Build a list mapping each original character index to its normalized index.
 
-    Because UNICODE_MAP replacements may expand characters (e.g. em-dash → '--',
-    ellipsis → '...'), the normalised string can be longer than the original.
+    Because UNICODE_MAP replacements may expand characters (e.g. em-dash -> '--',
+    ellipsis -> '...'), the normalised string can be longer than the original.
     This map lets us convert positions in the normalised string back to the
     corresponding positions in the original string.
 

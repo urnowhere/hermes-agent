@@ -154,16 +154,23 @@ def _find_bash() -> str:
         return custom
 
     found = shutil.which("bash")
-    if found:
+    # WSL bash (in WindowsApps) outputs UTF-16LE which breaks text-mode
+    # subprocess pipes. Prefer Git Bash when available.
+    if found and "WindowsApps" not in found:
         return found
 
     for candidate in (
         os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "bin", "bash.exe"),
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "usr", "bin", "bash.exe"),
         os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Git", "bin", "bash.exe"),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Git", "bin", "bash.exe"),
     ):
         if candidate and os.path.isfile(candidate):
             return candidate
+
+    # Fallback: use whatever shutil.which found (may be WSL)
+    if found:
+        return found
 
     raise RuntimeError(
         "Git Bash not found. Hermes Agent requires Git for Windows on Windows.\n"
@@ -177,10 +184,19 @@ _find_shell = _find_bash
 
 
 # Standard PATH entries for environments with minimal PATH.
-_SANE_PATH = (
-    "/opt/homebrew/bin:/opt/homebrew/sbin:"
-    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-)
+if _IS_WINDOWS:
+    _SANE_PATH = ";".join([
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "bin"),
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "usr", "bin"),
+        r"C:\Windows\System32",
+        r"C:\Windows",
+        r"C:\Windows\System32\Wbem",
+    ])
+else:
+    _SANE_PATH = (
+        "/opt/homebrew/bin:/opt/homebrew/sbin:"
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    )
 
 
 def _make_run_env(env: dict) -> dict:
@@ -199,8 +215,10 @@ def _make_run_env(env: dict) -> dict:
         elif k not in _HERMES_PROVIDER_ENV_BLOCKLIST or _is_passthrough(k):
             run_env[k] = v
     existing_path = run_env.get("PATH", "")
-    if "/usr/bin" not in existing_path.split(":"):
-        run_env["PATH"] = f"{existing_path}:{_SANE_PATH}" if existing_path else _SANE_PATH
+    _path_sep = os.pathsep
+    _usr_bin_check = "/usr/bin" if not _IS_WINDOWS else r"C:\Windows\System32"
+    if _usr_bin_check not in existing_path.split(_path_sep):
+        run_env["PATH"] = f"{existing_path}{_path_sep}{_SANE_PATH}" if existing_path else _SANE_PATH
 
     # Per-profile HOME isolation: redirect system tool configs (git, ssh, gh,
     # npm …) into {HERMES_HOME}/home/ when that directory exists.  Only the
@@ -239,13 +257,18 @@ class LocalEnvironment(BaseEnvironment):
         """
         for env_var in ("TMPDIR", "TMP", "TEMP"):
             candidate = self.env.get(env_var) or os.environ.get(env_var)
-            if candidate and candidate.startswith("/"):
-                return candidate.rstrip("/") or "/"
+            if candidate:
+                if _IS_WINDOWS and os.path.isdir(candidate):
+                    return candidate.rstrip("\\/")
+                if not _IS_WINDOWS and candidate.startswith("/"):
+                    return candidate.rstrip("/") or "/"
 
-        if os.path.isdir("/tmp") and os.access("/tmp", os.W_OK | os.X_OK):
+        if not _IS_WINDOWS and os.path.isdir("/tmp") and os.access("/tmp", os.W_OK | os.X_OK):
             return "/tmp"
 
         candidate = tempfile.gettempdir()
+        if _IS_WINDOWS:
+            return candidate.rstrip("\\/")
         if candidate.startswith("/"):
             return candidate.rstrip("/") or "/"
 

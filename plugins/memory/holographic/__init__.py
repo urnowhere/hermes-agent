@@ -40,7 +40,7 @@ FACT_STORE_SCHEMA = {
         "Deep structured memory with algebraic reasoning. "
         "Use alongside the memory tool — memory for always-on context, "
         "fact_store for deep recall and compositional queries.\n\n"
-        "ACTIONS (simple → powerful):\n"
+        "ACTIONS (simple -> powerful):\n"
         "• add — Store a fact the user would expect you to remember.\n"
         "• search — Keyword lookup ('editor config', 'deploy process').\n"
         "• probe — Entity recall: ALL facts about a person/thing.\n"

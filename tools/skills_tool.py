@@ -13,17 +13,17 @@ Inspired by Anthropic's Claude Skills system with progressive disclosure archite
 
 Directory Structure:
     skills/
-    ├── my-skill/
-    │   ├── SKILL.md           # Main instructions (required)
-    │   ├── references/        # Supporting documentation
-    │   │   ├── api.md
-    │   │   └── examples.md
-    │   ├── templates/         # Templates for output
-    │   │   └── template.md
-    │   └── assets/            # Supplementary files (agentskills.io standard)
-    └── category/              # Category folder for organization
-        └── another-skill/
-            └── SKILL.md
+    ├-- my-skill/
+    |   ├-- SKILL.md           # Main instructions (required)
+    |   ├-- references/        # Supporting documentation
+    |   |   ├-- api.md
+    |   |   +-- examples.md
+    |   ├-- templates/         # Templates for output
+    |   |   +-- template.md
+    |   +-- assets/            # Supplementary files (agentskills.io standard)
+    +-- category/              # Category folder for organization
+        +-- another-skill/
+            +-- SKILL.md
 
 SKILL.md Format (YAML Frontmatter, agentskills.io compatible):
     ---
@@ -712,7 +712,7 @@ def skills_list(category: str = None, task_id: str = None) -> str:
         return tool_error(str(e), success=False)
 
 
-# ── Plugin skill serving ──────────────────────────────────────────────────
+# -- Plugin skill serving --------------------------------------------------
 
 
 def _serve_plugin_skill(
@@ -815,7 +815,7 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
         JSON string with skill content or error message
     """
     try:
-        # ── Qualified name dispatch (plugin skills) ──────────────────
+        # -- Qualified name dispatch (plugin skills) ------------------
         # Names containing ':' are routed to the plugin skill registry.
         # Bare names fall through to the existing flat-tree scan below.
         if ":" in name:
@@ -1319,7 +1319,7 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
 
 if __name__ == "__main__":
     """Test the skills tool"""
-    print("🎯 Skills Tool Test")
+    print(" Skills Tool Test")
     print("=" * 60)
 
     # Test listing skills

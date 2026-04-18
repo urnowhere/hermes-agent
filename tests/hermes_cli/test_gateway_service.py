@@ -1,9 +1,11 @@
 """Tests for gateway service management helpers."""
 
 import os
-import pwd
+import sys
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 import hermes_cli.gateway as gateway_cli
 from gateway.restart import (
@@ -827,6 +829,7 @@ class TestGeneratedUnitIncludesLocalBin:
 class TestSystemServiceIdentityRootHandling:
     """Root user handling in _system_service_identity()."""
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="pwd/grp not available on Windows")
     def test_auto_detected_root_is_rejected(self, monkeypatch):
         """When root is auto-detected (not explicitly requested), raise."""
         import pwd
@@ -836,10 +839,10 @@ class TestSystemServiceIdentityRootHandling:
         monkeypatch.setenv("USER", "root")
         monkeypatch.setenv("LOGNAME", "root")
 
-        import pytest
         with pytest.raises(ValueError, match="pass --run-as-user root to override"):
             gateway_cli._system_service_identity(run_as_user=None)
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="pwd/grp not available on Windows")
     def test_explicit_root_is_allowed(self, monkeypatch):
         """When root is explicitly passed via --run-as-user root, allow it."""
         import pwd
@@ -852,6 +855,7 @@ class TestSystemServiceIdentityRootHandling:
         assert username == "root"
         assert home == root_info.pw_dir
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="pwd/grp not available on Windows")
     def test_non_root_user_passes_through(self, monkeypatch):
         """Normal non-root user works as before."""
         import pwd
@@ -1024,6 +1028,7 @@ class TestProfileArg:
         monkeypatch.setattr(Path, "home", lambda: profile_home)
         monkeypatch.setenv("HERMES_HOME", str(profile_dir))
         monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: profile_dir)
+        import pwd
         monkeypatch.setattr(pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(machine_home)))
 
         plist_path = gateway_cli.get_launchd_plist_path()

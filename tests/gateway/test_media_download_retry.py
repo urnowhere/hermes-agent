@@ -801,7 +801,7 @@ class TestMattermostSendUrlAsFile:
     """Tests for MattermostAdapter._send_url_as_file"""
 
     def test_success_on_first_attempt(self, _mock_safe):
-        """200 on first attempt → file uploaded and post created."""
+        """200 on first attempt -> file uploaded and post created."""
         adapter = _make_mm_adapter()
         resp = _make_aiohttp_resp(200)
         adapter._session.get = MagicMock(return_value=resp)

@@ -140,7 +140,7 @@ class TestReadAttachmentBytes:
 class TestCacheDiscordImage:
     @pytest.mark.asyncio
     async def test_prefers_att_read_over_url(self):
-        """Primary path: att.read() bytes → cache_image_from_bytes, no URL fetch."""
+        """Primary path: att.read() bytes -> cache_image_from_bytes, no URL fetch."""
         adapter = _make_adapter()
         att = _make_attachment_with_read(_PNG_BYTES)
 
@@ -159,7 +159,7 @@ class TestCacheDiscordImage:
 
     @pytest.mark.asyncio
     async def test_falls_back_to_url_when_no_read(self):
-        """No .read() → URL path is used (existing SSRF-gated behavior)."""
+        """No .read() -> URL path is used (existing SSRF-gated behavior)."""
         adapter = _make_adapter()
         att = _make_attachment_without_read()
 
@@ -244,7 +244,7 @@ class TestCacheDiscordAudio:
 class TestCacheDiscordDocument:
     @pytest.mark.asyncio
     async def test_prefers_att_read_returns_bytes_directly(self):
-        """Primary path: att.read() → raw bytes, no aiohttp involvement."""
+        """Primary path: att.read() -> raw bytes, no aiohttp involvement."""
         adapter = _make_adapter()
         att = _make_attachment_with_read(_PDF_BYTES)
 
@@ -263,7 +263,7 @@ class TestCacheDiscordDocument:
         internal-looking hosts. The fallback must now refuse unsafe URLs.
         """
         adapter = _make_adapter()
-        att = _make_attachment_without_read()  # no .read → forces fallback
+        att = _make_attachment_without_read()  # no .read -> forces fallback
 
         with patch(
             "gateway.platforms.discord.is_safe_url", return_value=False
@@ -277,7 +277,7 @@ class TestCacheDiscordDocument:
 
     @pytest.mark.asyncio
     async def test_fallback_aiohttp_when_safe_url(self):
-        """Safe URL + no att.read() → aiohttp fallback executes."""
+        """Safe URL + no att.read() -> aiohttp fallback executes."""
         adapter = _make_adapter()
         att = _make_attachment_without_read()
 

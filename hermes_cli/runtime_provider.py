@@ -892,7 +892,7 @@ def resolve_runtime_provider(
         # Read bedrock-specific config from config.yaml
         from hermes_cli.config import load_config as _load_bedrock_config
         _bedrock_cfg = _load_bedrock_config().get("bedrock", {})
-        # Region priority: config.yaml bedrock.region → env var → us-east-1
+        # Region priority: config.yaml bedrock.region -> env var -> us-east-1
         region = (_bedrock_cfg.get("region") or "").strip() or resolve_bedrock_region()
         auth_source = resolve_aws_auth_env_var() or "aws-sdk-default-chain"
         # Build guardrail config if configured
@@ -912,7 +912,7 @@ def resolve_runtime_provider(
         # Non-Claude models use the Converse API for multi-model support.
         _current_model = str(model_cfg.get("default") or "").strip()
         if is_anthropic_bedrock_model(_current_model):
-            # Claude on Bedrock → AnthropicBedrock SDK → anthropic_messages path
+            # Claude on Bedrock -> AnthropicBedrock SDK -> anthropic_messages path
             runtime = {
                 "provider": "bedrock",
                 "api_mode": "anthropic_messages",
@@ -924,7 +924,7 @@ def resolve_runtime_provider(
                 "requested_provider": requested_provider,
             }
         else:
-            # Non-Claude (Nova, DeepSeek, Llama, etc.) → Converse API
+            # Non-Claude (Nova, DeepSeek, Llama, etc.) -> Converse API
             runtime = {
                 "provider": "bedrock",
                 "api_mode": "bedrock_converse",

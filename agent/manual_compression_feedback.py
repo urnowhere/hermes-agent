@@ -24,13 +24,13 @@ def summarize_manual_compression(
             )
         else:
             token_line = (
-                f"Rough transcript estimate: ~{before_tokens:,} → "
+                f"Rough transcript estimate: ~{before_tokens:,} -> "
                 f"~{after_tokens:,} tokens"
             )
     else:
-        headline = f"Compressed: {before_count} → {after_count} messages"
+        headline = f"Compressed: {before_count} -> {after_count} messages"
         token_line = (
-            f"Rough transcript estimate: ~{before_tokens:,} → "
+            f"Rough transcript estimate: ~{before_tokens:,} -> "
             f"~{after_tokens:,} tokens"
         )
 

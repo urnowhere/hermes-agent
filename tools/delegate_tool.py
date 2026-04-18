@@ -169,7 +169,7 @@ def _build_child_progress_callback(task_index: int, goal: str, parent_agent, tas
     parent_cb = getattr(parent_agent, 'tool_progress_callback', None)
 
     if not spinner and not parent_cb:
-        return None  # No display → no callback → zero behavior change
+        return None  # No display -> no callback -> zero behavior change
 
     # Show 1-indexed prefix only in batch mode (multiple tasks)
     prefix = f"[{task_index + 1}] " if task_count > 1 else ""
@@ -220,7 +220,7 @@ def _build_child_progress_callback(task_index: int, goal: str, parent_agent, tas
             if spinner:
                 short = (text[:55] + "...") if len(text) > 55 else text
                 try:
-                    spinner.print_above(f" {prefix}├─ 💭 \"{short}\"")
+                    spinner.print_above(f" {prefix}├- 💭 \"{short}\"")
                 except Exception as e:
                     logger.debug("Spinner print_above failed: %s", e)
             _relay("subagent.thinking", preview=text)
@@ -235,7 +235,7 @@ def _build_child_progress_callback(task_index: int, goal: str, parent_agent, tas
             short = (preview[:35] + "...") if preview and len(preview) > 35 else (preview or "")
             from agent.display import get_tool_emoji
             emoji = get_tool_emoji(tool_name or "")
-            line = f" {prefix}├─ {emoji} {tool_name}"
+            line = f" {prefix}├- {emoji} {tool_name}"
             if short:
                 line += f"  \"{short}\""
             try:
@@ -868,7 +868,7 @@ def delegate_task(
                     label = task_labels[idx] if idx < len(task_labels) else f"Task {idx}"
                     dur = entry.get("duration_seconds", 0)
                     status = entry.get("status", "?")
-                    icon = "✓" if status == "completed" else "✗"
+                    icon = "[OK]" if status == "completed" else "[ERR]"
                     remaining = n_tasks - completed_count
                     completion_line = f"{icon} [{idx+1}/{n_tasks}] {label}  ({dur}s)"
                     if spinner_ref:

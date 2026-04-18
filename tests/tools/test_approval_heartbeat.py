@@ -124,7 +124,7 @@ class TestApprovalHeartbeat:
             call == "waiting for user approval" for call in heartbeat_calls
         ), f"unexpected heartbeat labels: {set(heartbeat_calls)}"
 
-        # Sanity: the approval was resolved with "once" → command approved.
+        # Sanity: the approval was resolved with "once" -> command approved.
         assert result_holder["result"]["approved"] is True
 
     def test_wait_returns_immediately_on_user_response(self):

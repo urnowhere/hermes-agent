@@ -212,7 +212,7 @@ def _to_openai_base_url(base_url: str) -> str:
     url = str(base_url or "").strip().rstrip("/")
     if url.endswith("/anthropic"):
         rewritten = url[: -len("/anthropic")] + "/v1"
-        logger.debug("Auxiliary client: rewrote base URL %s → %s", url, rewritten)
+        logger.debug("Auxiliary client: rewrote base URL %s -> %s", url, rewritten)
         return rewritten
     return url
 
@@ -256,7 +256,7 @@ def _pool_runtime_base_url(entry: Any, fallback: str = "") -> str:
     return str(url or "").strip().rstrip("/")
 
 
-# ── Codex Responses → chat.completions adapter ─────────────────────────────
+# -- Codex Responses -> chat.completions adapter -----------------------------
 # All auxiliary consumers call client.chat.completions.create(**kwargs) and
 # read response.choices[0].message.content. This adapter translates those
 # calls to the Codex Responses API so callers don't need any changes.
@@ -808,7 +808,7 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
     return None, None
 
 
-# ── Provider resolution helpers ─────────────────────────────────────────────
+# -- Provider resolution helpers ---------------------------------------------
 
 
 
@@ -1207,7 +1207,7 @@ def _try_payment_fallback(
     # Normalise the failed provider label for matching.
     skip = failed_provider.lower().strip()
     # Also skip Step-1 main-provider path if it maps to the same backend.
-    # (e.g. main_provider="openrouter" → skip "openrouter" in chain)
+    # (e.g. main_provider="openrouter" -> skip "openrouter" in chain)
     main_provider = _read_main_provider()
     skip_labels = {skip}
     if main_provider and main_provider.lower() in skip:
@@ -1249,8 +1249,9 @@ def _resolve_auto(main_runtime: Optional[Dict[str, Any]] = None) -> Tuple[Option
          on DeepSeek/ZAI/Alibaba get theirs; etc.  Running aux tasks on the
          user's picked model keeps behavior predictable — no surprise
          switches to a cheap fallback model for side tasks.
-      2. OpenRouter → Nous → custom → Codex → API-key providers (fallback
+      2. OpenRouter -> Nous -> custom -> Codex -> API-key providers (fallback
          chain, only used when the main provider has no working client).
+
     """
     global auxiliary_is_nous, _stale_base_url_warned
     auxiliary_is_nous = False  # Reset — _try_nous() will set True if it wins
@@ -1261,10 +1262,10 @@ def _resolve_auto(main_runtime: Optional[Dict[str, Any]] = None) -> Tuple[Option
     runtime_api_key = runtime.get("api_key", "")
     runtime_api_mode = runtime.get("api_mode", "")
 
-    # ── Warn once if OPENAI_BASE_URL is set but config.yaml uses a named
+    # -- Warn once if OPENAI_BASE_URL is set but config.yaml uses a named
     #    provider (not 'custom').  This catches the common "env poisoning"
     #    scenario where a user switches providers via `hermes model` but the
-    #    old OPENAI_BASE_URL lingers in ~/.hermes/.env. ──
+    #    old OPENAI_BASE_URL lingers in ~/.hermes/.env. --
     if not _stale_base_url_warned:
         _env_base = os.getenv("OPENAI_BASE_URL", "").strip()
         _cfg_provider = runtime_provider or _read_main_provider()
@@ -1280,13 +1281,14 @@ def _resolve_auto(main_runtime: Optional[Dict[str, Any]] = None) -> Tuple[Option
             )
             _stale_base_url_warned = True
 
-    # ── Step 1: main provider + main model → use them directly ──
+    # ── Step 1: main provider + main model -> use them directly ──
     #
     # This is the primary aux backend for every user.  "auto" means
     # "use my main chat model for side tasks as well" — including users
     # on aggregators (OpenRouter, Nous) who previously got routed to a
     # cheap provider-side default.  Explicit per-task overrides set via
     # config.yaml (auxiliary.<task>.provider) still win over this.
+
     main_provider = runtime_provider or _read_main_provider()
     main_model = runtime_model or _read_main_model()
     if (main_provider and main_model
@@ -1310,7 +1312,7 @@ def _resolve_auto(main_runtime: Optional[Dict[str, Any]] = None) -> Tuple[Option
                         main_provider, resolved or main_model)
             return client, resolved or main_model
 
-    # ── Step 2: aggregator / fallback chain ──────────────────────────────
+    # -- Step 2: aggregator / fallback chain ------------------------------
     tried = []
     for label, try_fn in _get_provider_chain():
         client, model = try_fn()
@@ -1329,7 +1331,7 @@ def _resolve_auto(main_runtime: Optional[Dict[str, Any]] = None) -> Tuple[Option
     return None, None
 
 
-# ── Centralized Provider Router ─────────────────────────────────────────────
+# -- Centralized Provider Router ---------------------------------------------
 #
 # resolve_provider_client() is the single entry point for creating a properly
 # configured client given a (provider, model) pair.  It handles auth lookup,
@@ -1461,7 +1463,7 @@ def resolve_provider_client(
             return CodexAuxiliaryClient(client_obj, final_model_str)
         return client_obj
 
-    # ── Auto: try all providers in priority order ────────────────────
+    # -- Auto: try all providers in priority order --------------------
     if provider == "auto":
         client, resolved = _resolve_auto(main_runtime=main_runtime)
         if client is None:
@@ -1479,7 +1481,7 @@ def resolve_provider_client(
         return (_to_async_client(client, final_model) if async_mode
                 else (client, final_model))
 
-    # ── OpenRouter ───────────────────────────────────────────────────
+    # -- OpenRouter ---------------------------------------------------
     if provider == "openrouter":
         client, default = _try_openrouter()
         if client is None:
@@ -1490,7 +1492,7 @@ def resolve_provider_client(
         return (_to_async_client(client, final_model) if async_mode
                 else (client, final_model))
 
-    # ── Nous Portal (OAuth) ──────────────────────────────────────────
+    # -- Nous Portal (OAuth) ------------------------------------------
     if provider == "nous":
         client, default = _try_nous()
         if client is None:
@@ -1501,7 +1503,7 @@ def resolve_provider_client(
         return (_to_async_client(client, final_model) if async_mode
                 else (client, final_model))
 
-    # ── OpenAI Codex (OAuth → Responses API) ─────────────────────────
+    # -- OpenAI Codex (OAuth -> Responses API) -------------------------
     if provider == "openai-codex":
         if raw_codex:
             # Return the raw OpenAI client for callers that need direct
@@ -1524,7 +1526,7 @@ def resolve_provider_client(
         return (_to_async_client(client, final_model) if async_mode
                 else (client, final_model))
 
-    # ── Custom endpoint (OPENAI_BASE_URL + OPENAI_API_KEY) ───────────
+    # -- Custom endpoint (OPENAI_BASE_URL + OPENAI_API_KEY) -----------
     if provider == "custom":
         if explicit_base_url:
             custom_base = explicit_base_url.strip()
@@ -1567,7 +1569,7 @@ def resolve_provider_client(
                        "but no endpoint credentials found")
         return None, None
 
-    # ── Named custom providers (config.yaml custom_providers list) ───
+    # -- Named custom providers (config.yaml custom_providers list) ---
     try:
         from hermes_cli.runtime_provider import _get_named_custom_provider
         custom_entry = _get_named_custom_provider(provider)
@@ -1597,7 +1599,7 @@ def resolve_provider_client(
     except ImportError:
         pass
 
-    # ── API-key providers from PROVIDER_REGISTRY ─────────────────────
+    # -- API-key providers from PROVIDER_REGISTRY ---------------------
     try:
         from hermes_cli.auth import (
             PROVIDER_REGISTRY,
@@ -1727,7 +1729,7 @@ def resolve_provider_client(
     return None, None
 
 
-# ── Public API ──────────────────────────────────────────────────────────────
+# -- Public API --------------------------------------------------------------
 
 def get_text_auxiliary_client(
     task: str = "",
@@ -1805,7 +1807,7 @@ def _strict_vision_backend_available(provider: str) -> bool:
 def get_available_vision_backends() -> List[str]:
     """Return the currently available vision backends in auto-selection order.
 
-    Order: active provider → OpenRouter → Nous → stop.  This is the single
+    Order: active provider -> OpenRouter -> Nous -> stop.  This is the single
     source of truth for setup, tool gating, and runtime auto-routing of
     vision tasks.
     """
@@ -1944,7 +1946,7 @@ def auxiliary_max_tokens_param(value: int) -> dict:
     return {"max_tokens": value}
 
 
-# ── Centralized LLM Call API ────────────────────────────────────────────────
+# -- Centralized LLM Call API ------------------------------------------------
 #
 # call_llm() and async_call_llm() own the full request lifecycle:
 #   1. Resolve provider + model from task config (or explicit args)
@@ -2005,7 +2007,7 @@ def _force_close_async_httpx(client: Any) -> None:
 
     This prevents ``AsyncHttpxClientWrapper.__del__`` from scheduling
     ``aclose()`` on a (potentially closed) event loop, which causes
-    ``RuntimeError: Event loop is closed`` → prompt_toolkit's
+    ``RuntimeError: Event loop is closed`` -> prompt_toolkit's
     "Press ENTER to continue..." handler.
 
     We intentionally do NOT run the full async close path — the
@@ -2555,13 +2557,13 @@ def call_llm(
                     raise
                 first_err = retry_err
 
-        # ── Payment / credit exhaustion fallback ──────────────────────
+        # -- Payment / credit exhaustion fallback ----------------------
         # When the resolved provider returns 402 or a credit-related error,
         # try alternative providers instead of giving up.  This handles the
         # common case where a user runs out of OpenRouter credits but has
         # Codex OAuth or another provider available.
         #
-        # ── Connection error fallback ────────────────────────────────
+        # -- Connection error fallback --------------------------------
         # When a provider endpoint is unreachable (DNS failure, connection
         # refused, timeout), try alternative providers.  This handles stale
         # Codex/OAuth tokens that authenticate but whose endpoint is down,
@@ -2747,7 +2749,7 @@ async def async_call_llm(
                     raise
                 first_err = retry_err
 
-        # ── Payment / connection fallback (mirrors sync call_llm) ─────
+        # -- Payment / connection fallback (mirrors sync call_llm) -----
         should_fallback = _is_payment_error(first_err) or _is_connection_error(first_err)
         is_auto = resolved_provider in ("auto", "", None)
         if should_fallback and is_auto:

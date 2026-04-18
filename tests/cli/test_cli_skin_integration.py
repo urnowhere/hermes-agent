@@ -65,7 +65,7 @@ class TestCliSkinPromptIntegration:
             frags = cli._get_tui_prompt_fragments()
 
         assert frags[0][0] == "class:voice-recording"
-        assert frags[0][1].startswith("●")
+        assert frags[0][1].startswith("*")
         assert "❯" not in frags[0][1]
 
     def test_icon_only_skin_symbol_still_visible_in_special_states(self):

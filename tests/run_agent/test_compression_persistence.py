@@ -127,7 +127,7 @@ class TestFlushAfterCompression:
 
             rows = db.get_messages("new-session")
             # With the stale history, flush_from = max(100, 0) = 100
-            # But compressed only has 2 entries → messages[100:] = empty
+            # But compressed only has 2 entries -> messages[100:] = empty
             assert len(rows) == 0, (
                 "Expected 0 messages with stale conversation_history "
                 "(this test verifies the bug condition exists)"

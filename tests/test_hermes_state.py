@@ -1023,7 +1023,7 @@ class TestSanitizeTitle:
             SessionDB.sanitize_title(title)
 
     def test_unicode_emoji_allowed(self):
-        assert SessionDB.sanitize_title("🚀 My Project 🎉") == "🚀 My Project 🎉"
+        assert SessionDB.sanitize_title(" My Project 🎉") == " My Project 🎉"
 
     def test_cjk_characters_allowed(self):
         assert SessionDB.sanitize_title("我的项目") == "我的项目"
@@ -1425,7 +1425,7 @@ class TestExcludeSources:
         db.append_message("s2", "user", "Golang test")
         db.create_session("s3", "tool")
         db.append_message("s3", "user", "Golang test")
-        # Include cli+tool, but exclude tool → should only return cli
+        # Include cli+tool, but exclude tool -> should only return cli
         results = db.search_messages(
             "Golang", source_filter=["cli", "tool"], exclude_sources=["tool"]
         )

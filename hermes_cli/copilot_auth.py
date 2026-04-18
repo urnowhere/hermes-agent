@@ -4,10 +4,10 @@ Implements the OAuth device code flow used by the Copilot CLI and handles
 token validation/exchange for the Copilot API.
 
 Token type support (per GitHub docs):
-  gho_          OAuth token           ✓  (default via copilot login)
-  github_pat_   Fine-grained PAT      ✓  (needs Copilot Requests permission)
-  ghu_          GitHub App token      ✓  (via environment variable)
-  ghp_          Classic PAT           ✗  NOT SUPPORTED
+  gho_          OAuth token           [OK]  (default via copilot login)
+  github_pat_   Fine-grained PAT      [OK]  (needs Copilot Requests permission)
+  ghu_          GitHub App token      [OK]  (via environment variable)
+  ghp_          Classic PAT           [ERR]  NOT SUPPORTED
 
 Credential search order (matching Copilot CLI behaviour):
   1. COPILOT_GITHUB_TOKEN env var
@@ -56,9 +56,9 @@ def validate_copilot_token(token: str) -> tuple[bool, str]:
         return False, (
             "Classic Personal Access Tokens (ghp_*) are not supported by the "
             "Copilot API. Use one of:\n"
-            "  → `copilot login` or `hermes model` to authenticate via OAuth\n"
-            "  → A fine-grained PAT (github_pat_*) with Copilot Requests permission\n"
-            "  → `gh auth login` with the default device code flow (produces gho_* tokens)"
+            "  -> `copilot login` or `hermes model` to authenticate via OAuth\n"
+            "  -> A fine-grained PAT (github_pat_*) with Copilot Requests permission\n"
+            "  -> `gh auth login` with the default device code flow (produces gho_* tokens)"
         )
 
     return True, "OK"
@@ -150,7 +150,7 @@ def _try_gh_cli_token() -> Optional[str]:
     return None
 
 
-# ─── OAuth Device Code Flow ────────────────────────────────────────────────
+# --- OAuth Device Code Flow ------------------------------------------------
 
 def copilot_device_code_login(
     *,
@@ -192,7 +192,7 @@ def copilot_device_code_login(
             device_data = json.loads(resp.read().decode())
     except Exception as exc:
         logger.error("Failed to initiate device authorization: %s", exc)
-        print(f"  ✗ Failed to start device authorization: {exc}")
+        print(f"  [ERR] Failed to start device authorization: {exc}")
         return None
 
     verification_uri = device_data.get("verification_uri", "https://github.com/login/device")
@@ -201,7 +201,7 @@ def copilot_device_code_login(
     interval = max(device_data.get("interval", _DEVICE_CODE_POLL_INTERVAL), 1)
 
     if not device_code or not user_code:
-        print("  ✗ GitHub did not return a device code.")
+        print("  [ERR] GitHub did not return a device code.")
         return None
 
     # Step 2: Show instructions
@@ -241,7 +241,7 @@ def copilot_device_code_login(
             continue
 
         if result.get("access_token"):
-            print(" ✓")
+            print(" [OK]")
             return result["access_token"]
 
         error = result.get("error", "")
@@ -259,23 +259,23 @@ def copilot_device_code_login(
             continue
         elif error == "expired_token":
             print()
-            print("  ✗ Device code expired. Please try again.")
+            print("  [ERR] Device code expired. Please try again.")
             return None
         elif error == "access_denied":
             print()
-            print("  ✗ Authorization was denied.")
+            print("  [ERR] Authorization was denied.")
             return None
         elif error:
             print()
-            print(f"  ✗ Authorization failed: {error}")
+            print(f"  [ERR] Authorization failed: {error}")
             return None
 
     print()
-    print("  ✗ Timed out waiting for authorization.")
+    print("  [ERR] Timed out waiting for authorization.")
     return None
 
 
-# ─── Copilot API Headers ───────────────────────────────────────────────────
+# --- Copilot API Headers ---------------------------------------------------
 
 def copilot_request_headers(
     *,

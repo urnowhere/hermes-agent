@@ -233,7 +233,7 @@ class TestCheckFileStalenessHelper(unittest.TestCase):
                 "read_history": set(), "dedup": {},
                 "read_timestamps": {"/nonexistent/path": 99999.0},
             }
-        # File doesn't exist → stat fails → returns None (let write handle it)
+        # File doesn't exist -> stat fails -> returns None (let write handle it)
         self.assertIsNone(_check_file_staleness("/nonexistent/path", "t1"))
 
 

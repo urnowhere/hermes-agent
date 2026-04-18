@@ -3,7 +3,7 @@ Delivery routing for cron job outputs and agent responses.
 
 Routes messages to the appropriate destination based on:
 - Explicit targets (e.g., "telegram:123456789")
-- Platform home channels (e.g., "telegram" → home channel)
+- Platform home channels (e.g., "telegram" -> home channel)
 - Origin (back to where the job was created)
 - Local (always saved to files)
 """
@@ -31,10 +31,10 @@ class DeliveryTarget:
     A single delivery target.
     
     Represents where a message should be sent:
-    - "origin" → back to source
-    - "local" → save to local files
-    - "telegram" → Telegram home channel
-    - "telegram:123456" → specific Telegram chat
+    - "origin" -> back to source
+    - "local" -> save to local files
+    - "telegram" -> Telegram home channel
+    - "telegram:123456" -> specific Telegram chat
     """
     platform: Platform
     chat_id: Optional[str] = None  # None means use home channel
@@ -48,10 +48,10 @@ class DeliveryTarget:
         Parse a delivery target string.
         
         Formats:
-        - "origin" → back to source
-        - "local" → local files only
-        - "telegram" → Telegram home channel
-        - "telegram:123456" → specific Telegram chat
+        - "origin" -> back to source
+        - "local" -> local files only
+        - "telegram" -> Telegram home channel
+        - "telegram:123456" -> specific Telegram chat
         """
         target = target.strip().lower()
         

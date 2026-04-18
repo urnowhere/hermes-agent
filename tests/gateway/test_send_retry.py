@@ -208,7 +208,7 @@ class TestSendWithRetryNetworkRetry:
 
 
 # ---------------------------------------------------------------------------
-# _send_with_retry — all retries exhausted → user notification
+# _send_with_retry — all retries exhausted -> user notification
 # ---------------------------------------------------------------------------
 
 class TestSendWithRetryExhausted:
@@ -251,7 +251,7 @@ class TestSendWithRetryExhausted:
 
 
 # ---------------------------------------------------------------------------
-# _send_with_retry — non-network failure → plain-text fallback (no retry)
+# _send_with_retry — non-network failure -> plain-text fallback (no retry)
 # ---------------------------------------------------------------------------
 
 class TestSendWithRetryFallback:

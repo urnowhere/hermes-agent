@@ -157,7 +157,7 @@ class GatewayStreamConsumer:
         """Signal that the stream is complete."""
         self._queue.put(_DONE)
 
-    # ── Think-block filtering ────────────────────────────────────────
+    # -- Think-block filtering ----------------------------------------
     # Models like MiniMax emit inline <think>...</think> blocks in their
     # content.  The CLI's _stream_delta suppresses these via a state
     # machine; we do the same here so gateway users never see raw
@@ -739,7 +739,7 @@ class GatewayStreamConsumer:
                             )
                             logger.debug(
                                 "Flood control on edit (strike %d/%d), "
-                                "backoff interval → %.1fs",
+                                "backoff interval -> %.1fs",
                                 self._flood_strikes,
                                 self._MAX_FLOOD_STRIKES,
                                 self._current_edit_interval,

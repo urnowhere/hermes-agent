@@ -52,7 +52,7 @@ class FactRetriever:
         min_trust: float = 0.3,
         limit: int = 10,
     ) -> list[dict]:
-        """Hybrid search: FTS5 candidates → Jaccard rerank → trust weighting.
+        """Hybrid search: FTS5 candidates -> Jaccard rerank -> trust weighting.
 
         Pipeline:
         1. FTS5 search: Get limit*3 candidates from SQLite full-text search

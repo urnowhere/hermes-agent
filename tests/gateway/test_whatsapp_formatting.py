@@ -1,7 +1,7 @@
 """Tests for WhatsApp message formatting and chunking.
 
 Covers:
-- format_message(): markdown → WhatsApp syntax conversion
+- format_message(): markdown -> WhatsApp syntax conversion
 - send(): message chunking for long responses
 - MAX_MESSAGE_LENGTH: practical UX limit
 """

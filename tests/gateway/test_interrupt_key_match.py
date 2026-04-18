@@ -76,10 +76,10 @@ class TestInterruptKeyConsistency:
         adapter._active_sessions[session_key] = interrupt_event
         interrupt_event.set()
 
-        # Using session_key → found
+        # Using session_key -> found
         assert adapter.has_pending_interrupt(session_key) is True
 
-        # Using chat_id → NOT found (this was the bug)
+        # Using chat_id -> NOT found (this was the bug)
         assert adapter.has_pending_interrupt(source.chat_id) is False
 
     @pytest.mark.asyncio
@@ -92,10 +92,10 @@ class TestInterruptKeyConsistency:
         event = MessageEvent(text="hello", source=source, message_id="42")
         adapter._pending_messages[session_key] = event
 
-        # Using chat_id → None (the bug)
+        # Using chat_id -> None (the bug)
         assert adapter.get_pending_message(source.chat_id) is None
 
-        # Using session_key → found
+        # Using session_key -> found
         result = adapter.get_pending_message(session_key)
         assert result is event
 

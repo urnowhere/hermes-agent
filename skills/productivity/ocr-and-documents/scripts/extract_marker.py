@@ -55,10 +55,10 @@ def check_requirements():
     import shutil
     free_gb = shutil.disk_usage("/").free / (1024**3)
     if free_gb < 5:
-        print(f"⚠️  Only {free_gb:.1f}GB free. marker-pdf needs ~5GB for PyTorch + models.")
+        print(f"[WARN]️  Only {free_gb:.1f}GB free. marker-pdf needs ~5GB for PyTorch + models.")
         print("Use pymupdf instead (scripts/extract_pymupdf.py) or free up disk space.")
         sys.exit(1)
-    print(f"✓ {free_gb:.1f}GB free — sufficient for marker-pdf")
+    print(f"[OK] {free_gb:.1f}GB free — sufficient for marker-pdf")
 
 
 if __name__ == "__main__":

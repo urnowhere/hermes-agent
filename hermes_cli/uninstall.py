@@ -16,13 +16,13 @@ from hermes_constants import get_hermes_home
 from hermes_cli.colors import Colors, color
 
 def log_info(msg: str):
-    print(f"{color('→', Colors.CYAN)} {msg}")
+    print(f"{color('->', Colors.CYAN)} {msg}")
 
 def log_success(msg: str):
-    print(f"{color('✓', Colors.GREEN)} {msg}")
+    print(f"{color('[OK]', Colors.GREEN)} {msg}")
 
 def log_warn(msg: str):
-    print(f"{color('⚠', Colors.YELLOW)} {msg}")
+    print(f"{color('[WARN]', Colors.YELLOW)} {msg}")
 
 def get_project_root() -> Path:
     """Get the project installation directory."""
@@ -183,9 +183,9 @@ def run_uninstall(args):
     hermes_home = get_hermes_home()
     
     print()
-    print(color("┌─────────────────────────────────────────────────────────┐", Colors.MAGENTA, Colors.BOLD))
-    print(color("│            ⚕ Hermes Agent Uninstaller                  │", Colors.MAGENTA, Colors.BOLD))
-    print(color("└─────────────────────────────────────────────────────────┘", Colors.MAGENTA, Colors.BOLD))
+    print(color("+---------------------------------------------------------+", Colors.MAGENTA, Colors.BOLD))
+    print(color("|             Hermes Agent Uninstaller                  |", Colors.MAGENTA, Colors.BOLD))
+    print(color("+---------------------------------------------------------+", Colors.MAGENTA, Colors.BOLD))
     print()
     
     # Show what will be affected
@@ -225,7 +225,7 @@ def run_uninstall(args):
     # Final confirmation
     print()
     if full_uninstall:
-        print(color("⚠️  WARNING: This will permanently delete ALL Hermes data!", Colors.RED, Colors.BOLD))
+        print(color("[WARN]️  WARNING: This will permanently delete ALL Hermes data!", Colors.RED, Colors.BOLD))
         print(color("   Including: configs, API keys, sessions, scheduled jobs, logs", Colors.RED))
     else:
         print("This will remove the Hermes code but keep your configuration and data.")
@@ -306,9 +306,9 @@ def run_uninstall(args):
     
     # Done
     print()
-    print(color("┌─────────────────────────────────────────────────────────┐", Colors.GREEN, Colors.BOLD))
-    print(color("│              ✓ Uninstall Complete!                      │", Colors.GREEN, Colors.BOLD))
-    print(color("└─────────────────────────────────────────────────────────┘", Colors.GREEN, Colors.BOLD))
+    print(color("+---------------------------------------------------------+", Colors.GREEN, Colors.BOLD))
+    print(color("|              [OK] Uninstall Complete!                      |", Colors.GREEN, Colors.BOLD))
+    print(color("+---------------------------------------------------------+", Colors.GREEN, Colors.BOLD))
     print()
     
     if not full_uninstall:
@@ -322,5 +322,5 @@ def run_uninstall(args):
     print(color("Reload your shell to complete the process:", Colors.YELLOW))
     print("  source ~/.bashrc  # or ~/.zshrc")
     print()
-    print("Thank you for using Hermes Agent! ⚕")
+    print("Thank you for using Hermes Agent! ")
     print()

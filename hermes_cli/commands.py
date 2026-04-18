@@ -388,8 +388,8 @@ def _sanitize_telegram_name(raw: str) -> str:
     """Convert a command/skill/plugin name to a valid Telegram command name.
 
     Telegram requires: 1-32 chars, lowercase a-z, digits 0-9, underscores only.
-    Steps: lowercase → replace hyphens with underscores → strip all other
-    invalid characters → collapse consecutive underscores → strip leading/
+    Steps: lowercase -> replace hyphens with underscores -> strip all other
+    invalid characters -> collapse consecutive underscores -> strip leading/
     trailing underscores.
     """
     name = raw.lower().replace("-", "_")
@@ -599,7 +599,7 @@ def discord_skill_commands(
     (plugins > skills, hub excluded, per-platform disabled excluded), but
     adapted for Discord's constraints:
 
-    - Hyphens are allowed in names (no ``-`` → ``_`` sanitization)
+    - Hyphens are allowed in names (no ``-`` -> ``_`` sanitization)
     - Descriptions capped at 100 chars (Discord's per-field max)
 
     Args:
@@ -691,7 +691,7 @@ def discord_skill_commands_by_category(
                 desc = desc[:97] + "..."
 
             # Determine category from the relative path within SKILLS_DIR.
-            # e.g. creative/ascii-art/SKILL.md → parts = ("creative", "ascii-art")
+            # e.g. creative/ascii-art/SKILL.md -> parts = ("creative", "ascii-art")
             try:
                 rel = sp.parent.relative_to(_skills_dir)
             except ValueError:
@@ -1225,7 +1225,7 @@ class SlashCommandCompleter(Completer):
                     self._completion_text(cmd_name, word),
                     start_position=-len(word),
                     display=cmd,
-                    display_meta=f"⚡ {short_desc}",
+                    display_meta=f" {short_desc}",
                 )
 
         # Plugin-registered slash commands
@@ -1278,7 +1278,7 @@ class SlashCommandAutoSuggest(AutoSuggest):
         base_cmd = parts[0].lower()
 
         if len(parts) == 1 and not text.endswith(" "):
-            # Still typing the command name: /upd → suggest "ate"
+            # Still typing the command name: /upd -> suggest "ate"
             word = text[1:].lower()
             for cmd in COMMANDS:
                 if self._completer is not None and not self._completer._command_allowed(cmd):

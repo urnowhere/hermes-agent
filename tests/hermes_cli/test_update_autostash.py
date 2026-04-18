@@ -459,7 +459,7 @@ def test_cmd_update_no_reset_when_ff_only_succeeds(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Non-main branch → auto-checkout main
+# Non-main branch -> auto-checkout main
 # ---------------------------------------------------------------------------
 
 def test_cmd_update_switches_to_main_from_feature_branch(monkeypatch, tmp_path, capsys):

@@ -25,7 +25,7 @@ except ImportError:
     pytest.skip("atroposlib not installed", allow_module_level=True)
 
 
-# ─── Registry tests ─────────────────────────────────────────────────────
+# --- Registry tests -----------------------------------------------------
 
 class TestParserRegistry:
     def test_list_parsers_returns_nonempty(self):
@@ -52,7 +52,7 @@ class TestParserRegistry:
             assert hasattr(parser, "parse")
 
 
-# ─── Hermes parser tests ────────────────────────────────────────────────
+# --- Hermes parser tests ------------------------------------------------
 
 class TestHermesParser:
     @pytest.fixture
@@ -124,7 +124,7 @@ class TestHermesParser:
         # Either parse it successfully or return None
 
 
-# ─── Parse result contract tests (applies to ALL parsers) ───────────────
+# --- Parse result contract tests (applies to ALL parsers) ---------------
 
 class TestParseResultContract:
     """Ensure all parsers conform to the ParseResult contract."""
@@ -159,7 +159,7 @@ class TestParseResultContract:
                 assert isinstance(tc.function.arguments, str)
 
 
-# ─── DeepSeek V3 parser tests ───────────────────────────────────────────
+# --- DeepSeek V3 parser tests -------------------------------------------
 
 class TestDeepSeekV3Parser:
     @pytest.fixture
@@ -211,7 +211,7 @@ class TestDeepSeekV3Parser:
         assert len(tool_calls) == 1
 
 
-# ─── Mistral parser tests ───────────────────────────────────────────────
+# --- Mistral parser tests -----------------------------------------------
 
 class TestMistralParser:
     @pytest.fixture

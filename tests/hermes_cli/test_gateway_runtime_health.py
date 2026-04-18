@@ -18,5 +18,5 @@ def test_runtime_health_lines_include_fatal_platform_and_startup_reason(monkeypa
 
     lines = _runtime_health_lines()
 
-    assert "⚠ telegram: another poller is active" in lines
-    assert "⚠ Last startup issue: telegram conflict" in lines
+    assert "[WARN] telegram: another poller is active" in lines
+    assert "[WARN] Last startup issue: telegram conflict" in lines

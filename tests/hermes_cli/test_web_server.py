@@ -375,7 +375,7 @@ class TestBuildSchemaFromConfig:
 
 
 class TestConfigRoundTrip:
-    """Verify config survives GET → edit → PUT without data loss."""
+    """Verify config survives GET -> edit -> PUT without data loss."""
 
     @pytest.fixture(autouse=True)
     def _setup(self):
@@ -417,7 +417,7 @@ class TestConfigRoundTrip:
         assert isinstance(before.get("model"), dict)
         original_keys = set(before["model"].keys())
 
-        # GET → PUT unchanged
+        # GET -> PUT unchanged
         web_config = self.client.get("/api/config").json()
         assert isinstance(web_config.get("model"), str), "GET should normalize model to string"
 

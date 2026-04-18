@@ -26,7 +26,7 @@ from hermes_cli.plugins import (
 )
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────
+# -- Helpers ----------------------------------------------------------------
 
 
 def _make_plugin_dir(base: Path, name: str, *, register_body: str = "pass",
@@ -46,7 +46,7 @@ def _make_plugin_dir(base: Path, name: str, *, register_body: str = "pass",
     return plugin_dir
 
 
-# ── TestPluginDiscovery ────────────────────────────────────────────────────
+# -- TestPluginDiscovery ----------------------------------------------------
 
 
 class TestPluginDiscovery:
@@ -140,7 +140,7 @@ class TestPluginDiscovery:
         assert "ep_plugin" in mgr._plugins
 
 
-# ── TestPluginLoading ──────────────────────────────────────────────────────
+# -- TestPluginLoading ------------------------------------------------------
 
 
 class TestPluginLoading:
@@ -192,7 +192,7 @@ class TestPluginLoading:
         assert "hermes_plugins.ns_plugin" in sys.modules
 
 
-# ── TestPluginHooks ────────────────────────────────────────────────────────
+# -- TestPluginHooks --------------------------------------------------------
 
 
 class TestPluginHooks:
@@ -357,7 +357,7 @@ class TestPreToolCallBlocking:
         assert get_pre_tool_call_block_message("terminal", {}) == "first blocker"
 
 
-# ── TestPluginContext ──────────────────────────────────────────────────────
+# -- TestPluginContext ------------------------------------------------------
 
 
 class TestPluginContext:
@@ -389,7 +389,7 @@ class TestPluginContext:
         assert "plugin_echo" in registry._tools
 
 
-# ── TestPluginToolVisibility ───────────────────────────────────────────────
+# -- TestPluginToolVisibility -----------------------------------------------
 
 
 class TestPluginToolVisibility:
@@ -436,7 +436,7 @@ class TestPluginToolVisibility:
         assert "vis_tool" in tool_names3
 
 
-# ── TestPluginManagerList ──────────────────────────────────────────────────
+# -- TestPluginManagerList --------------------------------------------------
 
 
 class TestPluginManagerList:
@@ -607,7 +607,7 @@ class TestPreLlmCallTargetRouting:
         assert "plain text C" in _plugin_user_context
 
 
-# ── TestPluginCommands ────────────────────────────────────────────────────
+# -- TestPluginCommands ----------------------------------------------------
 
 
 class TestPluginCommands:
@@ -766,7 +766,7 @@ class TestPluginCommands:
         assert mgr._plugin_commands["cmd-b"]["plugin"] == "plugin-b"
 
 
-# ── TestPluginDispatchTool ────────────────────────────────────────────────
+# -- TestPluginDispatchTool ------------------------------------------------
 
 
 class TestPluginDispatchTool:

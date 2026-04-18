@@ -50,9 +50,9 @@ def cron_list(show_all: bool = False):
         return
 
     print()
-    print(color("┌─────────────────────────────────────────────────────────────────────────┐", Colors.CYAN))
-    print(color("│                         Scheduled Jobs                                  │", Colors.CYAN))
-    print(color("└─────────────────────────────────────────────────────────────────────────┘", Colors.CYAN))
+    print(color("+-------------------------------------------------------------------------+", Colors.CYAN))
+    print(color("|                         Scheduled Jobs                                  |", Colors.CYAN))
+    print(color("+-------------------------------------------------------------------------+", Colors.CYAN))
     print()
 
     for job in jobs:
@@ -106,13 +106,13 @@ def cron_list(show_all: bool = False):
 
         delivery_err = job.get("last_delivery_error")
         if delivery_err:
-            print(f"    {color('⚠ Delivery failed:', Colors.YELLOW)} {delivery_err}")
+            print(f"    {color('[WARN] Delivery failed:', Colors.YELLOW)} {delivery_err}")
 
         print()
 
     from hermes_cli.gateway import find_gateway_pids
     if not find_gateway_pids():
-        print(color("  ⚠  Gateway is not running — jobs won't fire automatically.", Colors.YELLOW))
+        print(color("  [WARN]  Gateway is not running — jobs won't fire automatically.", Colors.YELLOW))
         print(color("     Start it with: hermes gateway install", Colors.DIM))
         print(color("                    sudo hermes gateway install --system  # Linux servers", Colors.DIM))
         print()
@@ -133,10 +133,10 @@ def cron_status():
 
     pids = find_gateway_pids()
     if pids:
-        print(color("✓ Gateway is running — cron jobs will fire automatically", Colors.GREEN))
+        print(color("[OK] Gateway is running — cron jobs will fire automatically", Colors.GREEN))
         print(f"  PID: {', '.join(map(str, pids))}")
     else:
-        print(color("✗ Gateway is not running — cron jobs will NOT fire", Colors.RED))
+        print(color("[ERR] Gateway is not running — cron jobs will NOT fire", Colors.RED))
         print()
         print("  To enable automatic execution:")
         print("    hermes gateway install    # Install as a user service")

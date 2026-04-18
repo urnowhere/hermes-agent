@@ -242,7 +242,7 @@ class MiniSWERunner:
             cwd=self.cwd,
             timeout=self.command_timeout
         )
-        print("✅ Environment ready")
+        print("[OK] Environment ready")
     
     def _cleanup_env(self):
         """Cleanup the execution environment."""
@@ -519,7 +519,7 @@ Complete the user's task step by step."""
                         
                         # Check for task completion signal
                         if "MINI_SWE_AGENT_FINAL_OUTPUT" in result["output"]:
-                            print("   ✅ Task completion signal detected!")
+                            print("   [OK] Task completion signal detected!")
                             completed = True
                         
                         # Add tool response
@@ -529,7 +529,7 @@ Complete the user's task step by step."""
                             "tool_call_id": tc.id
                         })
                         
-                        print(f"   ✅ exit_code={result['exit_code']}, output={len(result['output'])} chars")
+                        print(f"   [OK] exit_code={result['exit_code']}, output={len(result['output'])} chars")
                     
                     # If task completed, we can stop
                     if completed:
@@ -548,7 +548,7 @@ Complete the user's task step by step."""
                     break
             
             if api_call_count >= self.max_iterations:
-                print(f"⚠️  Reached max iterations ({self.max_iterations})")
+                print(f"[WARN]️  Reached max iterations ({self.max_iterations})")
         
         finally:
             # Cleanup environment
@@ -602,7 +602,7 @@ Complete the user's task step by step."""
                     f.write(json.dumps(result, ensure_ascii=False) + "\n")
                     f.flush()
                     
-                    print(f"✅ Task {i} completed (api_calls={result['api_calls']})")
+                    print(f"[OK] Task {i} completed (api_calls={result['api_calls']})")
                     
                 except Exception as e:
                     self.logger.error(f"Error on task {i}: {e}")
@@ -617,7 +617,7 @@ Complete the user's task step by step."""
                     f.write(json.dumps(error_result, ensure_ascii=False) + "\n")
                     f.flush()
         
-        print(f"\n✅ Batch complete! {len(results)} trajectories saved to {output_file}")
+        print(f"\n[OK] Batch complete! {len(results)} trajectories saved to {output_file}")
         return results
 
 
@@ -666,7 +666,7 @@ def main(
         # Batch from file
         python mini_swe_runner.py --prompts_file tasks.jsonl --output_file results.jsonl
     """
-    print("🚀 Mini-SWE Runner with Hermes Trajectory Format")
+    print(" Mini-SWE Runner with Hermes Trajectory Format")
     print("=" * 60)
     
     # Initialize runner
@@ -691,7 +691,7 @@ def main(
             f.write(json.dumps(result, ensure_ascii=False) + "\n")
         
         print(f"\n📁 Trajectory saved to: {output_file}")
-        print(f"✅ Completed: {result['completed']}")
+        print(f"[OK] Completed: {result['completed']}")
         print(f"📞 API calls: {result['api_calls']}")
         print(f"💬 Turns: {len(result['conversations'])}")
         
@@ -709,13 +709,13 @@ def main(
                         prompts.append(line)
         
         if not prompts:
-            print(f"❌ No prompts found in {prompts_file}")
+            print(f"[ERR] No prompts found in {prompts_file}")
             return
         
         runner.run_batch(prompts, output_file)
     
     else:
-        print("❌ Please provide either --task or --prompts_file")
+        print("[ERR] Please provide either --task or --prompts_file")
         print("   Example: python mini_swe_runner.py --task 'Create a hello world script'")
 
 

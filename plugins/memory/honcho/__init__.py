@@ -677,7 +677,7 @@ class HonchoMemoryProvider(MemoryProvider):
 
     # Proportional reasoning levels per depth/pass when dialecticDepthLevels
     # is not configured. The base level is dialecticReasoningLevel.
-    # Index: (depth, pass) → level relative to base.
+    # Index: (depth, pass) -> level relative to base.
     _PROPORTIONAL_LEVELS: dict[tuple[int, int], str] = {
         # depth 1: single pass at base level
         (1, 0): "base",

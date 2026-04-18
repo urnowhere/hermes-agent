@@ -2,9 +2,9 @@
 
 These tests exercise the full async message flow:
     adapter.handle_message(event)
-        → background task
-        → GatewayRunner._handle_message (command dispatch)
-        → adapter.send() (captured by mock)
+        -> background task
+        -> GatewayRunner._handle_message (command dispatch)
+        -> adapter.send() (captured by mock)
 
 No LLM, no real platform connections.
 """

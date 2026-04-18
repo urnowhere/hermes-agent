@@ -75,7 +75,7 @@ class TestHermesTimeNow:
         assert "Mars/Olympus_Mons" in caplog.text
 
     def test_empty_timezone_uses_local(self):
-        """No timezone configured → server-local time (still tz-aware)."""
+        """No timezone configured -> server-local time (still tz-aware)."""
         os.environ.pop("HERMES_TIMEZONE", None)
         result = hermes_time.now()
         assert result.tzinfo is not None

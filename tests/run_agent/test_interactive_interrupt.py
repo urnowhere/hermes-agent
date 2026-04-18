@@ -52,7 +52,7 @@ def make_slow_response(delay=2.0):
 def main() -> int:
     set_interrupt(False)
 
-    # ─── Create parent agent ───
+    # --- Create parent agent ---
     parent = AIAgent.__new__(AIAgent)
     parent._interrupt_requested = False
     parent._interrupt_message = None
@@ -93,7 +93,7 @@ def main() -> int:
 
     parent.interrupt = lambda msg=None: logged_interrupt(parent, msg)
 
-    # ─── Simulate the exact CLI flow ───
+    # --- Simulate the exact CLI flow ---
     interrupt_queue = queue.Queue()
     child_running = threading.Event()
     agent_result = [None]
@@ -139,11 +139,11 @@ def main() -> int:
                 agent_result[0] = result
                 log.info(f"🟢 agent_thread finished. Result status: {result.get('status')}")
 
-    # ─── Start agent thread (like chat() does) ───
+    # --- Start agent thread (like chat() does) ---
     agent_thread = threading.Thread(target=agent_thread_func, name="agent_thread", daemon=True)
     agent_thread.start()
 
-    # ─── Wait for child to start ───
+    # --- Wait for child to start ---
     if not child_running.wait(timeout=10):
         print("FAIL: Child never started", file=sys.stderr)
         set_interrupt(False)
@@ -152,11 +152,11 @@ def main() -> int:
     # Give child time to enter its main loop and start API call
     time.sleep(1.0)
 
-    # ─── Simulate user typing a message (like handle_enter does) ───
+    # --- Simulate user typing a message (like handle_enter does) ---
     log.info("📝 Simulating user typing 'Hey stop that'")
     interrupt_queue.put("Hey stop that")
 
-    # ─── Simulate chat() polling loop (like the real chat() method) ───
+    # --- Simulate chat() polling loop (like the real chat() method) ---
     log.info("📡 Starting interrupt queue polling (like chat())")
     interrupt_msg = None
     poll_count = 0
@@ -174,27 +174,27 @@ def main() -> int:
             if poll_count % 20 == 0:  # Log every 2s
                 log.info(f"   Still polling ({poll_count} iterations)...")
 
-    # ─── Wait for agent to finish ───
-    log.info("⏳ Waiting for agent_thread to join...")
+    # --- Wait for agent to finish ---
+    log.info("[WAIT] Waiting for agent_thread to join...")
     t0 = time.monotonic()
     agent_thread.join(timeout=10)
     elapsed = time.monotonic() - t0
-    log.info(f"✅ agent_thread joined after {elapsed:.2f}s")
+    log.info(f"[OK] agent_thread joined after {elapsed:.2f}s")
 
-    # ─── Check results ───
+    # --- Check results ---
     result = agent_result[0]
     if result:
         log.info(f"Result status: {result['status']}")
         log.info(f"Result duration: {result['duration_seconds']}s")
         if result["status"] == "interrupted" and elapsed < 2.0:
-            print("✅ PASS: Interrupt worked correctly!", file=sys.stderr)
+            print("[OK] PASS: Interrupt worked correctly!", file=sys.stderr)
             set_interrupt(False)
             return 0
-        print(f"❌ FAIL: status={result['status']}, elapsed={elapsed:.2f}s", file=sys.stderr)
+        print(f"[ERR] FAIL: status={result['status']}, elapsed={elapsed:.2f}s", file=sys.stderr)
         set_interrupt(False)
         return 1
 
-    print("❌ FAIL: No result returned", file=sys.stderr)
+    print("[ERR] FAIL: No result returned", file=sys.stderr)
     set_interrupt(False)
     return 1
 

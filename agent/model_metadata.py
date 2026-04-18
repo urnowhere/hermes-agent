@@ -52,10 +52,10 @@ _OLLAMA_TAG_PATTERN = re.compile(
 def _strip_provider_prefix(model: str) -> str:
     """Strip a recognised provider prefix from a model string.
 
-    ``"local:my-model"`` → ``"my-model"``
-    ``"qwen3.5:27b"``   → ``"qwen3.5:27b"``  (unchanged — not a provider prefix)
-    ``"qwen:0.5b"``     → ``"qwen:0.5b"``    (unchanged — Ollama model:tag)
-    ``"deepseek:latest"``→ ``"deepseek:latest"``(unchanged — Ollama model:tag)
+    ``"local:my-model"`` -> ``"my-model"``
+    ``"qwen3.5:27b"``   -> ``"qwen3.5:27b"``  (unchanged — not a provider prefix)
+    ``"qwen:0.5b"``     -> ``"qwen:0.5b"``    (unchanged — Ollama model:tag)
+    ``"deepseek:latest"``-> ``"deepseek:latest"``(unchanged — Ollama model:tag)
     """
     if ":" not in model or model.startswith("http"):
         return model
@@ -773,7 +773,7 @@ def _query_local_context_length(model: str, base_url: str) -> Optional[int]:
     """Query a local server for the model's context length."""
     import httpx
 
-    # Strip recognised provider prefix (e.g., "local:model-name" → "model-name").
+    # Strip recognised provider prefix (e.g., "local:model-name" -> "model-name").
     # Ollama "model:tag" colons (e.g. "qwen3.5:27b") are intentionally preserved.
     model = _strip_provider_prefix(model)
 
@@ -924,7 +924,7 @@ def _resolve_nous_context_length(model: str) -> Optional[int]:
         if bare.lower() == model.lower() or _normalize_model_version(bare).lower() == normalized:
             return entry.get("context_length")
 
-    # Partial prefix match for cases like gemini-3-flash → gemini-3-flash-preview
+    # Partial prefix match for cases like gemini-3-flash -> gemini-3-flash-preview
     # Require match to be at a word boundary (followed by -, :, or end of string)
     model_lower = model.lower()
     for or_id, entry in metadata.items():
@@ -963,7 +963,7 @@ def get_model_context_length(
     if config_context_length is not None and isinstance(config_context_length, int) and config_context_length > 0:
         return config_context_length
 
-    # Normalise provider-prefixed model names (e.g. "local:model-name" →
+    # Normalise provider-prefixed model names (e.g. "local:model-name" ->
     # "model-name") so cache lookups and server queries use the bare ID that
     # local servers actually know about.  Ollama "model:tag" colons are preserved.
     model = _strip_provider_prefix(model)

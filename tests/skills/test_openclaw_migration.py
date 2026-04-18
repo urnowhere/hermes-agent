@@ -756,7 +756,7 @@ def test_skill_installs_cleanly_under_skills_guard():
         assert f.pattern_id in KNOWN_FALSE_POSITIVES, f"Unexpected finding: {f}"
 
 
-# ── rebrand_text tests ────────────────────────────────────────
+# -- rebrand_text tests ----------------------------------------
 
 
 def test_rebrand_text_replaces_openclaw_variants():

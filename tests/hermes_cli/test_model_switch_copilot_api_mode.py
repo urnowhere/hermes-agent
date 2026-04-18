@@ -1,6 +1,6 @@
 """Regression tests for Copilot api_mode recomputation during /model switch.
 
-When switching models within the Copilot provider (e.g. GPT-5 → Claude),
+When switching models within the Copilot provider (e.g. GPT-5 -> Claude),
 the stale api_mode from resolve_runtime_provider must be overridden with
 a fresh value computed from the *new* model.  Without the fix, Claude
 requests went through the Responses API and failed with
@@ -56,7 +56,7 @@ def _run_copilot_switch(
 
 
 def test_same_provider_copilot_switch_recomputes_api_mode():
-    """GPT-5 → Claude on copilot: api_mode must flip to chat_completions."""
+    """GPT-5 -> Claude on copilot: api_mode must flip to chat_completions."""
     result = _run_copilot_switch(
         raw_input="claude-opus-4.6",
         current_provider="copilot",
@@ -85,7 +85,7 @@ def test_explicit_copilot_switch_uses_selected_model_api_mode():
 
 
 def test_copilot_gpt5_keeps_codex_responses():
-    """GPT-5 → GPT-5 on copilot: api_mode must stay codex_responses."""
+    """GPT-5 -> GPT-5 on copilot: api_mode must stay codex_responses."""
     result = _run_copilot_switch(
         raw_input="gpt-5.4-mini",
         current_provider="copilot",

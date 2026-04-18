@@ -54,7 +54,7 @@ def _make_adapter(dm_topics_config=None, group_topics_config=None):
     return adapter
 
 
-# ── _setup_dm_topics: load persisted thread_ids ──
+# -- _setup_dm_topics: load persisted thread_ids --
 
 
 @pytest.mark.asyncio
@@ -160,7 +160,7 @@ async def test_setup_dm_topics_no_config():
     adapter._bot.create_forum_topic.assert_not_called()
 
 
-# ── _create_dm_topic: error handling ──
+# -- _create_dm_topic: error handling --
 
 
 @pytest.mark.asyncio
@@ -198,7 +198,7 @@ async def test_create_dm_topic_returns_none_without_bot():
     assert result is None
 
 
-# ── _persist_dm_topic_thread_id ──
+# -- _persist_dm_topic_thread_id --
 
 
 def test_persist_dm_topic_thread_id_writes_config(tmp_path):
@@ -280,7 +280,7 @@ def test_persist_dm_topic_thread_id_skips_if_already_set(tmp_path):
     assert topics[0]["thread_id"] == 500  # unchanged
 
 
-# ── _get_dm_topic_info ──
+# -- _get_dm_topic_info --
 
 
 def test_get_dm_topic_info_finds_cached_topic():
@@ -380,7 +380,7 @@ def test_get_dm_topic_info_hot_reloads_from_config(tmp_path):
     assert adapter._dm_topics["111:NewProject"] == 555
 
 
-# ── _cache_dm_topic_from_message ──
+# -- _cache_dm_topic_from_message --
 
 
 def test_cache_dm_topic_from_message():
@@ -402,7 +402,7 @@ def test_cache_dm_topic_from_message_no_overwrite():
     assert adapter._dm_topics["111:General"] == 100  # unchanged
 
 
-# ── _build_message_event: auto_skill binding ──
+# -- _build_message_event: auto_skill binding --
 
 
 def _make_mock_message(chat_id=111, chat_type="private", text="hello", thread_id=None,
@@ -489,7 +489,7 @@ def test_build_message_event_no_auto_skill_without_thread():
     assert event.auto_skill is None
 
 
-# ── _build_message_event: group_topics skill binding ──
+# -- _build_message_event: group_topics skill binding --
 
 # The telegram mock sets sys.modules["telegram.constants"] = telegram_mod (root mock),
 # so `from telegram.constants import ChatType` in telegram.py resolves to

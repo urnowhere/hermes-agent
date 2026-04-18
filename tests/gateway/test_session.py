@@ -561,7 +561,7 @@ class TestLoadTranscriptPreferLongerSource:
 
         result = store_with_db.load_transcript(sid)
         assert len(result) == 2
-        # Should be the SQLite version (equal count → prefers SQLite)
+        # Should be the SQLite version (equal count -> prefers SQLite)
         assert result[0]["content"] == "db-q"
 
 

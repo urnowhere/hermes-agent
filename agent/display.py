@@ -132,7 +132,7 @@ def get_skin_tool_prefix() -> str:
     return "┊"
 
 
-def get_tool_emoji(tool_name: str, default: str = "⚡") -> str:
+def get_tool_emoji(tool_name: str, default: str = "") -> str:
     """Get the display emoji for a tool.
 
     Resolution order:
@@ -456,7 +456,7 @@ def _render_inline_unified_diff(diff: str) -> list[str]:
         if raw_line.startswith("+++ "):
             to_file = raw_line[4:].strip()
             if from_file or to_file:
-                rendered.append(f"{_diff_file()}{from_file or 'a/?'} → {to_file or 'b/?'}{_ANSI_RESET}")
+                rendered.append(f"{_diff_file()}{from_file or 'a/?'} -> {to_file or 'b/?'}{_ANSI_RESET}")
             continue
         if raw_line.startswith("@@"):
             rendered.append(f"{_diff_hunk()}{raw_line}{_ANSI_RESET}")
@@ -575,11 +575,11 @@ class KawaiiSpinner:
         'dots': ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'],
         'bounce': ['⠁', '⠂', '⠄', '⡀', '⢀', '⠠', '⠐', '⠈'],
         'grow': ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█', '▇', '▆', '▅', '▄', '▃', '▂'],
-        'arrows': ['←', '↖', '↑', '↗', '→', '↘', '↓', '↙'],
+        'arrows': ['←', '↖', '↑', '↗', '->', '↘', '↓', '↙'],
         'star': ['✶', '✷', '✸', '✹', '✺', '✹', '✸', '✷'],
         'moon': ['🌑', '🌒', '🌓', '🌔', '🌕', '🌖', '🌗', '🌘'],
         'pulse': ['◜', '◠', '◝', '◞', '◡', '◟'],
-        'brain': ['🧠', '💭', '💡', '✨', '💫', '🌟', '💡', '💭'],
+        'brain': ['🧠', '💭', '💡', '', '💫', '🌟', '💡', '💭'],
         'sparkle': ['⁺', '˚', '*', '✧', '✦', '✧', '*', '˚'],
     }
 
@@ -887,7 +887,7 @@ def get_cute_tool_message(
         sid = args.get("session_id", "")[:12]
         labels = {"list": "ls processes", "poll": f"poll {sid}", "log": f"log {sid}",
                   "wait": f"wait {sid}", "kill": f"kill {sid}", "write": f"write {sid}", "submit": f"submit {sid}"}
-        return _wrap(f"┊ ⚙️  proc      {labels.get(action, f'{action} {sid}')}  {dur}")
+        return _wrap(f"┊ ️  proc      {labels.get(action, f'{action} {sid}')}  {dur}")
     if tool_name == "read_file":
         return _wrap(f"┊ 📖 read      {_path(args.get('path', ''))}  {dur}")
     if tool_name == "write_file":
@@ -912,7 +912,7 @@ def get_cute_tool_message(
         return _wrap(f"┊ ⌨️  type      \"{_trunc(args.get('text', ''), 30)}\"  {dur}")
     if tool_name == "browser_scroll":
         d = args.get("direction", "down")
-        arrow = {"down": "↓", "up": "↑", "right": "→", "left": "←"}.get(d, "↓")
+        arrow = {"down": "↓", "up": "↑", "right": "->", "left": "←"}.get(d, "↓")
         return _wrap(f"┊ {arrow}  scroll    {d}  {dur}")
     if tool_name == "browser_back":
         return _wrap(f"┊ ◀️  back      {dur}")
@@ -986,7 +986,7 @@ def get_cute_tool_message(
         return _wrap(f"┊ 🔀 delegate  {_trunc(args.get('goal', ''), 35)}  {dur}")
 
     preview = build_tool_preview(tool_name, args) or ""
-    return _wrap(f"┊ ⚡ {tool_name[:9]:9} {_trunc(preview, 35)}  {dur}")
+    return _wrap(f"┊  {tool_name[:9]:9} {_trunc(preview, 35)}  {dur}")
 
 
 # =========================================================================

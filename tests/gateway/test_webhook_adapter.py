@@ -139,7 +139,7 @@ class TestValidateSignature:
         assert adapter._validate_signature(req, b"{}", "correct") is False
 
     def test_validate_no_signature_with_secret_rejects(self):
-        """Secret configured but no recognised signature header → reject."""
+        """Secret configured but no recognised signature header -> reject."""
         adapter = _make_adapter()
         req = _mock_request(headers={})  # no sig headers at all
         assert adapter._validate_signature(req, b"{}", "my-secret") is False
@@ -159,7 +159,7 @@ class TestValidateSignature:
         )
         # The route has no secret, global secret is empty
         route_secret = adapter._routes["test"].get("secret", adapter._global_secret)
-        assert not route_secret  # empty → validation is skipped in handler
+        assert not route_secret  # empty -> validation is skipped in handler
 
     def test_validate_generic_signature_valid(self):
         """Valid X-Webhook-Signature (generic HMAC-SHA256 hex) is accepted."""
@@ -203,7 +203,7 @@ class TestRenderPrompt:
         assert "{nonexistent}" in result
 
     def test_render_prompt_no_template_dumps_json(self):
-        """Empty template → JSON dump fallback with event/route context."""
+        """Empty template -> JSON dump fallback with event/route context."""
         adapter = _make_adapter()
         payload = {"key": "value"}
         result = adapter._render_prompt("", payload, "push", "my-route")
@@ -285,7 +285,7 @@ class TestEventFilter:
 
     @pytest.mark.asyncio
     async def test_event_filter_empty_allows_all(self):
-        """No events list → accept any event type."""
+        """No events list -> accept any event type."""
         routes = {
             "all": {
                 "secret": _INSECURE_NO_AUTH,

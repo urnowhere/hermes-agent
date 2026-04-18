@@ -365,7 +365,7 @@ class TestSignalSendImageFile:
         assert captured[0]["params"]["account"] == adapter.account
         assert captured[0]["params"]["recipient"] == ["+155****4567"]
         assert captured[0]["params"]["attachments"] == [str(img_path)]
-        assert captured[0]["params"]["message"] == ""  # caption=None → ""
+        assert captured[0]["params"]["message"] == ""  # caption=None -> ""
         # Typing indicator must be stopped before sending
         adapter._stop_typing_indicator.assert_awaited_once_with("+155****4567")
         # Timestamp must be tracked for echo-back prevention
@@ -459,7 +459,7 @@ class TestSignalSendVoice:
         assert result.success is True
         assert captured[0]["method"] == "send"
         assert captured[0]["params"]["attachments"] == [str(audio_path)]
-        assert captured[0]["params"]["message"] == ""  # caption=None → ""
+        assert captured[0]["params"]["message"] == ""  # caption=None -> ""
         adapter._stop_typing_indicator.assert_awaited_once_with("+155****4567")
         assert 1234567890 in adapter._recent_sent_timestamps
 
@@ -548,7 +548,7 @@ class TestSignalSendVideo:
         assert result.success is True
         assert captured[0]["method"] == "send"
         assert captured[0]["params"]["attachments"] == [str(vid_path)]
-        assert captured[0]["params"]["message"] == ""  # caption=None → ""
+        assert captured[0]["params"]["message"] == ""  # caption=None -> ""
         adapter._stop_typing_indicator.assert_awaited_once_with("+155****4567")
         assert 1234567890 in adapter._recent_sent_timestamps
 
@@ -605,7 +605,7 @@ class TestSignalSendVideo:
 # ---------------------------------------------------------------------------
 
 class TestSignalMediaExtraction:
-    """Verify the full pipeline: MEDIA: tag → extract → send_image_file/send_voice."""
+    """Verify the full pipeline: MEDIA: tag -> extract -> send_image_file/send_voice."""
 
     def test_extract_media_finds_image_tag(self):
         """BasePlatformAdapter.extract_media should find MEDIA: image paths."""
@@ -685,7 +685,7 @@ class TestSignalSendDocumentViaHelper:
 
 class TestSignalSendReturnsMessageId:
     """Signal send() must return a timestamp-based message_id so the stream
-    consumer can follow its edit→fallback path correctly."""
+    consumer can follow its edit->fallback path correctly."""
 
     @pytest.mark.asyncio
     async def test_send_returns_timestamp_as_message_id(self, monkeypatch):

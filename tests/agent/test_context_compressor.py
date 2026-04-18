@@ -168,7 +168,7 @@ class TestNonStringContent:
 
         with patch("agent.context_compressor.call_llm", return_value=mock_response):
             summary = c._generate_summary(messages)
-        # None content → empty string → standardized compaction handoff prefix added
+        # None content -> empty string -> standardized compaction handoff prefix added
         assert summary is not None
         assert summary == SUMMARY_PREFIX
 
@@ -330,9 +330,9 @@ class TestCompressWithClient:
         with patch("agent.context_compressor.get_model_context_length", return_value=100000):
             c = ContextCompressor(model="test", quiet_mode=True, protect_first_n=2, protect_last_n=2)
 
-        # Last head message (index 1) is "assistant" → summary should be "user".
+        # Last head message (index 1) is "assistant" -> summary should be "user".
         # With min_tail=3, tail = last 3 messages (indices 5-7).
-        # head_last=assistant, tail_first=assistant → summary_role="user", no collision.
+        # head_last=assistant, tail_first=assistant -> summary_role="user", no collision.
         # Need 8 messages: min_for_compress = 2+3+1 = 6, must have > 6.
         msgs = [
             {"role": "user", "content": "msg 0"},
@@ -363,7 +363,7 @@ class TestCompressWithClient:
         with patch("agent.context_compressor.get_model_context_length", return_value=100000):
             c = ContextCompressor(model="test", quiet_mode=True, protect_first_n=3, protect_last_n=2)
 
-        # Last head message (index 2) is "user" → summary should be "assistant"
+        # Last head message (index 2) is "user" -> summary should be "assistant"
         msgs = [
             {"role": "system", "content": "system prompt"},
             {"role": "user", "content": "msg 1"},
@@ -393,8 +393,8 @@ class TestCompressWithClient:
             c = ContextCompressor(model="test", quiet_mode=True, protect_first_n=2, protect_last_n=2)
 
         # Head ends with tool (index 1), tail starts with user (index 6).
-        # Default: tool → summary_role="user" → collides with tail.
-        # Flip to "assistant" → tool→assistant is fine.
+        # Default: tool -> summary_role="user" -> collides with tail.
+        # Flip to "assistant" -> tool->assistant is fine.
         msgs = [
             {"role": "user", "content": "msg 0"},
             {"role": "assistant", "content": "", "tool_calls": [
@@ -431,9 +431,9 @@ class TestCompressWithClient:
         with patch("agent.context_compressor.get_model_context_length", return_value=100000):
             c = ContextCompressor(model="test", quiet_mode=True, protect_first_n=3, protect_last_n=3)
 
-        # Head: [system, user, assistant]  →  last head = assistant
-        # Tail: [user, assistant, user]    →  first tail = user
-        # summary_role="user" collides with tail, "assistant" collides with head → merge
+        # Head: [system, user, assistant]  ->  last head = assistant
+        # Tail: [user, assistant, user]    ->  first tail = user
+        # summary_role="user" collides with tail, "assistant" collides with head -> merge
         msgs = [
             {"role": "system", "content": "system prompt"},
             {"role": "user", "content": "msg 1"},
@@ -462,7 +462,7 @@ class TestCompressWithClient:
 
     def test_double_collision_user_head_assistant_tail(self):
         """Reverse double collision: head ends with 'user', tail starts with 'assistant'.
-        summary='assistant' collides with tail, 'user' collides with head → merge."""
+        summary='assistant' collides with tail, 'user' collides with head -> merge."""
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "summary text"
@@ -470,9 +470,9 @@ class TestCompressWithClient:
         with patch("agent.context_compressor.get_model_context_length", return_value=100000):
             c = ContextCompressor(model="test", quiet_mode=True, protect_first_n=2, protect_last_n=2)
 
-        # Head: [system, user]        → last head = user
-        # Tail: [assistant, user, assistant] → first tail = assistant
-        # summary_role="assistant" collides with tail, "user" collides with head → merge
+        # Head: [system, user]        -> last head = user
+        # Tail: [assistant, user, assistant] -> first tail = assistant
+        # summary_role="assistant" collides with tail, "user" collides with head -> merge
         # With min_tail=3, tail = last 3 messages (indices 5-7).
         # Need 8 messages: min_for_compress = 2+3+1 = 6, must have > 6.
         msgs = [
@@ -510,7 +510,7 @@ class TestCompressWithClient:
         with patch("agent.context_compressor.get_model_context_length", return_value=100000):
             c = ContextCompressor(model="test", quiet_mode=True, protect_first_n=2, protect_last_n=2)
 
-        # Head=assistant, Tail=assistant → summary_role="user", no collision.
+        # Head=assistant, Tail=assistant -> summary_role="user", no collision.
         # With min_tail=3, tail = last 3 messages (indices 5-7).
         # Need 8 messages: min_for_compress = 2+3+1 = 6, must have > 6.
         msgs = [

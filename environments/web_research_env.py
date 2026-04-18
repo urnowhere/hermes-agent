@@ -415,7 +415,7 @@ class WebResearchEnv(HermesAgentBaseEnv):
         logger.debug(
             f"Reward breakdown — correctness={correctness:.2f}, "
             f"tool_used={tool_used:.1f}, efficiency={efficiency:.2f}, "
-            f"diversity={diversity:.1f} → total={reward:.3f}"
+            f"diversity={diversity:.1f} -> total={reward:.3f}"
         )
 
         return reward
@@ -523,7 +523,7 @@ class WebResearchEnv(HermesAgentBaseEnv):
                 })
 
                 logger.info(
-                    f"  → correctness={correctness:.2f}, reward={reward:.3f}, "
+                    f"  -> correctness={correctness:.2f}, reward={reward:.3f}, "
                     f"tools={tool_call_count}, turns={result.turns_used}"
                 )
 

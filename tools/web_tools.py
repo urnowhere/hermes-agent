@@ -66,7 +66,7 @@ from tools.website_policy import check_website_access
 logger = logging.getLogger(__name__)
 
 
-# ─── Backend Selection ────────────────────────────────────────────────────────
+# --- Backend Selection --------------------------------------------------------
 
 def _has_env(name: str) -> bool:
     val = os.getenv(name)
@@ -119,7 +119,7 @@ def _is_backend_available(backend: str) -> bool:
         return _has_env("TAVILY_API_KEY")
     return False
 
-# ─── Firecrawl Client ────────────────────────────────────────────────────────
+# --- Firecrawl Client --------------------------------------------------------
 
 _firecrawl_client = None
 _firecrawl_client_config = None
@@ -240,7 +240,7 @@ def _get_firecrawl_client():
     _firecrawl_client_config = client_config
     return _firecrawl_client
 
-# ─── Parallel Client ─────────────────────────────────────────────────────────
+# --- Parallel Client ---------------------------------------------------------
 
 _parallel_client = None
 _async_parallel_client = None
@@ -280,7 +280,7 @@ def _get_async_parallel_client():
         _async_parallel_client = AsyncParallel(api_key=api_key)
     return _async_parallel_client
 
-# ─── Tavily Client ───────────────────────────────────────────────────────────
+# --- Tavily Client -----------------------------------------------------------
 
 _TAVILY_BASE_URL = "https://api.tavily.com"
 
@@ -871,7 +871,7 @@ def clean_base64_images(text: str) -> str:
     return cleaned_text
 
 
-# ─── Exa Client ──────────────────────────────────────────────────────────────
+# --- Exa Client --------------------------------------------------------------
 
 _exa_client = None
 
@@ -894,7 +894,7 @@ def _get_exa_client():
     return _exa_client
 
 
-# ─── Exa Search & Extract Helpers ─────────────────────────────────────────────
+# --- Exa Search & Extract Helpers ---------------------------------------------
 
 def _exa_search(query: str, limit: int = 10) -> dict:
     """Search using the Exa SDK and return results as a dict."""
@@ -956,7 +956,7 @@ def _exa_extract(urls: List[str]) -> List[Dict[str, Any]]:
     return results
 
 
-# ─── Parallel Search & Extract Helpers ────────────────────────────────────────
+# --- Parallel Search & Extract Helpers ----------------------------------------
 
 def _parallel_search(query: str, limit: int = 5) -> dict:
     """Search using the Parallel SDK and return results as a dict."""
@@ -1223,7 +1223,7 @@ async def web_extract_tool(
     try:
         logger.info("Extracting content from %d URL(s)", len(urls))
 
-        # ── SSRF protection — filter out private/internal URLs before any backend ──
+        # -- SSRF protection — filter out private/internal URLs before any backend --
         safe_urls = []
         ssrf_blocked: List[Dict[str, Any]] = []
         for url in urls:
@@ -1253,7 +1253,7 @@ async def web_extract_tool(
                 })
                 results = _normalize_tavily_documents(raw, fallback_url=safe_urls[0] if safe_urls else "")
             else:
-                # ── Firecrawl extraction ──
+                # -- Firecrawl extraction --
                 # Determine requested formats for Firecrawl v2
                 formats: List[str] = []
                 if format == "markdown":
@@ -1952,7 +1952,7 @@ if __name__ == "__main__":
 
     if web_available:
         backend = _get_backend()
-        print(f"✅ Web backend: {backend}")
+        print(f"[OK] Web backend: {backend}")
         if backend == "exa":
             print("   Using Exa API (https://exa.ai)")
         elif backend == "parallel":
@@ -1969,18 +1969,18 @@ if __name__ == "__main__":
             else:
                 print("   Firecrawl backend selected but not configured")
     else:
-        print("❌ No web search backend configured")
+        print("[ERR] No web search backend configured")
         print(
             "Set EXA_API_KEY, PARALLEL_API_KEY, TAVILY_API_KEY, FIRECRAWL_API_KEY, FIRECRAWL_API_URL"
             f"{_firecrawl_backend_help_suffix()}"
         )
 
     if not nous_available:
-        print("❌ No auxiliary model available for LLM content processing")
+        print("[ERR] No auxiliary model available for LLM content processing")
         print("Set OPENROUTER_API_KEY, configure Nous Portal, or set OPENAI_BASE_URL + OPENAI_API_KEY")
-        print("⚠️  Without an auxiliary model, LLM content processing will be disabled")
+        print("[WARN]️  Without an auxiliary model, LLM content processing will be disabled")
     else:
-        print(f"✅ Auxiliary model available: {default_summarizer_model}")
+        print(f"[OK] Auxiliary model available: {default_summarizer_model}")
 
     if not web_available:
         exit(1)

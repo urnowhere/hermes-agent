@@ -486,7 +486,7 @@ class TestObservationModeMigration:
     """Existing configs without explicit observationMode keep 'unified' default."""
 
     def test_existing_config_defaults_to_unified(self, tmp_path):
-        """Config with host block but no observationMode → 'unified' (old default)."""
+        """Config with host block but no observationMode -> 'unified' (old default)."""
         cfg_file = tmp_path / "config.json"
         cfg_file.write_text(json.dumps({
             "apiKey": "k",
@@ -496,14 +496,14 @@ class TestObservationModeMigration:
         assert cfg.observation_mode == "unified"
 
     def test_new_config_defaults_to_directional(self, tmp_path):
-        """Config with no host block and no credentials → 'directional' (new default)."""
+        """Config with no host block and no credentials -> 'directional' (new default)."""
         cfg_file = tmp_path / "config.json"
         cfg_file.write_text(json.dumps({}))
         cfg = HonchoClientConfig.from_global_config(config_path=cfg_file)
         assert cfg.observation_mode == "directional"
 
     def test_explicit_directional_respected(self, tmp_path):
-        """Existing config with explicit observationMode → uses what's set."""
+        """Existing config with explicit observationMode -> uses what's set."""
         cfg_file = tmp_path / "config.json"
         cfg_file.write_text(json.dumps({
             "apiKey": "k",
@@ -513,7 +513,7 @@ class TestObservationModeMigration:
         assert cfg.observation_mode == "directional"
 
     def test_explicit_unified_respected(self, tmp_path):
-        """Existing config with explicit observationMode unified → stays unified."""
+        """Existing config with explicit observationMode unified -> stays unified."""
         cfg_file = tmp_path / "config.json"
         cfg_file.write_text(json.dumps({
             "apiKey": "k",

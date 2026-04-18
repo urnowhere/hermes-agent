@@ -214,7 +214,7 @@ class _Client:
             raise RuntimeError(f"RetainDB {method} {path} failed ({resp.status_code}): {msg or payload}")
         return payload
 
-    # ── Memory ────────────────────────────────────────────────────────────────
+    # -- Memory ----------------------------------------------------------------
 
     def query_context(self, user_id: str, session_id: str, query: str, max_tokens: int = 1200) -> dict:
         return self.request("POST", "/v1/context/query", json_body={
@@ -279,7 +279,7 @@ class _Client:
             "project": self.project, "content": content, "source": source,
         }, timeout=20.0)
 
-    # ── Files ─────────────────────────────────────────────────────────────────
+    # -- Files -----------------------------------------------------------------
 
     def upload_file(self, data: bytes, filename: str, remote_path: str, mime_type: str, scope: str, project_id: str | None) -> dict:
         import io
@@ -468,7 +468,7 @@ class RetainDBMemoryProvider(MemoryProvider):
         # Prefetch thread tracking — prevents accumulation on rapid calls
         self._prefetch_threads: list[threading.Thread] = []
 
-    # ── Core identity ──────────────────────────────────────────────────────
+    # -- Core identity ------------------------------------------------------
 
     @property
     def name(self) -> str:
@@ -484,7 +484,7 @@ class RetainDBMemoryProvider(MemoryProvider):
             {"key": "project", "description": "Project identifier (optional — uses 'default' project if not set)", "default": ""},
         ]
 
-    # ── Lifecycle ──────────────────────────────────────────────────────────
+    # -- Lifecycle ----------------------------------------------------------
 
     def initialize(self, session_id: str, **kwargs) -> None:
         api_key = os.environ.get("RETAINDB_API_KEY", "")
@@ -537,7 +537,7 @@ class RetainDBMemoryProvider(MemoryProvider):
             "retaindb_profile for a user overview, retaindb_context for current-task context."
         )
 
-    # ── Background prefetch (fires at turn-end, consumed next turn-start) ──
+    # -- Background prefetch (fires at turn-end, consumed next turn-start) --
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         """Fire context + dialectic + agent model prefetches in background."""
@@ -622,7 +622,7 @@ class RetainDBMemoryProvider(MemoryProvider):
 
         return "\n\n".join(parts)
 
-    # ── Turn sync ──────────────────────────────────────────────────────────
+    # -- Turn sync ----------------------------------------------------------
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Queue turn for async ingest. Returns immediately."""
@@ -638,7 +638,7 @@ class RetainDBMemoryProvider(MemoryProvider):
             ],
         )
 
-    # ── Tools ──────────────────────────────────────────────────────────────
+    # -- Tools --------------------------------------------------------------
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [
@@ -693,7 +693,7 @@ class RetainDBMemoryProvider(MemoryProvider):
                 return {"error": "memory_id is required"}
             return c.delete_memory(memory_id)
 
-        # ── File tools ──────────────────────────────────────────────────────
+        # -- File tools ------------------------------------------------------
 
         if tool_name == "retaindb_upload_file":
             local_path = args.get("local_path", "")
@@ -742,7 +742,7 @@ class RetainDBMemoryProvider(MemoryProvider):
 
         return {"error": f"Unknown tool: {tool_name}"}
 
-    # ── Optional hooks ─────────────────────────────────────────────────────
+    # -- Optional hooks -----------------------------------------------------
 
     def on_memory_write(self, action: str, target: str, content: str) -> None:
         """Mirror built-in memory writes to RetainDB."""

@@ -2,9 +2,9 @@
 
 Each test drives a message through the full async pipeline:
     adapter.handle_message(event)
-        → BasePlatformAdapter._process_message_background()
-        → GatewayRunner._handle_message() (command dispatch)
-        → adapter.send() (captured for assertions)
+        -> BasePlatformAdapter._process_message_background()
+        -> GatewayRunner._handle_message() (command dispatch)
+        -> adapter.send() (captured for assertions)
 
 No LLM involved — only gateway-level commands are tested.
 Tests are parametrized over platforms via the ``platform`` fixture in conftest.

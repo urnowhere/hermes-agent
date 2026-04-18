@@ -14,7 +14,7 @@ except ImportError:
 _needs_tiktoken = pytest.mark.skipif(not _has_tiktoken, reason="tiktoken not installed")
 
 
-# ─── Token Estimation Tests ──────────────────────────────────────────────────
+# --- Token Estimation Tests --------------------------------------------------
 
 
 @_needs_tiktoken
@@ -84,7 +84,7 @@ def test_estimate_tool_tokens_covers_known_tools():
         assert expected in tokens, f"Expected {expected!r} in token estimates"
 
 
-# ─── Status Function Tests ───────────────────────────────────────────────────
+# --- Status Function Tests ---------------------------------------------------
 
 
 def test_prompt_toolset_checklist_passes_status_fn(monkeypatch):
@@ -215,7 +215,7 @@ def test_status_fn_empty_selection():
     assert "~0 tokens" in result
 
 
-# ─── Curses UI Status Bar Tests ──────────────────────────────────────────────
+# --- Curses UI Status Bar Tests ----------------------------------------------
 
 
 def test_curses_checklist_numbered_fallback_shows_status(monkeypatch, capsys):
@@ -225,7 +225,7 @@ def test_curses_checklist_numbered_fallback_shows_status(monkeypatch, capsys):
     def my_status(chosen):
         return f"Selected {len(chosen)} items"
 
-    # Simulate user pressing Enter immediately (empty input → confirm)
+    # Simulate user pressing Enter immediately (empty input -> confirm)
     monkeypatch.setattr("builtins.input", lambda _prompt="": "")
 
     result = _numbered_fallback(
@@ -259,7 +259,7 @@ def test_curses_checklist_numbered_fallback_without_status(monkeypatch, capsys):
     assert result == {0}
 
 
-# ─── Registry get_schema Tests ───────────────────────────────────────────────
+# --- Registry get_schema Tests -----------------------------------------------
 
 
 def test_registry_get_schema_returns_schema():

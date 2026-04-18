@@ -992,7 +992,7 @@ class TestProviderRegistration:
         assert PROVIDER_REGISTRY["google-gemini-cli"].auth_type == "oauth_external"
 
     def test_google_gemini_alias_still_goes_to_api_key_gemini(self):
-        """Regression guard: don't shadow the existing google-gemini → gemini alias."""
+        """Regression guard: don't shadow the existing google-gemini -> gemini alias."""
         from hermes_cli.auth import resolve_provider
 
         assert resolve_provider("google-gemini") == "gemini"

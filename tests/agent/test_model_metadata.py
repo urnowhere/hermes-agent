@@ -50,7 +50,7 @@ class TestEstimateTokensRough:
         assert estimate_tokens_rough("a" * 400) == 100
 
     def test_short_text(self):
-        # "hello" = 5 chars → ceil(5/4) = 2
+        # "hello" = 5 chars -> ceil(5/4) = 2
         assert estimate_tokens_rough("hello") == 2
 
     def test_proportional(self):
@@ -247,7 +247,7 @@ class TestGetModelContextLength:
 
     @patch("agent.model_metadata.fetch_model_metadata")
     def test_api_missing_context_length_key(self, mock_fetch):
-        """Model in API but without context_length → defaults to 128000."""
+        """Model in API but without context_length -> defaults to 128000."""
         mock_fetch.return_value = {"test/model": {"name": "Test"}}
         assert get_model_context_length("test/model") == 128000
 
@@ -268,7 +268,7 @@ class TestGetModelContextLength:
         cache_file = tmp_path / "cache.yaml"
         with patch("agent.model_metadata._get_context_cache_path", return_value=cache_file):
             save_context_length("custom/model", "http://local", 32768)
-            # No base_url → cache skipped → falls to probe tier
+            # No base_url -> cache skipped -> falls to probe tier
             result = get_model_context_length("custom/model")
             assert result == CONTEXT_PROBE_TIERS[0]
 

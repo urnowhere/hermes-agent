@@ -1,6 +1,5 @@
 """Tests for FileSyncManager.sync_back() — pull remote changes to host."""
 
-import fcntl
 import io
 import logging
 import os
@@ -309,6 +308,8 @@ class TestSyncBackFileLock:
 
     @patch("tools.environments.file_sync.fcntl.flock")
     def test_sync_back_file_lock(self, mock_flock, tmp_path):
+        import fcntl
+
         download_fn = _make_download_fn({})
         mgr = _make_manager(tmp_path, bulk_download_fn=download_fn)
 

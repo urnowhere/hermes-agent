@@ -2456,7 +2456,7 @@ class TestRunConversation:
             patch.object(agent, "_save_trajectory"),
             patch.object(agent, "_cleanup_task_resources"),
         ):
-            # First call: truncated → retry. Second: valid → execute tool.
+            # First call: truncated -> retry. Second: valid -> execute tool.
             # Third: final text response.
             final_resp = _mock_response(content="Done!", finish_reason="stop")
             agent.client.chat.completions.create.side_effect = [

@@ -285,7 +285,7 @@ def test_init_env_args_prefers_shell_env_over_hermes_dotenv(monkeypatch):
     assert "value_from_dotenv" not in args_str
 
 
-# ── docker_env tests ──────────────────────────────────────────────
+# -- docker_env tests ----------------------------------------------
 
 
 def test_docker_env_appears_in_run_command(monkeypatch):

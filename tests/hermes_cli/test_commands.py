@@ -378,7 +378,7 @@ class TestSlashCommandCompleter:
         assert len(completions) == 1
         assert completions[0].text == "gif-search"
         assert completions[0].display_text == "/gif-search"
-        assert completions[0].display_meta_text == "⚡ Search for GIFs across providers"
+        assert completions[0].display_meta_text == " Search for GIFs across providers"
 
     def test_skill_exact_match_adds_trailing_space(self):
         completer = SlashCommandCompleter(
@@ -419,8 +419,8 @@ class TestSlashCommandCompleter:
         completions = _completions(completer, "/long")
         assert len(completions) == 1
         meta = completions[0].display_meta_text
-        # "⚡ " prefix + 50 chars + "..."
-        assert meta == f"⚡ {'A' * 50}..."
+        # " " prefix + 50 chars + "..."
+        assert meta == f" {'A' * 50}..."
 
     def test_skill_missing_description_uses_fallback(self):
         completer = SlashCommandCompleter(
@@ -433,7 +433,7 @@ class TestSlashCommandCompleter:
         assert "Skill command" in completions[0].display_meta_text
 
 
-# ── SUBCOMMANDS extraction ──────────────────────────────────────────────
+# -- SUBCOMMANDS extraction ----------------------------------------------
 
 
 class TestSubcommands:
@@ -473,7 +473,7 @@ class TestSubcommands:
         assert "/clear" not in SUBCOMMANDS
 
 
-# ── Subcommand tab completion ───────────────────────────────────────────
+# -- Subcommand tab completion -------------------------------------------
 
 
 class TestSubcommandCompletion:
@@ -516,7 +516,7 @@ class TestSubcommandCompletion:
         assert completions == []
 
 
-# ── Ghost text (SlashCommandAutoSuggest) ────────────────────────────────
+# -- Ghost text (SlashCommandAutoSuggest) --------------------------------
 
 
 def _suggestion(text: str, completer=None) -> str | None:
@@ -533,22 +533,22 @@ def _suggestion(text: str, completer=None) -> str | None:
 
 class TestGhostText:
     def test_command_name_suggestion(self):
-        """/he → 'lp'"""
+        """/he -> 'lp'"""
         assert _suggestion("/he") == "lp"
 
     def test_command_name_suggestion_reasoning(self):
-        """/rea → 'soning'"""
+        """/rea -> 'soning'"""
         assert _suggestion("/rea") == "soning"
 
     def test_no_suggestion_for_complete_command(self):
         assert _suggestion("/help") is None
 
     def test_subcommand_suggestion(self):
-        """/reasoning h → 'igh'"""
+        """/reasoning h -> 'igh'"""
         assert _suggestion("/reasoning h") == "igh"
 
     def test_subcommand_suggestion_show(self):
-        """/reasoning sh → 'ow'"""
+        """/reasoning sh -> 'ow'"""
         assert _suggestion("/reasoning sh") == "ow"
 
     def test_fast_subcommand_suggestion(self):
@@ -1091,7 +1091,7 @@ class TestDiscordSkillCommandsByCategory:
         assert hidden == 0
 
     def test_root_level_skills_are_uncategorized(self, tmp_path, monkeypatch):
-        """Skills directly under SKILLS_DIR (only 1 path component) → uncategorized."""
+        """Skills directly under SKILLS_DIR (only 1 path component) -> uncategorized."""
         from unittest.mock import patch
 
         fake_skills_dir = str(tmp_path / "skills")

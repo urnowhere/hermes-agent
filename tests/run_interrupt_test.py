@@ -133,11 +133,11 @@ def main() -> int:
         print(f"Status: {result['status']}")
         print(f"Duration: {result['duration_seconds']}s")
         if elapsed < 2.0:
-            print("✅ PASS: Interrupt detected quickly!")
+            print("[OK] PASS: Interrupt detected quickly!")
         else:
-            print(f"❌ FAIL: Took {elapsed:.2f}s — interrupt was too slow or not detected")
+            print(f"[ERR] FAIL: Took {elapsed:.2f}s — interrupt was too slow or not detected")
     else:
-        print("❌ FAIL: No result!")
+        print("[ERR] FAIL: No result!")
 
     set_interrupt(False)
     return 0

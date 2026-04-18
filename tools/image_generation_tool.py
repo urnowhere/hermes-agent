@@ -3,7 +3,7 @@
 Image Generation Tools Module
 
 Provides image generation via FAL.ai. Multiple FAL models are supported and
-selectable via ``hermes tools`` → Image Generation; the active model is
+selectable via ``hermes tools`` -> Image Generation; the active model is
 persisted to ``image_gen.model`` in ``config.yaml``.
 
 Architecture:
@@ -423,7 +423,7 @@ def _submit_fal_request(model: str, arguments: Dict[str, Any]):
                 f"(HTTP {status}). This model may not yet be enabled on "
                 f"the Nous Portal's FAL proxy. Either:\n"
                 f"  • Set FAL_KEY in your environment to use FAL.ai directly, or\n"
-                f"  • Pick a different model via `hermes tools` → Image Generation."
+                f"  • Pick a different model via `hermes tools` -> Image Generation."
             ) from exc
         raise
 
@@ -756,17 +756,17 @@ if __name__ == "__main__":
     print("=" * 60)
 
     if not check_fal_api_key():
-        print("❌ FAL_KEY environment variable not set")
+        print("[ERR] FAL_KEY environment variable not set")
         print("   Set it via: export FAL_KEY='your-key-here'")
         print("   Get a key: https://fal.ai/")
         raise SystemExit(1)
-    print("✅ FAL.ai API key found")
+    print("[OK] FAL.ai API key found")
 
     try:
         import fal_client  # noqa: F401
-        print("✅ fal_client library available")
+        print("[OK] fal_client library available")
     except ImportError:
-        print("❌ fal_client library not found — pip install fal-client")
+        print("[ERR] fal_client library not found — pip install fal-client")
         raise SystemExit(1)
 
     model_id, meta = _resolve_fal_model()

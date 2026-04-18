@@ -330,7 +330,7 @@ def cmd_setup(args) -> None:
 
     write_path = _local_config_path()
     read_path = _config_path()
-    print("\nHoncho memory setup\n" + "─" * 40)
+    print("\nHoncho memory setup\n" + "-" * 40)
     print("  Honcho gives Hermes persistent cross-session memory.")
     print(f"  Config: {write_path}")
     if read_path != write_path and read_path.exists():
@@ -611,7 +611,7 @@ def cmd_status(args) -> None:
     profile = _active_profile_name()
     profile_label = f" [{hcfg.host}]" if profile != "default" else ""
 
-    print(f"\nHoncho status{profile_label}\n" + "─" * 40)
+    print(f"\nHoncho status{profile_label}\n" + "-" * 40)
     if profile != "default":
         print(f"  Profile:        {profile}")
     print(f"  Host:           {hcfg.host}")
@@ -699,9 +699,9 @@ def _cmd_status_all() -> None:
     cfg = _read_config()
     active = _active_profile_name()
 
-    print(f"\nHoncho profiles ({len(rows)})\n" + "─" * 55)
+    print(f"\nHoncho profiles ({len(rows)})\n" + "-" * 55)
     print(f"  {'Profile':<14} {'Host':<22} {'Enabled':<9} {'Recall':<9} {'Write'}")
-    print(f"  {'─' * 14} {'─' * 22} {'─' * 9} {'─' * 9} {'─' * 9}")
+    print(f"  {'-' * 14} {'-' * 22} {'-' * 9} {'-' * 9} {'-' * 9}")
 
     for name, host, block in rows:
         enabled = block.get("enabled", cfg.get("enabled"))
@@ -724,9 +724,9 @@ def cmd_peers(args) -> None:
     rows = _all_profile_host_configs()
     cfg = _read_config()
 
-    print(f"\nHoncho peer identities ({len(rows)} profiles)\n" + "─" * 50)
+    print(f"\nHoncho peer identities ({len(rows)} profiles)\n" + "-" * 50)
     print(f"  {'Profile':<14} {'User peer':<16} {'AI peer'}")
-    print(f"  {'─' * 14} {'─' * 16} {'─' * 18}")
+    print(f"  {'-' * 14} {'-' * 16} {'-' * 18}")
 
     for name, host, block in rows:
         user = block.get("peerName") or cfg.get("peerName") or "(not set)"
@@ -737,7 +737,7 @@ def cmd_peers(args) -> None:
 
 
 def cmd_sessions(args) -> None:
-    """List known directory → session name mappings."""
+    """List known directory -> session name mappings."""
     cfg = _read_config()
     sessions = cfg.get("sessions", {})
 
@@ -748,7 +748,7 @@ def cmd_sessions(args) -> None:
         return
 
     cwd = os.getcwd()
-    print(f"\nHoncho session mappings ({len(sessions)})\n" + "─" * 40)
+    print(f"\nHoncho session mappings ({len(sessions)})\n" + "-" * 40)
     for path, name in sorted(sessions.items()):
         marker = " ←" if path == cwd else ""
         print(f"  {name:<30} {path}{marker}")
@@ -777,7 +777,7 @@ def cmd_map(args) -> None:
     cfg = _read_config()
     cfg.setdefault("sessions", {})[cwd] = session_name
     _write_config(cfg)
-    print(f"  Mapped {cwd}\n     → {session_name}\n")
+    print(f"  Mapped {cwd}\n     -> {session_name}\n")
 
 
 def cmd_peer(args) -> None:
@@ -799,7 +799,7 @@ def cmd_peer(args) -> None:
         ai = hermes.get('aiPeer') or cfg.get('aiPeer') or _host_key()
         lvl = hermes.get("dialecticReasoningLevel") or cfg.get("dialecticReasoningLevel") or "low"
         max_chars = hermes.get("dialecticMaxChars") or cfg.get("dialecticMaxChars") or 600
-        print("\nHoncho peers\n" + "─" * 40)
+        print("\nHoncho peers\n" + "-" * 40)
         print(f"  User peer:   {user}")
         print("    Your identity in Honcho. Messages you send build this peer's card.")
         print(f"  AI peer:     {ai}")
@@ -852,7 +852,7 @@ def cmd_mode(args) -> None:
             or cfg.get("recallMode")
             or "hybrid"
         )
-        print("\nHoncho recall mode\n" + "─" * 40)
+        print("\nHoncho recall mode\n" + "-" * 40)
         for m, desc in MODES.items():
             marker = " <-" if m == current else ""
             print(f"  {m:<10}  {desc}{marker}")
@@ -887,7 +887,7 @@ def cmd_strategy(args) -> None:
             or cfg.get("sessionStrategy")
             or "per-session"
         )
-        print("\nHoncho session strategy\n" + "─" * 40)
+        print("\nHoncho session strategy\n" + "-" * 40)
         for s, desc in STRATEGIES.items():
             marker = " <-" if s == current else ""
             print(f"  {s:<15}  {desc}{marker}")
@@ -918,7 +918,7 @@ def cmd_tokens(args) -> None:
         ctx_tokens = hermes.get("contextTokens") or cfg.get("contextTokens") or "(Honcho default)"
         d_chars = hermes.get("dialecticMaxChars") or cfg.get("dialecticMaxChars") or 600
         d_level = hermes.get("dialecticReasoningLevel") or cfg.get("dialecticReasoningLevel") or "low"
-        print("\nHoncho budgets\n" + "─" * 40)
+        print("\nHoncho budgets\n" + "-" * 40)
         print()
         print(f"  Context     {ctx_tokens} tokens")
         print("    Raw memory retrieval. Honcho returns stored facts/history about")
@@ -972,18 +972,18 @@ def cmd_identity(args) -> None:
         return
 
     if show:
-        # ── User peer ────────────────────────────────────────────────────────
+        # -- User peer --------------------------------------------------------
         user_card = mgr.get_peer_card(session_key)
-        print(f"\nUser peer ({hcfg.peer_name or 'not set'})\n" + "─" * 40)
+        print(f"\nUser peer ({hcfg.peer_name or 'not set'})\n" + "-" * 40)
         if user_card:
             for fact in user_card:
                 print(f"  {fact}")
         else:
             print("  No user peer card yet. Send a few messages to build one.")
 
-        # ── AI peer ──────────────────────────────────────────────────────────
+        # -- AI peer ----------------------------------------------------------
         ai_rep = mgr.get_ai_representation(session_key)
-        print(f"\nAI peer ({hcfg.ai_peer})\n" + "─" * 40)
+        print(f"\nAI peer ({hcfg.ai_peer})\n" + "-" * 40)
         if ai_rep.get("representation"):
             print(ai_rep["representation"])
         elif ai_rep.get("card"):
@@ -995,7 +995,7 @@ def cmd_identity(args) -> None:
         return
 
     if not file_path:
-        print("\nHoncho identity management\n" + "─" * 40)
+        print("\nHoncho identity management\n" + "-" * 40)
         print(f"  User peer: {hcfg.peer_name or 'not set'}")
         print(f"  AI peer:   {hcfg.ai_peer}")
         print()
@@ -1024,10 +1024,10 @@ def cmd_identity(args) -> None:
 
 
 def cmd_migrate(args) -> None:
-    """Step-by-step migration guide: OpenClaw native memory → Hermes + Honcho."""
+    """Step-by-step migration guide: OpenClaw native memory -> Hermes + Honcho."""
     from pathlib import Path
 
-    # ── Detect OpenClaw native memory files ──────────────────────────────────
+    # -- Detect OpenClaw native memory files ----------------------------------
     cwd = Path(os.getcwd())
     openclaw_home = Path.home() / ".openclaw"
 
@@ -1052,7 +1052,7 @@ def cmd_migrate(args) -> None:
     cfg = _read_config()
     has_key = bool(_resolve_api_key(cfg))
 
-    print("\nHoncho migration: OpenClaw native memory → Hermes\n" + "─" * 50)
+    print("\nHoncho migration: OpenClaw native memory -> Hermes\n" + "-" * 50)
     print()
     print("  OpenClaw's native memory stores context in local markdown files")
     print("  (USER.md, MEMORY.md, SOUL.md, ...) and injects them via QMD search.")
@@ -1061,7 +1061,7 @@ def cmd_migrate(args) -> None:
     print("  and enriched by a dialectic reasoning layer that builds over time.")
     print()
 
-    # ── Step 1: Honcho account ────────────────────────────────────────────────
+    # -- Step 1: Honcho account ------------------------------------------------
     print("Step 1  Create a Honcho account")
     print()
     if has_key:
@@ -1085,7 +1085,7 @@ def cmd_migrate(args) -> None:
             print()
             print("  Run 'hermes honcho setup' when ready, then re-run this walkthrough.")
 
-    # ── Step 2: Detected files ────────────────────────────────────────────────
+    # -- Step 2: Detected files ------------------------------------------------
     print()
     print("Step 2  Detected OpenClaw memory files")
     print()
@@ -1103,9 +1103,9 @@ def cmd_migrate(args) -> None:
         print("  If your files are elsewhere, copy them here before continuing,")
         print("  or seed them manually:  hermes honcho identity <path/to/file>")
 
-    # ── Step 3: Migrate user memory ───────────────────────────────────────────
+    # -- Step 3: Migrate user memory -------------------------------------------
     print()
-    print("Step 3  Migrate user memory files → Honcho user peer")
+    print("Step 3  Migrate user memory files -> Honcho user peer")
     print()
     print("  USER.md and MEMORY.md contain facts about you that the agent should")
     print("  remember across sessions. Honcho will store these under your user peer")
@@ -1155,9 +1155,9 @@ def cmd_migrate(args) -> None:
     else:
         print("  No user memory files detected. Nothing to migrate here.")
 
-    # ── Step 4: Seed AI identity ──────────────────────────────────────────────
+    # -- Step 4: Seed AI identity ----------------------------------------------
     print()
-    print("Step 4  Seed AI identity files → Honcho AI peer")
+    print("Step 4  Seed AI identity files -> Honcho AI peer")
     print()
     print("  SOUL.md, IDENTITY.md, AGENTS.md, TOOLS.md, BOOTSTRAP.md define the")
     print("  agent's character, capabilities, and behavioral rules. In OpenClaw")
@@ -1204,7 +1204,7 @@ def cmd_migrate(args) -> None:
         print("  No agent identity files detected.")
         print("  To seed manually:  hermes honcho identity <path/to/SOUL.md>")
 
-    # ── Step 5: What changes ──────────────────────────────────────────────────
+    # -- Step 5: What changes --------------------------------------------------
     print()
     print("Step 5  What changes vs. OpenClaw native memory")
     print()
@@ -1235,7 +1235,7 @@ def cmd_migrate(args) -> None:
     print("    Hermes:   per-session by default — each run gets its own session")
     print("              Map a custom name:  hermes honcho map <session-name>")
 
-    # ── Step 6: Next steps ────────────────────────────────────────────────────
+    # -- Step 6: Next steps ----------------------------------------------------
     print()
     print("Step 6  Next steps")
     print()

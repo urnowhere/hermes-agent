@@ -415,7 +415,7 @@ class TestSendUpdateNotification:
         }
         (hermes_home / ".update_pending.json").write_text(json.dumps(pending))
         (hermes_home / ".update_output.txt").write_text(
-            "→ Found 3 new commit(s)\n✓ Code updated!\n✓ Update complete!"
+            "-> Found 3 new commit(s)\n[OK] Code updated!\n[OK] Update complete!"
         )
         (hermes_home / ".update_exit_code").write_text("0")
 
@@ -442,7 +442,7 @@ class TestSendUpdateNotification:
         pending = {"platform": "telegram", "chat_id": "111", "user_id": "222"}
         (hermes_home / ".update_pending.json").write_text(json.dumps(pending))
         (hermes_home / ".update_output.txt").write_text(
-            "\x1b[32m✓ Code updated!\x1b[0m\n\x1b[1mDone\x1b[0m"
+            "\x1b[32m[OK] Code updated!\x1b[0m\n\x1b[1mDone\x1b[0m"
         )
         (hermes_home / ".update_exit_code").write_text("0")
 
@@ -537,7 +537,7 @@ class TestSendUpdateNotification:
         pending_path.write_text(json.dumps({
             "platform": "telegram", "chat_id": "111", "user_id": "222",
         }))
-        output_path.write_text("✓ Done")
+        output_path.write_text("[OK] Done")
         exit_code_path.write_text("0")
 
         mock_adapter = AsyncMock()
@@ -563,7 +563,7 @@ class TestSendUpdateNotification:
         pending_path.write_text(json.dumps({
             "platform": "telegram", "chat_id": "111", "user_id": "222",
         }))
-        output_path.write_text("✓ Done")
+        output_path.write_text("[OK] Done")
         exit_code_path.write_text("0")
 
         # Adapter send raises

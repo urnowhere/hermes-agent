@@ -233,7 +233,7 @@ class TestWorktreeCleanup:
         )
 
         # The git_repo fixture already has a fake remote ref so the initial
-        # commit is seen as "pushed".  No unpushed commits → cleanup proceeds.
+        # commit is seen as "pushed".  No unpushed commits -> cleanup proceeds.
         result = _cleanup_worktree(info)
         assert result is True  # Cleaned up despite dirty working tree
         assert not Path(info["path"]).exists()
@@ -553,7 +553,7 @@ class TestStaleWorktreePruning:
             capture_output=True, text=True, cwd=info["path"],
         )
         has_unpushed = bool(result.stdout.strip())
-        assert has_unpushed  # Has unpushed commits → not pruned in soft tier
+        assert has_unpushed  # Has unpushed commits -> not pruned in soft tier
         assert Path(info["path"]).exists()
 
     def test_force_prunes_very_old_worktree(self, git_repo):

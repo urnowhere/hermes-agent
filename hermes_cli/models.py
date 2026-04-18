@@ -366,10 +366,10 @@ def filter_nous_free_models(
     """Filter the Nous Portal model list according to free-model policy.
 
     Rules:
-      • Paid models that are NOT in the allowlist → keep (normal case).
-      • Free models that are NOT in the allowlist → drop.
-      • Allowlist models that ARE free → keep.
-      • Allowlist models that are NOT free → drop.
+      • Paid models that are NOT in the allowlist -> keep (normal case).
+      • Free models that are NOT in the allowlist -> drop.
+      • Allowlist models that ARE free -> keep.
+      • Allowlist models that are NOT free -> drop.
     """
     if not pricing:
         return model_ids  # no pricing data — can't filter, show everything
@@ -728,7 +728,7 @@ def model_ids(*, force_refresh: bool = False) -> list[str]:
 # Pricing helpers — fetch live pricing from OpenRouter-compatible /v1/models
 # ---------------------------------------------------------------------------
 
-# Cache: maps model_id → {"prompt": str, "completion": str} per endpoint
+# Cache: maps model_id -> {"prompt": str, "completion": str} per endpoint
 _pricing_cache: dict[str, dict[str, dict[str, str]]] = {}
 
 
@@ -739,12 +739,12 @@ def _format_price_per_mtok(per_token_str: str) -> str:
     right-justified in a column (the decimal point stays in the same position).
 
     Examples:
-        "0.000003"   → "$3.00"      (per million tokens)
-        "0.00003"    → "$30.00"
-        "0.00000015" → "$0.15"
-        "0.0000001"  → "$0.10"
-        "0.00018"    → "$180.00"
-        "0"          → "free"
+        "0.000003"   -> "$3.00"      (per million tokens)
+        "0.00003"    -> "$30.00"
+        "0.00000015" -> "$0.15"
+        "0.0000001"  -> "$0.10"
+        "0.00018"    -> "$180.00"
+        "0"          -> "free"
     """
     try:
         val = float(per_token_str)
@@ -965,10 +965,10 @@ def parse_model_input(raw: str, current_provider: str) -> tuple[str, str]:
 
     Supports ``provider:model`` syntax to switch providers at runtime::
 
-        openrouter:anthropic/claude-sonnet-4.5  →  ("openrouter", "anthropic/claude-sonnet-4.5")
-        nous:hermes-3                           →  ("nous", "hermes-3")
-        anthropic/claude-sonnet-4.5             →  (current_provider, "anthropic/claude-sonnet-4.5")
-        gpt-5.4                                 →  (current_provider, "gpt-5.4")
+        openrouter:anthropic/claude-sonnet-4.5  ->  ("openrouter", "anthropic/claude-sonnet-4.5")
+        nous:hermes-3                           ->  ("nous", "hermes-3")
+        anthropic/claude-sonnet-4.5             ->  (current_provider, "anthropic/claude-sonnet-4.5")
+        gpt-5.4                                 ->  (current_provider, "gpt-5.4")
 
     The colon is only treated as a provider delimiter if the left side is a
     recognized provider name or alias.  This avoids misinterpreting model names
@@ -984,8 +984,8 @@ def parse_model_input(raw: str, current_provider: str) -> tuple[str, str]:
         model_part = stripped[colon + 1:].strip()
         if provider_part and model_part and provider_part in _KNOWN_PROVIDER_NAMES:
             # Support custom:name:model triple syntax for named custom
-            # providers.  ``custom:local:qwen`` → ("custom:local", "qwen").
-            # Single colon ``custom:qwen`` → ("custom", "qwen") as before.
+            # providers.  ``custom:local:qwen`` -> ("custom:local", "qwen").
+            # Single colon ``custom:qwen`` -> ("custom", "qwen") as before.
             if provider_part == "custom" and ":" in model_part:
                 second_colon = model_part.find(":")
                 custom_name = model_part[:second_colon].strip()
@@ -1041,13 +1041,13 @@ def detect_provider_for_model(
     """Auto-detect the best provider for a model name.
 
     Returns ``(provider_id, model_name)`` — the model name may be remapped
-    (e.g. bare ``deepseek-chat`` → ``deepseek/deepseek-chat`` for OpenRouter).
+    (e.g. bare ``deepseek-chat`` -> ``deepseek/deepseek-chat`` for OpenRouter).
     Returns ``None`` when no confident match is found.
 
     Priority:
-    0. Bare provider name → switch to that provider's default model
+    0. Bare provider name -> switch to that provider's default model
     1. Direct provider with credentials (highest)
-    2. Direct provider without credentials → remap to OpenRouter slug
+    2. Direct provider without credentials -> remap to OpenRouter slug
     3. OpenRouter catalog match
     """
     name = (model_name or "").strip()
@@ -1145,9 +1145,9 @@ def _find_openrouter_slug(model_name: str) -> Optional[str]:
     """Find the full OpenRouter model slug for a bare or partial model name.
 
     Handles:
-    - Exact match: ``anthropic/claude-opus-4.6`` → as-is
-    - Bare name: ``deepseek-chat`` → ``deepseek/deepseek-chat``
-    - Bare name: ``claude-opus-4.6`` → ``anthropic/claude-opus-4.6``
+    - Exact match: ``anthropic/claude-opus-4.6`` -> as-is
+    - Bare name: ``deepseek-chat`` -> ``deepseek/deepseek-chat``
+    - Bare name: ``claude-opus-4.6`` -> ``anthropic/claude-opus-4.6``
     """
     name_lower = model_name.strip().lower()
     if not name_lower:
@@ -2028,7 +2028,7 @@ def validate_requested_model(
                     "persist": True,
                     "recognized": True,
                     "corrected_model": auto[0],
-                    "message": f"Auto-corrected `{requested}` → `{auto[0]}`",
+                    "message": f"Auto-corrected `{requested}` -> `{auto[0]}`",
                 }
 
             suggestions = get_close_matches(requested, api_models, n=3, cutoff=0.5)
@@ -2090,7 +2090,7 @@ def validate_requested_model(
                     "persist": True,
                     "recognized": True,
                     "corrected_model": auto[0],
-                    "message": f"Auto-corrected `{requested}` → `{auto[0]}`",
+                    "message": f"Auto-corrected `{requested}` -> `{auto[0]}`",
                 }
             suggestions = get_close_matches(requested_for_lookup, codex_models, n=3, cutoff=0.5)
             suggestion_text = ""
@@ -2132,7 +2132,7 @@ def validate_requested_model(
                     "persist": True,
                     "recognized": True,
                     "corrected_model": auto[0],
-                    "message": f"Auto-corrected `{requested}` → `{auto[0]}`",
+                    "message": f"Auto-corrected `{requested}` -> `{auto[0]}`",
                 }
 
             suggestions = get_close_matches(requested, api_models, n=3, cutoff=0.5)

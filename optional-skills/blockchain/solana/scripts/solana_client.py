@@ -36,7 +36,7 @@ RPC_URL = os.environ.get(
 LAMPORTS_PER_SOL = 1_000_000_000
 
 # Well-known Solana token names — avoids API calls for common tokens.
-# Maps mint address → (symbol, name).
+# Maps mint address -> (symbol, name).
 KNOWN_TOKENS: Dict[str, tuple] = {
     "So11111111111111111111111111111111111111112":  ("SOL",   "Solana"),
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": ("USDC",  "USD Coin"),
@@ -63,7 +63,7 @@ KNOWN_TOKENS: Dict[str, tuple] = {
     "A8C3xuqscfmyLrte3VwJvtPHXvcSN3FjDbUaSMAkQrCS": ("PENGU", "Pudgy Penguins"),
 }
 
-# Reverse lookup: symbol → mint (for the `price` command).
+# Reverse lookup: symbol -> mint (for the `price` command).
 _SYMBOL_TO_MINT = {v[0].upper(): k for k, v in KNOWN_TOKENS.items()}
 
 
@@ -350,7 +350,7 @@ def cmd_wallet(args):
             entry["value_usd"] = usd_value
         enriched.append(entry)
 
-    # Sort: tokens with known USD value first (highest→lowest), then unknowns
+    # Sort: tokens with known USD value first (highest->lowest), then unknowns
     enriched.sort(key=lambda x: (x.get("value_usd") is not None, x.get("value_usd") or 0), reverse=True)
 
     # Apply limit unless --all

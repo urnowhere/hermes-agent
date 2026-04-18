@@ -527,12 +527,12 @@ class TestSetupWizardSkipsConfiguredSections:
         ):
             setup_mod.run_setup_wizard(args)
 
-        # Model has API key → skip offered, user said No → section NOT called
+        # Model has API key -> skip offered, user said No -> section NOT called
         mock_model.assert_not_called()
-        # Terminal/agent always have a summary → skip offered, user said No
+        # Terminal/agent always have a summary -> skip offered, user said No
         mock_terminal.assert_not_called()
         mock_agent.assert_not_called()
-        # Gateway has no tokens (env_side returns "" for gateway keys) → section runs
+        # Gateway has no tokens (env_side returns "" for gateway keys) -> section runs
         mock_gateway.assert_called_once()
-        # Tools have no keys → section runs
+        # Tools have no keys -> section runs
         mock_tools.assert_called_once()

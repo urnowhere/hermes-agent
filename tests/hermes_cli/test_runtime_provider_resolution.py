@@ -573,7 +573,7 @@ def test_named_custom_provider_uses_saved_credentials(monkeypatch):
 
 
 def test_named_custom_provider_uses_providers_dict_when_list_missing(monkeypatch):
-    """After v11→v12 migration deletes custom_providers, resolution should
+    """After v11->v12 migration deletes custom_providers, resolution should
     still find entries in the providers dict via get_compatible_custom_providers."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
@@ -780,7 +780,7 @@ def test_resolve_requested_provider_precedence(monkeypatch):
     assert rp.resolve_requested_provider() == "auto"
 
 
-# ── api_mode config override tests ──────────────────────────────────────
+# -- api_mode config override tests --------------------------------------
 
 
 def test_model_config_api_mode(monkeypatch):

@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
-# ── helpers ────────────────────────────────────────────────────────────────
+# -- helpers ----------------------------------------------------------------
 
 def _make_response(content):
     """Build a minimal OpenAI-compatible ChatCompletion response stub."""
@@ -23,7 +23,7 @@ def _make_response(content):
     return types.SimpleNamespace(choices=[choice])
 
 
-# ── _extract_relevant_content (line 996) ──────────────────────────────────
+# -- _extract_relevant_content (line 996) ----------------------------------
 
 class TestExtractRelevantContentNoneGuard:
     """tools/browser_tool.py — _extract_relevant_content()"""
@@ -59,7 +59,7 @@ class TestExtractRelevantContentNoneGuard:
         assert len(result) > 0
 
 
-# ── browser_vision (line 1626) ────────────────────────────────────────────
+# -- browser_vision (line 1626) --------------------------------------------
 
 class TestBrowserVisionNoneGuard:
     """tools/browser_tool.py — browser_vision() analysis extraction"""
@@ -81,7 +81,7 @@ class TestBrowserVisionNoneGuard:
         assert fallback == "The page shows a login form."
 
 
-# ── source line verification ──────────────────────────────────────────────
+# -- source line verification ----------------------------------------------
 
 class TestBrowserSourceLinesAreGuarded:
     """Verify the actual source file has the fix applied."""

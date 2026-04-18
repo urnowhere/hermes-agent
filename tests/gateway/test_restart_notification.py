@@ -17,7 +17,7 @@ from tests.gateway.restart_test_helpers import (
 )
 
 
-# ── _handle_restart_command writes .restart_notify.json ──────────────────
+# -- _handle_restart_command writes .restart_notify.json ------------------
 
 
 @pytest.mark.asyncio
@@ -44,7 +44,7 @@ async def test_restart_command_writes_notify_file(tmp_path, monkeypatch):
     data = json.loads(notify_path.read_text())
     assert data["platform"] == "telegram"
     assert data["chat_id"] == "42"
-    assert "thread_id" not in data  # no thread → omitted
+    assert "thread_id" not in data  # no thread -> omitted
 
 
 @pytest.mark.asyncio
@@ -113,7 +113,7 @@ async def test_restart_command_preserves_thread_id(tmp_path, monkeypatch):
     assert data["thread_id"] == "topic_7"
 
 
-# ── _send_restart_notification ───────────────────────────────────────────
+# -- _send_restart_notification -------------------------------------------
 
 
 @pytest.mark.asyncio

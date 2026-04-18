@@ -26,7 +26,7 @@ from typing import Optional, Sequence
 
 from hermes_constants import get_hermes_home, display_hermes_home
 
-# Known log files (name → filename)
+# Known log files (name -> filename)
 LOG_FILES = {
     "agent": "agent.log",
     "errors": "errors.log",

@@ -21,7 +21,7 @@ def _reset_session_state(monkeypatch):
 
 
 class TestCloudProviderRuntimeFallback:
-    """Tests for _get_session_info cloud → local fallback."""
+    """Tests for _get_session_info cloud -> local fallback."""
 
     def test_cloud_failure_falls_back_to_local(self, monkeypatch):
         """When cloud provider.create_session raises, fall back to local."""
@@ -142,11 +142,11 @@ class TestCloudProviderRuntimeFallback:
         monkeypatch.setattr(browser_tool, "_get_cloud_provider", lambda: provider)
         monkeypatch.setattr(browser_tool, "_get_cdp_override", lambda: None)
 
-        # First call fails → fallback
+        # First call fails -> fallback
         s1 = browser_tool._get_session_info("task-a")
         assert s1["fallback_from_cloud"] is True
 
-        # Second call (different task) → cloud succeeds
+        # Second call (different task) -> cloud succeeds
         s2 = browser_tool._get_session_info("task-b")
         assert "fallback_from_cloud" not in s2
         assert s2["session_name"] == "cloud-ok"

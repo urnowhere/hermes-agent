@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
-# ── browser_console ──────────────────────────────────────────────────
+# -- browser_console --------------------------------------------------
 
 
 class TestBrowserConsole:
@@ -96,7 +96,7 @@ class TestBrowserConsole:
         assert result["total_errors"] == 0
 
 
-# ── browser_console schema ───────────────────────────────────────────
+# -- browser_console schema -------------------------------------------
 
 
 class TestBrowserConsoleSchema:
@@ -138,7 +138,7 @@ class TestBrowserConsoleToolsetWiring:
         assert "browser_console" in registry._tools
 
 
-# ── browser_vision annotate ──────────────────────────────────────────
+# -- browser_vision annotate ------------------------------------------
 
 
 class TestBrowserVisionAnnotate:
@@ -194,7 +194,7 @@ class TestBrowserVisionAnnotate:
                 assert "--annotate" in cmd_args
 
 
-# ── auto-recording config ────────────────────────────────────────────
+# -- auto-recording config --------------------------------------------
 
 
 class TestRecordSessionsConfig:
@@ -231,7 +231,7 @@ class TestRecordSessionsConfig:
         mock_cmd.assert_not_called()
 
 
-# ── dogfood skill files ──────────────────────────────────────────────
+# -- dogfood skill files ----------------------------------------------
 
 
 class TestDogfoodSkill:

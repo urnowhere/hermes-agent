@@ -301,7 +301,7 @@ def claw_command(args):
 
 
 def _cmd_migrate(args):
-    """Run the OpenClaw → Hermes migration."""
+    """Run the OpenClaw -> Hermes migration."""
     # Check current and legacy OpenClaw directories
     explicit_source = getattr(args, "source", None)
     if explicit_source:
@@ -329,19 +329,19 @@ def _cmd_migrate(args):
     print()
     print(
         color(
-            "┌─────────────────────────────────────────────────────────┐",
+            "+---------------------------------------------------------+",
             Colors.MAGENTA,
         )
     )
     print(
         color(
-            "│          ⚕ Hermes — OpenClaw Migration                 │",
+            "|           Hermes — OpenClaw Migration                 |",
             Colors.MAGENTA,
         )
     )
     print(
         color(
-            "└─────────────────────────────────────────────────────────┘",
+            "+---------------------------------------------------------+",
             Colors.MAGENTA,
         )
     )
@@ -408,7 +408,7 @@ def _cmd_migrate(args):
     selected = mod.resolve_selected_options(None, None, preset=preset)
     ws_target = Path(workspace_target).resolve() if workspace_target else None
 
-    # ── Phase 1: Always preview first ──────────────────────────
+    # -- Phase 1: Always preview first --------------------------
     try:
         preview = mod.Migrator(
             source_root=source_dir.resolve(),
@@ -447,7 +447,7 @@ def _cmd_migrate(args):
     if dry_run:
         return
 
-    # ── Phase 2: Confirm and execute ───────────────────────────
+    # -- Phase 2: Confirm and execute ---------------------------
     print()
     if not auto_yes:
         if not sys.stdin.isatty():
@@ -499,19 +499,19 @@ def _cmd_cleanup(args):
     print()
     print(
         color(
-            "┌─────────────────────────────────────────────────────────┐",
+            "+---------------------------------------------------------+",
             Colors.MAGENTA,
         )
     )
     print(
         color(
-            "│          ⚕ Hermes — OpenClaw Cleanup                   │",
+            "|           Hermes — OpenClaw Cleanup                   |",
             Colors.MAGENTA,
         )
     )
     print(
         color(
-            "└─────────────────────────────────────────────────────────┘",
+            "+---------------------------------------------------------+",
             Colors.MAGENTA,
         )
     )
@@ -597,7 +597,7 @@ def _cmd_cleanup(args):
 
         if dry_run:
             archive_path = _archive_directory(source_dir, dry_run=True)
-            print_info(f"Would archive: {source_dir} → {archive_path}")
+            print_info(f"Would archive: {source_dir} -> {archive_path}")
         elif not auto_yes and not sys.stdin.isatty():
             print_info(f"Non-interactive session — would archive: {source_dir}")
             print_info("To execute, re-run with: hermes claw cleanup --yes")
@@ -605,7 +605,7 @@ def _cmd_cleanup(args):
             if auto_yes or prompt_yes_no(f"Archive {source_dir}?", default=True):
                 try:
                     archive_path = _archive_directory(source_dir)
-                    print_success(f"Archived: {source_dir} → {archive_path}")
+                    print_success(f"Archived: {source_dir} -> {archive_path}")
                     total_archived += 1
                 except OSError as e:
                     print_error(f"Could not archive: {e}")
@@ -653,19 +653,19 @@ def _print_migration_report(report: dict, dry_run: bool):
 
         if migrated_items:
             label = "Would migrate" if dry_run else "Migrated"
-            print(color(f"  ✓ {label}:", Colors.GREEN))
+            print(color(f"  [OK] {label}:", Colors.GREEN))
             for item in migrated_items:
                 kind = item.get("kind", "unknown")
                 dest = item.get("destination", "")
                 if dest:
                     dest_short = str(dest).replace(str(Path.home()), "~")
-                    print(f"      {kind:<22s} → {dest_short}")
+                    print(f"      {kind:<22s} -> {dest_short}")
                 else:
                     print(f"      {kind}")
             print()
 
         if conflict_items:
-            print(color("  ⚠ Conflicts (skipped — use --overwrite to force):", Colors.YELLOW))
+            print(color("  [WARN] Conflicts (skipped — use --overwrite to force):", Colors.YELLOW))
             for item in conflict_items:
                 kind = item.get("kind", "unknown")
                 reason = item.get("reason", "already exists")
@@ -673,7 +673,7 @@ def _print_migration_report(report: dict, dry_run: bool):
             print()
 
         if skipped_items:
-            print(color("  ─ Skipped:", Colors.DIM))
+            print(color("  - Skipped:", Colors.DIM))
             for item in skipped_items:
                 kind = item.get("kind", "unknown")
                 reason = item.get("reason", "")
@@ -681,7 +681,7 @@ def _print_migration_report(report: dict, dry_run: bool):
             print()
 
         if error_items:
-            print(color("  ✗ Errors:", Colors.RED))
+            print(color("  [ERR] Errors:", Colors.RED))
             for item in error_items:
                 kind = item.get("kind", "unknown")
                 reason = item.get("reason", "unknown error")
@@ -724,7 +724,7 @@ def _print_migration_report(report: dict, dry_run: bool):
         ]
         if skipped_keys:
             print()
-            print(color("  ⚠ API keys were NOT migrated (secrets migration is disabled by default).", Colors.YELLOW))
+            print(color("  [WARN] API keys were NOT migrated (secrets migration is disabled by default).", Colors.YELLOW))
             print(color("  Your OPENROUTER_API_KEY and other provider keys must be added manually.", Colors.YELLOW))
             print()
             print_info("To migrate API keys, re-run with:")

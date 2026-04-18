@@ -77,7 +77,7 @@ class TestAlignBoundaryBackward:
             _tool_result("tc_2"),                    # idx=5
             {"role": "user", "content": "next"},
         ]
-        # Boundary at 4, messages[3] = assistant with tool_calls → pull back to 3
+        # Boundary at 4, messages[3] = assistant with tool_calls -> pull back to 3
         assert comp._align_boundary_backward(messages, 4) == 3
 
     def test_boundary_in_middle_of_tool_results(self):
@@ -115,7 +115,7 @@ class TestAlignBoundaryBackward:
             {"role": "user", "content": "next"},
         ]
         # Boundary at 7 — messages[6] is last tool result.
-        # Walk back: [6]=tool, [5]=tool, [4]=tool, [3]=assistant with tools → idx=3
+        # Walk back: [6]=tool, [5]=tool, [4]=tool, [3]=assistant with tools -> idx=3
         assert comp._align_boundary_backward(messages, 7) == 3
 
     def test_boundary_with_consecutive_tool_groups(self):
@@ -133,7 +133,7 @@ class TestAlignBoundaryBackward:
             {"role": "user", "content": "done"},
         ]
         # Boundary at 7 — messages[6] = tool result for tc_2 group
-        # Walk back: [6]=tool, [5]=assistant with tools → idx=5
+        # Walk back: [6]=tool, [5]=assistant with tools -> idx=5
         assert comp._align_boundary_backward(messages, 7) == 5
 
 

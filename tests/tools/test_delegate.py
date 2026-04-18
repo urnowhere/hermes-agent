@@ -504,17 +504,17 @@ class TestDelegateObservability(unittest.TestCase):
             # All three tool calls should have results
             self.assertEqual(len(trace), 3)
 
-            # First: web_search → ok
+            # First: web_search -> ok
             self.assertEqual(trace[0]["tool"], "web_search")
             self.assertEqual(trace[0]["status"], "ok")
             self.assertIn("result_bytes", trace[0])
 
-            # Second: web_search → error
+            # Second: web_search -> error
             self.assertEqual(trace[1]["tool"], "web_search")
             self.assertEqual(trace[1]["status"], "error")
             self.assertIn("result_bytes", trace[1])
 
-            # Third: terminal → ok
+            # Third: terminal -> ok
             self.assertEqual(trace[2]["tool"], "terminal")
             self.assertEqual(trace[2]["status"], "ok")
             self.assertIn("result_bytes", trace[2])
@@ -712,7 +712,7 @@ class TestDelegationCredentialResolution(unittest.TestCase):
 
 
 class TestDelegationProviderIntegration(unittest.TestCase):
-    """Integration tests: delegation config → _run_single_child → AIAgent construction."""
+    """Integration tests: delegation config -> _run_single_child -> AIAgent construction."""
 
     @patch("tools.delegate_tool._load_config")
     @patch("tools.delegate_tool._resolve_delegation_credentials")

@@ -2,9 +2,9 @@
 DingTalk Device Flow authorization.
 
 Implements the same 3-step registration flow as dingtalk-openclaw-connector:
-  1. POST /app/registration/init   → get nonce
-  2. POST /app/registration/begin  → get device_code + verification_uri_complete
-  3. POST /app/registration/poll   → poll until SUCCESS → get client_id + client_secret
+  1. POST /app/registration/init   -> get nonce
+  2. POST /app/registration/begin  -> get device_code + verification_uri_complete
+  3. POST /app/registration/poll   -> poll until SUCCESS -> get client_id + client_secret
 
 The verification_uri_complete is rendered as a QR code in the terminal so the
 user can scan it with DingTalk to authorize, yielding AppKey + AppSecret
@@ -24,7 +24,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-# ── Configuration ──────────────────────────────────────────────────────────
+# -- Configuration ----------------------------------------------------------
 
 REGISTRATION_BASE_URL = os.environ.get(
     "DINGTALK_REGISTRATION_BASE_URL", "https://oapi.dingtalk.com"
@@ -33,7 +33,7 @@ REGISTRATION_BASE_URL = os.environ.get(
 REGISTRATION_SOURCE = os.environ.get("DINGTALK_REGISTRATION_SOURCE", "openClaw")
 
 
-# ── API helpers ────────────────────────────────────────────────────────────
+# -- API helpers ------------------------------------------------------------
 
 class RegistrationError(Exception):
     """Raised when a DingTalk registration API call fails."""
@@ -56,7 +56,7 @@ def _api_post(path: str, payload: dict) -> dict:
     return data
 
 
-# ── Core flow ──────────────────────────────────────────────────────────────
+# -- Core flow --------------------------------------------------------------
 
 def begin_registration() -> dict:
     """Start a device-flow registration.
@@ -64,13 +64,13 @@ def begin_registration() -> dict:
     Returns a dict with keys:
         device_code, verification_uri_complete, expires_in, interval
     """
-    # Step 1: init → nonce
+    # Step 1: init -> nonce
     init_data = _api_post("/app/registration/init", {"source": REGISTRATION_SOURCE})
     nonce = str(init_data.get("nonce", "")).strip()
     if not nonce:
         raise RegistrationError("init response missing nonce")
 
-    # Step 2: begin → device_code, verification_uri_complete
+    # Step 2: begin -> device_code, verification_uri_complete
     begin_data = _api_post("/app/registration/begin", {"nonce": nonce})
     device_code = str(begin_data.get("device_code", "")).strip()
     verification_uri_complete = str(begin_data.get("verification_uri_complete", "")).strip()
@@ -152,7 +152,7 @@ def wait_for_registration_success(
     raise RegistrationError("authorization timed out, please retry")
 
 
-# ── QR code rendering ─────────────────────────────────────────────────────
+# -- QR code rendering -----------------------------------------------------
 
 def _ensure_qrcode_installed() -> bool:
     """Try to import qrcode; if missing, auto-install it via pip/uv."""
@@ -226,7 +226,7 @@ def render_qr_to_terminal(url: str) -> bool:
     return True
 
 
-# ── High-level entry point for the setup wizard ───────────────────────────
+# -- High-level entry point for the setup wizard ---------------------------
 
 def dingtalk_qr_auth() -> Optional[Tuple[str, str]]:
     """Run the interactive QR-code device-flow authorization.

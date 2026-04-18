@@ -890,7 +890,7 @@ class TestOnMemoryWriteBridge:
         on providers that enforce unique names (e.g. Xiaomi MiMo via Nous Portal).
 
         Regression test for: duplicate mnemosyne_recall / mnemosyne_remember /
-        mnemosyne_stats in tools array → 400 from Nous Portal.
+        mnemosyne_stats in tools array -> 400 from Nous Portal.
         """
         mgr = MemoryManager()
         p = FakeMemoryProvider("ext", tools=[
@@ -900,7 +900,7 @@ class TestOnMemoryWriteBridge:
         mgr.add_provider(p)
 
         # Simulate self.tools already containing one of the plugin tools
-        # (as if it was registered via ctx.register_tool → get_tool_definitions)
+        # (as if it was registered via ctx.register_tool -> get_tool_definitions)
         existing_tools = [
             {"type": "function", "function": {"name": "ext_recall", "description": "Recall (from registry)", "parameters": {}}},
             {"type": "function", "function": {"name": "web_search", "description": "Search", "parameters": {}}},

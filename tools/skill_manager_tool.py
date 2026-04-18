@@ -21,15 +21,15 @@ Actions:
 
 Directory layout for user skills:
     ~/.hermes/skills/
-    ├── my-skill/
-    │   ├── SKILL.md
-    │   ├── references/
-    │   ├── templates/
-    │   ├── scripts/
-    │   └── assets/
-    └── category-name/
-        └── another-skill/
-            └── SKILL.md
+    ├-- my-skill/
+    |   ├-- SKILL.md
+    |   ├-- references/
+    |   ├-- templates/
+    |   ├-- scripts/
+    |   +-- assets/
+    +-- category-name/
+        +-- another-skill/
+            +-- SKILL.md
 """
 
 import json

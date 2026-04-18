@@ -21,6 +21,7 @@ import os
 import shutil
 import shlex
 import stat
+import sys
 import base64
 import hashlib
 import subprocess
@@ -940,7 +941,7 @@ def _get_config_hint_for_unknown_provider(provider_name: str) -> str:
             # Show first line of hint
             first_hint = ci.hint.splitlines()[0] if ci.hint else ""
             if first_hint:
-                lines.append(f"    → {first_hint}")
+                lines.append(f"    -> {first_hint}")
         return "\n".join(lines)
     except Exception:
         return ""
@@ -1155,7 +1156,10 @@ def _save_qwen_cli_tokens(tokens: Dict[str, Any]) -> Path:
     auth_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = auth_path.with_suffix(".tmp")
     tmp_path.write_text(json.dumps(tokens, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)
+    try:
+        os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
     tmp_path.replace(auth_path)
     return auth_path
 
@@ -1661,7 +1665,7 @@ def resolve_codex_runtime_credentials(
         cli_tokens = _import_codex_cli_tokens()
         if cli_tokens:
             logger.info("Migrating Codex credentials from ~/.codex/ to Hermes auth store")
-            print("⚠️  Migrating Codex credentials to Hermes's own auth store.")
+            print("[WARN]️  Migrating Codex credentials to Hermes's own auth store.")
             print("   This avoids conflicts with Codex CLI and VS Code.")
             print("   Run `hermes auth` to create a fully independent session.\n")
             _save_codex_tokens(cli_tokens)
@@ -2615,7 +2619,7 @@ def get_external_process_provider_status(provider_id: str) -> Dict[str, Any]:
         or "copilot"
     )
     raw_args = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
-    args = shlex.split(raw_args) if raw_args else ["--acp", "--stdio"]
+    args = shlex.split(raw_args, posix=(sys.platform != "win32")) if raw_args else ["--acp", "--stdio"]
     base_url = os.getenv(pconfig.base_url_env_var, "").strip() if pconfig.base_url_env_var else ""
     if not base_url:
         base_url = pconfig.inference_base_url
@@ -2718,7 +2722,7 @@ def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str,
         or "copilot"
     )
     raw_args = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
-    args = shlex.split(raw_args) if raw_args else ["--acp", "--stdio"]
+    args = shlex.split(raw_args, posix=(sys.platform != "win32")) if raw_args else ["--acp", "--stdio"]
     resolved_command = shutil.which(command) if command else None
     if not resolved_command and not base_url.startswith("acp+tcp://"):
         raise AuthError(
@@ -2924,7 +2928,7 @@ def _prompt_model_selection(
             for mid in _unavailable:
                 print(f"{_DIM}     {_label(mid)}{_RESET}")
             print()
-            print(f"{_DIM}  ── Upgrade at {_upgrade_url} for paid models ──{_RESET}")
+            print(f"{_DIM}  -- Upgrade at {_upgrade_url} for paid models --{_RESET}")
             print()
             effective_title = "Available free models:"
         else:
@@ -2967,7 +2971,7 @@ def _prompt_model_selection(
     if _unavailable:
         _upgrade_url = (portal_url or DEFAULT_NOUS_PORTAL_URL).rstrip("/")
         print()
-        print(f"  {_DIM}── Unavailable models (requires paid tier — upgrade at {_upgrade_url}) ──{_RESET}")
+        print(f"  {_DIM}-- Unavailable models (requires paid tier — upgrade at {_upgrade_url}) --{_RESET}")
         for mid in _unavailable:
             print(f"  {'':>{num_width}}  {_DIM}{_label(mid)}{_RESET}")
     print()

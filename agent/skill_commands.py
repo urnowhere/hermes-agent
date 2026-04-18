@@ -141,7 +141,7 @@ def _build_skill_message(
 
     parts = [activation_note, "", content.strip()]
 
-    # ── Inject resolved skill config values ──
+    # -- Inject resolved skill config values --
     _inject_skill_config(loaded_skill, parts)
 
     if loaded_skill.get("setup_skipped"):

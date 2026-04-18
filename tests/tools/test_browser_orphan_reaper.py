@@ -143,7 +143,7 @@ class TestReapOrphanedBrowserSessions:
         d = _make_socket_dir(fake_tmpdir, "cdp_abc1234567")
         assert d.exists()
         _reap_orphaned_browser_sessions()
-        # No PID file → cleaned up
+        # No PID file -> cleaned up
         assert not d.exists()
 
     def test_non_hermes_dirs_are_ignored(self, fake_tmpdir):

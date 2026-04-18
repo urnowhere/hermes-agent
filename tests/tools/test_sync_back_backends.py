@@ -13,7 +13,7 @@ from tools.environments import daytona as daytona_env
 from tools.environments.ssh import SSHEnvironment
 
 
-# ── SSH helpers ──────────────────────────────────────────────────────
+# -- SSH helpers ------------------------------------------------------
 
 
 @pytest.fixture
@@ -34,7 +34,7 @@ def ssh_mock_env(monkeypatch):
     return SSHEnvironment(host="example.com", user="testuser")
 
 
-# ── Modal helpers ────────────────────────────────────────────────────
+# -- Modal helpers ----------------------------------------------------
 
 
 def _make_mock_modal_env():
@@ -79,7 +79,7 @@ def _wire_modal_download(env, *, tar_bytes=b"fake-tar-data", exit_code=0):
     return exec_calls
 
 
-# ── Daytona helpers ──────────────────────────────────────────────────
+# -- Daytona helpers --------------------------------------------------
 
 
 def _make_mock_daytona_env():

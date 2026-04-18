@@ -6,7 +6,7 @@ Covers:
 3. Gateway _resolve_turn_agent_config passes credential_pool to primary dict
 4. Eager fallback deferred when credential pool has credentials
 5. Eager fallback fires when no credential pool exists
-6. Full 429 rotation cycle: retry-same → rotate → exhaust → fallback
+6. Full 429 rotation cycle: retry-same -> rotate -> exhaust -> fallback
 """
 
 import os
@@ -255,7 +255,7 @@ class TestEagerFallbackWithPool:
 # ---------------------------------------------------------------------------
 
 class TestPoolRotationCycle:
-    """Verify the retry-same → rotate → exhaust flow in _recover_with_credential_pool."""
+    """Verify the retry-same -> rotate -> exhaust flow in _recover_with_credential_pool."""
 
     def _make_agent_with_pool(self, pool_entries=3):
         from run_agent import AIAgent

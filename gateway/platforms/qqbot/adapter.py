@@ -189,7 +189,7 @@ class QQAdapter(BasePlatformAdapter):
         self._heartbeat_interval: float = 30.0  # seconds, updated by Hello
         self._session_id: Optional[str] = None
         self._last_seq: Optional[int] = None
-        self._chat_type_map: Dict[str, str] = {}  # chat_id → "c2c"|"group"|"guild"|"dm"
+        self._chat_type_map: Dict[str, str] = {}  # chat_id -> "c2c"|"group"|"guild"|"dm"
 
         # Request/response correlation
         self._pending_responses: Dict[str, asyncio.Future] = {}
@@ -407,11 +407,11 @@ class QQAdapter(BasePlatformAdapter):
         """Read WebSocket events and reconnect on errors.
 
         Close code handling follows the OpenClaw qqbot reference implementation:
-          4004 → invalid token, refresh and reconnect
-          4006/4007/4009 → session invalid, clear session and re-identify
-          4008 → rate limited, back off 60s
-          4914 → bot offline/sandbox, stop reconnecting
-          4915 → bot banned, stop reconnecting
+          4004 -> invalid token, refresh and reconnect
+          4006/4007/4009 -> session invalid, clear session and re-identify
+          4008 -> rate limited, back off 60s
+          4914 -> bot offline/sandbox, stop reconnecting
+          4915 -> bot banned, stop reconnecting
         """
         backoff_idx = 0
         connect_time = 0.0
@@ -493,7 +493,7 @@ class QQAdapter(BasePlatformAdapter):
                         backoff_idx += 1
                     continue
 
-                # Token invalid → clear cached token so _ensure_token() refreshes
+                # Token invalid -> clear cached token so _ensure_token() refreshes
                 if code == 4004:
                     logger.info(
                         "[%s] Invalid token (4004), will refresh and reconnect",
@@ -502,7 +502,7 @@ class QQAdapter(BasePlatformAdapter):
                     self._access_token = None
                     self._token_expires_at = 0.0
 
-                # Session invalid → clear session, will re-identify on next Hello
+                # Session invalid -> clear session, will re-identify on next Hello
                 if code in (
                         4006,
                         4007,
@@ -1286,7 +1286,7 @@ class QQAdapter(BasePlatformAdapter):
         Priority:
         1. QQ's built-in ``asr_refer_text`` (Tencent's own ASR — free, no API call).
         2. Self-hosted STT on ``voice_wav_url`` (pre-converted WAV from QQ, avoids SILK decoding).
-        3. Self-hosted STT on the original attachment URL (requires SILK→WAV conversion).
+        3. Self-hosted STT on the original attachment URL (requires SILK->WAV conversion).
 
         Returns the transcript text, or None on failure.
         """
@@ -1593,7 +1593,7 @@ class QQAdapter(BasePlatformAdapter):
         """Resolve STT backend configuration from config/environment.
 
         Priority:
-        1. Plugin-specific: ``channels.qqbot.stt`` in config.yaml → ``self.config.extra["stt"]``
+        1. Plugin-specific: ``channels.qqbot.stt`` in config.yaml -> ``self.config.extra["stt"]``
         2. QQ-specific env vars: ``QQ_STT_API_KEY`` / ``QQ_STT_BASE_URL`` / ``QQ_STT_MODEL``
         3. Return None if nothing is configured (STT will be skipped, QQ built-in ASR still works).
         """

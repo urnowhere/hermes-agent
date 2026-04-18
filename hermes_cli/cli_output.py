@@ -10,7 +10,7 @@ import getpass
 from hermes_cli.colors import Colors, color
 
 
-# ─── Print Helpers ────────────────────────────────────────────────────────────
+# --- Print Helpers ------------------------------------------------------------
 
 
 def print_info(text: str) -> None:
@@ -19,18 +19,18 @@ def print_info(text: str) -> None:
 
 
 def print_success(text: str) -> None:
-    """Print a green success message with ✓ prefix."""
-    print(color(f"✓ {text}", Colors.GREEN))
+    """Print a green success message with OK prefix."""
+    print(color(f"[OK] {text}", Colors.GREEN))
 
 
 def print_warning(text: str) -> None:
-    """Print a yellow warning message with ⚠ prefix."""
-    print(color(f"⚠ {text}", Colors.YELLOW))
+    """Print a yellow warning message with WARN prefix."""
+    print(color(f"[WARN] {text}", Colors.YELLOW))
 
 
 def print_error(text: str) -> None:
-    """Print a red error message with ✗ prefix."""
-    print(color(f"✗ {text}", Colors.RED))
+    """Print a red error message with ERR prefix."""
+    print(color(f"[ERR] {text}", Colors.RED))
 
 
 def print_header(text: str) -> None:
@@ -38,7 +38,7 @@ def print_header(text: str) -> None:
     print(color(f"\n  {text}", Colors.YELLOW))
 
 
-# ─── Input Prompts ────────────────────────────────────────────────────────────
+# --- Input Prompts ------------------------------------------------------------
 
 
 def prompt(

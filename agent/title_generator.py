@@ -102,7 +102,7 @@ def maybe_auto_title(
     """Fire-and-forget title generation after the first exchange.
 
     Only generates a title when:
-    - This appears to be the first user→assistant exchange
+    - This appears to be the first user->assistant exchange
     - No title is already set
     """
     if not session_db or not session_id or not user_message or not assistant_response:

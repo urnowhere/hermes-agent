@@ -288,7 +288,7 @@ class WebhookAdapter(BasePlatformAdapter):
                 {"error": f"Unknown route: {route_name}"}, status=404
             )
 
-        # ── Auth-before-body ─────────────────────────────────────
+        # -- Auth-before-body -------------------------------------
         # Check Content-Length before reading the full payload.
         content_length = request.content_length or 0
         if content_length > self._max_body_bytes:
@@ -296,7 +296,7 @@ class WebhookAdapter(BasePlatformAdapter):
                 {"error": "Payload too large"}, status=413
             )
 
-        # ── Rate limiting ────────────────────────────────────────
+        # -- Rate limiting ----------------------------------------
         now = time.time()
         window = self._rate_counts.setdefault(route_name, [])
         window[:] = [t for t in window if now - t < 60]
@@ -400,7 +400,7 @@ class WebhookAdapter(BasePlatformAdapter):
             request.headers.get("X-Request-ID", str(int(time.time() * 1000))),
         )
 
-        # ── Idempotency ─────────────────────────────────────────
+        # -- Idempotency -----------------------------------------
         # Skip duplicate deliveries (webhook retries).
         now = time.time()
         # Prune expired entries
@@ -506,7 +506,7 @@ class WebhookAdapter(BasePlatformAdapter):
             ).hexdigest()
             return hmac.compare_digest(generic_sig, expected)
 
-        # No recognised signature header but secret is configured → reject
+        # No recognised signature header but secret is configured -> reject
         logger.debug(
             "[webhook] Secret configured but no signature header found"
         )
@@ -526,7 +526,7 @@ class WebhookAdapter(BasePlatformAdapter):
         """Render a prompt template with the webhook payload.
 
         Supports dot-notation access into nested dicts:
-        ``{pull_request.title}`` → ``payload["pull_request"]["title"]``
+        ``{pull_request.title}`` -> ``payload["pull_request"]["title"]``
 
         Special token ``{__raw__}`` dumps the entire payload as indented
         JSON (truncated to 4000 chars).  Useful for monitoring alerts or

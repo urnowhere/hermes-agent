@@ -12,9 +12,9 @@ Old v1 manifests (plain names without hashes) are auto-migrated.
 Update logic:
   - NEW skills (not in manifest): copied to user dir, origin hash recorded.
   - EXISTING skills (in manifest, present in user dir):
-      * If user copy matches origin hash: user hasn't modified it → safe to
+      * If user copy matches origin hash: user hasn't modified it -> safe to
         update from bundled if bundled changed. New origin hash recorded.
-      * If user copy differs from origin hash: user customized it → SKIP.
+      * If user copy differs from origin hash: user customized it -> SKIP.
   - DELETED by user (in manifest, absent from user dir): respected, not re-added.
   - REMOVED from bundled (in manifest, gone from repo): cleaned from manifest.
 
@@ -203,7 +203,7 @@ def sync_skills(quiet: bool = False) -> dict:
         bundled_hash = _dir_hash(skill_src)
 
         if skill_name not in manifest:
-            # ── New skill — never offered before ──
+            # -- New skill — never offered before --
             try:
                 if dest.exists():
                     # User already has a skill with the same name — don't overwrite
@@ -222,7 +222,7 @@ def sync_skills(quiet: bool = False) -> dict:
                 # Do NOT add to manifest — next sync should retry
 
         elif dest.exists():
-            # ── Existing skill — in manifest AND on disk ──
+            # -- Existing skill — in manifest AND on disk --
             origin_hash = manifest.get(skill_name, "")
             user_hash = _dir_hash(dest)
 
@@ -270,7 +270,7 @@ def sync_skills(quiet: bool = False) -> dict:
                 skipped += 1  # bundled unchanged, user unchanged
 
         else:
-            # ── In manifest but not on disk — user deleted it ──
+            # -- In manifest but not on disk — user deleted it --
             skipped += 1
 
     # Clean stale manifest entries (skills removed from bundled dir)

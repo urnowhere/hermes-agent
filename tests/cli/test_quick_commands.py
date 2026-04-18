@@ -5,7 +5,7 @@ from rich.text import Text
 import pytest
 
 
-# ── CLI tests ──────────────────────────────────────────────────────────────
+# -- CLI tests --------------------------------------------------------------
 
 class TestCLIQuickCommands:
     """Test quick command dispatch in HermesCLI.process_command."""
@@ -109,7 +109,7 @@ class TestCLIQuickCommands:
         assert "timed out" in args.lower()
 
 
-# ── Gateway tests ──────────────────────────────────────────────────────────
+# -- Gateway tests ----------------------------------------------------------
 
 class TestGatewayQuickCommands:
     """Test quick command dispatch in GatewayRunner._handle_message."""

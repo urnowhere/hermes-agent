@@ -95,7 +95,7 @@ class TestReasoningCommand:
         result = await runner._handle_reasoning_command(_make_event("/reasoning"))
 
         assert "**Effort:** `none (disabled)`" in result
-        assert "**Display:** on ✓" in result
+        assert "**Display:** on [OK]" in result
         assert runner._reasoning_config == {"enabled": False}
         assert runner._show_reasoning is True
 

@@ -15,7 +15,7 @@ import pytest
 from hermes_cli.main import _session_browse_picker
 
 
-# ─── Sample session data ──────────────────────────────────────────────────────
+# --- Sample session data ------------------------------------------------------
 
 def _make_sessions(n=5):
     """Generate a list of fake rich-session dicts."""
@@ -38,7 +38,7 @@ def _make_sessions(n=5):
 SAMPLE_SESSIONS = _make_sessions(5)
 
 
-# ─── _session_browse_picker ──────────────────────────────────────────────────
+# --- _session_browse_picker --------------------------------------------------
 
 class TestSessionBrowsePicker:
     """Tests for the _session_browse_picker function."""
@@ -242,7 +242,7 @@ class TestSessionBrowsePicker:
         assert "test_003_fallback" in output
 
 
-# ─── Curses-based picker (mocked curses) ────────────────────────────────────
+# --- Curses-based picker (mocked curses) ------------------------------------
 
 class TestCursesBrowse:
     """Tests for the curses-based interactive picker via simulated key sequences."""
@@ -378,13 +378,13 @@ class TestCursesBrowse:
         ]
         # Type "se" first (activates filter, matches "the sequel")
         # Then type "q" — should add 'q' to filter (filter="seq"), NOT quit
-        # "seq" still matches "the sequel" → Enter selects it
+        # "seq" still matches "the sequel" -> Enter selects it
         keys = [ord('s'), ord('e'), ord('q'), 10]
         result = self._run_with_keys(sessions, keys)
         assert result == "s1"  # "the sequel" matches "seq"
 
 
-# ─── Argument parser registration ──────────────────────────────────────────
+# --- Argument parser registration ------------------------------------------
 
 class TestSessionBrowseArgparse:
     """Verify the 'browse' subcommand is properly registered."""
@@ -411,7 +411,7 @@ class TestSessionBrowseArgparse:
         assert len(sessions) == 50
 
 
-# ─── Integration: cmd_sessions browse action ────────────────────────────────
+# --- Integration: cmd_sessions browse action --------------------------------
 
 class TestCmdSessionsBrowse:
     """Integration tests for the 'browse' action in cmd_sessions."""
@@ -444,7 +444,7 @@ class TestCmdSessionsBrowse:
         assert result == "s1"
 
 
-# ─── Edge cases ──────────────────────────────────────────────────────────────
+# --- Edge cases --------------------------------------------------------------
 
 class TestEdgeCases:
     """Edge case handling for the session browser."""

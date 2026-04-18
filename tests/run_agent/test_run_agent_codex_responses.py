@@ -1108,7 +1108,7 @@ def test_normalize_codex_response_reasoning_with_content_is_stop(monkeypatch):
 
 
 def test_run_conversation_codex_continues_after_reasoning_only_response(monkeypatch):
-    """End-to-end: reasoning-only → final message should succeed, not hit retry loop."""
+    """End-to-end: reasoning-only -> final message should succeed, not hit retry loop."""
     agent = _build_agent(monkeypatch)
     responses = [
         _codex_reasoning_only_response(),

@@ -262,7 +262,7 @@ class TestAutoVoiceReply:
     # | Slack         | voice | all        | yes  | skip*  | 1 audio      |
     # | Slack         | text  | all        | skip | yes    | 1 audio      |
     #
-    # * skip_double: voice input → base already handles
+    # * skip_double: voice input -> base already handles
     # † Discord play_tts override skips when in VC
 
     # -- Telegram/Slack/Web: voice input, base handles ---------------------
@@ -557,7 +557,7 @@ class TestVoiceReceiver:
         receiver = self._make_receiver()
         receiver.map_ssrc(100, 42)
         # 48kHz, stereo, 16-bit = 192000 bytes/sec
-        # MIN_SPEECH_DURATION = 0.5s → need 96000 bytes
+        # MIN_SPEECH_DURATION = 0.5s -> need 96000 bytes
         pcm_data = bytearray(b"\x00" * 96000)
         receiver._buffers[100] = pcm_data
         # Set last_packet_time far enough in the past to exceed SILENCE_THRESHOLD
@@ -2180,7 +2180,7 @@ class TestVoiceReception:
         assert len(receiver._buffers[100]) == 0
 
     def test_unknown_ssrc_late_speaking_event(self):
-        """Audio buffered before SPEAKING → SPEAKING maps → next check returns it."""
+        """Audio buffered before SPEAKING -> SPEAKING maps -> next check returns it."""
         receiver = self._make_receiver(dave=True)
         receiver.start()
         self._fill_buffer(receiver, 100, age_s=0.0)  # still receiving
@@ -2222,7 +2222,7 @@ class TestVoiceReception:
         assert len(completed) == 0
 
     def test_automap_no_allowlist_single_member(self):
-        """No allowed_user_ids → sole non-bot member inferred."""
+        """No allowed_user_ids -> sole non-bot member inferred."""
         members = [
             SimpleNamespace(id=9999, name="Bot"),
             SimpleNamespace(id=42, name="Alice"),
@@ -2344,7 +2344,7 @@ class TestVoiceReception:
         return mock_decoder
 
     def test_on_packet_dave_known_user_decrypt_ok(self):
-        """Known SSRC + DAVE decrypt success → audio buffered."""
+        """Known SSRC + DAVE decrypt success -> audio buffered."""
         dave = MagicMock()
         dave.decrypt.return_value = b"\xf8\xff\xfe"
         receiver = self._make_receiver_with_nacl(
@@ -2361,7 +2361,7 @@ class TestVoiceReception:
         dave.decrypt.assert_called_once()
 
     def test_on_packet_dave_unknown_ssrc_passthrough(self):
-        """Unknown SSRC + DAVE → skip DAVE, attempt Opus decode (passthrough)."""
+        """Unknown SSRC + DAVE -> skip DAVE, attempt Opus decode (passthrough)."""
         dave = MagicMock()
         receiver = self._make_receiver_with_nacl(dave_session=dave)
         self._inject_mock_decoder(receiver, 100)
@@ -2375,7 +2375,7 @@ class TestVoiceReception:
         assert len(receiver._buffers[100]) > 0
 
     def test_on_packet_dave_unencrypted_error_passthrough(self):
-        """DAVE decrypt 'Unencrypted' error → use data as-is, don't drop."""
+        """DAVE decrypt 'Unencrypted' error -> use data as-is, don't drop."""
         dave = MagicMock()
         dave.decrypt.side_effect = Exception(
             "Failed to decrypt: DecryptionFailed(UnencryptedWhenPassthroughDisabled)"
@@ -2393,7 +2393,7 @@ class TestVoiceReception:
         assert len(receiver._buffers[100]) > 0
 
     def test_on_packet_dave_other_error_drops(self):
-        """DAVE decrypt non-Unencrypted error → packet dropped."""
+        """DAVE decrypt non-Unencrypted error -> packet dropped."""
         dave = MagicMock()
         dave.decrypt.side_effect = Exception("KeyRotationFailed")
         receiver = self._make_receiver_with_nacl(
@@ -2407,7 +2407,7 @@ class TestVoiceReception:
         assert len(receiver._buffers.get(100, b"")) == 0
 
     def test_on_packet_no_dave_direct_decode(self):
-        """No DAVE session → decode directly."""
+        """No DAVE session -> decode directly."""
         receiver = self._make_receiver_with_nacl(dave_session=None)
         self._inject_mock_decoder(receiver, 100)
 
@@ -2419,14 +2419,14 @@ class TestVoiceReception:
         assert len(receiver._buffers[100]) > 0
 
     def test_on_packet_bot_own_ssrc_ignored(self):
-        """Bot's own SSRC → dropped (echo prevention)."""
+        """Bot's own SSRC -> dropped (echo prevention)."""
         receiver = self._make_receiver_with_nacl()
         with patch("nacl.secret.Aead"):
             receiver._on_packet(self._build_rtp_packet(ssrc=9999))
         assert len(receiver._buffers) == 0
 
     def test_on_packet_multiple_ssrcs_separate_buffers(self):
-        """Different SSRCs → separate buffers."""
+        """Different SSRCs -> separate buffers."""
         receiver = self._make_receiver_with_nacl(dave_session=None)
         self._inject_mock_decoder(receiver, 100)
         self._inject_mock_decoder(receiver, 200)

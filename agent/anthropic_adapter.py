@@ -5,9 +5,9 @@ Anthropic's Messages API. Follows the same pattern as the codex_responses
 adapter — all provider-specific logic is isolated here.
 
 Auth supports:
-  - Regular API keys (sk-ant-api*) → x-api-key header
-  - OAuth setup-tokens (sk-ant-oat*) → Bearer auth + beta header
-  - Claude Code credentials (~/.claude.json or ~/.claude/.credentials.json) → Bearer auth
+  - Regular API keys (sk-ant-api*) -> x-api-key header
+  - OAuth setup-tokens (sk-ant-oat*) -> Bearer auth + beta header
+  - Claude Code credentials (~/.claude.json or ~/.claude/.credentials.json) -> Bearer auth
 """
 
 import copy
@@ -28,7 +28,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 THINKING_BUDGET = {"xhigh": 32000, "high": 16000, "medium": 8000, "low": 4000}
-# Hermes effort → Anthropic adaptive-thinking effort (output_config.effort).
+# Hermes effort -> Anthropic adaptive-thinking effort (output_config.effort).
 # Anthropic exposes 5 levels on 4.7+: low, medium, high, xhigh, max.
 # Opus/Sonnet 4.6 only expose 4 levels: low, medium, high, max — no xhigh.
 # We preserve xhigh as xhigh on 4.7+ (the recommended default for coding/
@@ -60,7 +60,7 @@ _ADAPTIVE_THINKING_SUBSTRINGS = ("4-6", "4.6", "4-7", "4.7")
 # This is the Opus 4.7 contract; future 4.x+ models are expected to follow it.
 _NO_SAMPLING_PARAMS_SUBSTRINGS = ("4-7", "4.7")
 
-# ── Max output token limits per Anthropic model ───────────────────────
+# -- Max output token limits per Anthropic model -----------------------
 # Source: Anthropic docs + Cline model catalog.  Anthropic's API requires
 # max_tokens as a mandatory field.  Previously we hardcoded 16384, which
 # starves thinking-enabled models (thinking tokens count toward the limit).
@@ -126,7 +126,7 @@ def _supports_xhigh_effort(model: str) -> bool:
 
     Opus 4.7 introduced xhigh as a distinct level between high and max.
     Pre-4.7 adaptive models (Opus/Sonnet 4.6) only accept low/medium/high/max
-    and reject xhigh with an HTTP 400. Callers should downgrade xhigh→max
+    and reject xhigh with an HTTP 400. Callers should downgrade xhigh->max
     when this returns False.
     """
     return any(v in model for v in _XHIGH_EFFORT_SUBSTRINGS)
@@ -218,8 +218,8 @@ def _is_oauth_token(key: str) -> bool:
     """Check if the key is an Anthropic OAuth/setup token.
 
     Positively identifies Anthropic OAuth tokens by their key format:
-    - ``sk-ant-`` prefix (but NOT ``sk-ant-api``) → setup tokens, managed keys
-    - ``eyJ`` prefix → JWTs from the Anthropic OAuth flow
+    - ``sk-ant-`` prefix (but NOT ``sk-ant-api``) -> setup tokens, managed keys
+    - ``eyJ`` prefix -> JWTs from the Anthropic OAuth flow
 
     Non-Anthropic keys (MiniMax, Alibaba, etc.) don't match either pattern
     and correctly return False.
@@ -331,7 +331,7 @@ def build_anthropic_client(api_key: str, base_url: str = None):
         if common_betas:
             kwargs["default_headers"] = {"anthropic-beta": ",".join(common_betas)}
     elif _is_oauth_token(api_key):
-        # OAuth access token / setup-token → Bearer auth + Claude Code identity.
+        # OAuth access token / setup-token -> Bearer auth + Claude Code identity.
         # Anthropic routes OAuth requests based on user-agent and headers;
         # without Claude Code's fingerprint, requests get intermittent 500s.
         all_betas = common_betas + _OAUTH_ONLY_BETAS
@@ -342,7 +342,7 @@ def build_anthropic_client(api_key: str, base_url: str = None):
             "x-app": "cli",
         }
     else:
-        # Regular API key → x-api-key header + common betas
+        # Regular API key -> x-api-key header + common betas
         kwargs["api_key"] = api_key
         if common_betas:
             kwargs["default_headers"] = {"anthropic-beta": ",".join(common_betas)}
@@ -685,7 +685,7 @@ def run_oauth_setup_token() -> Optional[str]:
     return None
 
 
-# ── Hermes-native PKCE OAuth flow ────────────────────────────────────────
+# -- Hermes-native PKCE OAuth flow ----------------------------------------
 # Mirrors the flow used by Claude Code, pi-ai, and OpenCode.
 # Stores credentials in ~/.hermes/.anthropic_oauth.json (our own file).
 
@@ -733,10 +733,10 @@ def run_hermes_oauth_login_pure() -> Optional[Dict[str, Any]]:
     print()
     print("Authorize Hermes with your Claude Pro/Max subscription.")
     print()
-    print("╭─ Claude Pro/Max Authorization ────────────────────╮")
-    print("│                                                   │")
-    print("│  Open this link in your browser:                  │")
-    print("╰───────────────────────────────────────────────────╯")
+    print("╭- Claude Pro/Max Authorization --------------------╮")
+    print("|                                                   |")
+    print("|  Open this link in your browser:                  |")
+    print("╰---------------------------------------------------╯")
     print()
     print(f"  {auth_url}")
     print()
@@ -829,7 +829,7 @@ def normalize_model_name(model: str, preserve_dots: bool = False) -> str:
 
     - Strips 'anthropic/' prefix (OpenRouter format, case-insensitive)
     - Converts dots to hyphens in version numbers (OpenRouter uses dots,
-      Anthropic uses hyphens: claude-opus-4.6 → claude-opus-4-6), unless
+      Anthropic uses hyphens: claude-opus-4.6 -> claude-opus-4-6), unless
       preserve_dots is True (e.g. for Alibaba/DashScope: qwen3.5-plus).
     """
     lower = model.lower()
@@ -1187,7 +1187,7 @@ def convert_messages_to_anthropic(
             fixed.append(m)
     result = fixed
 
-    # ── Thinking block signature management ──────────────────────────
+    # -- Thinking block signature management --------------------------
     # Anthropic signs thinking blocks against the full turn content.
     # Any upstream mutation (context compression, session truncation,
     # orphan stripping, message merging) invalidates the signature,
@@ -1329,7 +1329,7 @@ def build_anthropic_kwargs(
     if context_length and effective_max_tokens > context_length:
         effective_max_tokens = max(context_length - 1, 1)
 
-    # ── OAuth: Claude Code identity ──────────────────────────────────
+    # -- OAuth: Claude Code identity ----------------------------------
     if is_oauth:
         # 1. Prepend Claude Code system prompt identity
         cc_block = {"type": "text", "text": _CLAUDE_CODE_SYSTEM_PREFIX}
@@ -1412,7 +1412,7 @@ def build_anthropic_kwargs(
                     "display": "summarized",
                 }
                 adaptive_effort = ADAPTIVE_EFFORT_MAP.get(effort, "medium")
-                # Downgrade xhigh→max on models that don't list xhigh as a
+                # Downgrade xhigh->max on models that don't list xhigh as a
                 # supported level (Opus/Sonnet 4.6). Opus 4.7+ keeps xhigh.
                 if adaptive_effort == "xhigh" and not _supports_xhigh_effort(model):
                     adaptive_effort = "max"
@@ -1425,16 +1425,16 @@ def build_anthropic_kwargs(
                 kwargs["temperature"] = 1
                 kwargs["max_tokens"] = max(effective_max_tokens, budget + 4096)
 
-    # ── Strip sampling params on 4.7+ ─────────────────────────────────
+    # -- Strip sampling params on 4.7+ ---------------------------------
     # Opus 4.7 rejects any non-default temperature/top_p/top_k with a 400.
     # Callers (auxiliary_client, flush_memories, etc.) may set these for
-    # older models; drop them here as a safety net so upstream 4.6 → 4.7
+    # older models; drop them here as a safety net so upstream 4.6 -> 4.7
     # migrations don't require coordinated edits everywhere.
     if _forbids_sampling_params(model):
         for _sampling_key in ("temperature", "top_p", "top_k"):
             kwargs.pop(_sampling_key, None)
 
-    # ── Fast mode (Opus 4.6 only) ────────────────────────────────────
+    # -- Fast mode (Opus 4.6 only) ------------------------------------
     # Adds extra_body.speed="fast" + the fast-mode beta header for ~2.5x
     # output speed. Only for native Anthropic endpoints — third-party
     # providers would reject the unknown beta header and speed parameter.

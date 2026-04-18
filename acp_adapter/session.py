@@ -149,7 +149,7 @@ class SessionManager:
         self._sessions: Dict[str, SessionState] = {}
         self._lock = Lock()
         self._agent_factory = agent_factory
-        self._db_instance = db  # None → lazy-init on first use
+        self._db_instance = db  # None -> lazy-init on first use
 
     # ---- public API ---------------------------------------------------------
 

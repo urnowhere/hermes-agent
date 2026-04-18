@@ -141,10 +141,10 @@ def _make_voice_receiver(secret_key, dave_session=None, bot_ssrc=9999,
 
 
 class TestRealNaClDecrypt:
-    """End-to-end: real NaCl encrypt → _on_packet decrypt → buffer."""
+    """End-to-end: real NaCl encrypt -> _on_packet decrypt -> buffer."""
 
     def test_valid_encrypted_packet_buffered(self):
-        """Real NaCl encrypted packet → decrypted → buffered."""
+        """Real NaCl encrypted packet -> decrypted -> buffered."""
         key = _make_secret_key()
         opus_silence = b'\xf8\xff\xfe'
         receiver = _make_voice_receiver(key)
@@ -156,7 +156,7 @@ class TestRealNaClDecrypt:
         assert len(receiver._buffers[100]) > 0
 
     def test_wrong_key_packet_dropped(self):
-        """Packet encrypted with wrong key → NaCl fails → not buffered."""
+        """Packet encrypted with wrong key -> NaCl fails -> not buffered."""
         real_key = _make_secret_key()
         wrong_key = _make_secret_key()
         opus_silence = b'\xf8\xff\xfe'
@@ -168,7 +168,7 @@ class TestRealNaClDecrypt:
         assert len(receiver._buffers.get(100, b"")) == 0
 
     def test_bot_ssrc_ignored(self):
-        """Packet from bot's own SSRC → ignored."""
+        """Packet from bot's own SSRC -> ignored."""
         key = _make_secret_key()
         receiver = _make_voice_receiver(key, bot_ssrc=9999)
 
@@ -178,7 +178,7 @@ class TestRealNaClDecrypt:
         assert len(receiver._buffers) == 0
 
     def test_multiple_packets_accumulate(self):
-        """Multiple valid packets → buffer grows."""
+        """Multiple valid packets -> buffer grows."""
         key = _make_secret_key()
         receiver = _make_voice_receiver(key)
 
@@ -193,7 +193,7 @@ class TestRealNaClDecrypt:
         assert buf_size > 0, "Multiple packets should accumulate in buffer"
 
     def test_different_ssrcs_separate_buffers(self):
-        """Packets from different SSRCs → separate buffers."""
+        """Packets from different SSRCs -> separate buffers."""
         key = _make_secret_key()
         receiver = _make_voice_receiver(key)
 
@@ -210,7 +210,7 @@ class TestRealNaClWithDAVE:
     """NaCl decrypt + DAVE passthrough scenarios with real crypto."""
 
     def test_dave_unknown_ssrc_passthrough(self):
-        """DAVE enabled but SSRC unknown → skip DAVE, buffer audio."""
+        """DAVE enabled but SSRC unknown -> skip DAVE, buffer audio."""
         key = _make_secret_key()
         dave = MagicMock()  # DAVE session present but SSRC not mapped
         receiver = _make_voice_receiver(key, dave_session=dave)
@@ -225,7 +225,7 @@ class TestRealNaClWithDAVE:
         assert len(receiver._buffers[100]) > 0
 
     def test_dave_unencrypted_error_passthrough(self):
-        """DAVE raises 'Unencrypted' → use NaCl-decrypted data as-is."""
+        """DAVE raises 'Unencrypted' -> use NaCl-decrypted data as-is."""
         key = _make_secret_key()
         dave = MagicMock()
         dave.decrypt.side_effect = Exception(
@@ -237,13 +237,13 @@ class TestRealNaClWithDAVE:
         packet = _build_encrypted_rtp_packet(key, b'\xf8\xff\xfe', ssrc=100)
         receiver._on_packet(packet)
 
-        # DAVE was called but failed → passthrough
+        # DAVE was called but failed -> passthrough
         dave.decrypt.assert_called_once()
         assert 100 in receiver._buffers
         assert len(receiver._buffers[100]) > 0
 
     def test_dave_real_error_drops(self):
-        """DAVE raises non-Unencrypted error → packet dropped."""
+        """DAVE raises non-Unencrypted error -> packet dropped."""
         key = _make_secret_key()
         dave = MagicMock()
         dave.decrypt.side_effect = Exception("KeyRotationFailed")
@@ -260,7 +260,7 @@ class TestRTPPaddingStrip:
     """RFC 3550 §5.1 — strip RTP padding before DAVE/Opus decode."""
 
     def test_padded_packet_stripped_and_buffered(self):
-        """P bit set → trailing padding stripped → opus payload decoded."""
+        """P bit set -> trailing padding stripped -> opus payload decoded."""
         key = _make_secret_key()
         opus_silence = b"\xf8\xff\xfe"
         receiver = _make_voice_receiver(key)
@@ -273,7 +273,7 @@ class TestRTPPaddingStrip:
         assert len(receiver._buffers[100]) > 0
 
     def test_padded_packet_matches_unpadded_output(self):
-        """Same opus payload with/without padding → same decoded PCM."""
+        """Same opus payload with/without padding -> same decoded PCM."""
         key = _make_secret_key()
         opus_silence = b"\xf8\xff\xfe"
 
@@ -290,10 +290,10 @@ class TestRTPPaddingStrip:
         assert bytes(recv_plain._buffers[100]) == bytes(recv_padded._buffers[100])
 
     def test_padding_with_dave_passthrough(self):
-        """Padding stripped before DAVE → passthrough buffers cleanly."""
+        """Padding stripped before DAVE -> passthrough buffers cleanly."""
         key = _make_secret_key()
         opus_silence = b"\xf8\xff\xfe"
-        dave = MagicMock()  # SSRC unmapped → DAVE skipped, passthrough used
+        dave = MagicMock()  # SSRC unmapped -> DAVE skipped, passthrough used
         receiver = _make_voice_receiver(key, dave_session=dave)
 
         packet = _build_padded_rtp_packet(key, opus_silence, pad_len=4, ssrc=100)
@@ -317,7 +317,7 @@ class TestRTPPaddingStrip:
         assert len(receiver._buffers.get(100, b"")) == 0
 
     def test_invalid_padding_length_overflow_dropped(self):
-        """Declared pad_len > payload size → packet dropped."""
+        """Declared pad_len > payload size -> packet dropped."""
         key = _make_secret_key()
         opus_silence = b"\xf8\xff\xfe"
         receiver = _make_voice_receiver(key)
@@ -330,7 +330,7 @@ class TestRTPPaddingStrip:
         assert len(receiver._buffers.get(100, b"")) == 0
 
     def test_padding_consuming_entire_payload_dropped(self):
-        """Padding consumes entire payload → no opus data → dropped."""
+        """Padding consumes entire payload -> no opus data -> dropped."""
         key = _make_secret_key()
         receiver = _make_voice_receiver(key)
 
@@ -341,7 +341,7 @@ class TestRTPPaddingStrip:
         assert len(receiver._buffers.get(100, b"")) == 0
 
     def test_padding_with_extension_stripped_correctly(self):
-        """X+P bits both set → strip extension from start, padding from end."""
+        """X+P bits both set -> strip extension from start, padding from end."""
         key = _make_secret_key()
         opus_silence = b"\xf8\xff\xfe"
 
@@ -364,10 +364,10 @@ class TestRTPPaddingStrip:
 
 
 class TestFullVoiceFlow:
-    """End-to-end: encrypt → receive → buffer → silence detect → complete."""
+    """End-to-end: encrypt -> receive -> buffer -> silence detect -> complete."""
 
     def test_single_utterance_flow(self):
-        """Encrypt packets → buffer → silence → check_silence returns utterance."""
+        """Encrypt packets -> buffer -> silence -> check_silence returns utterance."""
         key = _make_secret_key()
         receiver = _make_voice_receiver(key)
         receiver.map_ssrc(100, 42)
@@ -391,7 +391,7 @@ class TestFullVoiceFlow:
         assert len(pcm_data) > 0
 
     def test_utterance_with_ssrc_automap(self):
-        """No SPEAKING event → auto-map sole allowed user → utterance processed."""
+        """No SPEAKING event -> auto-map sole allowed user -> utterance processed."""
         key = _make_secret_key()
         members = [
             SimpleNamespace(id=9999, name="Bot"),
@@ -415,7 +415,7 @@ class TestFullVoiceFlow:
         assert completed[0][0] == 42  # auto-mapped to sole allowed user
 
     def test_pause_blocks_during_playback(self):
-        """Pause receiver → packets ignored → resume → packets accepted."""
+        """Pause receiver -> packets ignored -> resume -> packets accepted."""
         key = _make_secret_key()
         receiver = _make_voice_receiver(key)
 
@@ -432,7 +432,7 @@ class TestFullVoiceFlow:
         assert len(receiver._buffers[100]) > 0
 
     def test_corrupted_packet_ignored(self):
-        """Corrupted/truncated packet → silently ignored."""
+        """Corrupted/truncated packet -> silently ignored."""
         key = _make_secret_key()
         receiver = _make_voice_receiver(key)
 
@@ -739,7 +739,7 @@ class TestEchoPreventionFlow:
         receiver = _make_voice_receiver(key)
         receiver.map_ssrc(100, 42)
 
-        # Pause → send packets → resume → send more packets
+        # Pause -> send packets -> resume -> send more packets
         receiver.pause()
         for seq in range(1, 5):
             packet = _build_encrypted_rtp_packet(

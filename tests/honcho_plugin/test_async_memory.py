@@ -132,7 +132,7 @@ class TestResolveSessionNameTitle:
     def test_title_all_invalid_chars_falls_back_to_dirname(self):
         cfg = HonchoClientConfig()
         result = cfg.resolve_session_name("/some/dir", session_title="!!! ###")
-        # sanitized to empty → falls back to dirname
+        # sanitized to empty -> falls back to dirname
         assert result == "dir"
 
     def test_none_title_falls_back_to_dirname(self):

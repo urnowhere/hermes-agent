@@ -26,7 +26,7 @@ class TestMergeCaptionSubstringBug:
     """These are the exact scenarios that the old substring check got wrong."""
 
     def test_shorter_caption_not_dropped_when_substring(self):
-        # Bug: "Meeting" in "Meeting agenda" → True → caption was silently lost
+        # Bug: "Meeting" in "Meeting agenda" -> True -> caption was silently lost
         result = merge("Meeting agenda", "Meeting")
         assert result == "Meeting agenda\n\nMeeting"
 
@@ -48,11 +48,11 @@ class TestMergeCaptionWhitespace:
         assert merge("Revenue", "  Revenue") == "Revenue"
 
     def test_whitespace_only_new_text_not_added(self):
-        # strip() makes it empty string → falsy check in callers guards this,
-        # but _merge_caption itself: strip matches "" which is not in list → would merge.
+        # strip() makes it empty string -> falsy check in callers guards this,
+        # but _merge_caption itself: strip matches "" which is not in list -> would merge.
         # Callers already guard with `if event.text:` so this is an edge case.
         result = merge("Revenue", "   ")
-        # "   ".strip() == "" → not in ["Revenue"] → gets merged (caller guards prevent this)
+        # "   ".strip() == "" -> not in ["Revenue"] -> gets merged (caller guards prevent this)
         assert "\n\n" in result or result == "Revenue"
 
 
@@ -71,7 +71,7 @@ class TestMergeCaptionMultipleItems:
 
     def test_album_scenario_revenue_profit(self):
         # Album Item 1: "Revenue and Profit", Item 2: "Revenue"
-        # Old bug: "Revenue" in ["Revenue and Profit"] → True → lost
+        # Old bug: "Revenue" in ["Revenue and Profit"] -> True -> lost
         text = merge(None, "Revenue and Profit")
         text = merge(text, "Revenue")
         assert text == "Revenue and Profit\n\nRevenue"

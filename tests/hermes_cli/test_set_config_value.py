@@ -29,7 +29,7 @@ def _read_config(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Explicit allowlist keys → .env
+# Explicit allowlist keys -> .env
 # ---------------------------------------------------------------------------
 
 class TestExplicitAllowlist:
@@ -61,7 +61,7 @@ class TestExplicitAllowlist:
 
 
 # ---------------------------------------------------------------------------
-# Catch-all patterns → .env
+# Catch-all patterns -> .env
 # ---------------------------------------------------------------------------
 
 class TestCatchAllPatterns:
@@ -93,7 +93,7 @@ class TestCatchAllPatterns:
 
 
 # ---------------------------------------------------------------------------
-# Non-secret keys → config.yaml
+# Non-secret keys -> config.yaml
 # ---------------------------------------------------------------------------
 
 class TestConfigYamlRouting:

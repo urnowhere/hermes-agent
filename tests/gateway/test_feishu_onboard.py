@@ -360,11 +360,11 @@ class TestQrRegister:
         result = qr_register()
         assert result is None
 
-    # -- Contract: expected errors → None, unexpected errors → propagate --
+    # -- Contract: expected errors -> None, unexpected errors -> propagate --
 
     @patch("gateway.platforms.feishu._init_registration")
     def test_qr_register_returns_none_on_network_error(self, mock_init):
-        """URLError (network down) is an expected failure → None."""
+        """URLError (network down) is an expected failure -> None."""
         from gateway.platforms.feishu import qr_register
         from urllib.error import URLError
 
@@ -374,7 +374,7 @@ class TestQrRegister:
 
     @patch("gateway.platforms.feishu._init_registration")
     def test_qr_register_returns_none_on_json_error(self, mock_init):
-        """Malformed server response is an expected failure → None."""
+        """Malformed server response is an expected failure -> None."""
         from gateway.platforms.feishu import qr_register
 
         mock_init.side_effect = json.JSONDecodeError("bad json", "", 0)
@@ -398,7 +398,7 @@ class TestQrRegister:
     def test_qr_register_returns_none_when_begin_missing_device_code(
         self, mock_init, mock_begin, mock_render
     ):
-        """Server returns begin response without device_code → RuntimeError → None."""
+        """Server returns begin response without device_code -> RuntimeError -> None."""
         from gateway.platforms.feishu import qr_register
 
         mock_begin.side_effect = RuntimeError("Feishu registration did not return a device_code")
@@ -413,7 +413,7 @@ class TestQrRegister:
     def test_qr_register_succeeds_even_when_probe_fails(
         self, mock_init, mock_begin, mock_poll, mock_render, mock_probe
     ):
-        """Registration succeeds but probe fails → result with bot_name=None."""
+        """Registration succeeds but probe fails -> result with bot_name=None."""
         from gateway.platforms.feishu import qr_register
 
         mock_begin.return_value = {

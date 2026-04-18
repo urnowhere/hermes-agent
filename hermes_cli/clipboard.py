@@ -54,7 +54,7 @@ def has_clipboard_image() -> bool:
     return _xclip_has_image()
 
 
-# ── macOS ────────────────────────────────────────────────────────────────
+# -- macOS ----------------------------------------------------------------
 
 def _macos_save(dest: Path) -> bool:
     """Try pngpaste first (fast, handles more formats), fall back to osascript."""
@@ -117,7 +117,7 @@ def _macos_osascript(dest: Path) -> bool:
     return False
 
 
-# ── Shared PowerShell scripts (native Windows + WSL2) ─────────────────────
+# -- Shared PowerShell scripts (native Windows + WSL2) ---------------------
 
 # .NET System.Windows.Forms.Clipboard — used by both native Windows (powershell)
 # and WSL2 (powershell.exe) paths.
@@ -245,7 +245,7 @@ def _powershell_save_image(exe: str, dest: Path, *, timeout: int, label: str) ->
     return False
 
 
-# ── Native Windows ────────────────────────────────────────────────────────
+# -- Native Windows --------------------------------------------------------
 
 # Native Windows uses ``powershell`` (Windows PowerShell 5.1, always present)
 # or ``pwsh`` (PowerShell 7+, optional).  Discovery is cached per-process.
@@ -288,7 +288,7 @@ def _windows_has_image() -> bool:
 
 
 def _windows_save(dest: Path) -> bool:
-    """Extract clipboard image on native Windows via PowerShell → base64 PNG."""
+    """Extract clipboard image on native Windows via PowerShell -> base64 PNG."""
     ps = _get_ps_exe()
     if ps is None:
         logger.debug("No PowerShell found — Windows clipboard image paste unavailable")
@@ -296,10 +296,10 @@ def _windows_save(dest: Path) -> bool:
     return _powershell_save_image(ps, dest, timeout=15, label="Windows")
 
 
-# ── Linux ────────────────────────────────────────────────────────────────
+# -- Linux ----------------------------------------------------------------
 
 def _linux_save(dest: Path) -> bool:
-    """Try clipboard backends in priority order: WSL → Wayland → X11."""
+    """Try clipboard backends in priority order: WSL -> Wayland -> X11."""
     if _is_wsl():
         if _wsl_save(dest):
             return True
@@ -312,7 +312,7 @@ def _linux_save(dest: Path) -> bool:
     return _xclip_save(dest)
 
 
-# ── WSL2 (powershell.exe) ────────────────────────────────────────────────
+# -- WSL2 (powershell.exe) ------------------------------------------------
 # Reuses _PS_CHECK_IMAGE / _PS_EXTRACT_IMAGE defined above.
 
 def _wsl_has_image() -> bool:
@@ -321,11 +321,12 @@ def _wsl_has_image() -> bool:
 
 
 def _wsl_save(dest: Path) -> bool:
-    """Extract clipboard image via powershell.exe → base64 → decode to PNG."""
+    """Extract clipboard image via powershell.exe -> base64 -> decode to PNG."""
     return _powershell_save_image("powershell.exe", dest, timeout=15, label="WSL")
 
 
-# ── Wayland (wl-paste) ──────────────────────────────────────────────────
+
+# -- Wayland (wl-paste) --------------------------------------------------
 
 def _wayland_has_image() -> bool:
     """Check if Wayland clipboard has image content."""
@@ -404,7 +405,7 @@ def _convert_to_png(path: Path) -> bool:
     except ImportError:
         pass
     except Exception as e:
-        logger.debug("Pillow BMP→PNG conversion failed: %s", e)
+        logger.debug("Pillow BMP->PNG conversion failed: %s", e)
 
     # Fall back to ImageMagick convert
     tmp = path.with_suffix(".bmp")
@@ -425,7 +426,7 @@ def _convert_to_png(path: Path) -> bool:
         if tmp.exists() and not path.exists():
             tmp.rename(path)
     except Exception as e:
-        logger.debug("ImageMagick BMP→PNG conversion failed: %s", e)
+        logger.debug("ImageMagick BMP->PNG conversion failed: %s", e)
         if tmp.exists() and not path.exists():
             tmp.rename(path)
 
@@ -433,7 +434,7 @@ def _convert_to_png(path: Path) -> bool:
     return path.exists() and path.stat().st_size > 0
 
 
-# ── X11 (xclip) ─────────────────────────────────────────────────────────
+# -- X11 (xclip) ---------------------------------------------------------
 
 def _xclip_has_image() -> bool:
     """Check if X11 clipboard has image content."""

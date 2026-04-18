@@ -46,7 +46,7 @@ def _json_stdout(findings=None, summary=""):
 
 
 # ---------------------------------------------------------------------------
-# Exit code → action mapping
+# Exit code -> action mapping
 # ---------------------------------------------------------------------------
 
 class TestExitCodeMapping:
@@ -369,7 +369,7 @@ class TestFailedDownloadCaching:
     def test_failed_install_scan_uses_fail_open(self, mock_cfg, mock_run,
                                                  mock_which, mock_install,
                                                  mock_disk_check, mock_mark):
-        """After cached miss, check_command_security hits OSError → fail_open."""
+        """After cached miss, check_command_security hits OSError -> fail_open."""
         _tirith_mod._resolved_path = None
         mock_cfg.return_value = {"tirith_enabled": True, "tirith_path": "tirith",
                                  "tirith_timeout": 5, "tirith_fail_open": True}
@@ -379,7 +379,7 @@ class TestFailedDownloadCaching:
         assert result["action"] == "allow"
         assert mock_install.call_count == 1
 
-        # Second command: no install retry, just hits OSError → allow
+        # Second command: no install retry, just hits OSError -> allow
         result = check_command_security("echo world")
         assert result["action"] == "allow"
         assert mock_install.call_count == 1  # still 1
@@ -446,7 +446,7 @@ class TestCosignVerification:
     @patch("tools.tirith_security.subprocess.run")
     @patch("tools.tirith_security.shutil.which", return_value="/usr/bin/cosign")
     def test_cosign_pass(self, mock_which, mock_run):
-        """cosign verify-blob exits 0 → returns True."""
+        """cosign verify-blob exits 0 -> returns True."""
         from tools.tirith_security import _verify_cosign
         mock_run.return_value = _mock_run(0, "Verified OK")
         result = _verify_cosign("/tmp/checksums.txt", "/tmp/checksums.txt.sig",
@@ -475,7 +475,7 @@ class TestCosignVerification:
     @patch("tools.tirith_security.subprocess.run")
     @patch("tools.tirith_security.shutil.which", return_value="/usr/bin/cosign")
     def test_cosign_fail_aborts(self, mock_which, mock_run):
-        """cosign verify-blob exits non-zero → returns False (abort install)."""
+        """cosign verify-blob exits non-zero -> returns False (abort install)."""
         from tools.tirith_security import _verify_cosign
         mock_run.return_value = _mock_run(1, "", "signature mismatch")
         result = _verify_cosign("/tmp/checksums.txt", "/tmp/checksums.txt.sig",
@@ -484,7 +484,7 @@ class TestCosignVerification:
 
     @patch("tools.tirith_security.shutil.which", return_value=None)
     def test_cosign_not_found_returns_none(self, mock_which):
-        """cosign not on PATH → returns None (proceed with SHA-256 only)."""
+        """cosign not on PATH -> returns None (proceed with SHA-256 only)."""
         from tools.tirith_security import _verify_cosign
         result = _verify_cosign("/tmp/checksums.txt", "/tmp/checksums.txt.sig",
                                 "/tmp/checksums.txt.pem")
@@ -494,7 +494,7 @@ class TestCosignVerification:
            side_effect=subprocess.TimeoutExpired("cosign", 15))
     @patch("tools.tirith_security.shutil.which", return_value="/usr/bin/cosign")
     def test_cosign_timeout_returns_none(self, mock_which, mock_run):
-        """cosign times out → returns None (proceed with SHA-256 only)."""
+        """cosign times out -> returns None (proceed with SHA-256 only)."""
         from tools.tirith_security import _verify_cosign
         result = _verify_cosign("/tmp/checksums.txt", "/tmp/checksums.txt.sig",
                                 "/tmp/checksums.txt.pem")
@@ -504,7 +504,7 @@ class TestCosignVerification:
            side_effect=OSError("exec format error"))
     @patch("tools.tirith_security.shutil.which", return_value="/usr/bin/cosign")
     def test_cosign_os_error_returns_none(self, mock_which, mock_run):
-        """cosign OSError → returns None (proceed with SHA-256 only)."""
+        """cosign OSError -> returns None (proceed with SHA-256 only)."""
         from tools.tirith_security import _verify_cosign
         result = _verify_cosign("/tmp/checksums.txt", "/tmp/checksums.txt.sig",
                                 "/tmp/checksums.txt.pem")
@@ -868,7 +868,7 @@ class TestDiskFailureMarker:
         from tools.tirith_security import _resolve_tirith_path, _INSTALL_FAILED
         _tirith_mod._resolved_path = None
 
-        # _is_install_failed_on_disk sees "cosign_missing" + cosign on PATH → returns False
+        # _is_install_failed_on_disk sees "cosign_missing" + cosign on PATH -> returns False
         with patch("tools.tirith_security.shutil.which", return_value=None), \
              patch("tools.tirith_security._hermes_bin_dir", return_value="/nonexistent"), \
              patch("tools.tirith_security._is_install_failed_on_disk", return_value=False), \
@@ -948,7 +948,7 @@ class TestDiskFailureMarker:
             assert _tirith_mod._resolved_path is _INSTALL_FAILED
             assert _tirith_mod._install_failure_reason == "cosign_missing"
 
-        # Second call: cosign now on PATH → in-memory retry fires
+        # Second call: cosign now on PATH -> in-memory retry fires
         def _which_side_effect(name):
             if name == "tirith":
                 return None

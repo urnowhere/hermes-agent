@@ -131,7 +131,7 @@ class TestSessionEntryReason:
         assert entry2.session_id != entry1.session_id
 
     def test_reset_had_activity_false_when_no_tokens(self, tmp_path):
-        """Expired session with no tokens → reset_had_activity=False."""
+        """Expired session with no tokens -> reset_had_activity=False."""
         store = _make_store(
             SessionResetPolicy(mode="idle", idle_minutes=1),
             tmp_path,
@@ -148,7 +148,7 @@ class TestSessionEntryReason:
         assert entry2.reset_had_activity is False
 
     def test_reset_had_activity_true_when_tokens_used(self, tmp_path):
-        """Expired session with tokens → reset_had_activity=True."""
+        """Expired session with tokens -> reset_had_activity=True."""
         store = _make_store(
             SessionResetPolicy(mode="idle", idle_minutes=1),
             tmp_path,

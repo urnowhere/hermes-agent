@@ -376,7 +376,7 @@ def backup_existing(path: Path, backup_root: Path) -> Optional[Path]:
     return dest
 
 
-# ── Brand rewriting ─────────────────────────────────────────
+# -- Brand rewriting -----------------------------------------
 # Replace OpenClaw brand names with Hermes in migrated text so that
 # memory entries, user profiles, SOUL.md, and workspace instructions
 # read as self-referential to the new agent identity.
@@ -713,7 +713,7 @@ class Migrator:
         )
         self.run_if_selected("archive", self.archive_docs)
 
-        # ── v2 migration modules ──────────────────────────────
+        # -- v2 migration modules ------------------------------
         self.run_if_selected("mcp-servers", lambda: self.migrate_mcp_servers(config))
         self.run_if_selected("plugins-config", lambda: self.migrate_plugins_config(config))
         self.run_if_selected("cron-jobs", lambda: self.migrate_cron_jobs(config))
@@ -1771,7 +1771,7 @@ class Migrator:
         else:
             self.record("archive", source, destination, "archived", reason)
 
-    # ── MCP servers ─────────────────────────────────────────────
+    # -- MCP servers ---------------------------------------------
     def migrate_mcp_servers(self, config: Optional[Dict[str, Any]] = None) -> None:
         config = config or self.load_openclaw_config()
         mcp_raw = (config.get("mcp") or {}).get("servers") or {}
@@ -1847,7 +1847,7 @@ class Migrator:
             hermes_cfg["mcp_servers"] = existing_mcp
             dump_yaml_file(hermes_cfg_path, hermes_cfg)
 
-    # ── Plugins ───────────────────────────────────────────────
+    # -- Plugins -----------------------------------------------
     def migrate_plugins_config(self, config: Optional[Dict[str, Any]] = None) -> None:
         config = config or self.load_openclaw_config()
         plugins = config.get("plugins") or {}
@@ -1885,7 +1885,7 @@ class Migrator:
                     env_key = f"PLUGIN_{plugin_name.upper().replace('-', '_')}_API_KEY"
                     self._set_env_var(env_key, api_key, f"plugins.entries.{plugin_name}.apiKey")
 
-    # ── Cron jobs ─────────────────────────────────────────────
+    # -- Cron jobs ---------------------------------------------
     def migrate_cron_jobs(self, config: Optional[Dict[str, Any]] = None) -> None:
         config = config or self.load_openclaw_config()
         cron = config.get("cron") or {}
@@ -1917,7 +1917,7 @@ class Migrator:
         if not found_any:
             self.record("cron-jobs", None, None, "skipped", "No cron configuration found")
 
-    # ── Hooks ─────────────────────────────────────────────────
+    # -- Hooks -------------------------------------------------
     def migrate_hooks_config(self, config: Optional[Dict[str, Any]] = None) -> None:
         config = config or self.load_openclaw_config()
         hooks = config.get("hooks") or {}
@@ -1947,7 +1947,7 @@ class Migrator:
                             "Workspace hooks directory archived")
                 break
 
-    # ── Agent config ──────────────────────────────────────────
+    # -- Agent config ------------------------------------------
     def migrate_agent_config(self, config: Optional[Dict[str, Any]] = None) -> None:
         config = config or self.load_openclaw_config()
         agents = config.get("agents") or {}
@@ -2066,7 +2066,7 @@ class Migrator:
             self.record("agent-config", "openclaw.json bindings", "archive/bindings.json",
                         "archived", f"Agent routing bindings ({len(bindings)} rules) archived")
 
-    # ── Gateway config ────────────────────────────────────────
+    # -- Gateway config ----------------------------------------
     def migrate_gateway_config(self, config: Optional[Dict[str, Any]] = None) -> None:
         config = config or self.load_openclaw_config()
         gateway = config.get("gateway") or {}
@@ -2087,7 +2087,7 @@ class Migrator:
         if auth.get("token") and self.migrate_secrets:
             self._set_env_var("HERMES_GATEWAY_TOKEN", auth["token"], "gateway.auth.token")
 
-    # ── Session config ────────────────────────────────────────
+    # -- Session config ----------------------------------------
     def migrate_session_config(self, config: Optional[Dict[str, Any]] = None) -> None:
         config = config or self.load_openclaw_config()
         session = config.get("session") or {}
@@ -2150,7 +2150,7 @@ class Migrator:
                         "archive/session-config.json", "archived",
                         "Advanced session settings archived (identity links, thread bindings, etc.)")
 
-    # ── Full model providers ──────────────────────────────────
+    # -- Full model providers ----------------------------------
     def migrate_full_providers(self, config: Optional[Dict[str, Any]] = None) -> None:
         config = config or self.load_openclaw_config()
         models = config.get("models") or {}
@@ -2224,7 +2224,7 @@ class Migrator:
             self.record("full-providers", "agents.defaults.models", "archive/model-aliases.json",
                         "archived", f"Model aliases/catalog ({len(model_aliases)} entries) archived")
 
-    # ── Deep channel config ───────────────────────────────────
+    # -- Deep channel config -----------------------------------
     def migrate_deep_channels(self, config: Optional[Dict[str, Any]] = None) -> None:
         config = config or self.load_openclaw_config()
         channels = config.get("channels") or {}
@@ -2312,7 +2312,7 @@ class Migrator:
                         "archive/channels-deep-config.json", "archived",
                         f"Deep channel config for {len(complex_archive)} channels archived")
 
-    # ── Browser config ────────────────────────────────────────
+    # -- Browser config ----------------------------------------
     def migrate_browser_config(self, config: Optional[Dict[str, Any]] = None) -> None:
         config = config or self.load_openclaw_config()
         browser = config.get("browser") or {}
@@ -2352,7 +2352,7 @@ class Migrator:
             self.record("browser-config", "openclaw.json browser (advanced)",
                         "archive/browser-config.json", "archived")
 
-    # ── Tools config ──────────────────────────────────────────
+    # -- Tools config ------------------------------------------
     def migrate_tools_config(self, config: Optional[Dict[str, Any]] = None) -> None:
         config = config or self.load_openclaw_config()
         tools = config.get("tools") or {}
@@ -2396,7 +2396,7 @@ class Migrator:
             self.record("tools-config", "openclaw.json tools (full)", "archive/tools-config.json",
                         "archived", "Full tools config archived for reference")
 
-    # ── Approvals config ──────────────────────────────────────
+    # -- Approvals config --------------------------------------
     def migrate_approvals_config(self, config: Optional[Dict[str, Any]] = None) -> None:
         config = config or self.load_openclaw_config()
         approvals = config.get("approvals") or {}
@@ -2429,7 +2429,7 @@ class Migrator:
             self.record("approvals-config", "openclaw.json approvals (rules)",
                         "archive/approvals-config.json", "archived")
 
-    # ── Memory backend ────────────────────────────────────────
+    # -- Memory backend ----------------------------------------
     def migrate_memory_backend(self, config: Optional[Dict[str, Any]] = None) -> None:
         config = config or self.load_openclaw_config()
         memory = config.get("memory") or {}
@@ -2444,7 +2444,7 @@ class Migrator:
         self.record("memory-backend", "openclaw.json memory.*", "archive/memory-backend-config.json",
                     "archived", "Memory backend config (QMD, vector search, citations) archived for manual review")
 
-    # ── Skills config ─────────────────────────────────────────
+    # -- Skills config -----------------------------------------
     def migrate_skills_config(self, config: Optional[Dict[str, Any]] = None) -> None:
         config = config or self.load_openclaw_config()
         skills = config.get("skills") or {}
@@ -2460,7 +2460,7 @@ class Migrator:
         self.record("skills-config", "openclaw.json skills.*", "archive/skills-registry-config.json",
                     "archived", f"Skills registry config ({len(entries)} entries) archived")
 
-    # ── UI / Identity ─────────────────────────────────────────
+    # -- UI / Identity -----------------------------------------
     def migrate_ui_identity(self, config: Optional[Dict[str, Any]] = None) -> None:
         config = config or self.load_openclaw_config()
         ui = config.get("ui") or {}
@@ -2475,7 +2475,7 @@ class Migrator:
         self.record("ui-identity", "openclaw.json ui.*", "archive/ui-identity-config.json",
                     "archived", "UI theme and identity settings archived")
 
-    # ── Logging / Diagnostics ─────────────────────────────────
+    # -- Logging / Diagnostics ---------------------------------
     def migrate_logging_config(self, config: Optional[Dict[str, Any]] = None) -> None:
         config = config or self.load_openclaw_config()
         logging_cfg = config.get("logging") or {}
@@ -2496,7 +2496,7 @@ class Migrator:
         self.record("logging-config", "openclaw.json logging/diagnostics",
                     "archive/logging-diagnostics-config.json", "archived")
 
-    # ── Helper: set env var ───────────────────────────────────
+    # -- Helper: set env var -----------------------------------
     def _set_env_var(self, key: str, value: str, source_label: str) -> None:
         env_path = self.target_root / ".env"
         if self.execute:
@@ -2509,7 +2509,7 @@ class Migrator:
             save_env_file(env_path, env_data)
         self.record("env-var", source_label, f".env {key}", "migrated")
 
-    # ── Generate migration notes ──────────────────────────────
+    # -- Generate migration notes ------------------------------
     def generate_migration_notes(self) -> None:
         if not self.output_dir:
             return
@@ -2694,23 +2694,23 @@ def main() -> int:
     )
     report = migrator.migrate()
 
-    # ── Human-readable terminal recap ─────────────────────────
+    # -- Human-readable terminal recap -------------------------
     s = report["summary"]
     items = report["items"]
     mode_label = "DRY RUN" if not args.execute else "EXECUTED"
     total = sum(s.values())
 
     print()
-    print(f"  ╔══════════════════════════════════════════════════════╗")
-    print(f"  ║   OpenClaw -> Hermes Migration   [{mode_label:>8s}]   ║")
-    print(f"  ╠══════════════════════════════════════════════════════╣")
-    print(f"  ║  Source:  {str(report['source_root'])[:42]:<42s}  ║")
-    print(f"  ║  Target:  {str(report['target_root'])[:42]:<42s}  ║")
-    print(f"  ╠══════════════════════════════════════════════════════╣")
-    print(f"  ║  ✔ Migrated:  {s.get('migrated', 0):>3d}    ◆ Archived:  {s.get('archived', 0):>3d}        ║")
-    print(f"  ║  ⊘ Skipped:   {s.get('skipped', 0):>3d}    ⚠ Conflicts: {s.get('conflict', 0):>3d}        ║")
-    print(f"  ║  ✖ Errors:    {s.get('error', 0):>3d}    Total:       {total:>3d}        ║")
-    print(f"  ╚══════════════════════════════════════════════════════╝")
+    print(f"  +------------------------------------------------------+")
+    print(f"  |   OpenClaw -> Hermes Migration   [{mode_label:>8s}]   |")
+    print(f"  ╠------------------------------------------------------╣")
+    print(f"  |  Source:  {str(report['source_root'])[:42]:<42s}  |")
+    print(f"  |  Target:  {str(report['target_root'])[:42]:<42s}  |")
+    print(f"  ╠------------------------------------------------------╣")
+    print(f"  |  ✔ Migrated:  {s.get('migrated', 0):>3d}    ◆ Archived:  {s.get('archived', 0):>3d}        |")
+    print(f"  |  ⊘ Skipped:   {s.get('skipped', 0):>3d}    [WARN] Conflicts: {s.get('conflict', 0):>3d}        |")
+    print(f"  |  ✖ Errors:    {s.get('error', 0):>3d}    Total:       {total:>3d}        |")
+    print(f"  +------------------------------------------------------+")
 
     # Show what was migrated
     migrated = [i for i in items if i["status"] == "migrated"]
@@ -2753,7 +2753,7 @@ def main() -> int:
         print()
         print("  Conflicts (use --overwrite to force):")
         for item in conflicts:
-            print(f"    ⚠ {item['kind']}: {item.get('reason', '')}")
+            print(f"    [WARN] {item['kind']}: {item.get('reason', '')}")
 
     # Show errors
     errors = [i for i in items if i["status"] == "error"]
@@ -2776,7 +2776,7 @@ def main() -> int:
         if any(i["kind"] == "cron-jobs" and i["status"] == "archived" for i in items):
             print("    3. Recreate cron jobs: hermes cron")
         if report.get("output_dir"):
-            print(f"    → Full report: {report['output_dir']}/MIGRATION_NOTES.md")
+            print(f"    -> Full report: {report['output_dir']}/MIGRATION_NOTES.md")
     elif not args.execute:
         print()
         print("  This was a dry run. Add --execute to apply changes.")

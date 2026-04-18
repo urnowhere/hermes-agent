@@ -2,7 +2,7 @@
 
 Covers:
   - AWS credential detection and region resolution
-  - Message format conversion (OpenAI → Converse and back)
+  - Message format conversion (OpenAI -> Converse and back)
   - Tool definition conversion
   - Response normalization (non-streaming and streaming)
   - Model discovery with caching
@@ -49,7 +49,7 @@ class TestResolveAwsAuthEnvVar:
 
     def test_requires_both_access_key_and_secret(self):
         from agent.bedrock_adapter import resolve_aws_auth_env_var
-        # Only access key, no secret → should not match
+        # Only access key, no secret -> should not match
         env = {"AWS_ACCESS_KEY_ID": "AKIA..."}
         assert resolve_aws_auth_env_var(env) != "AWS_ACCESS_KEY_ID"
 
@@ -125,7 +125,7 @@ class TestResolveBedrocRegion:
 # ---------------------------------------------------------------------------
 
 class TestConvertToolsToConverse:
-    """Test OpenAI → Bedrock Converse tool definition conversion."""
+    """Test OpenAI -> Bedrock Converse tool definition conversion."""
 
     def test_converts_single_tool(self):
         from agent.bedrock_adapter import convert_tools_to_converse
@@ -176,11 +176,11 @@ class TestConvertToolsToConverse:
 
 
 # ---------------------------------------------------------------------------
-# Message conversion: OpenAI → Converse
+# Message conversion: OpenAI -> Converse
 # ---------------------------------------------------------------------------
 
 class TestConvertMessagesToConverse:
-    """Test OpenAI message format → Bedrock Converse format conversion."""
+    """Test OpenAI message format -> Bedrock Converse format conversion."""
 
     def test_extracts_system_prompt(self):
         from agent.bedrock_adapter import convert_messages_to_converse
@@ -335,11 +335,11 @@ class TestConvertMessagesToConverse:
 
 
 # ---------------------------------------------------------------------------
-# Response normalization: Converse → OpenAI
+# Response normalization: Converse -> OpenAI
 # ---------------------------------------------------------------------------
 
 class TestNormalizeConverseResponse:
-    """Test Bedrock Converse response → OpenAI format conversion."""
+    """Test Bedrock Converse response -> OpenAI format conversion."""
 
     def test_text_response(self):
         from agent.bedrock_adapter import normalize_converse_response
@@ -455,7 +455,7 @@ class TestNormalizeConverseResponse:
 # ---------------------------------------------------------------------------
 
 class TestNormalizeConverseStreamEvents:
-    """Test Bedrock ConverseStream event → OpenAI format conversion."""
+    """Test Bedrock ConverseStream event -> OpenAI format conversion."""
 
     def test_text_stream(self):
         from agent.bedrock_adapter import normalize_converse_stream_events

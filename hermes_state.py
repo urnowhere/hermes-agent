@@ -120,7 +120,7 @@ class SessionDB:
     single writer via WAL mode). Each method opens its own cursor.
     """
 
-    # ── Write-contention tuning ──
+    # -- Write-contention tuning --
     # With multiple hermes processes (gateway + CLI sessions + worktree agents)
     # all sharing one state.db, WAL write-lock contention causes visible TUI
     # freezes.  SQLite's built-in busy handler uses a deterministic sleep
@@ -159,7 +159,7 @@ class SessionDB:
 
         self._init_schema()
 
-    # ── Core write helper ──
+    # -- Core write helper --
 
     def _execute_write(self, fn: Callable[[sqlite3.Connection], T]) -> T:
         """Execute a write transaction with BEGIN IMMEDIATE and jitter retry.
@@ -680,7 +680,7 @@ class SessionDB:
         return None
 
     def get_next_title_in_lineage(self, base_title: str) -> str:
-        """Generate the next title in a lineage (e.g., "my session" → "my session #2").
+        """Generate the next title in a lineage (e.g., "my session" -> "my session #2").
 
         Strips any existing " #N" suffix to find the base name, then finds
         the highest existing number and increments.

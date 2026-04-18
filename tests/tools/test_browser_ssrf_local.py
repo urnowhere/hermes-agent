@@ -121,14 +121,14 @@ class TestIsLocalBackend:
         assert browser_tool._is_local_backend() is True
 
     def test_no_cloud_provider_is_local(self, monkeypatch):
-        """No cloud provider configured → local backend."""
+        """No cloud provider configured -> local backend."""
         monkeypatch.setattr(browser_tool, "_is_camofox_mode", lambda: False)
         monkeypatch.setattr(browser_tool, "_get_cloud_provider", lambda: None)
 
         assert browser_tool._is_local_backend() is True
 
     def test_cloud_provider_is_not_local(self, monkeypatch):
-        """Cloud provider configured and not Camofox → NOT local."""
+        """Cloud provider configured and not Camofox -> NOT local."""
         monkeypatch.setattr(browser_tool, "_is_camofox_mode", lambda: False)
         monkeypatch.setattr(browser_tool, "_get_cloud_provider", lambda: "bb")
 

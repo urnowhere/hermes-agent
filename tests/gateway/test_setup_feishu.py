@@ -215,7 +215,7 @@ class TestSetupFeishuGroupPolicy:
 
 
 # ---------------------------------------------------------------------------
-# Adapter integration: env vars → FeishuAdapterSettings
+# Adapter integration: env vars -> FeishuAdapterSettings
 # ---------------------------------------------------------------------------
 
 class TestSetupFeishuAdapterIntegration:
@@ -243,7 +243,7 @@ class TestSetupFeishuAdapterIntegration:
 
     @patch.dict(os.environ, {}, clear=True)
     def test_qr_env_produces_valid_adapter_settings(self):
-        """QR setup → adapter initializes with websocket mode."""
+        """QR setup -> adapter initializes with websocket mode."""
         env = self._make_env_from_setup()
 
         with patch.dict(os.environ, env, clear=True):
@@ -257,7 +257,7 @@ class TestSetupFeishuAdapterIntegration:
 
     @patch.dict(os.environ, {}, clear=True)
     def test_open_dm_env_sets_correct_adapter_state(self):
-        """Setup with 'allow all DMs' → adapter sees allow-all flag."""
+        """Setup with 'allow all DMs' -> adapter sees allow-all flag."""
         env = self._make_env_from_setup(dm_idx=1)
 
         with patch.dict(os.environ, env, clear=True):
@@ -269,7 +269,7 @@ class TestSetupFeishuAdapterIntegration:
 
     @patch.dict(os.environ, {}, clear=True)
     def test_group_open_env_sets_adapter_group_policy(self):
-        """Setup with 'open groups' → adapter group_policy is 'open'."""
+        """Setup with 'open groups' -> adapter group_policy is 'open'."""
         env = self._make_env_from_setup(group_idx=0)
 
         with patch.dict(os.environ, env, clear=True):

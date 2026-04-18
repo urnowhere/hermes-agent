@@ -1,7 +1,7 @@
 """Integration tests for the generic webhook platform adapter.
 
 These tests exercise end-to-end flows through the webhook adapter:
-1. GitHub PR webhook → agent MessageEvent created
+1. GitHub PR webhook -> agent MessageEvent created
 2. Skills config injects skill content into the prompt
 3. Cross-platform delivery routes to a mock Telegram adapter
 4. GitHub comment delivery invokes ``gh`` CLI (mocked subprocess)
@@ -207,7 +207,7 @@ class TestSkillsInjection:
 
 
 # ===================================================================
-# Test 3: Cross-platform delivery (webhook → Telegram)
+# Test 3: Cross-platform delivery (webhook -> Telegram)
 # ===================================================================
 
 class TestCrossPlatformDelivery:

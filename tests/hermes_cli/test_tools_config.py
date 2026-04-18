@@ -403,7 +403,7 @@ def test_first_install_nous_auto_configures_managed_defaults(monkeypatch):
     assert config["browser"]["cloud_provider"] == "browser-use"
     assert configured == []
 
-# ── Platform / toolset consistency ────────────────────────────────────────────
+# -- Platform / toolset consistency --------------------------------------------
 
 
 class TestPlatformToolsetConsistency:
@@ -481,7 +481,7 @@ def test_numeric_mcp_server_name_does_not_crash_sorted():
     sorted(enabled)
 
 
-# ─── Imagegen Backend Picker Wiring ────────────────────────────────────────
+# --- Imagegen Backend Picker Wiring ----------------------------------------
 
 class TestImagegenBackendRegistry:
     """IMAGEGEN_BACKENDS tags drive the model picker flow in tools_config."""

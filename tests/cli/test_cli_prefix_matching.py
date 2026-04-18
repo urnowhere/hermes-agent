@@ -129,7 +129,7 @@ class TestSlashCommandPrefixMatching:
 
         import cli as cli_mod
         with patch.object(cli_mod, '_skill_commands', fake_skill):
-            # /quit is caught by the exact "/quit" branch → process_command returns False
+            # /quit is caught by the exact "/quit" branch -> process_command returns False
             result = cli_obj.process_command("/qui")
 
         # Returns False because /quit was dispatched (exits chat loop)
@@ -148,7 +148,7 @@ class TestSlashCommandPrefixMatching:
         assert "Ambiguous" in combined or "Did you mean" in combined
 
     def test_exact_typed_name_dispatches_over_longer_match(self):
-        """/help typed with /help-extra skill installed → exact match wins."""
+        """/help typed with /help-extra skill installed -> exact match wins."""
         cli_obj = _make_cli()
         fake_skill = {"/help-extra": {"name": "Help Extra", "description": ""}}
         import cli as cli_mod

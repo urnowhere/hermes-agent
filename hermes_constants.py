@@ -5,6 +5,7 @@ without risk of circular imports.
 """
 
 import os
+import sys
 from pathlib import Path
 
 
@@ -182,6 +183,9 @@ def is_wsl() -> bool:
     global _wsl_detected
     if _wsl_detected is not None:
         return _wsl_detected
+    if sys.platform == "win32":
+        _wsl_detected = False
+        return _wsl_detected
     try:
         with open("/proc/version", "r") as f:
             _wsl_detected = "microsoft" in f.read().lower()
@@ -215,13 +219,17 @@ def is_container() -> bool:
             if "docker" in cgroup or "podman" in cgroup or "/lxc/" in cgroup:
                 _container_detected = True
                 return True
-    except OSError:
+    except (OSError, FileNotFoundError):
+        # Windows has no /proc; tests may monkeypatch builtins.open.
+        if sys.platform == "win32":
+            _container_detected = False
+            return _container_detected
         pass
     _container_detected = False
     return False
 
 
-# ─── Well-Known Paths ─────────────────────────────────────────────────────────
+# --- Well-Known Paths ---------------------------------------------------------
 
 
 def get_config_path() -> Path:
@@ -244,7 +252,7 @@ def get_env_path() -> Path:
     return get_hermes_home() / ".env"
 
 
-# ─── Network Preferences ─────────────────────────────────────────────────────
+# --- Network Preferences -----------------------------------------------------
 
 
 def apply_ipv4_preference(force: bool = False) -> None:

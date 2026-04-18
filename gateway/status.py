@@ -59,21 +59,31 @@ def terminate_pid(pid: int, *, force: bool = False) -> None:
     POSIX uses SIGTERM/SIGKILL. Windows uses taskkill /T /F for true force-kill
     because os.kill(..., SIGTERM) is not equivalent to a tree-killing hard stop.
     """
-    if force and _IS_WINDOWS:
+    if _IS_WINDOWS:
+        if force:
+            try:
+                result = subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if result.returncode != 0:
+                    details = (result.stderr or result.stdout or "").strip()
+                    raise OSError(details or f"taskkill failed for PID {pid}")
+                return
+            except FileNotFoundError:
+                pass
+        # Fallback: psutil on Windows
+        import psutil
         try:
-            result = subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        except FileNotFoundError:
-            os.kill(pid, signal.SIGTERM)
-            return
-
-        if result.returncode != 0:
-            details = (result.stderr or result.stdout or "").strip()
-            raise OSError(details or f"taskkill failed for PID {pid}")
+            proc = psutil.Process(pid)
+            if force:
+                proc.kill()
+            else:
+                proc.terminate()
+        except psutil.NoSuchProcess:
+            pass
         return
 
     sig = signal.SIGTERM if not force else getattr(signal, "SIGKILL", signal.SIGTERM)
@@ -90,6 +100,14 @@ def _get_scope_lock_path(scope: str, identity: str) -> Path:
 
 def _get_process_start_time(pid: int) -> Optional[int]:
     """Return the kernel start time for a process when available."""
+    try:
+        import psutil
+        proc = psutil.Process(pid)
+        return int(proc.create_time())
+    except Exception:
+        pass
+
+    # Fallback: /proc on Linux
     stat_path = Path(f"/proc/{pid}/stat")
     try:
         # Field 22 in /proc/<pid>/stat is process start time (clock ticks).
@@ -100,6 +118,14 @@ def _get_process_start_time(pid: int) -> Optional[int]:
 
 def _read_process_cmdline(pid: int) -> Optional[str]:
     """Return the process command line as a space-separated string."""
+    try:
+        import psutil
+        proc = psutil.Process(pid)
+        return " ".join(proc.cmdline())
+    except Exception:
+        pass
+
+    # Fallback: /proc on Linux
     cmdline_path = Path(f"/proc/{pid}/cmdline")
     try:
         raw = cmdline_path.read_bytes()
@@ -340,8 +366,13 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
         stale = existing_pid is None
         if not stale:
             try:
-                os.kill(existing_pid, 0)
-            except (ProcessLookupError, PermissionError):
+                if _IS_WINDOWS:
+                    import psutil
+                    if not psutil.pid_exists(existing_pid):
+                        raise ProcessLookupError(existing_pid)
+                else:
+                    os.kill(existing_pid, 0)
+            except (ProcessLookupError, PermissionError, OSError):
                 stale = True
             else:
                 current_start = _get_process_start_time(existing_pid)
@@ -354,7 +385,8 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
                 # Check if process is stopped (Ctrl+Z / SIGTSTP) — stopped
                 # processes still respond to os.kill(pid, 0) but are not
                 # actually running. Treat them as stale so --replace works.
-                if not stale:
+                # Windows has no /proc or SIGTSTP; skip this check.
+                if not stale and sys.platform != "win32":
                     try:
                         _proc_status = Path(f"/proc/{existing_pid}/status")
                         if _proc_status.exists():
@@ -575,7 +607,12 @@ def get_running_pid(
         return None
 
     try:
-        os.kill(pid, 0)  # signal 0 = existence check, no actual signal sent
+        if _IS_WINDOWS:
+            import psutil
+            if not psutil.pid_exists(pid):
+                raise ProcessLookupError(pid)
+        else:
+            os.kill(pid, 0)  # signal 0 = existence check, no actual signal sent
     except (ProcessLookupError, PermissionError):
         _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
         return None

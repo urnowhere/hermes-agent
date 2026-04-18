@@ -78,7 +78,7 @@ class TestIsSafeUrl:
         ]):
             assert is_safe_url("https://example.com") is True
 
-    # ── New tests for hardened SSRF protection ──
+    # -- New tests for hardened SSRF protection --
 
     def test_cgnat_100_64_blocked(self):
         """100.64.0.0/10 (CGNAT/Shared Address Space) is NOT covered by

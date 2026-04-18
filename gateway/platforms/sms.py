@@ -263,13 +263,13 @@ class SmsAdapter(BasePlatformAdapter):
             return None
 
         if parsed.port == default_port:
-            # Has explicit default port → strip it
+            # Has explicit default port -> strip it
             return urllib.parse.urlunparse(
                 (parsed.scheme, parsed.hostname, parsed.path,
                  parsed.params, parsed.query, parsed.fragment)
             )
         elif parsed.port is None:
-            # No port → add default
+            # No port -> add default
             netloc = f"{parsed.hostname}:{default_port}"
             return urllib.parse.urlunparse(
                 (parsed.scheme, netloc, parsed.path,

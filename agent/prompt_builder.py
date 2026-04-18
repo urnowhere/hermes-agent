@@ -206,13 +206,13 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "\n"
     "<mandatory_tool_use>\n"
     "NEVER answer these from memory or mental computation — ALWAYS use a tool:\n"
-    "- Arithmetic, math, calculations → use terminal or execute_code\n"
-    "- Hashes, encodings, checksums → use terminal (e.g. sha256sum, base64)\n"
-    "- Current time, date, timezone → use terminal (e.g. date)\n"
-    "- System state: OS, CPU, memory, disk, ports, processes → use terminal\n"
-    "- File contents, sizes, line counts → use read_file, search_files, or terminal\n"
-    "- Git history, branches, diffs → use terminal\n"
-    "- Current facts (weather, news, versions) → use web_search\n"
+    "- Arithmetic, math, calculations -> use terminal or execute_code\n"
+    "- Hashes, encodings, checksums -> use terminal (e.g. sha256sum, base64)\n"
+    "- Current time, date, timezone -> use terminal (e.g. date)\n"
+    "- System state: OS, CPU, memory, disk, ports, processes -> use terminal\n"
+    "- File contents, sizes, line counts -> use read_file, search_files, or terminal\n"
+    "- Git history, branches, diffs -> use terminal\n"
+    "- Current facts (weather, news, versions) -> use web_search\n"
     "Your memory and user profile describe the USER, not the system you are "
     "running on. The execution environment may differ from what the user profile "
     "says about their personal setup.\n"
@@ -221,9 +221,9 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "<act_dont_ask>\n"
     "When a question has an obvious default interpretation, act on it immediately "
     "instead of asking for clarification. Examples:\n"
-    "- 'Is port 443 open?' → check THIS machine (don't ask 'open where?')\n"
-    "- 'What OS am I running?' → check the live system (don't use user profile)\n"
-    "- 'What time is it?' → run `date` (don't guess)\n"
+    "- 'Is port 443 open?' -> check THIS machine (don't ask 'open where?')\n"
+    "- 'What OS am I running?' -> check the live system (don't use user profile)\n"
+    "- 'What time is it?' -> run `date` (don't guess)\n"
     "Only ask for clarification when the ambiguity genuinely changes what tool "
     "you would call.\n"
     "</act_dont_ask>\n"
@@ -604,7 +604,7 @@ def build_skills_system_prompt(
     if not skills_dir.exists() and not external_dirs:
         return ""
 
-    # ── Layer 1: in-process LRU cache ─────────────────────────────────
+    # -- Layer 1: in-process LRU cache ---------------------------------
     # Include the resolved platform so per-platform disabled-skill lists
     # produce distinct cache entries (gateway serves multiple platforms).
     from gateway.session_context import get_session_env
@@ -628,7 +628,7 @@ def build_skills_system_prompt(
 
     disabled = get_disabled_skill_names()
 
-    # ── Layer 2: disk snapshot ────────────────────────────────────────
+    # -- Layer 2: disk snapshot ----------------------------------------
     snapshot = _load_skills_snapshot(skills_dir)
 
     skills_by_category: dict[str, list[tuple[str, str]]] = {}
@@ -703,7 +703,7 @@ def build_skills_system_prompt(
             category_descriptions,
         )
 
-    # ── External skill directories ─────────────────────────────────────
+    # -- External skill directories -------------------------------------
     # Scan external dirs directly (no snapshot caching — they're read-only
     # and typically small).  Local skills already in skills_by_category take
     # precedence: we track seen names and skip duplicates from external dirs.
@@ -799,7 +799,7 @@ def build_skills_system_prompt(
             "Only proceed without loading a skill if genuinely none are relevant to the task."
         )
 
-    # ── Store in LRU cache ────────────────────────────────────────────
+    # -- Store in LRU cache --------------------------------------------
     with _SKILLS_PROMPT_CACHE_LOCK:
         _SKILLS_PROMPT_CACHE[cache_key] = result
         _SKILLS_PROMPT_CACHE.move_to_end(cache_key)

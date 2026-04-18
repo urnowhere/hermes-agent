@@ -138,7 +138,7 @@ class ProviderInfo:
 # Provider ID mapping: Hermes ↔ models.dev
 # ---------------------------------------------------------------------------
 
-# Hermes provider names → models.dev provider IDs
+# Hermes provider names -> models.dev provider IDs
 PROVIDER_TO_MODELS_DEV: Dict[str, str] = {
     "openrouter": "openrouter",
     "anthropic": "anthropic",
@@ -172,7 +172,7 @@ PROVIDER_TO_MODELS_DEV: Dict[str, str] = {
     "ollama-cloud": "ollama-cloud",
 }
 
-# Reverse mapping: models.dev → Hermes (built lazily)
+# Reverse mapping: models.dev -> Hermes (built lazily)
 _MODELS_DEV_TO_PROVIDER: Optional[Dict[str, str]] = None
 
 
@@ -362,12 +362,12 @@ def get_model_capabilities(provider: str, model: str) -> Optional[ModelCapabilit
     Returns None if model not found.
 
     Extracts from model entry fields:
-      - reasoning  (bool)  → supports_reasoning
-      - tool_call  (bool)  → supports_tools
-      - attachment (bool)  → supports_vision
-      - limit.context (int) → context_window
-      - limit.output  (int) → max_output_tokens
-      - family     (str)   → model_family
+      - reasoning  (bool)  -> supports_reasoning
+      - tool_call  (bool)  -> supports_tools
+      - attachment (bool)  -> supports_vision
+      - limit.context (int) -> context_window
+      - limit.output  (int) -> max_output_tokens
+      - family     (str)   -> model_family
     """
     models = _get_provider_models(provider)
     if models is None:
@@ -578,7 +578,7 @@ def get_provider_info(provider_id: str) -> Optional[ProviderInfo]:
     Accepts either a Hermes provider ID (e.g. "kilocode") or a models.dev
     ID (e.g. "kilo").  Returns None if the provider is not in the catalog.
     """
-    # Resolve Hermes ID → models.dev ID
+    # Resolve Hermes ID -> models.dev ID
     mdev_id = PROVIDER_TO_MODELS_DEV.get(provider_id, provider_id)
 
     data = fetch_models_dev()

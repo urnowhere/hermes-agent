@@ -172,7 +172,7 @@ def is_interactive_stdin() -> bool:
 def print_noninteractive_setup_guidance(reason: str | None = None) -> None:
     """Print guidance for headless/non-interactive setup flows."""
     print()
-    print(color("⚕ Hermes Setup — Non-interactive mode", Colors.CYAN, Colors.BOLD))
+    print(color(" Hermes Setup — Non-interactive mode", Colors.CYAN, Colors.BOLD))
     print()
     if reason:
         print_info(reason)
@@ -233,7 +233,7 @@ def prompt_choice(question: str, choices: list, default: int = 0, description: s
 
     print(color(question, Colors.YELLOW))
     for i, choice in enumerate(choices):
-        marker = "●" if i == default else "○"
+        marker = "*" if i == default else "○"
         if i == default:
             print(color(f"  {marker} {choice}", Colors.GREEN))
         else:
@@ -288,9 +288,9 @@ def prompt_checklist(title: str, items: list, pre_selected: list = None) -> list
     Display a multi-select checklist and return the indices of selected items.
 
     Each item in `items` is a display string. `pre_selected` is a list of
-    indices that should be checked by default. A "Continue →" option is
+    indices that should be checked by default. A "Continue ->" option is
     appended at the end — the user toggles items with Space and confirms
-    with Enter on "Continue →".
+    with Enter on "Continue ->".
 
     Falls back to a numbered toggle interface when simple_term_menu is
     unavailable.
@@ -320,7 +320,7 @@ def _prompt_api_key(var: dict):
         tools_str += f", +{len(tools) - 3} more"
 
     print()
-    print(color(f"  ─── {var.get('description', var['name'])} ───", Colors.CYAN))
+    print(color(f"  --- {var.get('description', var['name'])} ---", Colors.CYAN))
     print()
     if tools_str:
         print_info(f"  Enables: {tools_str}")
@@ -335,7 +335,7 @@ def _prompt_api_key(var: dict):
 
     if value:
         save_env_value(var["name"], value)
-        print_success("  ✓ Saved")
+        print_success("  [OK] Saved")
     else:
         print_warning("  Skipped (configure later with 'hermes setup')")
 
@@ -490,10 +490,10 @@ def _print_setup_summary(config: dict, hermes_home):
 
     for name, available, missing_var in tool_status:
         if available:
-            print(f"   {color('✓', Colors.GREEN)} {name}")
+            print(f"   {color('[OK]', Colors.GREEN)} {name}")
         else:
             print(
-                f"   {color('✗', Colors.RED)} {name} {color(f'(missing {missing_var})', Colors.DIM)}"
+                f"   {color('[ERR]', Colors.RED)} {name} {color(f'(missing {missing_var})', Colors.DIM)}"
             )
 
     print()
@@ -511,17 +511,17 @@ def _print_setup_summary(config: dict, hermes_home):
     print()
     print(
         color(
-            "┌─────────────────────────────────────────────────────────┐", Colors.GREEN
+            "+---------------------------------------------------------+", Colors.GREEN
         )
     )
     print(
         color(
-            "│              ✓ Setup Complete!                          │", Colors.GREEN
+            "|              [OK] Setup Complete!                          |", Colors.GREEN
         )
     )
     print(
         color(
-            "└─────────────────────────────────────────────────────────┘", Colors.GREEN
+            "+---------------------------------------------------------+", Colors.GREEN
         )
     )
     print()
@@ -537,7 +537,7 @@ def _print_setup_summary(config: dict, hermes_home):
     )
     print()
 
-    print(color("─" * 60, Colors.DIM))
+    print(color("-" * 60, Colors.DIM))
     print()
     print(color("📝 To edit your configuration:", Colors.CYAN, Colors.BOLD))
     print()
@@ -559,9 +559,9 @@ def _print_setup_summary(config: dict, hermes_home):
     print(f"   {color(f'nano {get_env_path()}', Colors.DIM)}")
     print()
 
-    print(color("─" * 60, Colors.DIM))
+    print(color("-" * 60, Colors.DIM))
     print()
-    print(color("🚀 Ready to go!", Colors.CYAN, Colors.BOLD))
+    print(color(" Ready to go!", Colors.CYAN, Colors.BOLD))
     print()
     print(f"   {color('hermes', Colors.GREEN)}              Start chatting")
     print(f"   {color('hermes gateway', Colors.GREEN)}      Start messaging gateway")
@@ -671,7 +671,7 @@ def setup_model_provider(config: dict, *, quick: bool = False):
 
     nous_subscription_selected = selected_provider == "nous"
 
-    # ── Same-provider fallback & rotation setup (full setup only) ──
+    # -- Same-provider fallback & rotation setup (full setup only) --
     if not quick and _supports_same_provider_pool_setup(selected_provider):
         try:
             from types import SimpleNamespace
@@ -748,7 +748,7 @@ def setup_model_provider(config: dict, *, quick: bool = False):
         except Exception as exc:
             logger.debug("Could not configure same-provider fallback in setup: %s", exc)
 
-    # ── Vision & Image Analysis Setup (full setup only) ──
+    # -- Vision & Image Analysis Setup (full setup only) --
     if quick:
         _vision_needs_setup = False
     else:
@@ -1454,7 +1454,7 @@ def setup_agent_settings(config: dict):
     print_info(f"   Guide: {_DOCS_BASE}/user-guide/configuration")
     print()
 
-    # ── Max Iterations ──
+    # -- Max Iterations --
     current_max = get_env_value("HERMES_MAX_ITERATIONS") or str(
         config.get("agent", {}).get("max_turns", 90)
     )
@@ -1473,7 +1473,7 @@ def setup_agent_settings(config: dict):
     except ValueError:
         print_warning("Invalid number, keeping current value")
 
-    # ── Tool Progress Display ──
+    # -- Tool Progress Display --
     print_info("")
     print_info("Tool Progress Display")
     print_info("Controls how much tool activity is shown (CLI and messaging).")
@@ -1493,7 +1493,7 @@ def setup_agent_settings(config: dict):
     else:
         print_warning(f"Unknown mode '{mode}', keeping '{current_mode}'")
 
-    # ── Context Compression ──
+    # -- Context Compression --
     print_header("Context Compression")
     print_info("Automatically summarizes old messages when context gets too long.")
     print_info(
@@ -1515,7 +1515,7 @@ def setup_agent_settings(config: dict):
         f"Context compression threshold set to {config['compression'].get('threshold', 0.50)}"
     )
 
-    # ── Session Reset Policy ──
+    # -- Session Reset Policy --
     print_header("Session Reset Policy")
     print_info(
         "Messaging sessions (Telegram, Discord, etc.) accumulate context over time."
@@ -1626,7 +1626,7 @@ def _setup_telegram():
         if not prompt_yes_no("Reconfigure Telegram?", False):
             # Check missing allowlist on existing config
             if not get_env_value("TELEGRAM_ALLOWED_USERS"):
-                print_info("⚠️  Telegram has no user allowlist - anyone can use your bot!")
+                print_info("[WARN]️  Telegram has no user allowlist - anyone can use your bot!")
                 if prompt_yes_no("Add allowed users now?", True):
                     print_info("   To find your Telegram user ID: message @userinfobot")
                     allowed_users = prompt("Allowed user IDs (comma-separated)")
@@ -1665,7 +1665,7 @@ def _setup_telegram():
         save_env_value("TELEGRAM_ALLOWED_USERS", allowed_users.replace(" ", ""))
         print_success("Telegram allowlist configured - only listed users can use the bot")
     else:
-        print_info("⚠️  No allowlist set - anyone who finds your bot can use it!")
+        print_info("[WARN]️  No allowlist set - anyone who finds your bot can use it!")
 
     print()
     print_info("📬 Home Channel: where Hermes delivers cron job results,")
@@ -1696,9 +1696,9 @@ def _setup_discord():
         print_info("Discord: already configured")
         if not prompt_yes_no("Reconfigure Discord?", False):
             if not get_env_value("DISCORD_ALLOWED_USERS"):
-                print_info("⚠️  Discord has no user allowlist - anyone can use your bot!")
+                print_info("[WARN]️  Discord has no user allowlist - anyone can use your bot!")
                 if prompt_yes_no("Add allowed users now?", True):
-                    print_info("   To find Discord ID: Enable Developer Mode, right-click name → Copy ID")
+                    print_info("   To find Discord ID: Enable Developer Mode, right-click name -> Copy ID")
                     allowed_users = prompt("Allowed user IDs (comma-separated)")
                     if allowed_users:
                         cleaned_ids = _clean_discord_user_ids(allowed_users)
@@ -1717,7 +1717,7 @@ def _setup_discord():
     print_info("🔒 Security: Restrict who can use your bot")
     print_info("   To find your Discord user ID:")
     print_info("   1. Enable Developer Mode in Discord settings")
-    print_info("   2. Right-click your name → Copy ID")
+    print_info("   2. Right-click your name -> Copy ID")
     print()
     print_info("   You can also use Discord usernames (resolved on gateway start).")
     print()
@@ -1729,12 +1729,12 @@ def _setup_discord():
         save_env_value("DISCORD_ALLOWED_USERS", ",".join(cleaned_ids))
         print_success("Discord allowlist configured")
     else:
-        print_info("⚠️  No allowlist set - anyone in servers with your bot can use it!")
+        print_info("[WARN]️  No allowlist set - anyone in servers with your bot can use it!")
 
     print()
     print_info("📬 Home Channel: where Hermes delivers cron job results,")
     print_info("   cross-platform messages, and notifications.")
-    print_info("   To get a channel ID: right-click a channel → Copy Channel ID")
+    print_info("   To get a channel ID: right-click a channel -> Copy Channel ID")
     print_info("   (requires Developer Mode in Discord settings)")
     print_info("   You can also set this later by typing /set-home in a Discord channel.")
     home_channel = prompt("Home channel ID (leave empty to set later with /set-home)")
@@ -1766,20 +1766,20 @@ def _setup_slack():
             return
 
     print_info("Steps to create a Slack app:")
-    print_info("   1. Go to https://api.slack.com/apps → Create New App (from scratch)")
-    print_info("   2. Enable Socket Mode: Settings → Socket Mode → Enable")
+    print_info("   1. Go to https://api.slack.com/apps -> Create New App (from scratch)")
+    print_info("   2. Enable Socket Mode: Settings -> Socket Mode -> Enable")
     print_info("      • Create an App-Level Token with 'connections:write' scope")
-    print_info("   3. Add Bot Token Scopes: Features → OAuth & Permissions")
+    print_info("   3. Add Bot Token Scopes: Features -> OAuth & Permissions")
     print_info("      Required scopes: chat:write, app_mentions:read,")
     print_info("      channels:history, channels:read, im:history,")
     print_info("      im:read, im:write, users:read, files:read, files:write")
     print_info("      Optional for private channels: groups:history")
-    print_info("   4. Subscribe to Events: Features → Event Subscriptions → Enable")
+    print_info("   4. Subscribe to Events: Features -> Event Subscriptions -> Enable")
     print_info("      Required events: message.im, message.channels, app_mention")
     print_info("      Optional for private channels: message.groups")
-    print_warning("   ⚠ Without message.channels the bot will ONLY work in DMs,")
+    print_warning("   [WARN] Without message.channels the bot will ONLY work in DMs,")
     print_warning("     not public channels.")
-    print_info("   5. Install to Workspace: Settings → Install App")
+    print_info("   5. Install to Workspace: Settings -> Install App")
     print_info("   6. Reinstall the app after any scope or event changes")
     print_info("   7. After installing, invite the bot to channels: /invite @YourBot")
     print()
@@ -1796,7 +1796,7 @@ def _setup_slack():
 
     print()
     print_info("🔒 Security: Restrict who can use your bot")
-    print_info("   To find a Member ID: click a user's name → View full profile → ⋮ → Copy member ID")
+    print_info("   To find a Member ID: click a user's name -> View full profile -> ⋮ -> Copy member ID")
     print()
     allowed_users = prompt(
         "Allowed user IDs (comma-separated, leave empty to deny everyone except paired users)"
@@ -1805,7 +1805,7 @@ def _setup_slack():
         save_env_value("SLACK_ALLOWED_USERS", allowed_users.replace(" ", ""))
         print_success("Slack allowlist configured")
     else:
-        print_warning("⚠️  No Slack allowlist set - unpaired users will be denied by default.")
+        print_warning("[WARN]️  No Slack allowlist set - unpaired users will be denied by default.")
         print_info("   Set SLACK_ALLOW_ALL_USERS=true or GATEWAY_ALLOW_ALL_USERS=true only if you intentionally want open workspace access.")
 
 
@@ -1884,7 +1884,7 @@ def _setup_matrix():
             save_env_value("MATRIX_ALLOWED_USERS", allowed_users.replace(" ", ""))
             print_success("Matrix allowlist configured")
         else:
-            print_info("⚠️  No allowlist set - anyone who can message the bot can use it!")
+            print_info("[WARN]️  No allowlist set - anyone who can message the bot can use it!")
 
         print()
         print_info("📬 Home Room: where Hermes delivers cron job results and notifications.")
@@ -1905,7 +1905,7 @@ def _setup_mattermost():
             return
 
     print_info("Works with any self-hosted Mattermost instance.")
-    print_info("   1. In Mattermost: Integrations → Bot Accounts → Add Bot Account")
+    print_info("   1. In Mattermost: Integrations -> Bot Accounts -> Add Bot Account")
     print_info("   2. Copy the bot token")
     print()
     mm_url = prompt("Mattermost server URL (e.g. https://mm.example.com)")
@@ -1919,7 +1919,7 @@ def _setup_mattermost():
 
     print()
     print_info("🔒 Security: Restrict who can use your bot")
-    print_info("   To find your user ID: click your avatar → Profile")
+    print_info("   To find your user ID: click your avatar -> Profile")
     print_info("   or use the API: GET /api/v4/users/me")
     print()
     allowed_users = prompt("Allowed user IDs (comma-separated, leave empty for open access)")
@@ -1927,11 +1927,11 @@ def _setup_mattermost():
         save_env_value("MATTERMOST_ALLOWED_USERS", allowed_users.replace(" ", ""))
         print_success("Mattermost allowlist configured")
     else:
-        print_info("⚠️  No allowlist set - anyone who can message the bot can use it!")
+        print_info("[WARN]️  No allowlist set - anyone who can message the bot can use it!")
 
     print()
     print_info("📬 Home Channel: where Hermes delivers cron job results and notifications.")
-    print_info("   To get a channel ID: click channel name → View Info → copy the ID")
+    print_info("   To get a channel ID: click channel name -> View Info -> copy the ID")
     print_info("   You can also set this later by typing /set-home in a Mattermost channel.")
     home_channel = prompt("Home channel ID (leave empty to set later with /set-home)")
     if home_channel:
@@ -2006,6 +2006,7 @@ def _setup_wecom_callback():
 
 
 
+
 def _setup_bluebubbles():
     """Configure BlueBubbles iMessage gateway."""
     print_header("BlueBubbles (iMessage)")
@@ -2020,7 +2021,7 @@ def _setup_bluebubbles():
     print_info("   Requires a Mac running BlueBubbles Server v1.0.0+")
     print_info("   Download: https://bluebubbles.app/")
     print()
-    print_info("In BlueBubbles Server → Settings → API, note your Server URL and Password.")
+    print_info("In BlueBubbles Server -> Settings -> API, note your Server URL and Password.")
     print()
 
     server_url = prompt("BlueBubbles server URL (e.g. http://192.168.1.10:1234)")
@@ -2045,7 +2046,7 @@ def _setup_bluebubbles():
         save_env_value("BLUEBUBBLES_ALLOWED_USERS", allowed_users.replace(" ", ""))
         print_success("BlueBubbles allowlist configured")
     else:
-        print_info("⚠️  No allowlist set — anyone who can iMessage you can use the bot!")
+        print_info("[WARN]️  No allowlist set — anyone who can iMessage you can use the bot!")
 
     print()
     print_info("📬 Home Channel: phone or email for cron job delivery and notifications.")
@@ -2087,7 +2088,7 @@ def _setup_webhooks():
             return
 
     print()
-    print_warning("⚠  Webhook and SMS platforms require exposing gateway ports to the")
+    print_warning("[WARN]  Webhook and SMS platforms require exposing gateway ports to the")
     print_warning("   internet. For security, run the gateway in a sandboxed environment")
     print_warning("   (Docker, VM, etc.) to limit blast radius from prompt injection.")
     print()
@@ -2175,7 +2176,7 @@ def setup_gateway(config: dict):
         name, _env_var, setup_func = _GATEWAY_PLATFORMS[idx]
         setup_func()
 
-    # ── Gateway Service Setup ──
+    # -- Gateway Service Setup --
     any_messaging = (
         get_env_value("TELEGRAM_BOT_TOKEN")
         or get_env_value("DISCORD_BOT_TOKEN")
@@ -2197,7 +2198,7 @@ def setup_gateway(config: dict):
     )
     if any_messaging:
         print()
-        print_info("━" * 50)
+        print_info("-" * 50)
         print_success("Messaging platforms configured!")
 
         # Check if any home channels are missing
@@ -2328,7 +2329,7 @@ def setup_gateway(config: dict):
                 print_info("Start the gateway to bring your bots online:")
                 print_info("   hermes gateway              # Run in foreground")
 
-        print_info("━" * 50)
+        print_info("-" * 50)
 
 
 # =============================================================================
@@ -2340,7 +2341,7 @@ def setup_tools(config: dict, first_install: bool = False):
     """Configure tools — delegates to the unified tools_command() in tools_config.py.
 
     Both `hermes setup tools` and `hermes tools` use the same flow:
-    platform selection → toolset toggles → provider/API key configuration.
+    platform selection -> toolset toggles -> provider/API key configuration.
 
     Args:
         first_install: When True, uses the simplified first-install flow
@@ -2506,15 +2507,15 @@ def _load_openclaw_migration_module():
 # Config values may have different semantics between OpenClaw and Hermes.
 # Instruction/context files (.md) can contain incompatible setup procedures.
 _HIGH_IMPACT_KIND_KEYWORDS = {
-    "gateway": "⚠ Gateway/messaging — this will configure Hermes to use your OpenClaw messaging channels",
-    "telegram": "⚠ Telegram — this will point Hermes at your OpenClaw Telegram bot",
-    "slack": "⚠ Slack — this will point Hermes at your OpenClaw Slack workspace",
-    "discord": "⚠ Discord — this will point Hermes at your OpenClaw Discord bot",
-    "whatsapp": "⚠ WhatsApp — this will point Hermes at your OpenClaw WhatsApp connection",
-    "config": "⚠ Config values — OpenClaw settings may not map 1:1 to Hermes equivalents",
-    "soul": "⚠ Instruction file — may contain OpenClaw-specific setup/restart procedures",
-    "memory": "⚠ Memory/context file — may reference OpenClaw-specific infrastructure",
-    "context": "⚠ Context file — may contain OpenClaw-specific instructions",
+    "gateway": "[WARN] Gateway/messaging — this will configure Hermes to use your OpenClaw messaging channels",
+    "telegram": "[WARN] Telegram — this will point Hermes at your OpenClaw Telegram bot",
+    "slack": "[WARN] Slack — this will point Hermes at your OpenClaw Slack workspace",
+    "discord": "[WARN] Discord — this will point Hermes at your OpenClaw Discord bot",
+    "whatsapp": "[WARN] WhatsApp — this will point Hermes at your OpenClaw WhatsApp connection",
+    "config": "[WARN] Config values — OpenClaw settings may not map 1:1 to Hermes equivalents",
+    "soul": "[WARN] Instruction file — may contain OpenClaw-specific setup/restart procedures",
+    "memory": "[WARN] Memory/context file — may reference OpenClaw-specific infrastructure",
+    "context": "[WARN] Context file — may contain OpenClaw-specific instructions",
 }
 
 
@@ -2542,7 +2543,7 @@ def _print_migration_preview(report: dict):
             dest = item.get("destination", "")
             if dest:
                 dest_short = str(dest).replace(str(Path.home()), "~")
-                print(f"      {kind:<22s} → {dest_short}")
+                print(f"      {kind:<22s} -> {dest_short}")
             else:
                 print(f"      {kind}")
 
@@ -2572,7 +2573,7 @@ def _print_migration_preview(report: dict):
 
     # Print collected warnings
     if warnings_shown:
-        print(color("  ── Warnings ──", Colors.YELLOW))
+        print(color("  -- Warnings --", Colors.YELLOW))
         for warning in sorted(warnings_shown):
             print(color(f"    {warning}", Colors.YELLOW))
         print()
@@ -2625,7 +2626,7 @@ def _offer_openclaw_migration(hermes_home: Path) -> bool:
         logger.debug("OpenClaw migration module load error", exc_info=True)
         return False
 
-    # ── Phase 1: Dry-run preview ──
+    # -- Phase 1: Dry-run preview --
     try:
         selected = mod.resolve_selected_options(None, None, preset="full")
         dry_migrator = mod.Migrator(
@@ -2660,7 +2661,7 @@ def _offer_openclaw_migration(hermes_home: Path) -> bool:
     print()
     _print_migration_preview(preview_report)
 
-    # ── Phase 2: Confirm and execute ──
+    # -- Phase 2: Confirm and execute --
     if not prompt_yes_no("Proceed with migration?", default=False):
         print_info(
             "Migration cancelled. You can run it later with: hermes claw migrate"
@@ -2785,14 +2786,14 @@ def run_setup_wizard(args):
                 print()
                 print(
                     color(
-                        "┌─────────────────────────────────────────────────────────┐",
+                        "+---------------------------------------------------------+",
                         Colors.MAGENTA,
                     )
                 )
-                print(color(f"│     ⚕ Hermes Setup — {label:<34s} │", Colors.MAGENTA))
+                print(color(f"|      Hermes Setup — {label:<34s} |", Colors.MAGENTA))
                 print(
                     color(
-                        "└─────────────────────────────────────────────────────────┘",
+                        "+---------------------------------------------------------+",
                         Colors.MAGENTA,
                     )
                 )
@@ -2819,34 +2820,34 @@ def run_setup_wizard(args):
     print()
     print(
         color(
-            "┌─────────────────────────────────────────────────────────┐",
+            "+---------------------------------------------------------+",
             Colors.MAGENTA,
         )
     )
     print(
         color(
-            "│             ⚕ Hermes Agent Setup Wizard                │", Colors.MAGENTA
+            "|              Hermes Agent Setup Wizard                |", Colors.MAGENTA
         )
     )
     print(
         color(
-            "├─────────────────────────────────────────────────────────┤",
+            "├---------------------------------------------------------┤",
             Colors.MAGENTA,
         )
     )
     print(
         color(
-            "│  Let's configure your Hermes Agent installation.       │", Colors.MAGENTA
+            "|  Let's configure your Hermes Agent installation.       |", Colors.MAGENTA
         )
     )
     print(
         color(
-            "│  Press Ctrl+C at any time to exit.                     │", Colors.MAGENTA
+            "|  Press Ctrl+C at any time to exit.                     |", Colors.MAGENTA
         )
     )
     print(
         color(
-            "└─────────────────────────────────────────────────────────┘",
+            "+---------------------------------------------------------+",
             Colors.MAGENTA,
         )
     )
@@ -2854,7 +2855,7 @@ def run_setup_wizard(args):
     migration_ran = False
 
     if is_existing:
-        # ── Returning User Menu ──
+        # -- Returning User Menu --
         print()
         print_header("Welcome Back!")
         print_success("You already have Hermes configured.")
@@ -2895,7 +2896,7 @@ def run_setup_wizard(args):
                 _print_setup_summary(config, hermes_home)
             return
     else:
-        # ── First-Time Setup ──
+        # -- First-Time Setup --
         print()
 
         # Offer OpenClaw migration before configuration begins
@@ -2912,7 +2913,7 @@ def run_setup_wizard(args):
             _run_first_time_quick_setup(config, hermes_home, is_existing)
             return
 
-    # ── Full Setup — run all sections ──
+    # -- Full Setup — run all sections --
     print_header("Configuration Location")
     print_info(f"Config file:  {get_config_path()}")
     print_info(f"Secrets file: {get_env_path()}")
@@ -3096,7 +3097,7 @@ def _run_quick_setup(config: dict, hermes_home):
         if v.get("category") == "messaging" and not v.get("advanced")
     ]
 
-    # ── Tool API keys (checklist) ──
+    # -- Tool API keys (checklist) --
     if missing_tools:
         print()
         print_header("Tool API Keys")
@@ -3104,7 +3105,7 @@ def _run_quick_setup(config: dict, hermes_home):
         checklist_labels = []
         for var in missing_tools:
             tools = var.get("tools", [])
-            tools_str = f" → {', '.join(tools[:2])}" if tools else ""
+            tools_str = f" -> {', '.join(tools[:2])}" if tools else ""
             checklist_labels.append(f"{var.get('description', var['name'])}{tools_str}")
 
         selected_indices = prompt_checklist(
@@ -3116,7 +3117,7 @@ def _run_quick_setup(config: dict, hermes_home):
             var = missing_tools[idx]
             _prompt_api_key(var)
 
-    # ── Messaging platforms (checklist then prompt for selected) ──
+    # -- Messaging platforms (checklist then prompt for selected) --
     if missing_messaging:
         print()
         print_header("Messaging Platforms")
@@ -3159,7 +3160,7 @@ def _run_quick_setup(config: dict, hermes_home):
             vars_list = platforms[plat]
             emoji = {"Telegram": "📱", "Discord": "💬", "Slack": "💼"}.get(plat, "")
             print()
-            print(color(f"  ─── {emoji} {plat} ───", Colors.CYAN))
+            print(color(f"  --- {emoji} {plat} ---", Colors.CYAN))
             print()
             for var in vars_list:
                 print_info(f"  {var.get('description', '')}")
@@ -3171,7 +3172,7 @@ def _run_quick_setup(config: dict, hermes_home):
                     value = prompt(f"  {var.get('prompt', var['name'])}")
                 if value:
                     save_env_value(var["name"], value)
-                    print_success("  ✓ Saved")
+                    print_success("  [OK] Saved")
                 else:
                     print_warning("  Skipped")
                 print()

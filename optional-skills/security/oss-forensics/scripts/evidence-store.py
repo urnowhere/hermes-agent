@@ -268,7 +268,7 @@ def main():
             notes=args.notes,
         )
         if not getattr(args, "quiet", False):
-            print(f"✓ Added evidence: {eid}")
+            print(f"[OK] Added evidence: {eid}")
 
     elif args.command == "list":
         items = store.list_evidence(
@@ -285,9 +285,9 @@ def main():
     elif args.command == "verify":
         issues = store.verify_integrity()
         if not issues:
-            print(f"✓ All {len(store.data['evidence'])} evidence entries passed SHA-256 integrity check.")
+            print(f"[OK] All {len(store.data['evidence'])} evidence entries passed SHA-256 integrity check.")
         else:
-            print(f"✗ {len(issues)} integrity issue(s) detected:")
+            print(f"[ERR] {len(issues)} integrity issue(s) detected:")
             for i in issues:
                 print(f"  [{i['id']}] stored={i['stored_sha256'][:16]}... computed={i['computed_sha256'][:16]}...")
             sys.exit(1)

@@ -19,7 +19,7 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 
-# ── Error taxonomy ──────────────────────────────────────────────────────
+# -- Error taxonomy ------------------------------------------------------
 
 class FailoverReason(enum.Enum):
     """Why an API call failed — determines recovery strategy."""
@@ -57,7 +57,7 @@ class FailoverReason(enum.Enum):
     unknown = "unknown"                  # Unclassifiable — retry with backoff
 
 
-# ── Classification result ───────────────────────────────────────────────
+# -- Classification result -----------------------------------------------
 
 @dataclass
 class ClassifiedError:
@@ -83,7 +83,7 @@ class ClassifiedError:
 
 
 
-# ── Provider-specific patterns ──────────────────────────────────────────
+# -- Provider-specific patterns ------------------------------------------
 
 # Patterns that indicate billing exhaustion (not transient rate limit)
 _BILLING_PATTERNS = [
@@ -237,7 +237,7 @@ _SERVER_DISCONNECT_PATTERNS = [
 ]
 
 
-# ── Classification pipeline ─────────────────────────────────────────────
+# -- Classification pipeline ---------------------------------------------
 
 def classify_api_error(
     error: Exception,
@@ -256,7 +256,7 @@ def classify_api_error(
       3. Error code classification (from body)
       4. Message pattern matching (billing vs rate_limit vs context vs auth)
       5. Transport error heuristics
-      6. Server disconnect + large session → context overflow
+      6. Server disconnect + large session -> context overflow
       7. Fallback: unknown (retryable with backoff)
 
     Args:
@@ -328,7 +328,7 @@ def classify_api_error(
         defaults.update(overrides)
         return ClassifiedError(**defaults)
 
-    # ── 1. Provider-specific patterns (highest priority) ────────────
+    # -- 1. Provider-specific patterns (highest priority) ------------
 
     # Anthropic thinking block signature invalid (400).
     # Don't gate on provider — OpenRouter proxies Anthropic errors, so the
@@ -357,7 +357,7 @@ def classify_api_error(
             should_compress=True,
         )
 
-    # ── 2. HTTP status code classification ──────────────────────────
+    # -- 2. HTTP status code classification --------------------------
 
     if status_code is not None:
         classified = _classify_by_status(
@@ -370,14 +370,14 @@ def classify_api_error(
         if classified is not None:
             return classified
 
-    # ── 3. Error code classification ────────────────────────────────
+    # -- 3. Error code classification --------------------------------
 
     if error_code:
         classified = _classify_by_error_code(error_code, error_msg, _result)
         if classified is not None:
             return classified
 
-    # ── 4. Message pattern matching (no status code) ────────────────
+    # -- 4. Message pattern matching (no status code) ----------------
 
     classified = _classify_by_message(
         error_msg, error_type,
@@ -388,7 +388,7 @@ def classify_api_error(
     if classified is not None:
         return classified
 
-    # ── 5. Server disconnect + large session → context overflow ─────
+    # -- 5. Server disconnect + large session -> context overflow -----
     # Must come BEFORE generic transport error catch — a disconnect on
     # a large session is more likely context overflow than a transient
     # transport hiccup.  Without this ordering, RemoteProtocolError
@@ -405,17 +405,17 @@ def classify_api_error(
             )
         return _result(FailoverReason.timeout, retryable=True)
 
-    # ── 6. Transport / timeout heuristics ───────────────────────────
+    # -- 6. Transport / timeout heuristics ---------------------------
 
     if error_type in _TRANSPORT_ERROR_TYPES or isinstance(error, (TimeoutError, ConnectionError, OSError)):
         return _result(FailoverReason.timeout, retryable=True)
 
-    # ── 7. Fallback: unknown ────────────────────────────────────────
+    # -- 7. Fallback: unknown ----------------------------------------
 
     return _result(FailoverReason.unknown, retryable=True)
 
 
-# ── Status code classification ──────────────────────────────────────────
+# -- Status code classification ------------------------------------------
 
 def _classify_by_status(
     status_code: int,
@@ -600,7 +600,7 @@ def _classify_400(
             should_fallback=True,
         )
 
-    # Generic 400 + large session → probable context overflow
+    # Generic 400 + large session -> probable context overflow
     # Anthropic sometimes returns a bare "Error" message when context is too large
     err_body_msg = ""
     if isinstance(body, dict):
@@ -628,7 +628,7 @@ def _classify_400(
     )
 
 
-# ── Error code classification ───────────────────────────────────────────
+# -- Error code classification -------------------------------------------
 
 def _classify_by_error_code(
     error_code: str, error_msg: str, result_fn,
@@ -668,7 +668,7 @@ def _classify_by_error_code(
     return None
 
 
-# ── Message pattern classification ──────────────────────────────────────
+# -- Message pattern classification --------------------------------------
 
 def _classify_by_message(
     error_msg: str,
@@ -759,7 +759,7 @@ def _classify_by_message(
     return None
 
 
-# ── Helpers ─────────────────────────────────────────────────────────────
+# -- Helpers -------------------------------------------------------------
 
 def _extract_status_code(error: Exception) -> Optional[int]:
     """Walk the error and its cause chain to find an HTTP status code."""

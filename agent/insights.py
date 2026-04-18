@@ -609,16 +609,16 @@ class InsightsEngine:
 
         # Header
         lines.append("")
-        lines.append("  ╔══════════════════════════════════════════════════════════╗")
-        lines.append("  ║                    📊 Hermes Insights                    ║")
+        lines.append("  +----------------------------------------------------------+")
+        lines.append("  |                    📊 Hermes Insights                    |")
         period_label = f"Last {days} days"
         if src_filter:
             period_label += f" ({src_filter})"
         padding = 58 - len(period_label) - 2
         left_pad = padding // 2
         right_pad = padding - left_pad
-        lines.append(f"  ║{' ' * left_pad} {period_label} {' ' * right_pad}║")
-        lines.append("  ╚══════════════════════════════════════════════════════════╝")
+        lines.append(f"  |{' ' * left_pad} {period_label} {' ' * right_pad}|")
+        lines.append("  +----------------------------------------------------------+")
         lines.append("")
 
         # Date range
@@ -630,7 +630,7 @@ class InsightsEngine:
 
         # Overview
         lines.append("  📋 Overview")
-        lines.append("  " + "─" * 56)
+        lines.append("  " + "-" * 56)
         lines.append(f"  Sessions:          {o['total_sessions']:<12}  Messages:        {o['total_messages']:,}")
         lines.append(f"  Tool calls:        {o['total_tool_calls']:<12,}  User messages:   {o['user_messages']:,}")
         lines.append(f"  Input tokens:      {o['total_input_tokens']:<12,}  Output tokens:   {o['total_output_tokens']:,}")
@@ -643,7 +643,7 @@ class InsightsEngine:
         # Model breakdown
         if report["models"]:
             lines.append("  🤖 Models Used")
-            lines.append("  " + "─" * 56)
+            lines.append("  " + "-" * 56)
             lines.append(f"  {'Model':<30} {'Sessions':>8} {'Tokens':>12}")
             for m in report["models"]:
                 model_name = m["model"][:28]
@@ -653,7 +653,7 @@ class InsightsEngine:
         # Platform breakdown
         if len(report["platforms"]) > 1 or (report["platforms"] and report["platforms"][0]["platform"] != "cli"):
             lines.append("  📱 Platforms")
-            lines.append("  " + "─" * 56)
+            lines.append("  " + "-" * 56)
             lines.append(f"  {'Platform':<14} {'Sessions':>8} {'Messages':>10} {'Tokens':>14}")
             for p in report["platforms"]:
                 lines.append(f"  {p['platform']:<14} {p['sessions']:>8} {p['messages']:>10,} {p['total_tokens']:>14,}")
@@ -662,7 +662,7 @@ class InsightsEngine:
         # Tool usage
         if report["tools"]:
             lines.append("  🔧 Top Tools")
-            lines.append("  " + "─" * 56)
+            lines.append("  " + "-" * 56)
             lines.append(f"  {'Tool':<28} {'Calls':>8} {'%':>8}")
             for t in report["tools"][:15]:  # Top 15
                 lines.append(f"  {t['tool']:<28} {t['count']:>8,} {t['percentage']:>7.1f}%")
@@ -674,7 +674,7 @@ class InsightsEngine:
         act = report.get("activity", {})
         if act.get("by_day"):
             lines.append("  📅 Activity Patterns")
-            lines.append("  " + "─" * 56)
+            lines.append("  " + "-" * 56)
 
             # Day of week chart
             day_values = [d["count"] for d in act["by_day"]]
@@ -706,7 +706,7 @@ class InsightsEngine:
         # Notable sessions
         if report.get("top_sessions"):
             lines.append("  🏆 Notable Sessions")
-            lines.append("  " + "─" * 56)
+            lines.append("  " + "-" * 56)
             for ts in report["top_sessions"]:
                 lines.append(f"  {ts['label']:<20} {ts['value']:<18} ({ts['date']}, {ts['session_id']})")
             lines.append("")

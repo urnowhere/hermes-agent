@@ -1253,7 +1253,7 @@ class WeComAdapter(BasePlatformAdapter):
         if prepared["rejected"]:
             await self._send_followup_markdown(
                 chat_id,
-                f"⚠️ {prepared['reject_reason']}",
+                f"[WARN]️ {prepared['reject_reason']}",
                 reply_to=reply_to,
             )
             return SendResult(success=False, error=prepared["reject_reason"])

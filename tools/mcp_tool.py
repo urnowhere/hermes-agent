@@ -78,6 +78,7 @@ import math
 import os
 import re
 import shutil
+import sys
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -2167,7 +2168,7 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
     #   tools.include — whitelist: only these tool names are registered
     #   tools.exclude — blacklist: all tools EXCEPT these are registered
     #   include takes precedence over exclude
-    #   Neither set → register all tools (backward-compatible default)
+    #   Neither set -> register all tools (backward-compatible default)
     tools_filter = config.get("tools") or {}
     include_set = _normalize_name_filter(tools_filter.get("include"), f"mcp_servers.{name}.tools.include")
     exclude_set = _normalize_name_filter(tools_filter.get("exclude"), f"mcp_servers.{name}.tools.exclude")
@@ -2194,7 +2195,7 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
         existing_toolset = registry.get_toolset_for_tool(tool_name_prefixed)
         if existing_toolset and not existing_toolset.startswith("mcp-"):
             logger.warning(
-                "MCP server '%s': tool '%s' (→ '%s') collides with built-in "
+                "MCP server '%s': tool '%s' (-> '%s') collides with built-in "
                 "tool in toolset '%s' — skipping to preserve built-in",
                 name, mcp_tool.name, tool_name_prefixed, existing_toolset,
             )
@@ -2564,7 +2565,8 @@ def _kill_orphaned_mcp_children() -> None:
     Only kills PIDs tracked in ``_stdio_pids`` — never arbitrary children.
     """
     import signal as _signal
-    kill_signal = getattr(_signal, "SIGKILL", _signal.SIGTERM)
+    # Windows does not have SIGKILL; use SIGTERM instead.
+    kill_signal = _signal.SIGTERM if sys.platform == "win32" else getattr(_signal, "SIGKILL", _signal.SIGTERM)
 
     with _lock:
         pids = list(_stdio_pids)

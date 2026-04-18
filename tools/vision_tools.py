@@ -47,7 +47,7 @@ _debug = DebugSession("vision_tools", env_var="VISION_TOOLS_DEBUG")
 
 # Configurable HTTP download timeout for _download_image().
 # Separate from auxiliary.vision.timeout which governs the LLM API call.
-# Resolution: config.yaml auxiliary.vision.download_timeout → env var → 30s default.
+# Resolution: config.yaml auxiliary.vision.download_timeout -> env var -> 30s default.
 def _resolve_download_timeout() -> float:
     env_val = os.getenv("HERMES_VISION_DOWNLOAD_TIMEOUT", "").strip()
     if env_val:
@@ -701,11 +701,11 @@ if __name__ == "__main__":
     api_available = check_vision_requirements()
     
     if not api_available:
-        print("❌ No auxiliary vision model available")
+        print("[ERR] No auxiliary vision model available")
         print("Configure a supported multimodal backend (OpenRouter, Nous, Codex, Anthropic, or a custom OpenAI-compatible endpoint).")
         exit(1)
     else:
-        print("✅ Vision model available")
+        print("[OK] Vision model available")
     
     print("🛠️ Vision tools ready for use!")
     

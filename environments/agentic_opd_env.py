@@ -21,8 +21,8 @@ Key idea (from OpenClaw-RL, Princeton 2026):
 
 The trainer then computes per-token advantages:
   A_t = teacher_logprob(token_t) - student_logprob(token_t)
-  Positive → teacher approves this token (upweight)
-  Negative → teacher disapproves (downweight)
+  Positive -> teacher approves this token (upweight)
+  Negative -> teacher disapproves (downweight)
 
 This gives dense, token-level training signal from every tool interaction,
 instead of just a scalar reward at the end of the trajectory.
@@ -91,9 +91,9 @@ from environments.tool_context import ToolContext
 logger = logging.getLogger(__name__)
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# -----------------------------------------------------------------------
 # Built-in coding tasks (fallback when no HF dataset is configured)
-# ═══════════════════════════════════════════════════════════════════════
+# -----------------------------------------------------------------------
 
 BUILTIN_CODING_TASKS = [
     {
@@ -214,9 +214,9 @@ BUILTIN_CODING_TASKS = [
 ]
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# -----------------------------------------------------------------------
 # Hint extraction prompts (adapted from OpenClaw-RL)
-# ═══════════════════════════════════════════════════════════════════════
+# -----------------------------------------------------------------------
 
 _HINT_JUDGE_SYSTEM = (
     "You are a process reward model used for hindsight hint extraction.\n"
@@ -310,9 +310,9 @@ def _append_hint_to_messages(messages: list[dict], hint: str) -> list[dict]:
     return cloned
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# -----------------------------------------------------------------------
 # Configuration
-# ═══════════════════════════════════════════════════════════════════════
+# -----------------------------------------------------------------------
 
 
 class AgenticOPDConfig(HermesAgentEnvConfig):
@@ -371,9 +371,9 @@ class AgenticOPDConfig(HermesAgentEnvConfig):
     )
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# -----------------------------------------------------------------------
 # Environment
-# ═══════════════════════════════════════════════════════════════════════
+# -----------------------------------------------------------------------
 
 
 class AgenticOPDEnv(HermesAgentBaseEnv):
@@ -448,9 +448,9 @@ class AgenticOPDEnv(HermesAgentBaseEnv):
         self._hints_extracted_buffer: list[int] = []
         self._opd_turns_scored_buffer: list[int] = []
 
-    # ═══════════════════════════════════════════════════════════════════
+    # -------------------------------------------------------------------
     # 1. setup — load dataset
-    # ═══════════════════════════════════════════════════════════════════
+    # -------------------------------------------------------------------
 
     async def setup(self) -> None:
         """Load coding tasks from HuggingFace or use built-in set."""
@@ -508,9 +508,9 @@ class AgenticOPDEnv(HermesAgentBaseEnv):
             len(self._eval_items),
         )
 
-    # ═══════════════════════════════════════════════════════════════════
+    # -------------------------------------------------------------------
     # 2. get_next_item
-    # ═══════════════════════════════════════════════════════════════════
+    # -------------------------------------------------------------------
 
     async def get_next_item(self) -> dict:
         """Return the next coding task, cycling through the dataset."""
@@ -520,9 +520,9 @@ class AgenticOPDEnv(HermesAgentBaseEnv):
         self._index += 1
         return item
 
-    # ═══════════════════════════════════════════════════════════════════
+    # -------------------------------------------------------------------
     # 3. format_prompt
-    # ═══════════════════════════════════════════════════════════════════
+    # -------------------------------------------------------------------
 
     def format_prompt(self, item: dict) -> str:
         """Format the coding task as a user prompt."""
@@ -544,9 +544,9 @@ class AgenticOPDEnv(HermesAgentBaseEnv):
         )
         return prompt
 
-    # ═══════════════════════════════════════════════════════════════════
+    # -------------------------------------------------------------------
     # 4. compute_reward
-    # ═══════════════════════════════════════════════════════════════════
+    # -------------------------------------------------------------------
 
     async def compute_reward(
         self,
@@ -628,7 +628,7 @@ class AgenticOPDEnv(HermesAgentBaseEnv):
         self._tool_usage_buffer.append(tool_usage)
 
         logger.debug(
-            "Reward: correctness=%.2f, efficiency=%.2f, tool_usage=%.2f → %.3f",
+            "Reward: correctness=%.2f, efficiency=%.2f, tool_usage=%.2f -> %.3f",
             correctness,
             efficiency,
             tool_usage,
@@ -636,9 +636,9 @@ class AgenticOPDEnv(HermesAgentBaseEnv):
         )
         return reward
 
-    # ═══════════════════════════════════════════════════════════════════
+    # -------------------------------------------------------------------
     # 5. collect_trajectories — OPD pipeline
-    # ═══════════════════════════════════════════════════════════════════
+    # -------------------------------------------------------------------
 
     async def collect_trajectories(
         self, item: Item
@@ -649,7 +649,7 @@ class AgenticOPDEnv(HermesAgentBaseEnv):
         """
         Override collect_trajectories to add the OPD pipeline.
 
-        1. Run standard rollouts via super() → ScoredDataGroup with tokens/masks/scores
+        1. Run standard rollouts via super() -> ScoredDataGroup with tokens/masks/scores
         2. For each rollout, extract hints from next-state signals
         3. Score student tokens under enhanced (hint-augmented) distribution
         4. Add distill_token_ids / distill_logprobs to the ScoredDataGroup
@@ -1001,9 +1001,9 @@ class AgenticOPDEnv(HermesAgentBaseEnv):
                 return i
         return None
 
-    # ═══════════════════════════════════════════════════════════════════
+    # -------------------------------------------------------------------
     # 6. evaluate
-    # ═══════════════════════════════════════════════════════════════════
+    # -------------------------------------------------------------------
 
     async def evaluate(self, *args, **kwargs) -> None:
         """
@@ -1105,7 +1105,7 @@ class AgenticOPDEnv(HermesAgentBaseEnv):
                 )
 
                 logger.info(
-                    "  → correctness=%.2f, reward=%.3f, turns=%d",
+                    "  -> correctness=%.2f, reward=%.3f, turns=%d",
                     correctness,
                     reward,
                     result.turns_used,
@@ -1152,9 +1152,9 @@ class AgenticOPDEnv(HermesAgentBaseEnv):
             end_time=end_time,
         )
 
-    # ═══════════════════════════════════════════════════════════════════
+    # -------------------------------------------------------------------
     # 7. wandb_log — custom OPD metrics
-    # ═══════════════════════════════════════════════════════════════════
+    # -------------------------------------------------------------------
 
     async def wandb_log(self, wandb_metrics: Optional[Dict] = None) -> None:
         """Log reward breakdown and OPD-specific metrics to wandb."""
@@ -1206,9 +1206,9 @@ class AgenticOPDEnv(HermesAgentBaseEnv):
         await super().wandb_log(wandb_metrics)
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# -----------------------------------------------------------------------
 # Entry point
-# ═══════════════════════════════════════════════════════════════════════
+# -----------------------------------------------------------------------
 
 if __name__ == "__main__":
     AgenticOPDEnv.cli()

@@ -11,7 +11,7 @@ from agent.model_metadata import get_model_context_length
 from agent.models_dev import PROVIDER_TO_MODELS_DEV, list_agentic_models, _NOISE_PATTERNS
 
 
-# ── Provider Registry ──
+# -- Provider Registry --
 
 class TestGeminiProviderRegistry:
     def test_gemini_in_registry(self):
@@ -33,7 +33,7 @@ class TestGeminiProviderRegistry:
         assert "generativelanguage.googleapis.com" in PROVIDER_REGISTRY["gemini"].inference_base_url
 
 
-# ── Provider Aliases ──
+# -- Provider Aliases --
 
 PROVIDER_ENV_VARS = (
     "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
@@ -72,7 +72,7 @@ class TestGeminiAliases:
         assert normalize_provider("google-ai-studio") == "gemini"
 
 
-# ── Auto-detection ──
+# -- Auto-detection --
 
 class TestGeminiAutoDetection:
     def test_auto_detects_google_api_key(self, monkeypatch):
@@ -91,7 +91,7 @@ class TestGeminiAutoDetection:
         assert creds["source"] == "GOOGLE_API_KEY"
 
 
-# ── Credential Resolution ──
+# -- Credential Resolution --
 
 class TestGeminiCredentials:
     def test_resolve_with_google_api_key(self, monkeypatch):
@@ -122,7 +122,7 @@ class TestGeminiCredentials:
         assert result["base_url"] == "https://generativelanguage.googleapis.com/v1beta/openai"
 
 
-# ── Model Catalog ──
+# -- Model Catalog --
 
 class TestGeminiModelCatalog:
     def test_provider_models_exist(self):
@@ -143,7 +143,7 @@ class TestGeminiModelCatalog:
         assert _PROVIDER_LABELS["gemini"] == "Google AI Studio"
 
 
-# ── Model Normalization ──
+# -- Model Normalization --
 
 class TestGeminiModelNormalization:
     def test_passthrough_bare_name(self):
@@ -167,7 +167,7 @@ class TestGeminiModelNormalization:
         assert result == "google/gemma-4-31b-it"
 
 
-# ── Context Length ──
+# -- Context Length --
 
 class TestGeminiContextLength:
     def test_gemma_4_31b_context(self):
@@ -183,7 +183,7 @@ class TestGeminiContextLength:
         assert ctx == 1048576
 
 
-# ── Agent Init (no SyntaxError) ──
+# -- Agent Init (no SyntaxError) --
 
 class TestGeminiAgentInit:
     def test_agent_imports_without_error(self):
@@ -239,7 +239,7 @@ class TestGeminiAgentInit:
         assert "x-goog-api-key" not in headers
 
 
-# ── models.dev Integration ──
+# -- models.dev Integration --
 
 class TestGeminiModelsDev:
     def test_gemini_mapped_to_google(self):

@@ -24,8 +24,8 @@ def check(p):
     return dict(mw=mw,logp=logp,hbd=hbd,hba=hba,rot=rot,tpsa=tpsa,violations=v,ro5=v<=1,veber=tpsa<=140 and rot<=10,ok=v<=1 and tpsa<=140 and rot<=10)
 
 def report(name, r):
-    if not r: print(f"✗ {name:30s} — not found"); return
-    s = "✓ PASS" if r["ok"] else "✗ FAIL"
+    if not r: print(f"[ERR] {name:30s} — not found"); return
+    s = "[OK] PASS" if r["ok"] else "[ERR] FAIL"
     flags = (f" [Ro5 violations:{r['violations']}]" if not r["ro5"] else "") + (" [Veber fail]" if not r["veber"] else "")
     print(f"{s}  {name:28s} MW={r['mw']:.0f} LogP={r['logp']:.2f} HBD={r['hbd']} HBA={r['hba']} TPSA={r['tpsa']:.0f} RotB={r['rot']}{flags}")
 

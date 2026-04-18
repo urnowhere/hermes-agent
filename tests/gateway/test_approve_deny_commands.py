@@ -341,7 +341,7 @@ class TestBareTextNoLongerApproves:
 
 
 class TestBlockingApprovalE2E:
-    """Test the full blocking flow: agent thread blocks → user approves → agent resumes."""
+    """Test the full blocking flow: agent thread blocks -> user approves -> agent resumes."""
 
     def setup_method(self):
         _clear_approval_state()

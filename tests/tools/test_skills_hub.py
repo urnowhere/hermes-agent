@@ -409,7 +409,7 @@ class TestSkillsShSource:
                 resp.status_code = 404
                 return resp
             if url.endswith("owner/repo"):
-                # Repo info → default branch
+                # Repo info -> default branch
                 resp.status_code = 200
                 resp.json = lambda: {"default_branch": "main"}
                 return resp

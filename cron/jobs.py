@@ -98,9 +98,9 @@ def parse_duration(s: str) -> int:
     Parse duration string into minutes.
     
     Examples:
-        "30m" → 30
-        "2h" → 120
-        "1d" → 1440
+        "30m" -> 30
+        "2h" -> 120
+        "1d" -> 1440
     """
     s = s.strip().lower()
     match = re.match(r'^(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$', s)
@@ -125,18 +125,18 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
         - For "cron": "expr" (cron expression)
     
     Examples:
-        "30m"              → once in 30 minutes
-        "2h"               → once in 2 hours
-        "every 30m"        → recurring every 30 minutes
-        "every 2h"         → recurring every 2 hours
-        "0 9 * * *"        → cron expression
-        "2026-02-03T14:00" → once at timestamp
+        "30m"              -> once in 30 minutes
+        "2h"               -> once in 2 hours
+        "every 30m"        -> recurring every 30 minutes
+        "every 2h"         -> recurring every 2 hours
+        "0 9 * * *"        -> cron expression
+        "2026-02-03T14:00" -> once at timestamp
     """
     schedule = schedule.strip()
     original = schedule
     schedule_lower = schedule.lower()
     
-    # "every X" pattern → recurring interval
+    # "every X" pattern -> recurring interval
     if schedule_lower.startswith("every "):
         duration_str = schedule[6:].strip()
         minutes = parse_duration(duration_str)
@@ -182,7 +182,7 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
         except ValueError as e:
             raise ValueError(f"Invalid timestamp '{schedule}': {e}")
     
-    # Duration like "30m", "2h", "1d" → one-shot from now
+    # Duration like "30m", "2h", "1d" -> one-shot from now
     try:
         minutes = parse_duration(schedule)
         run_at = _hermes_now() + timedelta(minutes=minutes)

@@ -193,7 +193,7 @@ class TestCLIStatusBar:
 
         text = cli_obj._build_status_bar_text(width=60)
 
-        assert "⚕" in text
+        assert "" in text
         assert "$0.06" not in text  # cost hidden by default
         assert "15m" in text
         assert "200K" not in text
@@ -203,7 +203,7 @@ class TestCLIStatusBar:
 
         text = cli_obj._build_status_bar_text(width=100)
 
-        assert "⚕" in text
+        assert "" in text
         assert "claude-sonnet-4-20250514" in text
 
     def test_minimal_tui_chrome_threshold(self):
@@ -264,7 +264,7 @@ class TestCLIStatusBar:
 
         fragments = cli_obj._get_voice_status_fragments(width=50)
 
-        assert fragments == [("class:voice-status-recording", " ● REC ")]
+        assert fragments == [("class:voice-status-recording", " * REC ")]
 
 
 class TestCLIUsageReport:

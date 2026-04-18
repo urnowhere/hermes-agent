@@ -52,7 +52,7 @@ def clarify_tool(
         if len(choices) > MAX_CHOICES:
             choices = choices[:MAX_CHOICES]
         if not choices:
-            choices = None  # empty list → open-ended
+            choices = None  # empty list -> open-ended
 
     if callback is None:
         return json.dumps(

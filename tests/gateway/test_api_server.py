@@ -556,7 +556,7 @@ class TestChatCompletionsEndpoint:
 
     @pytest.mark.asyncio
     async def test_stream_includes_tool_progress(self, adapter):
-        """tool_progress_callback fires → progress appears as custom SSE event, not in delta.content."""
+        """tool_progress_callback fires -> progress appears as custom SSE event, not in delta.content."""
         import asyncio
 
         app = _create_app(adapter)

@@ -166,7 +166,12 @@ class SSHEnvironment(BaseEnvironment):
             for host_path, remote_path in files:
                 staged = os.path.join(staging, remote_path.lstrip("/"))
                 os.makedirs(os.path.dirname(staged), exist_ok=True)
-                os.symlink(os.path.abspath(host_path), staged)
+                try:
+                    os.symlink(os.path.abspath(host_path), staged)
+                except OSError:
+                    # Windows requires admin/Developer Mode for symlinks
+                    import shutil
+                    shutil.copy2(os.path.abspath(host_path), staged)
 
             tar_cmd = ["tar", "-chf", "-", "-C", staging, "."]
             ssh_cmd = self._build_ssh_command()

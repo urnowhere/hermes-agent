@@ -35,13 +35,13 @@ class TestIsLikelyBinary:
 
     def test_binary_content_returns_true(self, ops):
         """Content with >30% non-printable characters should be classified as binary."""
-        # 500 NUL bytes + 500 printable = 50% non-printable → binary
+        # 500 NUL bytes + 500 printable = 50% non-printable -> binary
         # Use .xyz extension (not in BINARY_EXTENSIONS) to ensure content analysis runs
         sample = "\x00" * 500 + "a" * 500
         assert ops._is_likely_binary("data.xyz", content_sample=sample) is True
 
     def test_no_content_sample_returns_false(self, ops):
-        """When no content sample is provided and extension is unknown → not binary."""
+        """When no content sample is provided and extension is unknown -> not binary."""
         assert ops._is_likely_binary("mystery_file") is False
 
     def test_none_content_sample_returns_false(self, ops):
@@ -49,17 +49,17 @@ class TestIsLikelyBinary:
         assert ops._is_likely_binary("mystery_file", content_sample=None) is False
 
     def test_empty_string_content_sample_returns_false(self, ops):
-        """Empty string is falsy, so content analysis should be skipped → not binary."""
+        """Empty string is falsy, so content analysis should be skipped -> not binary."""
         assert ops._is_likely_binary("mystery_file", content_sample="") is False
 
     def test_threshold_boundary(self, ops):
         """Exactly 30% non-printable should NOT trigger binary classification (> 0.30, not >=)."""
-        # 300 NUL bytes + 700 printable = 30.0% → should be False (uses strict >)
+        # 300 NUL bytes + 700 printable = 30.0% -> should be False (uses strict >)
         sample = "\x00" * 300 + "a" * 700
         assert ops._is_likely_binary("data.xyz", content_sample=sample) is False
 
     def test_just_above_threshold(self, ops):
-        """301/1000 = 30.1% non-printable → should be binary."""
+        """301/1000 = 30.1% non-printable -> should be binary."""
         sample = "\x00" * 301 + "a" * 699
         assert ops._is_likely_binary("data.xyz", content_sample=sample) is True
 
@@ -70,8 +70,8 @@ class TestIsLikelyBinary:
 
     def test_content_sample_longer_than_1000(self, ops):
         """Only the first 1000 characters should be analysed."""
-        # First 1000 chars: 200 NUL + 800 printable = 20% → not binary
-        # Remaining 1000 chars: all NUL → ignored by [:1000] slice
+        # First 1000 chars: 200 NUL + 800 printable = 20% -> not binary
+        # Remaining 1000 chars: all NUL -> ignored by [:1000] slice
         sample = "\x00" * 200 + "a" * 800 + "\x00" * 1000
         assert ops._is_likely_binary("file.xyz", content_sample=sample) is False
 

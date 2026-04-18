@@ -143,11 +143,11 @@ def test_discord_human_still_checked_against_allowlist_when_bot_policy_set(monke
     monkeypatch.setenv("DISCORD_ALLOW_BOTS", "all")
     monkeypatch.setenv("DISCORD_ALLOWED_USERS", "100200300")
 
-    # Human NOT on the allowlist → must be rejected.
+    # Human NOT on the allowlist -> must be rejected.
     source = _make_discord_human_source(user_id="999999999")
     assert runner._is_user_authorized(source) is False
 
-    # Human ON the allowlist → accepted.
+    # Human ON the allowlist -> accepted.
     source_allowed = _make_discord_human_source(user_id="100200300")
     assert runner._is_user_authorized(source_allowed) is True
 
@@ -201,7 +201,7 @@ def test_discord_role_config_still_authorizes_alongside_users(monkeypatch):
     monkeypatch.setenv("DISCORD_ALLOWED_ROLES", "1493705176387948674")
     monkeypatch.setenv("DISCORD_ALLOWED_USERS", "100200300")
 
-    # User on the user allowlist, no role → still authorized at gateway
+    # User on the user allowlist, no role -> still authorized at gateway
     # level via the role bypass (adapter already approved them).
     source = _make_discord_human_source(user_id="100200300")
     assert runner._is_user_authorized(source) is True

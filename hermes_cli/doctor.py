@@ -69,6 +69,8 @@ def _system_package_install_cmd(pkg: str) -> str:
         return f"pkg install {pkg}"
     if sys.platform == "darwin":
         return f"brew install {pkg}"
+    if sys.platform == "win32":
+        return f"winget install {pkg}  (or download from official website)"
     return f"sudo apt install {pkg}"
 
 
@@ -116,16 +118,16 @@ def _apply_doctor_tool_availability_overrides(available: list[str], unavailable:
 
 
 def check_ok(text: str, detail: str = ""):
-    print(f"  {color('✓', Colors.GREEN)} {text}" + (f" {color(detail, Colors.DIM)}" if detail else ""))
+    print(f"  {color('[OK]', Colors.GREEN)} {text}" + (f" {color(detail, Colors.DIM)}" if detail else ""))
 
 def check_warn(text: str, detail: str = ""):
-    print(f"  {color('⚠', Colors.YELLOW)} {text}" + (f" {color(detail, Colors.DIM)}" if detail else ""))
+    print(f"  {color('[WARN]', Colors.YELLOW)} {text}" + (f" {color(detail, Colors.DIM)}" if detail else ""))
 
 def check_fail(text: str, detail: str = ""):
-    print(f"  {color('✗', Colors.RED)} {text}" + (f" {color(detail, Colors.DIM)}" if detail else ""))
+    print(f"  {color('[ERR]', Colors.RED)} {text}" + (f" {color(detail, Colors.DIM)}" if detail else ""))
 
 def check_info(text: str):
-    print(f"    {color('→', Colors.CYAN)} {text}")
+    print(f"    {color('->', Colors.CYAN)} {text}")
 
 
 def _check_gateway_service_linger(issues: list[str]) -> None:
@@ -174,9 +176,9 @@ def run_doctor(args):
     fixed_count = 0
     
     print()
-    print(color("┌─────────────────────────────────────────────────────────┐", Colors.CYAN))
-    print(color("│                 🩺 Hermes Doctor                        │", Colors.CYAN))
-    print(color("└─────────────────────────────────────────────────────────┘", Colors.CYAN))
+    print(color("+---------------------------------------------------------+", Colors.CYAN))
+    print(color("|                  Hermes Doctor                        |", Colors.CYAN))
+    print(color("+---------------------------------------------------------+", Colors.CYAN))
     
     # =========================================================================
     # Check: Python version
@@ -302,7 +304,7 @@ def run_doctor(args):
             current_ver, latest_ver = check_config_version()
             if current_ver < latest_ver:
                 check_warn(
-                    f"Config version outdated (v{current_ver} → v{latest_ver})",
+                    f"Config version outdated (v{current_ver} -> v{latest_ver})",
                     "(new settings available)"
                 )
                 if should_fix:
@@ -522,7 +524,7 @@ def run_doctor(args):
                     conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
                     conn.close()
                     new_size = wal_path.stat().st_size if wal_path.exists() else 0
-                    check_ok(f"WAL checkpoint performed ({wal_size // 1024}K → {new_size // 1024}K)")
+                    check_ok(f"WAL checkpoint performed ({wal_size // 1024}K -> {new_size // 1024}K)")
                     fixed_count += 1
                 else:
                     issues.append("Large WAL file — run 'hermes doctor --fix' to checkpoint")
@@ -575,16 +577,16 @@ def run_doctor(args):
                 _target = _cmd_link.resolve()
                 _expected = _venv_bin.resolve()
                 if _target == _expected:
-                    check_ok(f"{_cmd_link_display}/hermes → correct target")
+                    check_ok(f"{_cmd_link_display}/hermes -> correct target")
                 else:
                     check_warn(
                         f"{_cmd_link_display}/hermes points to wrong target",
-                        f"(→ {_target}, expected → {_expected})"
+                        f"(-> {_target}, expected -> {_expected})"
                     )
                     if should_fix:
                         _cmd_link.unlink()
                         _cmd_link.symlink_to(_venv_bin)
-                        check_ok(f"Fixed symlink: {_cmd_link_display}/hermes → {_venv_bin}")
+                        check_ok(f"Fixed symlink: {_cmd_link_display}/hermes -> {_venv_bin}")
                         fixed_count += 1
                     else:
                         issues.append(f"Broken symlink at {_cmd_link_display}/hermes — run 'hermes doctor --fix'")
@@ -599,7 +601,7 @@ def run_doctor(args):
                 if should_fix:
                     _cmd_link_dir.mkdir(parents=True, exist_ok=True)
                     _cmd_link.symlink_to(_venv_bin)
-                    check_ok(f"Created symlink: {_cmd_link_display}/hermes → {_venv_bin}")
+                    check_ok(f"Created symlink: {_cmd_link_display}/hermes -> {_venv_bin}")
                     fixed_count += 1
 
                     # Check if the link dir is on PATH
@@ -774,14 +776,14 @@ def run_doctor(args):
                 timeout=10
             )
             if response.status_code == 200:
-                print(f"\r  {color('✓', Colors.GREEN)} OpenRouter API                          ")
+                print(f"\r  {color('[OK]', Colors.GREEN)} OpenRouter API                          ")
             elif response.status_code == 401:
-                print(f"\r  {color('✗', Colors.RED)} OpenRouter API {color('(invalid API key)', Colors.DIM)}                ")
+                print(f"\r  {color('[ERR]', Colors.RED)} OpenRouter API {color('(invalid API key)', Colors.DIM)}                ")
                 issues.append("Check OPENROUTER_API_KEY in .env")
             else:
-                print(f"\r  {color('✗', Colors.RED)} OpenRouter API {color(f'(HTTP {response.status_code})', Colors.DIM)}                ")
+                print(f"\r  {color('[ERR]', Colors.RED)} OpenRouter API {color(f'(HTTP {response.status_code})', Colors.DIM)}                ")
         except Exception as e:
-            print(f"\r  {color('✗', Colors.RED)} OpenRouter API {color(f'({e})', Colors.DIM)}                ")
+            print(f"\r  {color('[ERR]', Colors.RED)} OpenRouter API {color(f'({e})', Colors.DIM)}                ")
             issues.append("Check network connectivity")
     else:
         check_warn("OpenRouter API", "(not configured)")
@@ -806,14 +808,14 @@ def run_doctor(args):
                 timeout=10
             )
             if response.status_code == 200:
-                print(f"\r  {color('✓', Colors.GREEN)} Anthropic API                           ")
+                print(f"\r  {color('[OK]', Colors.GREEN)} Anthropic API                           ")
             elif response.status_code == 401:
-                print(f"\r  {color('✗', Colors.RED)} Anthropic API {color('(invalid API key)', Colors.DIM)}                 ")
+                print(f"\r  {color('[ERR]', Colors.RED)} Anthropic API {color('(invalid API key)', Colors.DIM)}                 ")
             else:
                 msg = "(couldn't verify)"
-                print(f"\r  {color('⚠', Colors.YELLOW)} Anthropic API {color(msg, Colors.DIM)}                 ")
+                print(f"\r  {color('[WARN]', Colors.YELLOW)} Anthropic API {color(msg, Colors.DIM)}                 ")
         except Exception as e:
-            print(f"\r  {color('⚠', Colors.YELLOW)} Anthropic API {color(f'({e})', Colors.DIM)}                 ")
+            print(f"\r  {color('[WARN]', Colors.YELLOW)} Anthropic API {color(f'({e})', Colors.DIM)}                 ")
 
     # -- API-key providers --
     # Tuple: (name, env_vars, default_url, base_env, supports_models_endpoint)
@@ -846,13 +848,13 @@ def run_doctor(args):
             _label = _pname.ljust(20)
             # Some providers (like MiniMax) don't support /models endpoint
             if not _supports_health_check:
-                print(f"  {color('✓', Colors.GREEN)} {_label} {color('(key configured)', Colors.DIM)}")
+                print(f"  {color('[OK]', Colors.GREEN)} {_label} {color('(key configured)', Colors.DIM)}")
                 continue
             print(f"  Checking {_pname} API...", end="", flush=True)
             try:
                 import httpx
                 _base = os.getenv(_base_env, "") if _base_env else ""
-                # Auto-detect Kimi Code keys (sk-kimi-) → api.kimi.com
+                # Auto-detect Kimi Code keys (sk-kimi-) -> api.kimi.com
                 if not _base and _key.startswith("sk-kimi-"):
                     _base = "https://api.kimi.com/coding/v1"
                 # Anthropic-compat endpoints (/anthropic) don't support /models.
@@ -870,14 +872,14 @@ def run_doctor(args):
                     timeout=10,
                 )
                 if _resp.status_code == 200:
-                    print(f"\r  {color('✓', Colors.GREEN)} {_label}                          ")
+                    print(f"\r  {color('[OK]', Colors.GREEN)} {_label}                          ")
                 elif _resp.status_code == 401:
-                    print(f"\r  {color('✗', Colors.RED)} {_label} {color('(invalid API key)', Colors.DIM)}           ")
+                    print(f"\r  {color('[ERR]', Colors.RED)} {_label} {color('(invalid API key)', Colors.DIM)}           ")
                     issues.append(f"Check {_env_vars[0]} in .env")
                 else:
-                    print(f"\r  {color('⚠', Colors.YELLOW)} {_label} {color(f'(HTTP {_resp.status_code})', Colors.DIM)}           ")
+                    print(f"\r  {color('[WARN]', Colors.YELLOW)} {_label} {color(f'(HTTP {_resp.status_code})', Colors.DIM)}           ")
             except Exception as _e:
-                print(f"\r  {color('⚠', Colors.YELLOW)} {_label} {color(f'({_e})', Colors.DIM)}           ")
+                print(f"\r  {color('[WARN]', Colors.YELLOW)} {_label} {color(f'({_e})', Colors.DIM)}           ")
 
     # -- AWS Bedrock --
     # Bedrock uses the AWS SDK credential chain, not API keys.
@@ -893,13 +895,14 @@ def run_doctor(args):
                 _br_client = boto3.client("bedrock", region_name=_region)
                 _br_resp = _br_client.list_foundation_models()
                 _model_count = len(_br_resp.get("modelSummaries", []))
-                print(f"\r  {color('✓', Colors.GREEN)} {_label} {color(f'({_auth_var}, {_region}, {_model_count} models)', Colors.DIM)}           ")
+                print(f"\r  {color('[OK]', Colors.GREEN)} {_label} {color(f'({_auth_var}, {_region}, {_model_count} models)', Colors.DIM)}           ")
             except ImportError:
                 print(f"\r  {color('⚠', Colors.YELLOW)} {_label} {color(f'(boto3 not installed — {sys.executable} -m pip install boto3)', Colors.DIM)}           ")
                 issues.append(f"Install boto3 for Bedrock: {sys.executable} -m pip install boto3")
+
             except Exception as _e:
                 _err_name = type(_e).__name__
-                print(f"\r  {color('⚠', Colors.YELLOW)} {_label} {color(f'({_err_name}: {_e})', Colors.DIM)}           ")
+                print(f"\r  {color('[WARN]', Colors.YELLOW)} {_label} {color(f'({_err_name}: {_e})', Colors.DIM)}           ")
                 issues.append(f"AWS Bedrock: {_err_name} — check IAM permissions for bedrock:ListFoundationModels")
     except ImportError:
         pass  # bedrock_adapter not available — skip silently
@@ -1090,7 +1093,7 @@ def run_doctor(args):
                 if p.model:
                     parts.append(p.model[:30])
                 if not (p.path / "config.yaml").exists():
-                    parts.append("⚠ missing config")
+                    parts.append("[WARN] missing config")
                 if not (p.path / ".env").exists():
                     parts.append("no .env")
                 wrapper = wrapper_dir / p.name
@@ -1109,7 +1112,7 @@ def run_doctor(args):
                         if "hermes -p" in content:
                             _m = _re.search(r"hermes -p (\S+)", content)
                             if _m and not profile_exists(_m.group(1)):
-                                check_warn(f"Orphan alias: {wrapper.name} → profile '{_m.group(1)}' no longer exists")
+                                check_warn(f"Orphan alias: {wrapper.name} -> profile '{_m.group(1)}' no longer exists")
                     except Exception:
                         pass
     except ImportError:
@@ -1123,7 +1126,7 @@ def run_doctor(args):
     print()
     remaining_issues = issues + manual_issues
     if should_fix and fixed_count > 0:
-        print(color("─" * 60, Colors.GREEN))
+        print(color("-" * 60, Colors.GREEN))
         print(color(f"  Fixed {fixed_count} issue(s).", Colors.GREEN, Colors.BOLD), end="")
         if remaining_issues:
             print(color(f" {len(remaining_issues)} issue(s) require manual intervention.", Colors.YELLOW, Colors.BOLD))
@@ -1135,7 +1138,7 @@ def run_doctor(args):
                 print(f"  {i}. {issue}")
             print()
     elif remaining_issues:
-        print(color("─" * 60, Colors.YELLOW))
+        print(color("-" * 60, Colors.YELLOW))
         print(color(f"  Found {len(remaining_issues)} issue(s) to address:", Colors.YELLOW, Colors.BOLD))
         print()
         for i, issue in enumerate(remaining_issues, 1):
@@ -1144,7 +1147,7 @@ def run_doctor(args):
         if not should_fix:
             print(color("  Tip: run 'hermes doctor --fix' to auto-fix what's possible.", Colors.DIM))
     else:
-        print(color("─" * 60, Colors.GREEN))
+        print(color("-" * 60, Colors.GREEN))
         print(color("  All checks passed! 🎉", Colors.GREEN, Colors.BOLD))
     
     print()

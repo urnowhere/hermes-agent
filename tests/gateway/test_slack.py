@@ -592,7 +592,7 @@ class TestSendTyping:
 
 
 # ---------------------------------------------------------------------------
-# TestFormatMessage — Markdown → mrkdwn conversion
+# TestFormatMessage — Markdown -> mrkdwn conversion
 # ---------------------------------------------------------------------------
 
 
@@ -1022,7 +1022,7 @@ class TestReactions:
         }
         await adapter._handle_slack_message(event)
 
-        # Should have added 👀, then removed 👀, then added ✅
+        # Should have added 👀, then removed 👀, then added [OK]
         add_calls = adapter._app.client.reactions_add.call_args_list
         remove_calls = adapter._app.client.reactions_remove.call_args_list
         assert len(add_calls) == 2
@@ -1418,7 +1418,7 @@ class TestMessageSplitting:
 
     @pytest.mark.asyncio
     async def test_send_preserves_blockquote_formatting(self, adapter):
-        """Blockquote '>' markers must survive format → chunk → send pipeline."""
+        """Blockquote '>' markers must survive format -> chunk -> send pipeline."""
         adapter._app.client.chat_postMessage = AsyncMock(return_value={"ts": "ts1"})
         await adapter.send("C123", "> quoted text\nnormal text")
         kwargs = adapter._app.client.chat_postMessage.call_args.kwargs
@@ -1697,7 +1697,7 @@ class TestProgressMessageThread:
         adapter._app.client.chat_postMessage = AsyncMock(return_value={"ts": "reply_ts"})
         result = await adapter.send(
             chat_id="D_DM",
-            content="⚙️ working...",
+            content="️ working...",
             metadata={"thread_id": msg_event.message_id},
         )
         assert result.success

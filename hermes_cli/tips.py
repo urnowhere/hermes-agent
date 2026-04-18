@@ -22,7 +22,7 @@ TIPS = [
     "/queue <prompt> queues a message for the next turn without interrupting the current one.",
     "/undo removes the last user/assistant exchange from the conversation.",
     "/retry resends your last message — useful when the agent's response wasn't quite right.",
-    "/verbose cycles tool progress display: off → new → all → verbose.",
+    "/verbose cycles tool progress display: off -> new -> all -> verbose.",
     "/reasoning high increases the model's thinking depth. /reasoning show displays the reasoning.",
     "/fast toggles priority processing for faster API responses (provider-dependent).",
     "/yolo skips all dangerous command approval prompts for the rest of the session.",
@@ -155,7 +155,7 @@ TIPS = [
 
     # --- Sessions ---
     "Sessions auto-generate descriptive titles after the first exchange — no manual naming needed.",
-    "Session titles support lineage: \"my project\" → \"my project #2\" → \"my project #3\".",
+    "Session titles support lineage: \"my project\" -> \"my project #2\" -> \"my project #3\".",
     "When exiting, Hermes prints a resume command with session ID and stats.",
     "hermes sessions export backup.jsonl exports all sessions for backup or analysis.",
     "hermes -r SESSION_ID resumes any specific past session by its ID.",
@@ -296,7 +296,7 @@ TIPS = [
     "Each profile gets its own subprocess HOME at HERMES_HOME/home/ — isolated git, ssh, npm, gh configs.",
     "HERMES_HOME_MODE env var (octal, e.g. 0701) sets custom directory permissions for web server traversal.",
     "Container mode: place .container-mode in HERMES_HOME and the host CLI auto-execs into the container.",
-    "Ctrl+C has 5 priority tiers: cancel recording → cancel prompts → cancel picker → interrupt agent → exit.",
+    "Ctrl+C has 5 priority tiers: cancel recording -> cancel prompts -> cancel picker -> interrupt agent -> exit.",
     "Every interrupt during an agent run is logged to ~/.hermes/interrupt_debug.log with timestamps.",
     "BROWSER_CDP_URL connects browser tools to any running Chrome — accepts WebSocket, HTTP, or host:port.",
     "BROWSERBASE_ADVANCED_STEALTH=true enables advanced anti-detection with custom Chromium (Scale Plan).",

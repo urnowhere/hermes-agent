@@ -36,7 +36,7 @@ def _run(capsys, argv: list[str]) -> dict:
     return json.loads(captured.out)
 
 
-# ── Add / List / Delete ──────────────────────────────────────────────────────
+# -- Add / List / Delete ------------------------------------------------------
 
 class TestCardCRUD:
     def test_add_creates_card(self, capsys):
@@ -100,7 +100,7 @@ class TestCardCRUD:
         assert list_result["cards"][0]["collection"] == "Keep"
 
 
-# ── Due Filtering ────────────────────────────────────────────────────────────
+# -- Due Filtering ------------------------------------------------------------
 
 class TestDueFiltering:
     def test_new_card_is_due(self, capsys):
@@ -131,7 +131,7 @@ class TestDueFiltering:
         assert result["cards"][0]["collection"] == "C1"
 
 
-# ── Rating and Rescheduling ──────────────────────────────────────────────────
+# -- Rating and Rescheduling --------------------------------------------------
 
 class TestRating:
     def test_hard_adds_1_day(self, capsys):
@@ -217,7 +217,7 @@ class TestRating:
             _run(capsys, ["rate", "--id", "nonexistent", "--rating", "easy"])
 
 
-# ── CSV Export/Import ────────────────────────────────────────────────────────
+# -- CSV Export/Import --------------------------------------------------------
 
 class TestCSV:
     def test_export_import_roundtrip(self, capsys, tmp_path):
@@ -281,7 +281,7 @@ class TestCSV:
             _run(capsys, ["import", "--file", str(tmp_path / "nope.csv"), "--collection", "X"])
 
 
-# ── Quiz Batch Add ───────────────────────────────────────────────────────────
+# -- Quiz Batch Add -----------------------------------------------------------
 
 class TestQuizBatchAdd:
     def test_add_quiz_creates_cards(self, capsys):
@@ -312,7 +312,7 @@ class TestQuizBatchAdd:
             _run(capsys, ["add-quiz", "--video-id", "x", "--questions", "not json"])
 
 
-# ── Statistics ───────────────────────────────────────────────────────────────
+# -- Statistics ---------------------------------------------------------------
 
 class TestStats:
     def test_stats_empty(self, capsys):
@@ -339,7 +339,7 @@ class TestStats:
         assert result["collections"] == {"C1": 2, "C2": 1}
 
 
-# ── Edge Cases ───────────────────────────────────────────────────────────────
+# -- Edge Cases ---------------------------------------------------------------
 
 class TestEdgeCases:
     def test_empty_deck_operations(self, capsys):
@@ -386,7 +386,7 @@ class TestEdgeCases:
         assert result["deleted_count"] == 0
 
 
-# ── User Answer Tracking ────────────────────────────────────────────────────
+# -- User Answer Tracking ----------------------------------------------------
 
 class TestUserAnswer:
     def test_rate_stores_user_answer(self, capsys):

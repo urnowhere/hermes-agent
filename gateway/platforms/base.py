@@ -171,9 +171,9 @@ def proxy_kwargs_for_bot(proxy_url: str | None) -> dict:
     """Build kwargs for ``commands.Bot()`` / ``discord.Client()`` with proxy.
 
     Returns:
-      - SOCKS URL  → ``{"connector": ProxyConnector(..., rdns=True)}``
-      - HTTP URL   → ``{"proxy": url}``
-      - *None*     → ``{}``
+      - SOCKS URL  -> ``{"connector": ProxyConnector(..., rdns=True)}``
+      - HTTP URL   -> ``{"proxy": url}``
+      - *None*     -> ``{}``
 
     ``rdns=True`` forces remote DNS resolution through the proxy — required
     by many SOCKS implementations (Shadowrocket, Clash) and essential for
@@ -201,9 +201,9 @@ def proxy_kwargs_for_aiohttp(proxy_url: str | None) -> tuple[dict, dict]:
     """Build kwargs for standalone ``aiohttp.ClientSession`` with proxy.
 
     Returns ``(session_kwargs, request_kwargs)`` where:
-      - SOCKS → ``({"connector": ProxyConnector(...)}, {})``
-      - HTTP  → ``({}, {"proxy": url})``
-      - None  → ``({}, {})``
+      - SOCKS -> ``({"connector": ProxyConnector(...)}, {})``
+      - HTTP  -> ``({}, {"proxy": url})``
+      - None  -> ``({}, {})``
 
     Usage::
 
@@ -1444,9 +1444,9 @@ class BasePlatformAdapter(ABC):
         """Resume typing indicator for a chat after approval resolves."""
         self._typing_paused.discard(chat_id)
 
-    # ── Processing lifecycle hooks ──────────────────────────────────────────
+    # -- Processing lifecycle hooks ------------------------------------------
     # Subclasses override these to react to message processing events
-    # (e.g. Discord adds 👀/✅/❌ reactions).
+    # (e.g. Discord adds 👀/[OK]/[ERR] reactions).
 
     async def on_processing_start(self, event: MessageEvent) -> None:
         """Hook called when background processing begins."""
@@ -2130,7 +2130,7 @@ class BasePlatformAdapter(ABC):
             # _safe_slice_pos() maps a custom-unit budget to the largest
             # codepoint offset whose custom length ≤ budget.
             if _len is not len:
-                # Map headroom (custom units) → codepoint slice length
+                # Map headroom (custom units) -> codepoint slice length
                 _cp_limit = _custom_unit_to_cp(remaining, headroom, _len)
             else:
                 _cp_limit = headroom

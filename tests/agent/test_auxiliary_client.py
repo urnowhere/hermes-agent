@@ -476,7 +476,7 @@ class TestGetTextAuxiliaryClient:
         assert isinstance(client, CodexAuxiliaryClient)
         assert model == "gpt-5.2-codex"
 
-# ── Payment / credit exhaustion fallback ─────────────────────────────────
+# -- Payment / credit exhaustion fallback ---------------------------------
 
 
 class TestIsPaymentError:

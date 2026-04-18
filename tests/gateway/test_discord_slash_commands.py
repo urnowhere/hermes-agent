@@ -528,7 +528,7 @@ class _FakeTextChannel:
 
 
 class _FakeThreadChannel(_discord_mod.Thread):
-    """isinstance(ch, discord.Thread) → True."""
+    """isinstance(ch, discord.Thread) -> True."""
 
     def __init__(self, channel_id=200, name="existing-thread", guild_name="TestGuild", parent_id=100):
         # Don't call super().__init__ — mock Thread is just an empty type
@@ -769,7 +769,7 @@ def test_register_skill_command_callback_dispatches_by_name(adapter):
     import asyncio
 
     fake_interaction = SimpleNamespace()
-    # gif-search → /gif-search with no args
+    # gif-search -> /gif-search with no args
     asyncio.run(skill_cmd.callback(fake_interaction, name="gif-search"))
     # dogfood with args
     asyncio.run(skill_cmd.callback(fake_interaction, name="dogfood", args="my test"))

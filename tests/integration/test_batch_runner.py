@@ -29,7 +29,7 @@ def create_test_dataset():
         for prompt in prompts:
             f.write(json.dumps(prompt, ensure_ascii=False) + "\n")
     
-    print(f"✅ Created test dataset: {test_file}")
+    print(f"[OK] Created test dataset: {test_file}")
     return test_file
 
 
@@ -47,28 +47,28 @@ def verify_output(run_name):
     
     # Check directory exists
     if not output_dir.exists():
-        print(f"❌ Output directory not found: {output_dir}")
+        print(f"[ERR] Output directory not found: {output_dir}")
         return False
     
     # Check for checkpoint
     checkpoint_file = output_dir / "checkpoint.json"
     if not checkpoint_file.exists():
-        print(f"❌ Checkpoint file not found: {checkpoint_file}")
+        print(f"[ERR] Checkpoint file not found: {checkpoint_file}")
         return False
     
     # Check for statistics
     stats_file = output_dir / "statistics.json"
     if not stats_file.exists():
-        print(f"❌ Statistics file not found: {stats_file}")
+        print(f"[ERR] Statistics file not found: {stats_file}")
         return False
     
     # Check for batch files
     batch_files = list(output_dir.glob("batch_*.jsonl"))
     if not batch_files:
-        print(f"❌ No batch files found in: {output_dir}")
+        print(f"[ERR] No batch files found in: {output_dir}")
         return False
     
-    print(f"✅ Output verification passed:")
+    print(f"[OK] Output verification passed:")
     print(f"   - Checkpoint: {checkpoint_file}")
     print(f"   - Statistics: {stats_file}")
     print(f"   - Batch files: {len(batch_files)}")

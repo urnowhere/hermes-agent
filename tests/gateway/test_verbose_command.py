@@ -124,7 +124,7 @@ class TestVerboseCommand:
         runner = _make_runner()
         result = await runner._handle_verbose_command(_make_event())
 
-        # Telegram default is "all" (high tier) → cycles to verbose
+        # Telegram default is "all" (high tier) -> cycles to verbose
         assert "VERBOSE" in result
         saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert saved["display"]["platforms"]["telegram"]["tool_progress"] == "verbose"
@@ -139,7 +139,7 @@ class TestVerboseCommand:
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
-        # No global tool_progress → built-in platform defaults apply
+        # No global tool_progress -> built-in platform defaults apply
         config_path.write_text(
             "display:\n  tool_progress_command: true\n",
             encoding="utf-8",

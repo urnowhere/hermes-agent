@@ -2913,7 +2913,7 @@ class TestMCPBuiltinCollisionGuard:
         mock_registry = ToolRegistry()
 
         # Pre-register a "built-in" tool with the name that the MCP tool would produce.
-        # Server "abc", tool "search" → mcp_abc_search
+        # Server "abc", tool "search" -> mcp_abc_search
         builtin_schema = {
             "name": "mcp_abc_search",
             "description": "A hypothetical built-in",

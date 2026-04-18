@@ -446,18 +446,18 @@ if __name__ == "__main__":
     api_available = check_openrouter_api_key()
     
     if not api_available:
-        print("❌ OPENROUTER_API_KEY environment variable not set")
+        print("[ERR] OPENROUTER_API_KEY environment variable not set")
         print("Please set your API key: export OPENROUTER_API_KEY='your-key-here'")
         print("Get API key at: https://openrouter.ai/")
         exit(1)
     else:
-        print("✅ OpenRouter API key found")
+        print("[OK] OpenRouter API key found")
     
     print("🛠️  MoA tools ready for use!")
     
     # Show current configuration
     config = get_moa_configuration()
-    print("\n⚙️  Current Configuration:")
+    print("\n️  Current Configuration:")
     print(f"  🤖 Reference models ({len(config['reference_models'])}): {', '.join(config['reference_models'])}")
     print(f"  🧠 Aggregator model: {config['aggregator_model']}")
     print(f"  🌡️  Reference temperature: {config['reference_temperature']}")

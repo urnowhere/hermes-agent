@@ -560,7 +560,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
 async def _send_telegram(token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False):
     """Send via Telegram Bot API (one-shot, no polling needed).
 
-    Applies markdown→MarkdownV2 formatting (same as the gateway adapter)
+    Applies markdown->MarkdownV2 formatting (same as the gateway adapter)
     so that bold, links, and headers render correctly.  If the message
     already contains HTML tags, it is sent with ``parse_mode='HTML'``
     instead, bypassing MarkdownV2 conversion.
@@ -577,7 +577,7 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
             formatted = message
             send_parse_mode = ParseMode.HTML
         else:
-            # Reuse the gateway adapter's format_message for markdown→MarkdownV2
+            # Reuse the gateway adapter's format_message for markdown->MarkdownV2
             try:
                 from gateway.platforms.telegram import TelegramAdapter
                 _adapter = TelegramAdapter.__new__(TelegramAdapter)

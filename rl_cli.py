@@ -36,7 +36,7 @@ from hermes_cli.env_loader import load_hermes_dotenv
 
 _loaded_env_paths = load_hermes_dotenv(hermes_home=_hermes_home, project_env=_project_env)
 for _env_path in _loaded_env_paths:
-    print(f"✅ Loaded environment variables from {_env_path}")
+    print(f"[OK] Loaded environment variables from {_env_path}")
 
 # Set terminal working directory to tinker-atropos submodule
 # This ensures terminal commands run in the right context for RL work
@@ -49,7 +49,7 @@ else:
     # Fall back to hermes-agent directory if submodule not found
     os.environ['TERMINAL_CWD'] = str(Path(__file__).parent)
     os.environ['HERMES_QUIET'] = '1'
-    print(f"⚠️  tinker-atropos submodule not found, using: {Path(__file__).parent}")
+    print(f"[WARN]️  tinker-atropos submodule not found, using: {Path(__file__).parent}")
 
 # Import agent and tools
 from run_agent import AIAgent
@@ -97,7 +97,7 @@ def load_hermes_config() -> dict:
                 config["base_url"] = file_config["base_url"]
                 
         except Exception as e:
-            print(f"⚠️  Warning: Failed to load config.yaml: {e}")
+            print(f"[WARN]️  Warning: Failed to load config.yaml: {e}")
     
     return config
 
@@ -190,7 +190,7 @@ def check_requirements():
         errors.append(f"Missing RL API keys: {', '.join(missing_rl_keys)}")
     
     if errors:
-        print("❌ Missing requirements:")
+        print("[ERR] Missing requirements:")
         for error in errors:
             print(f"   - {error}")
         print("\nPlease set these environment variables in your .env file or shell.")
@@ -281,7 +281,7 @@ def main(
     if base_url is None:
         base_url = config["base_url"]
     
-    print("🎯 RL Training Agent")
+    print(" RL Training Agent")
     print("=" * 60)
     
     # Handle setup check
@@ -289,19 +289,19 @@ def main(
         print("\n🔍 Checking tinker-atropos setup...")
         ok, result = check_tinker_atropos()
         if ok:
-            print("✅ tinker-atropos submodule found")
+            print("[OK] tinker-atropos submodule found")
             print(f"   Path: {result.get('path')}")
             print(f"   Environments found: {result.get('environments_count', 0)}")
             
             # Also check API keys
             missing = get_missing_keys()
             if missing:
-                print(f"\n⚠️  Missing API keys: {', '.join(missing)}")
+                print(f"\n[WARN]️  Missing API keys: {', '.join(missing)}")
                 print("   Add them to ~/.hermes/.env")
             else:
-                print("✅ API keys configured")
+                print("[OK] API keys configured")
         else:
-            print(f"❌ tinker-atropos not set up: {result}")
+            print(f"[ERR] tinker-atropos not set up: {result}")
             print("\nTo set up:")
             print("  git submodule update --init")
             print("  pip install -e ./tinker-atropos")
@@ -314,7 +314,7 @@ def main(
         try:
             data = list_environments_sync()
             if "error" in data:
-                print(f"❌ Error: {data['error']}")
+                print(f"[ERR] Error: {data['error']}")
                 return
             
             envs = data.get("environments", [])
@@ -335,7 +335,7 @@ def main(
             print(f"\n📊 Total: {len(envs)} environments")
             print("\nUse `rl_select_environment(name)` to select an environment for training.")
         except Exception as e:
-            print(f"❌ Error listing environments: {e}")
+            print(f"[ERR] Error listing environments: {e}")
             print("\nMake sure tinker-atropos is set up:")
             print("  git submodule update --init")
             print("  pip install -e ./tinker-atropos")
@@ -347,7 +347,7 @@ def main(
     
     # Set default task if none provided
     if not task and not interactive:
-        print("\n⚠️  No task provided. Use --interactive for interactive mode or provide a task.")
+        print("\n[WARN]️  No task provided. Use --interactive for interactive mode or provide a task.")
         print("\nExamples:")
         print('  python rl_cli.py "Train a model on GSM8k math problems"')
         print('  python rl_cli.py "Create an RL environment for code generation"')
@@ -357,7 +357,7 @@ def main(
     # Get API key
     api_key = api_key or os.getenv("OPENROUTER_API_KEY")
     if not api_key:
-        print("❌ No API key provided. Set OPENROUTER_API_KEY or pass --api-key")
+        print("[ERR] No API key provided. Set OPENROUTER_API_KEY or pass --api-key")
         sys.exit(1)
     
     print(f"\n🤖 Model: {model}")
@@ -387,7 +387,7 @@ def main(
         
         while True:
             try:
-                user_input = input("\n🎯 RL Task> ").strip()
+                user_input = input("\n RL Task> ").strip()
                 
                 if not user_input:
                     continue
@@ -419,7 +419,7 @@ def main(
                 print("\n\n👋 Interrupted. Goodbye!")
                 break
             except Exception as e:
-                print(f"\n❌ Error: {e}")
+                print(f"\n[ERR] Error: {e}")
                 if verbose:
                     import traceback
                     traceback.print_exc()
@@ -431,11 +431,11 @@ def main(
         try:
             response = agent.run_conversation(task)
             print("\n" + "=" * 60)
-            print("✅ Task completed")
+            print("[OK] Task completed")
         except KeyboardInterrupt:
-            print("\n\n⚠️ Interrupted by user")
+            print("\n\n[WARN]️ Interrupted by user")
         except Exception as e:
-            print(f"\n❌ Error: {e}")
+            print(f"\n[ERR] Error: {e}")
             if verbose:
                 import traceback
                 traceback.print_exc()

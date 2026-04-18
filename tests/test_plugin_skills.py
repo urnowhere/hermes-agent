@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 
 
-# ── Namespace helpers ─────────────────────────────────────────────────────
+# -- Namespace helpers -----------------------------------------------------
 
 
 class TestParseQualifiedName:
@@ -67,7 +67,7 @@ class TestIsValidNamespace:
         assert not is_valid_namespace("bad name")
 
 
-# ── Plugin skill registry (PluginManager + PluginContext) ─────────────────
+# -- Plugin skill registry (PluginManager + PluginContext) -----------------
 
 
 class TestPluginSkillRegistry:
@@ -160,7 +160,7 @@ class TestPluginContextRegisterSkill:
             ctx.register_skill("foo", tmp_path / "nonexistent.md")
 
 
-# ── skill_view qualified name dispatch ────────────────────────────────────
+# -- skill_view qualified name dispatch ------------------------------------
 
 
 class TestSkillViewQualifiedName:

@@ -395,7 +395,7 @@ class TestOptionalEnvVarsRegistry:
 
 
 class TestAnthropicTokenMigration:
-    """Test that config version 8→9 clears ANTHROPIC_TOKEN."""
+    """Test that config version 8->9 clears ANTHROPIC_TOKEN."""
 
     def _write_config_version(self, tmp_path, version):
         config_path = tmp_path / "config.yaml"

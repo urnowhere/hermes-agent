@@ -70,13 +70,13 @@ class TestProcessSessionField:
 
 class TestCheckWatchPatterns:
     def test_no_patterns_no_notification(self, registry):
-        """No watch_patterns → no notifications."""
+        """No watch_patterns -> no notifications."""
         session = _make_session(watch_patterns=[])
         registry._check_watch_patterns(session, "ERROR: something broke\n")
         assert registry.completion_queue.empty()
 
     def test_no_match_no_notification(self, registry):
-        """Output that doesn't match any pattern → no notification."""
+        """Output that doesn't match any pattern -> no notification."""
         session = _make_session(watch_patterns=["ERROR", "FAIL"])
         registry._check_watch_patterns(session, "INFO: all good\nDEBUG: fine\n")
         assert registry.completion_queue.empty()
@@ -238,7 +238,7 @@ class TestOverloadKillSwitch:
         session = _make_session(watch_patterns=["E"])
         # Start overload tracking
         session._watch_overload_since = time.time() - 10
-        # But window allows delivery → overload should reset
+        # But window allows delivery -> overload should reset
         registry._check_watch_patterns(session, "E ok\n")
         assert session._watch_overload_since == 0.0
         assert session._watch_disabled is False

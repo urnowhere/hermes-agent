@@ -100,7 +100,7 @@ class TestBuildChildProgressCallback:
         output = buf.getvalue()
         assert "web_search" in output
         assert "quantum computing" in output
-        assert "├─" in output
+        assert "├-" in output
 
     def test_cli_spinner_thinking_event(self):
         """Should print thinking line above spinner for CLI path."""
@@ -191,13 +191,14 @@ class TestBuildChildProgressCallback:
         parent._delegate_spinner = spinner
         parent.tool_progress_callback = None
         
-        # task_index=0 in a batch of 3 → prefix "[1]"
+        # task_index=0 in a batch of 3 -> prefix "[1]"
         cb0 = _build_child_progress_callback(0, "test goal", parent, task_count=3)
+
         cb0("web_search", "test")
         output = buf.getvalue()
         assert "[1]" in output
 
-        # task_index=2 in a batch of 3 → prefix "[3]"
+        # task_index=2 in a batch of 3 -> prefix "[3]"
         buf.truncate(0)
         buf.seek(0)
         cb2 = _build_child_progress_callback(2, "test goal", parent, task_count=3)

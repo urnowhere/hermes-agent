@@ -16,7 +16,7 @@ from hermes_constants import get_config_path, get_skills_dir
 
 logger = logging.getLogger(__name__)
 
-# ── Platform mapping ──────────────────────────────────────────────────────
+# -- Platform mapping ------------------------------------------------------
 
 PLATFORM_MAP = {
     "macos": "darwin",
@@ -26,7 +26,7 @@ PLATFORM_MAP = {
 
 EXCLUDED_SKILL_DIRS = frozenset((".git", ".github", ".hub"))
 
-# ── Lazy YAML loader ─────────────────────────────────────────────────────
+# -- Lazy YAML loader -----------------------------------------------------
 
 _yaml_load_fn = None
 
@@ -46,7 +46,7 @@ def yaml_load(content: str):
     return _yaml_load_fn(content)
 
 
-# ── Frontmatter parsing ──────────────────────────────────────────────────
+# -- Frontmatter parsing --------------------------------------------------
 
 
 def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
@@ -86,7 +86,7 @@ def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
     return frontmatter, body
 
 
-# ── Platform matching ─────────────────────────────────────────────────────
+# -- Platform matching -----------------------------------------------------
 
 
 def skill_matches_platform(frontmatter: Dict[str, Any]) -> bool:
@@ -115,7 +115,7 @@ def skill_matches_platform(frontmatter: Dict[str, Any]) -> bool:
     return False
 
 
-# ── Disabled skills ───────────────────────────────────────────────────────
+# -- Disabled skills -------------------------------------------------------
 
 
 def get_disabled_skill_names(platform: str | None = None) -> Set[str]:
@@ -168,7 +168,7 @@ def _normalize_string_set(values) -> Set[str]:
     return {str(v).strip() for v in values if str(v).strip()}
 
 
-# ── External skills directories ──────────────────────────────────────────
+# -- External skills directories ------------------------------------------
 
 
 def get_external_skills_dirs() -> List[Path]:
@@ -235,7 +235,7 @@ def get_all_skills_dirs() -> List[Path]:
     return dirs
 
 
-# ── Condition extraction ──────────────────────────────────────────────────
+# -- Condition extraction --------------------------------------------------
 
 
 def extract_skill_conditions(frontmatter: Dict[str, Any]) -> Dict[str, List]:
@@ -255,7 +255,7 @@ def extract_skill_conditions(frontmatter: Dict[str, Any]) -> Dict[str, List]:
     }
 
 
-# ── Skill config extraction ───────────────────────────────────────────────
+# -- Skill config extraction -----------------------------------------------
 
 
 def extract_skill_config_vars(frontmatter: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -412,7 +412,7 @@ def resolve_skill_config_values(
     return resolved
 
 
-# ── Description extraction ────────────────────────────────────────────────
+# -- Description extraction ------------------------------------------------
 
 
 def extract_skill_description(frontmatter: Dict[str, Any]) -> str:
@@ -426,7 +426,7 @@ def extract_skill_description(frontmatter: Dict[str, Any]) -> str:
     return desc
 
 
-# ── File iteration ────────────────────────────────────────────────────────
+# -- File iteration --------------------------------------------------------
 
 
 def iter_skill_index_files(skills_dir: Path, filename: str):
@@ -443,7 +443,7 @@ def iter_skill_index_files(skills_dir: Path, filename: str):
         yield path
 
 
-# ── Namespace helpers for plugin-provided skills ───────────────────────────
+# -- Namespace helpers for plugin-provided skills ---------------------------
 
 _NAMESPACE_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 

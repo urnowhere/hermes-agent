@@ -480,7 +480,7 @@ async def test_auto_thread_tracks_participation(monkeypatch):
 
 class TestThreadPersistence:
     def test_empty_state_file(self, tmp_path, monkeypatch):
-        """No state file → empty set."""
+        """No state file -> empty set."""
         from gateway.platforms.helpers import ThreadParticipationTracker
 
         monkeypatch.setattr(

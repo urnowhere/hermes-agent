@@ -107,7 +107,7 @@ def test_model_command_uses_runtime_access_token_for_codex_list(monkeypatch):
     assert captured["current_model"] == "openai/gpt-5.4"
 
 
-# ── Tests for _normalize_model_for_provider ──────────────────────────
+# -- Tests for _normalize_model_for_provider --------------------------
 
 
 def _make_cli(model="anthropic/claude-opus-4.6", **kwargs):
@@ -178,14 +178,14 @@ class TestNormalizeModelForProvider:
         assert cli.model == "claude-opus-4-6"
 
     def test_provider_prefix_stripped(self):
-        """openai/gpt-5.4 → gpt-5.4 (strip prefix, keep model)."""
+        """openai/gpt-5.4 -> gpt-5.4 (strip prefix, keep model)."""
         cli = _make_cli(model="openai/gpt-5.4")
         changed = cli._normalize_model_for_provider("openai-codex")
         assert changed is True
         assert cli.model == "gpt-5.4"
 
     def test_any_provider_prefix_stripped(self):
-        """anthropic/claude-opus-4.6 → claude-opus-4.6 (strip prefix only).
+        """anthropic/claude-opus-4.6 -> claude-opus-4.6 (strip prefix only).
         User explicitly chose this — let the API decide if it works."""
         cli = _make_cli(model="anthropic/claude-opus-4.6")
         changed = cli._normalize_model_for_provider("openai-codex")

@@ -100,7 +100,7 @@ class HonchoSessionManager:
         self._write_frequency = write_frequency
         self._turn_counter: int = 0
 
-        # Prefetch caches: session_key → last result (consumed once per turn)
+        # Prefetch caches: session_key -> last result (consumed once per turn)
         self._context_cache: dict[str, dict] = {}
         self._dialectic_cache: dict[str, str] = {}
         self._prefetch_cache_lock = threading.Lock()

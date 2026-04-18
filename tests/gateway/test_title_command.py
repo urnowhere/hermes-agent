@@ -112,7 +112,7 @@ class TestHandleTitleCommand:
         event = _make_event(text="/title Taken Title")
         result = await runner._handle_title_command(event)
         assert "already in use" in result
-        assert "⚠️" in result
+        assert "[WARN]️" in result
         db.close()
 
     @pytest.mark.asyncio
@@ -135,7 +135,7 @@ class TestHandleTitleCommand:
         event = _make_event(text=f"/title {long_title}")
         result = await runner._handle_title_command(event)
         assert "too long" in result
-        assert "⚠️" in result
+        assert "[WARN]️" in result
         db.close()
 
     @pytest.mark.asyncio

@@ -1191,7 +1191,7 @@ async def rl_test_inference(
                 await asyncio.wait_for(
                     asyncio.gather(
                         read_stream(process.stdout, stdout_lines, "📊 "),
-                        read_stream(process.stderr, stderr_lines, "⚠️ "),
+                        read_stream(process.stderr, stderr_lines, "[WARN]️ "),
                     ),
                     timeout=600,  # 10 minute timeout per model
                 )
@@ -1224,14 +1224,14 @@ async def rl_test_inference(
                 model_results["stderr"] = stderr_text[-1000:]
                 model_results["stdout"] = stdout_text[-1000:]
                 model_results["log_file"] = str(log_file)
-                print(f"\n  ❌ Error: {model_results['error']}")
+                print(f"\n  [ERR] Error: {model_results['error']}")
                 # Print last few lines of stderr for debugging
                 if stderr_lines:
                     print("  Last errors:")
                     for line in stderr_lines[-5:]:
                         print(f"    {line}")
             else:
-                print("\n  ✅ Process completed successfully")
+                print("\n  [OK] Process completed successfully")
                 print(f"  Output file: {output_file}")
                 print(f"  File exists: {output_file.exists()}")
                 

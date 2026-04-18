@@ -166,7 +166,7 @@ class TestCLISubagentInterrupt(unittest.TestCase):
         result = delegate_result[0]
         assert result is not None, "Delegate returned no result"
         assert result["status"] == "interrupted", f"Expected 'interrupted', got '{result['status']}'"
-        print(f"✓ Interrupt detected! Result: {result}")
+        print(f"[OK] Interrupt detected! Result: {result}")
 
 
 if __name__ == "__main__":

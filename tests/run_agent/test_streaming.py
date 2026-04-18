@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch, PropertyMock
 import pytest
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────
+# -- Helpers --------------------------------------------------------------
 
 
 def _make_stream_chunk(
@@ -55,7 +55,7 @@ def _make_empty_chunk(model=None, usage=None):
     return SimpleNamespace(choices=[], model=model, usage=usage)
 
 
-# ── Test: Streaming Accumulator ──────────────────────────────────────────
+# -- Test: Streaming Accumulator ------------------------------------------
 
 
 class TestStreamingAccumulator:
@@ -271,7 +271,7 @@ class TestStreamingAccumulator:
         assert len(response.choices[0].message.tool_calls) == 1
 
 
-# ── Test: Streaming Callbacks ────────────────────────────────────────────
+# -- Test: Streaming Callbacks --------------------------------------------
 
 
 class TestStreamingCallbacks:
@@ -464,7 +464,7 @@ class TestStreamingCallbacks:
         assert response.choices[0].message.content == "thinking... more text"
 
 
-# ── Test: Streaming Fallback ────────────────────────────────────────────
+# -- Test: Streaming Fallback --------------------------------------------
 
 
 class TestStreamingFallback:
@@ -581,7 +581,7 @@ class TestStreamingFallback:
         with pytest.raises(httpx.ConnectError, match="socket closed"):
             agent._interruptible_streaming_api_call({})
 
-        # Should have retried 3 times (default HERMES_STREAM_RETRIES=2 → 3 attempts)
+        # Should have retried 3 times (default HERMES_STREAM_RETRIES=2 -> 3 attempts)
         assert mock_client.chat.completions.create.call_count == 3
         assert mock_close.call_count >= 1
 
@@ -625,7 +625,7 @@ class TestStreamingFallback:
         with pytest.raises(OAIAPIError):
             agent._interruptible_streaming_api_call({})
 
-        # Should retry 3 times (default HERMES_STREAM_RETRIES=2 → 3 attempts)
+        # Should retry 3 times (default HERMES_STREAM_RETRIES=2 -> 3 attempts)
         assert mock_client.chat.completions.create.call_count == 3
         # Connection cleanup should happen for each failed retry
         assert mock_close.call_count >= 2
@@ -666,7 +666,7 @@ class TestStreamingFallback:
         assert mock_client.chat.completions.create.call_count == 1
 
 
-# ── Test: Reasoning Streaming ────────────────────────────────────────────
+# -- Test: Reasoning Streaming --------------------------------------------
 
 
 class TestReasoningStreaming:
@@ -713,7 +713,7 @@ class TestReasoningStreaming:
         assert response.choices[0].message.content == "The answer is 42"
 
 
-# ── Test: _has_stream_consumers ──────────────────────────────────────────
+# -- Test: _has_stream_consumers ------------------------------------------
 
 
 class TestHasStreamConsumers:
@@ -758,7 +758,7 @@ class TestHasStreamConsumers:
         assert agent._has_stream_consumers() is True
 
 
-# ── Test: Codex stream fires callbacks ────────────────────────────────
+# -- Test: Codex stream fires callbacks --------------------------------
 
 
 class TestCodexStreamCallbacks:

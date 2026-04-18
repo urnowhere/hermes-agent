@@ -575,7 +575,7 @@ class TestToolsModeInitBehavior:
         return provider, cfg
 
     def test_tools_lazy_default(self):
-        """tools + initOnSessionStart=false → session NOT initialized after initialize()."""
+        """tools + initOnSessionStart=false -> session NOT initialized after initialize()."""
         provider, _ = self._make_provider_with_config(
             recall_mode="tools", init_on_session_start=False,
         )
@@ -584,7 +584,7 @@ class TestToolsModeInitBehavior:
         assert provider._lazy_init_kwargs is not None
 
     def test_tools_eager_init(self):
-        """tools + initOnSessionStart=true → session IS initialized after initialize()."""
+        """tools + initOnSessionStart=true -> session IS initialized after initialize()."""
         provider, _ = self._make_provider_with_config(
             recall_mode="tools", init_on_session_start=True,
         )
@@ -648,7 +648,7 @@ class TestPerSessionMigrateGuard:
 
         mock_manager = MagicMock()
         mock_session = MagicMock()
-        mock_session.messages = []  # empty = new session → triggers migration path
+        mock_session.messages = []  # empty = new session -> triggers migration path
         mock_manager.get_or_create.return_value = mock_session
 
         with patch("plugins.memory.honcho.client.HonchoClientConfig.from_global_config", return_value=cfg), \

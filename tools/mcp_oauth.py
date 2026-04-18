@@ -126,7 +126,7 @@ def _is_interactive() -> bool:
 
 def _can_open_browser() -> bool:
     """Return True if opening a browser is likely to work."""
-    # Explicit SSH session → no local display
+    # Explicit SSH session -> no local display
     if os.environ.get("SSH_CLIENT") or os.environ.get("SSH_TTY"):
         return False
     # macOS and Windows usually have a display
@@ -160,7 +160,10 @@ def _write_json(path: Path, data: dict) -> None:
     tmp = path.with_suffix(".tmp")
     try:
         tmp.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
-        os.chmod(tmp, 0o600)
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
         tmp.rename(path)
     except OSError:
         tmp.unlink(missing_ok=True)

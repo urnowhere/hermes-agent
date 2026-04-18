@@ -44,8 +44,8 @@ def _hash_sender_id(value: str) -> str:
 def _hash_chat_id(value: str) -> str:
     """Hash the numeric portion of a chat ID, preserving platform prefix.
 
-    ``telegram:12345`` → ``telegram:<hash>``
-    ``12345``          → ``<hash>``
+    ``telegram:12345`` -> ``telegram:<hash>``
+    ``12345``          -> ``<hash>``
     """
     colon = value.find(":")
     if colon > 0:
@@ -286,7 +286,7 @@ def build_session_context_prompt(
     platforms_list = ["local (files on this machine)"]
     for p in context.connected_platforms:
         if p != Platform.LOCAL:
-            platforms_list.append(f"{p.value}: Connected ✓")
+            platforms_list.append(f"{p.value}: Connected [OK]")
     
     lines.append(f"**Connected Platforms:** {', '.join(platforms_list)}")
     
@@ -306,21 +306,21 @@ def build_session_context_prompt(
 
     # Origin delivery
     if context.source.platform == Platform.LOCAL:
-        lines.append("- `\"origin\"` → Local output (saved to files)")
+        lines.append("- `\"origin\"` -> Local output (saved to files)")
     else:
         _origin_label = context.source.chat_name or (
             _hash_chat_id(context.source.chat_id) if redact_pii else context.source.chat_id
         )
-        lines.append(f"- `\"origin\"` → Back to this chat ({_origin_label})")
+        lines.append(f"- `\"origin\"` -> Back to this chat ({_origin_label})")
 
     # Local always available
     lines.append(
-        f"- `\"local\"` → Save to local files only ({display_hermes_home()}/cron/output/)"
+        f"- `\"local\"` -> Save to local files only ({display_hermes_home()}/cron/output/)"
     )
     
     # Platform home channels
     for platform, home in context.home_channels.items():
-        lines.append(f"- `\"{platform.value}\"` → Home channel ({home.name})")
+        lines.append(f"- `\"{platform.value}\"` -> Home channel ({home.name})")
     
     # Note about explicit targeting
     lines.append("")
@@ -813,7 +813,7 @@ class SessionStore:
         background work isn't orphaned.
 
         Pruning is functionally identical to a natural reset-policy expiry:
-        the transcript in SQLite stays, but the session_key → session_id
+        the transcript in SQLite stays, but the session_key -> session_id
         mapping is dropped and the user starts a fresh session on return.
 
         ``max_age_days <= 0`` disables pruning; returns 0 immediately.
