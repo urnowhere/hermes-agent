@@ -311,6 +311,7 @@ def load_cli_config() -> Dict[str, Any]:
             "compact": False,
             "resume_display": "full",
             "show_reasoning": False,
+            "show_full_prompt": False,
             "streaming": True,
             "busy_input_mode": "interrupt",
 
@@ -1649,6 +1650,7 @@ class HermesCLI:
         max_turns: int = None,
         verbose: bool = False,
         compact: bool = False,
+        show_full_prompt: bool = None,
         resume: str = None,
         checkpoints: bool = False,
         pass_session_id: bool = False,
@@ -1665,6 +1667,7 @@ class HermesCLI:
             max_turns: Maximum tool-calling iterations shared with subagents (default: 90)
             verbose: Enable verbose logging
             compact: Use compact display mode
+            show_full_prompt: Print full multiline prompts instead of the compact first-line preview
             resume: Session ID to resume (restores conversation history from SQLite)
             pass_session_id: Include the session ID in the agent's system prompt
         """
@@ -1682,6 +1685,9 @@ class HermesCLI:
         self.bell_on_complete = CLI_CONFIG["display"].get("bell_on_complete", False)
         # show_reasoning: display model thinking/reasoning before the response
         self.show_reasoning = CLI_CONFIG["display"].get("show_reasoning", False)
+        # show_full_prompt: print full multiline prompts instead of "first line (+N lines)"
+        _sfp = CLI_CONFIG["display"].get("show_full_prompt", False)
+        self.show_full_prompt = bool(_sfp) if show_full_prompt is None else bool(show_full_prompt)
         # busy_input_mode: "interrupt" (Enter interrupts current run) or "queue" (Enter queues for next turn)
         _bim = CLI_CONFIG["display"].get("busy_input_mode", "interrupt")
         self.busy_input_mode = "queue" if str(_bim).strip().lower() == "queue" else "interrupt"
@@ -4597,6 +4603,29 @@ class HermesCLI:
         else:
             _ask()
         return result[0]
+
+    def _format_submitted_user_input(self, user_input: str) -> str:
+        """Format the just-submitted user input for scrollback."""
+        line_count = user_input.count("\n") + 1
+        accent = _accent_hex()
+
+        if self.show_full_prompt and line_count > 1:
+            lines = user_input.split("\n")
+            header = (
+                f"[bold {accent}]●[/] [bold]{_escape(lines[0])}[/] "
+                f"[dim]({line_count} lines total)[/]"
+            )
+            rest = "\n".join(f"  [bold]{_escape(line)}[/]" for line in lines[1:])
+            return f"{header}\n{rest}" if rest else header
+
+        if line_count > 1:
+            first_line = user_input.split("\n", 1)[0]
+            return (
+                f"[bold {accent}]●[/] [bold]{_escape(first_line)}[/] "
+                f"[dim](+{line_count - 1} lines)[/]"
+            )
+
+        return f"[bold {accent}]●[/] [bold]{_escape(user_input)}[/]"
 
     def _open_model_picker(self, providers: list, current_model: str, current_provider: str, user_provs=None, custom_provs=None) -> None:
         """Open prompt_toolkit-native /model picker modal."""
@@ -9972,36 +10001,29 @@ class HermesCLI:
                         _user_bar = f"[{_accent_hex()}]{'─' * 40}[/]"
                         print()
                         ChatConsole().print(_user_bar)
-                        # Show any surrounding user text alongside the paste summary
-                        split_parts = _paste_ref_re.split(user_input)
-                        visible_user_text = " ".join(
-                            split_parts[i].strip() for i in range(0, len(split_parts), 2) if split_parts[i].strip()
-                        )
-                        if visible_user_text:
-                            ChatConsole().print(
-                                f"[bold {_accent_hex()}]\u25cf[/] [bold]{_escape(visible_user_text)}[/] "
-                                f"[dim]({n_pastes} pasted block{'s' if n_pastes > 1 else ''}, {total_lines} lines total)[/]"
-                            )
+                        if self.show_full_prompt:
+                            ChatConsole().print(self._format_submitted_user_input(expanded))
                         else:
-                            ChatConsole().print(
-                                f"[bold {_accent_hex()}]\u25cf[/] [bold]{_escape(f'[Pasted text: {total_lines} lines]')}[/]"
+                            # Show any surrounding user text alongside the paste summary
+                            split_parts = _paste_ref_re.split(user_input)
+                            visible_user_text = " ".join(
+                                split_parts[i].strip() for i in range(0, len(split_parts), 2) if split_parts[i].strip()
                             )
+                            if visible_user_text:
+                                ChatConsole().print(
+                                    f"[bold {_accent_hex()}]\u25cf[/] [bold]{_escape(visible_user_text)}[/] "
+                                    f"[dim]({n_pastes} pasted block{'s' if n_pastes > 1 else ''}, {total_lines} lines total)[/]"
+                                )
+                            else:
+                                ChatConsole().print(
+                                    f"[bold {_accent_hex()}]\u25cf[/] [bold]{_escape(f'[Pasted text: {total_lines} lines]')}[/]"
+                                )
                         user_input = expanded
                     else:
                         _user_bar = f"[{_accent_hex()}]{'─' * 40}[/]"
-                        if '\n' in user_input:
-                            first_line = user_input.split('\n')[0]
-                            line_count = user_input.count('\n') + 1
-                            print()
-                            ChatConsole().print(_user_bar)
-                            ChatConsole().print(
-                                f"[bold {_accent_hex()}]●[/] [bold]{_escape(first_line)}[/] "
-                                f"[dim](+{line_count - 1} lines)[/]"
-                            )
-                        else:
-                            print()
-                            ChatConsole().print(_user_bar)
-                            ChatConsole().print(f"[bold {_accent_hex()}]●[/] [bold]{_escape(user_input)}[/]")
+                        print()
+                        ChatConsole().print(_user_bar)
+                        ChatConsole().print(self._format_submitted_user_input(user_input))
                     
                     # Show image attachment count
                     if submit_images:
@@ -10214,6 +10236,7 @@ def main(
     verbose: bool = False,
     quiet: bool = False,
     compact: bool = False,
+    show_full_prompt: bool = None,
     list_tools: bool = False,
     list_toolsets: bool = False,
     gateway: bool = False,
@@ -10239,6 +10262,7 @@ def main(
         max_turns: Maximum tool-calling iterations (default: 60)
         verbose: Enable verbose logging
         compact: Use compact display mode
+        show_full_prompt: Print full multiline prompts in CLI scrollback
         list_tools: List available tools and exit
         list_toolsets: List available toolsets and exit
         resume: Resume a previous session by its ID (e.g., 20260225_143052_a1b2c3)
@@ -10253,6 +10277,7 @@ def main(
         python cli.py -q "Describe this" --image ~/storage/shared/Pictures/cat.png
         python cli.py --list-tools               # List tools and exit
         python cli.py --resume 20260225_143052_a1b2c3  # Resume session
+        python cli.py --show-full-prompt        # Echo full multiline prompts in scrollback
         python cli.py -w                         # Start in isolated git worktree
         python cli.py -w -q "Fix issue #123"     # Single query in worktree
     """
@@ -10328,6 +10353,7 @@ def main(
         max_turns=max_turns,
         verbose=verbose,
         compact=compact,
+        show_full_prompt=show_full_prompt,
         resume=resume,
         checkpoints=checkpoints,
         pass_session_id=pass_session_id,

@@ -557,6 +557,7 @@ DEFAULT_CONFIG = {
         "busy_input_mode": "interrupt",
         "bell_on_complete": False,
         "show_reasoning": False,
+        "show_full_prompt": False,
         "streaming": False,
         "inline_diffs": True,     # Show inline diff previews for write actions (write_file, patch, skill_manage)
         "show_cost": False,       # Show $ cost in the status bar (off by default)
@@ -2445,6 +2446,20 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                     else:
                         print("  ✓ Removed unused compression.summary_* keys")
 
+    # ── Version 17 → 18: add explicit full-prompt display toggle ──
+    if current_ver < 18:
+        config = read_raw_config()
+        display = config.get("display", {})
+        if not isinstance(display, dict):
+            display = {}
+        if "show_full_prompt" not in display:
+            display["show_full_prompt"] = False
+            config["display"] = display
+            results["config_added"].append("display.show_full_prompt=false (default)")
+            save_config(config)
+            if not quiet:
+                print("  ✓ Added display.show_full_prompt=false")
+
     if current_ver < latest_ver and not quiet:
         print(f"Config version: {current_ver} → {latest_ver}")
     
@@ -3365,6 +3380,7 @@ def show_config():
     display = config.get('display', {})
     print(f"  Personality:  {display.get('personality', 'kawaii')}")
     print(f"  Reasoning:    {'on' if display.get('show_reasoning', False) else 'off'}")
+    print(f"  Full prompt:  {'on' if display.get('show_full_prompt', False) else 'off'}")
     print(f"  Bell:         {'on' if display.get('bell_on_complete', False) else 'off'}")
 
     # Terminal

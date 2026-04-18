@@ -96,6 +96,23 @@ class TestVerboseAndToolProgress:
         assert cli.tool_progress_mode in ("off", "new", "all", "verbose")
 
 
+class TestShowFullPrompt:
+    def test_show_full_prompt_defaults_off(self):
+        cli = _make_cli()
+        assert cli.show_full_prompt is False
+
+    def test_show_full_prompt_config_is_honored(self):
+        cli = _make_cli(config_overrides={"display": {"show_full_prompt": True}})
+        assert cli.show_full_prompt is True
+
+    def test_show_full_prompt_cli_arg_overrides_config(self):
+        cli = _make_cli(
+            config_overrides={"display": {"show_full_prompt": False}},
+            show_full_prompt=True,
+        )
+        assert cli.show_full_prompt is True
+
+
 class TestBusyInputMode:
     def test_default_busy_input_mode_is_interrupt(self):
         cli = _make_cli()
