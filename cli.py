@@ -3354,7 +3354,8 @@ class HermesCLI:
             padding=(0, 1),
             style=_history_text_c,
         )
-        self.console.print(panel)
+        out_console = ChatConsole() if getattr(self, "_app", None) else self.console
+        out_console.print(panel)
 
     def _try_attach_clipboard_image(self) -> bool:
         """Check clipboard for an image and attach it if found.
@@ -4398,6 +4399,7 @@ class HermesCLI:
                 f" ({msg_count} user message{'s' if msg_count != 1 else ''},"
                 f" {len(self.conversation_history)} total)"
             )
+            self._display_resumed_history()
         else:
             _cprint(f"  ↻ Resumed session {target_id}{title_part} — no messages, starting fresh.")
 
