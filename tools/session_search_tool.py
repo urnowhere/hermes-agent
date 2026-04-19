@@ -245,7 +245,20 @@ _HIDDEN_SESSION_SOURCES = ("tool",)
 def _list_recent_sessions(db, limit: int, current_session_id: str = None) -> str:
     """Return metadata for the most recent sessions (no LLM calls)."""
     try:
-        sessions = db.list_sessions_rich(limit=limit + 5, exclude_sources=list(_HIDDEN_SESSION_SOURCES))  # fetch extra to skip current
+        # Per-instance isolation (#6320): when HERMES_INSTANCE_ID is set,
+        # multiple Hermes profiles sharing one state.db must not see each
+        # other's sessions.  When unset, behavior is unchanged.
+        try:
+            from hermes_state import get_current_instance_id
+            instance_id = get_current_instance_id()
+        except ImportError:
+            instance_id = None
+
+        sessions = db.list_sessions_rich(
+            limit=limit + 5,
+            exclude_sources=list(_HIDDEN_SESSION_SOURCES),
+            instance_id=instance_id,
+        )  # fetch extra to skip current
 
         # Resolve current session lineage to exclude it
         current_root = None
@@ -333,6 +346,17 @@ def session_search(
         if role_filter and role_filter.strip():
             role_list = [r.strip() for r in role_filter.split(",") if r.strip()]
 
+        # Per-instance isolation (#6320): when HERMES_INSTANCE_ID is set,
+        # scope the search to sessions owned by the current instance so
+        # multiple profiles sharing one state.db cannot leak into each
+        # other.  When the env var is unset, instance_id stays None and
+        # the query is unchanged.
+        try:
+            from hermes_state import get_current_instance_id
+            instance_id = get_current_instance_id()
+        except ImportError:
+            instance_id = None
+
         # FTS5 search -- get matches ranked by relevance
         raw_results = db.search_messages(
             query=query,
@@ -340,6 +364,7 @@ def session_search(
             exclude_sources=list(_HIDDEN_SESSION_SOURCES),
             limit=50,  # Get more matches to find unique sessions
             offset=0,
+            instance_id=instance_id,
         )
 
         if not raw_results:

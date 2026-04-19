@@ -16,6 +16,7 @@ Key design decisions:
 
 import json
 import logging
+import os
 import random
 import re
 import sqlite3
@@ -31,7 +32,24 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
+
+
+def get_current_instance_id() -> Optional[str]:
+    """Return the current Hermes instance id from ``HERMES_INSTANCE_ID``.
+
+    When multiple Hermes Agent processes share a single state database
+    (e.g. finance vs. general-purpose profiles running side-by-side against
+    the same ``HERMES_HOME``), setting ``HERMES_INSTANCE_ID`` on each process
+    isolates session search / recent-session listings so that one instance
+    cannot leak conversations into another.  Returns ``None`` when the env
+    var is unset or empty — in which case behavior is unchanged and all
+    sessions remain visible (backwards compatible).
+
+    See issue #6320.
+    """
+    val = os.getenv("HERMES_INSTANCE_ID", "").strip()
+    return val or None
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -65,6 +83,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     cost_source TEXT,
     pricing_version TEXT,
     title TEXT,
+    instance_id TEXT,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
 );
 
@@ -87,6 +106,8 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
+-- NOTE: idx_sessions_instance is created after the v7 migration below,
+-- because legacy databases may not yet have the instance_id column.
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
 """
 
@@ -329,6 +350,24 @@ class SessionDB:
                     except sqlite3.OperationalError:
                         pass  # Column already exists
                 cursor.execute("UPDATE schema_version SET version = 6")
+            if current_version < 7:
+                # v7: add instance_id column to sessions — isolates session
+                # search / recent-session listings between multiple Hermes
+                # Agent instances that share a single state database
+                # (e.g. different profiles like hermes-finance and hermes).
+                # See #6320.
+                try:
+                    cursor.execute("ALTER TABLE sessions ADD COLUMN instance_id TEXT")
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+                try:
+                    cursor.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_sessions_instance "
+                        "ON sessions(instance_id)"
+                    )
+                except sqlite3.OperationalError:
+                    pass
+                cursor.execute("UPDATE schema_version SET version = 7")
 
         # Unique title index — always ensure it exists (safe to run after migrations
         # since the title column is guaranteed to exist at this point)
@@ -339,6 +378,17 @@ class SessionDB:
             )
         except sqlite3.OperationalError:
             pass  # Index already exists
+
+        # Instance id index — safe to create post-migration because v7 is
+        # guaranteed to have added the column by now, either via ALTER TABLE
+        # above or via the initial CREATE TABLE on a fresh database.
+        try:
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sessions_instance "
+                "ON sessions(instance_id)"
+            )
+        except sqlite3.OperationalError:
+            pass
 
         # FTS5 setup (separate because CREATE VIRTUAL TABLE can't be in executescript with IF NOT EXISTS reliably)
         try:
@@ -361,13 +411,31 @@ class SessionDB:
         system_prompt: str = None,
         user_id: str = None,
         parent_session_id: str = None,
+        instance_id: Optional[str] = None,
     ) -> str:
-        """Create a new session record. Returns the session_id."""
+        """Create a new session record. Returns the session_id.
+
+        When *instance_id* is ``None`` the current process-level instance id
+        (``HERMES_INSTANCE_ID``) is captured automatically so every session
+        gets tagged with the profile that created it.  Child sessions inherit
+        their parent's ``instance_id`` when the caller omits it, keeping
+        delegation chains in the same isolation bucket.
+        """
+        if instance_id is None:
+            instance_id = get_current_instance_id()
+            if instance_id is None and parent_session_id:
+                # Inherit from parent so compression / delegation sessions
+                # stay in the same isolation bucket even if HERMES_INSTANCE_ID
+                # is set differently for a subprocess.
+                parent = self.get_session(parent_session_id)
+                if parent and parent.get("instance_id"):
+                    instance_id = parent["instance_id"]
+
         def _do(conn):
             conn.execute(
                 """INSERT OR IGNORE INTO sessions (id, source, user_id, model, model_config,
-                   system_prompt, parent_session_id, started_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   system_prompt, parent_session_id, started_at, instance_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     source,
@@ -377,6 +445,7 @@ class SessionDB:
                     system_prompt,
                     parent_session_id,
                     time.time(),
+                    instance_id,
                 ),
             )
         self._execute_write(_do)
@@ -511,12 +580,14 @@ class SessionDB:
         create_session() call (e.g. transient SQLite lock at agent startup).
         INSERT OR IGNORE is safe to call even when the row already exists.
         """
+        instance_id = get_current_instance_id()
+
         def _do(conn):
             conn.execute(
                 """INSERT OR IGNORE INTO sessions
-                   (id, source, model, started_at)
-                   VALUES (?, ?, ?, ?)""",
-                (session_id, source, model, time.time()),
+                   (id, source, model, started_at, instance_id)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (session_id, source, model, time.time(), instance_id),
             )
         self._execute_write(_do)
 
@@ -721,6 +792,7 @@ class SessionDB:
         limit: int = 20,
         offset: int = 0,
         include_children: bool = False,
+        instance_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """List sessions with preview (first user message) and last active timestamp.
 
@@ -746,6 +818,12 @@ class SessionDB:
             placeholders = ",".join("?" for _ in exclude_sources)
             where_clauses.append(f"s.source NOT IN ({placeholders})")
             params.extend(exclude_sources)
+
+        # Instance isolation (#6320): when HERMES_INSTANCE_ID is set,
+        # hide sessions created by other instances sharing this state.db.
+        if instance_id is not None:
+            where_clauses.append("s.instance_id IS ?")
+            params.append(instance_id)
 
         where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
         query = f"""
@@ -1011,6 +1089,7 @@ class SessionDB:
         role_filter: List[str] = None,
         limit: int = 20,
         offset: int = 0,
+        instance_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Full-text search across session messages using FTS5.
@@ -1049,6 +1128,14 @@ class SessionDB:
             role_placeholders = ",".join("?" for _ in role_filter)
             where_clauses.append(f"m.role IN ({role_placeholders})")
             params.extend(role_filter)
+
+        # Instance isolation (#6320): when HERMES_INSTANCE_ID is set,
+        # hide messages from sessions owned by other instances sharing
+        # this state.db.  ``IS ?`` binds correctly against NULL too,
+        # but instance_id will always be a non-NULL string here.
+        if instance_id is not None:
+            where_clauses.append("s.instance_id IS ?")
+            params.append(instance_id)
 
         where_sql = " AND ".join(where_clauses)
         params.extend([limit, offset])

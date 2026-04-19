@@ -1070,7 +1070,7 @@ class TestSchemaInit:
     def test_schema_version(self, db):
         cursor = db._conn.execute("SELECT version FROM schema_version")
         version = cursor.fetchone()[0]
-        assert version == 6
+        assert version == 7
 
     def test_title_column_exists(self, db):
         """Verify the title column was created in the sessions table."""
@@ -1126,12 +1126,12 @@ class TestSchemaInit:
         conn.commit()
         conn.close()
 
-        # Open with SessionDB — should migrate to v6
+        # Open with SessionDB — should migrate to current schema version
         migrated_db = SessionDB(db_path=db_path)
 
         # Verify migration
         cursor = migrated_db._conn.execute("SELECT version FROM schema_version")
-        assert cursor.fetchone()[0] == 6
+        assert cursor.fetchone()[0] == 7
 
         # Verify title column exists and is NULL for existing sessions
         session = migrated_db.get_session("existing")
@@ -1499,7 +1499,92 @@ class TestConcurrentWriteSafety:
         assert len(msgs) == 1
         assert msgs[0]["content"] == "hello after lock"
 
-    def test_sqlite_timeout_is_at_least_30s(self, db):
+
+# =========================================================================
+# Instance isolation (#6320)
+# =========================================================================
+
+class TestInstanceIsolation:
+    """Multiple Hermes profiles sharing one state.db must not leak sessions.
+
+    See issue #6320 — running hermes-finance and hermes side-by-side against
+    the same HERMES_HOME caused session_search to return cross-profile hits.
+    """
+
+    def test_create_session_captures_env_instance_id(self, db, monkeypatch):
+        monkeypatch.setenv("HERMES_INSTANCE_ID", "finance")
+        db.create_session(session_id="f1", source="cli")
+        row = db.get_session("f1")
+        assert row["instance_id"] == "finance"
+
+    def test_create_session_without_env_leaves_null(self, db, monkeypatch):
+        monkeypatch.delenv("HERMES_INSTANCE_ID", raising=False)
+        db.create_session(session_id="s1", source="cli")
+        assert db.get_session("s1")["instance_id"] is None
+
+    def test_explicit_instance_id_overrides_env(self, db, monkeypatch):
+        monkeypatch.setenv("HERMES_INSTANCE_ID", "general")
+        db.create_session(session_id="s1", source="cli", instance_id="explicit")
+        assert db.get_session("s1")["instance_id"] == "explicit"
+
+    def test_child_session_inherits_parent_instance_id(self, db, monkeypatch):
+        monkeypatch.setenv("HERMES_INSTANCE_ID", "finance")
+        db.create_session(session_id="parent", source="cli")
+        monkeypatch.delenv("HERMES_INSTANCE_ID", raising=False)
+        db.create_session(
+            session_id="child", source="cli", parent_session_id="parent"
+        )
+        assert db.get_session("child")["instance_id"] == "finance"
+
+    def test_search_messages_scoped_by_instance(self, db, monkeypatch):
+        monkeypatch.setenv("HERMES_INSTANCE_ID", "finance")
+        db.create_session(session_id="fin1", source="cli")
+        db.append_message("fin1", role="user", content="quarterly earnings report")
+
+        monkeypatch.setenv("HERMES_INSTANCE_ID", "general")
+        db.create_session(session_id="gen1", source="cli")
+        db.append_message("gen1", role="user", content="quarterly earnings report")
+
+        # Finance instance should only see its own session
+        fin_hits = db.search_messages(query="quarterly", instance_id="finance")
+        assert [h["session_id"] for h in fin_hits] == ["fin1"]
+
+        gen_hits = db.search_messages(query="quarterly", instance_id="general")
+        assert [h["session_id"] for h in gen_hits] == ["gen1"]
+
+        # No filter — legacy behavior, both are visible.
+        all_hits = db.search_messages(query="quarterly")
+        assert {h["session_id"] for h in all_hits} == {"fin1", "gen1"}
+
+    def test_list_sessions_rich_scoped_by_instance(self, db, monkeypatch):
+        monkeypatch.setenv("HERMES_INSTANCE_ID", "finance")
+        db.create_session(session_id="fin1", source="cli")
+        db.append_message("fin1", role="user", content="b3 validation")
+
+        monkeypatch.setenv("HERMES_INSTANCE_ID", "general")
+        db.create_session(session_id="gen1", source="cli")
+        db.append_message("gen1", role="user", content="general notes")
+
+        fin_rows = db.list_sessions_rich(instance_id="finance")
+        assert [r["id"] for r in fin_rows] == ["fin1"]
+
+        gen_rows = db.list_sessions_rich(instance_id="general")
+        assert [r["id"] for r in gen_rows] == ["gen1"]
+
+        unfiltered = db.list_sessions_rich()
+        assert {r["id"] for r in unfiltered} == {"fin1", "gen1"}
+
+    def test_get_current_instance_id_helper(self, monkeypatch):
+        from hermes_state import get_current_instance_id
+        monkeypatch.delenv("HERMES_INSTANCE_ID", raising=False)
+        assert get_current_instance_id() is None
+        monkeypatch.setenv("HERMES_INSTANCE_ID", "  ")
+        assert get_current_instance_id() is None
+        monkeypatch.setenv("HERMES_INSTANCE_ID", "finance")
+        assert get_current_instance_id() == "finance"
+
+
+    def test_sqlite_timeout_is_at_least_30s_isolated(self, db):
         """Connection timeout should be >= 30s to survive CLI/gateway contention."""
         # Access the underlying connection timeout via sqlite3 introspection.
         # There is no public API, so we check the kwarg via the module default.
