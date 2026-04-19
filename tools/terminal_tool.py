@@ -2,13 +2,14 @@
 """
 Terminal Tool Module
 
-A terminal tool that executes commands in local, Docker, Modal, SSH, Singularity, and Daytona environments.
+A terminal tool that executes commands in local, Docker, Modal, SSH, Singularity, Daytona, and Kubernetes environments.
 Supports local execution, containerized backends, and Modal cloud sandboxes, including managed gateway mode.
 
 Environment Selection (via TERMINAL_ENV environment variable):
 - "local": Execute directly on the host machine (default, fastest)
 - "docker": Execute in Docker containers (isolated, requires Docker)
 - "modal": Execute in Modal cloud sandboxes (direct Modal or managed gateway)
+- "kubernetes": Execute in a Kubernetes pod via kubectl exec (requires kubectl + cluster access)
 
 Features:
 - Multiple execution backends (local, docker, modal)
@@ -504,6 +505,7 @@ from tools.environments.local import LocalEnvironment as _LocalEnvironment
 from tools.environments.singularity import SingularityEnvironment as _SingularityEnvironment
 from tools.environments.ssh import SSHEnvironment as _SSHEnvironment
 from tools.environments.docker import DockerEnvironment as _DockerEnvironment
+from tools.environments.kubernetes import KubernetesEnvironment as _KubernetesEnvironment
 from tools.environments.modal import ModalEnvironment as _ModalEnvironment
 from tools.environments.managed_modal import ManagedModalEnvironment as _ManagedModalEnvironment
 from tools.managed_tool_gateway import is_managed_tool_gateway_ready
@@ -629,7 +631,7 @@ def _get_env_config() -> Dict[str, Any]:
         ):
             host_cwd = candidate
             cwd = "/workspace"
-    elif env_type in ("modal", "docker", "singularity", "daytona") and cwd:
+    elif env_type in ("modal", "docker", "singularity", "daytona", "kubernetes") and cwd:
         # Host paths and relative paths that won't work inside containers
         is_host_path = any(cwd.startswith(p) for p in host_prefixes)
         is_relative = not os.path.isabs(cwd)  # e.g. "." or "src/"
@@ -647,6 +649,14 @@ def _get_env_config() -> Dict[str, Any]:
         "singularity_image": os.getenv("TERMINAL_SINGULARITY_IMAGE", f"docker://{default_image}"),
         "modal_image": os.getenv("TERMINAL_MODAL_IMAGE", default_image),
         "daytona_image": os.getenv("TERMINAL_DAYTONA_IMAGE", default_image),
+        "kubernetes_image": os.getenv("TERMINAL_KUBERNETES_IMAGE", default_image),
+        "kubernetes_namespace": os.getenv("TERMINAL_KUBERNETES_NAMESPACE", "default"),
+        "kubernetes_context": os.getenv("TERMINAL_KUBERNETES_CONTEXT", ""),
+        "kubernetes_kubeconfig": os.getenv("TERMINAL_KUBERNETES_KUBECONFIG", ""),
+        "kubernetes_service_account": os.getenv("TERMINAL_KUBERNETES_SERVICE_ACCOUNT", ""),
+        "kubernetes_pod_prefix": os.getenv("TERMINAL_KUBERNETES_POD_PREFIX", "hermes"),
+        "kubernetes_image_pull_policy": os.getenv("TERMINAL_KUBERNETES_IMAGE_PULL_POLICY", "IfNotPresent"),
+        "kubernetes_forward_env": _parse_env_var("TERMINAL_KUBERNETES_FORWARD_ENV", "[]", json.loads, "valid JSON"),
         "cwd": cwd,
         "host_cwd": host_cwd,
         "docker_mount_cwd_to_workspace": mount_docker_cwd,
@@ -733,6 +743,24 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
             image=image, cwd=cwd, timeout=timeout,
             cpu=cpu, memory=memory, disk=disk,
             persistent_filesystem=persistent, task_id=task_id,
+        )
+
+    elif env_type == "kubernetes":
+        return _KubernetesEnvironment(
+            image=image,
+            cwd=cwd,
+            timeout=timeout,
+            task_id=task_id,
+            namespace=cc.get("kubernetes_namespace") or "default",
+            context=cc.get("kubernetes_context") or "",
+            kubeconfig=cc.get("kubernetes_kubeconfig") or "",
+            service_account=cc.get("kubernetes_service_account") or "",
+            pod_prefix=cc.get("kubernetes_pod_prefix") or "hermes",
+            image_pull_policy=cc.get("kubernetes_image_pull_policy") or "IfNotPresent",
+            forward_env=cc.get("kubernetes_forward_env") or [],
+            cpu=cpu,
+            memory=memory,
+            disk=disk,
         )
     
     elif env_type == "modal":
@@ -1177,6 +1205,8 @@ def terminal_tool(
             image = overrides.get("modal_image") or config["modal_image"]
         elif env_type == "daytona":
             image = overrides.get("daytona_image") or config["daytona_image"]
+        elif env_type == "kubernetes":
+            image = overrides.get("kubernetes_image") or config["kubernetes_image"]
         else:
             image = ""
 
@@ -1241,7 +1271,7 @@ def terminal_tool(
                             }
 
                         container_config = None
-                        if env_type in ("docker", "singularity", "modal", "daytona"):
+                        if env_type in ("docker", "singularity", "modal", "daytona", "kubernetes"):
                             container_config = {
                                 "container_cpu": config.get("container_cpu", 1),
                                 "container_memory": config.get("container_memory", 5120),
@@ -1250,6 +1280,13 @@ def terminal_tool(
                                 "modal_mode": config.get("modal_mode", "auto"),
                                 "docker_volumes": config.get("docker_volumes", []),
                                 "docker_mount_cwd_to_workspace": config.get("docker_mount_cwd_to_workspace", False),
+                                "kubernetes_namespace": config.get("kubernetes_namespace", "default"),
+                                "kubernetes_context": config.get("kubernetes_context", ""),
+                                "kubernetes_kubeconfig": config.get("kubernetes_kubeconfig", ""),
+                                "kubernetes_service_account": config.get("kubernetes_service_account", ""),
+                                "kubernetes_pod_prefix": config.get("kubernetes_pod_prefix", "hermes"),
+                                "kubernetes_image_pull_policy": config.get("kubernetes_image_pull_policy", "IfNotPresent"),
+                                "kubernetes_forward_env": config.get("kubernetes_forward_env", []),
                             }
 
                         local_config = None
@@ -1626,11 +1663,19 @@ def check_terminal_requirements() -> bool:
         elif env_type == "daytona":
             from daytona import Daytona  # noqa: F401 — SDK presence check
             return os.getenv("DAYTONA_API_KEY") is not None
+        
+        elif env_type == "kubernetes":
+            kubectl = shutil.which("kubectl")
+            if not kubectl:
+                logger.error("kubectl not found (required for TERMINAL_ENV=kubernetes)")
+                return False
+            result = subprocess.run([kubectl, "version", "--client=true"], capture_output=True, timeout=5)
+            return result.returncode == 0
 
         else:
             logger.error(
                 "Unknown TERMINAL_ENV '%s'. Use one of: local, docker, singularity, "
-                "modal, daytona, ssh.",
+                "modal, daytona, kubernetes, ssh.",
                 env_type,
             )
             return False
@@ -1670,11 +1715,12 @@ if __name__ == "__main__":
 
     print("\nEnvironment Variables:")
     default_img = "nikolaik/python-nodejs:python3.11-nodejs20"
-    print(f"  TERMINAL_ENV: {os.getenv('TERMINAL_ENV', 'local')} (local/docker/singularity/modal/daytona/ssh)")
+    print(f"  TERMINAL_ENV: {os.getenv('TERMINAL_ENV', 'local')} (local/docker/singularity/modal/daytona/kubernetes/ssh)")
     print(f"  TERMINAL_DOCKER_IMAGE: {os.getenv('TERMINAL_DOCKER_IMAGE', default_img)}")
     print(f"  TERMINAL_SINGULARITY_IMAGE: {os.getenv('TERMINAL_SINGULARITY_IMAGE', f'docker://{default_img}')}")
     print(f"  TERMINAL_MODAL_IMAGE: {os.getenv('TERMINAL_MODAL_IMAGE', default_img)}")
     print(f"  TERMINAL_DAYTONA_IMAGE: {os.getenv('TERMINAL_DAYTONA_IMAGE', default_img)}")
+    print(f"  TERMINAL_KUBERNETES_IMAGE: {os.getenv('TERMINAL_KUBERNETES_IMAGE', default_img)}")
     print(f"  TERMINAL_CWD: {os.getenv('TERMINAL_CWD', os.getcwd())}")
     from hermes_constants import display_hermes_home as _dhh
     print(f"  TERMINAL_SANDBOX_DIR: {os.getenv('TERMINAL_SANDBOX_DIR', f'{_dhh()}/sandboxes')}")

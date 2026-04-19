@@ -1097,14 +1097,15 @@ def setup_terminal_backend(config: dict):
     terminal_choices = [
         "Local - run directly on this machine (default)",
         "Docker - isolated container with configurable resources",
+        "Kubernetes - run in a cluster pod via kubectl",
         "Modal - serverless cloud sandbox",
         "SSH - run on a remote machine",
         "Daytona - persistent cloud development environment",
     ]
-    idx_to_backend = {0: "local", 1: "docker", 2: "modal", 3: "ssh", 4: "daytona"}
-    backend_to_idx = {"local": 0, "docker": 1, "modal": 2, "ssh": 3, "daytona": 4}
+    idx_to_backend = {0: "local", 1: "docker", 2: "kubernetes", 3: "modal", 4: "ssh", 5: "daytona"}
+    backend_to_idx = {"local": 0, "docker": 1, "kubernetes": 2, "modal": 3, "ssh": 4, "daytona": 5}
 
-    next_idx = 5
+    next_idx = 6
     if is_linux:
         terminal_choices.append("Singularity/Apptainer - HPC-friendly container")
         idx_to_backend[next_idx] = "singularity"
@@ -1176,6 +1177,62 @@ def setup_terminal_backend(config: dict):
         image = prompt("  Docker image", current_image)
         config["terminal"]["docker_image"] = image
         save_env_value("TERMINAL_DOCKER_IMAGE", image)
+
+        _prompt_container_resources(config)
+
+    elif selected_backend == "kubernetes":
+        print_success("Terminal backend: Kubernetes")
+        print_info("Run commands in a Kubernetes pod via kubectl.")
+
+        kubectl_bin = shutil.which("kubectl")
+        if not kubectl_bin:
+            print_warning("kubectl not found in PATH!")
+            print_info("Install kubectl and ensure you have cluster access.")
+        else:
+            print_info(f"kubectl found: {kubectl_bin}")
+
+        current_image = config.get("terminal", {}).get(
+            "kubernetes_image", "nikolaik/python-nodejs:python3.11-nodejs20"
+        )
+        image = prompt("  Sandbox image", current_image)
+        config["terminal"]["kubernetes_image"] = image
+        save_env_value("TERMINAL_KUBERNETES_IMAGE", image)
+
+        current_namespace = config.get("terminal", {}).get("kubernetes_namespace", "default")
+        namespace = prompt("  Kubernetes namespace", current_namespace)
+        if namespace:
+            config["terminal"]["kubernetes_namespace"] = namespace
+            save_env_value("TERMINAL_KUBERNETES_NAMESPACE", namespace)
+
+        current_context = config.get("terminal", {}).get("kubernetes_context", "")
+        context = prompt("  Kubernetes context (optional)", current_context)
+        if context:
+            config["terminal"]["kubernetes_context"] = context
+            save_env_value("TERMINAL_KUBERNETES_CONTEXT", context)
+
+        current_kubeconfig = config.get("terminal", {}).get("kubernetes_kubeconfig", "")
+        kubeconfig = prompt("  KUBECONFIG path (optional)", current_kubeconfig)
+        if kubeconfig:
+            config["terminal"]["kubernetes_kubeconfig"] = kubeconfig
+            save_env_value("TERMINAL_KUBERNETES_KUBECONFIG", kubeconfig)
+
+        current_sa = config.get("terminal", {}).get("kubernetes_service_account", "")
+        sa = prompt("  Service account (optional)", current_sa)
+        if sa:
+            config["terminal"]["kubernetes_service_account"] = sa
+            save_env_value("TERMINAL_KUBERNETES_SERVICE_ACCOUNT", sa)
+
+        current_prefix = config.get("terminal", {}).get("kubernetes_pod_prefix", "hermes")
+        prefix = prompt("  Pod name prefix", current_prefix)
+        if prefix:
+            config["terminal"]["kubernetes_pod_prefix"] = prefix
+            save_env_value("TERMINAL_KUBERNETES_POD_PREFIX", prefix)
+
+        current_policy = config.get("terminal", {}).get("kubernetes_image_pull_policy", "IfNotPresent")
+        policy = prompt("  Image pull policy", current_policy)
+        if policy:
+            config["terminal"]["kubernetes_image_pull_policy"] = policy
+            save_env_value("TERMINAL_KUBERNETES_IMAGE_PULL_POLICY", policy)
 
         _prompt_container_resources(config)
 

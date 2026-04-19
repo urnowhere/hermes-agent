@@ -657,6 +657,21 @@ def run_doctor(args):
                 check_info("Docker backend is not available inside Termux (expected on Android)")
             else:
                 check_warn("docker not found", "(optional)")
+
+    if terminal_env == "kubernetes":
+        if shutil.which("kubectl"):
+            try:
+                result = subprocess.run(["kubectl", "version", "--client=true"], capture_output=True, timeout=10)
+            except subprocess.TimeoutExpired:
+                result = None
+            if result is not None and result.returncode == 0:
+                check_ok("kubectl", "(configured)")
+            else:
+                check_fail("kubectl not working")
+                issues.append("Fix kubectl installation/config")
+        else:
+            check_fail("kubectl not found", "(required for TERMINAL_ENV=kubernetes)")
+            issues.append("Install kubectl or change TERMINAL_ENV")
     
     # SSH (if using ssh backend)
     if terminal_env == "ssh":

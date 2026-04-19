@@ -474,19 +474,28 @@ def _get_or_create_env(task_id: str):
             image = overrides.get("modal_image") or config["modal_image"]
         elif env_type == "daytona":
             image = overrides.get("daytona_image") or config["daytona_image"]
+        elif env_type == "kubernetes":
+            image = overrides.get("kubernetes_image") or config["kubernetes_image"]
         else:
             image = ""
 
         cwd = overrides.get("cwd") or config["cwd"]
 
         container_config = None
-        if env_type in ("docker", "singularity", "modal", "daytona"):
+        if env_type in ("docker", "singularity", "modal", "daytona", "kubernetes"):
             container_config = {
                 "container_cpu": config.get("container_cpu", 1),
                 "container_memory": config.get("container_memory", 5120),
                 "container_disk": config.get("container_disk", 51200),
                 "container_persistent": config.get("container_persistent", True),
                 "docker_volumes": config.get("docker_volumes", []),
+                "kubernetes_namespace": config.get("kubernetes_namespace", "default"),
+                "kubernetes_context": config.get("kubernetes_context", ""),
+                "kubernetes_kubeconfig": config.get("kubernetes_kubeconfig", ""),
+                "kubernetes_service_account": config.get("kubernetes_service_account", ""),
+                "kubernetes_pod_prefix": config.get("kubernetes_pod_prefix", "hermes"),
+                "kubernetes_image_pull_policy": config.get("kubernetes_image_pull_policy", "IfNotPresent"),
+                "kubernetes_forward_env": config.get("kubernetes_forward_env", []),
             }
 
         ssh_config = None
