@@ -1,0 +1,5 @@
+name: lancedb
+version: 1.0.0
+description: "LanceDB — local-first semantic memory with explicit durable storage, episodic turn capture, and profile recall."
+pip_dependencies:
+  - "lancedb"
