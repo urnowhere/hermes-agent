@@ -4769,7 +4769,7 @@ class GatewayRunner:
 
     async def _handle_caveman_command(self, event: MessageEvent) -> str:
         """Handle /caveman — toggle caveman speak mode (compressed responses, fewer tokens)."""
-        from hermes_cli.commands import CAVEMAN_INTENSITY_RULES
+        from hermes_cli.commands import CAVEMAN_INTENSITY_RULES, CAVEMAN_SYSTEM_INSTRUCTION
 
         text = (event.text or "").strip()
         parts = text.split()
@@ -4802,13 +4802,9 @@ class GatewayRunner:
         session_entry.caveman_mode = intensity
         icons = {"lite": "🪶", "full": "🦴", "ultra": "🔥"}
         rule = CAVEMAN_INTENSITY_RULES.get(intensity, CAVEMAN_INTENSITY_RULES["full"])
-        msg = (
-            f"[SYSTEM: CAVEMAN MODE ON — intensity: {intensity}] "
-            f"IMPORTANT: You MUST respond in caveman speak from now on. "
-            f"Rules: {rule} "
-            f"Keep all technical accuracy. Code blocks unchanged. "
-            f"This overrides your default communication style. "
-            f"Stay in caveman mode until user says /caveman again or 'normal mode'."
+        msg = CAVEMAN_SYSTEM_INSTRUCTION.format(
+            intensity_upper=intensity.upper(),
+            rule=rule,
         )
 
         # Inject idempotently: strip any previous caveman entry, then append fresh one
@@ -6562,6 +6558,14 @@ class GatewayRunner:
             agent.stream_delta_callback = _stream_delta_cb
             agent.status_callback = _status_callback_sync
             agent.reasoning_config = reasoning_config
+            # Propagate caveman mode so run_agent's post-tool reinforcement fires.
+            # Cached agents outlive the /caveman toggle, so this must be refreshed
+            # every turn from the authoritative session_entry.
+            try:
+                _session_entry = self.session_store.get_or_create_session(source)
+                agent.caveman_mode = getattr(_session_entry, "caveman_mode", None)
+            except Exception:
+                agent.caveman_mode = None
 
             # Background review delivery — send "💾 Memory updated" etc. to user
             def _bg_review_send(message: str) -> None:

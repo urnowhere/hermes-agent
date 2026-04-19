@@ -12,7 +12,11 @@ import gateway.run as gateway_run
 from gateway.config import Platform
 from gateway.platforms.base import MessageEvent
 from gateway.session import SessionEntry, SessionSource
-from hermes_cli.commands import CAVEMAN_INTENSITY_RULES, resolve_command
+from hermes_cli.commands import (
+    CAVEMAN_INTENSITY_RULES,
+    CAVEMAN_SYSTEM_INSTRUCTION,
+    resolve_command,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +221,41 @@ class TestGatewayCavemanCommand:
         # Simulate the second runner having a separate session entry
         assert entry1.caveman_mode == "full"
         assert entry2.caveman_mode is None
+
+    @pytest.mark.asyncio
+    async def test_injected_message_uses_shared_template(self):
+        """Gateway transcript text must come from CAVEMAN_SYSTEM_INSTRUCTION so CLI
+        and gateway cannot drift to competing wordings (see llm-instruction-compliance
+        skill, pitfall 6: 'Dual injection fights itself')."""
+        runner, _ = _make_runner()
+        await runner._handle_caveman_command(_make_event("/caveman ultra"))
+
+        rewritten = runner.session_store.rewrite_transcript.call_args[0][1]
+        injected_content = rewritten[0]["content"]
+        expected = CAVEMAN_SYSTEM_INSTRUCTION.format(
+            intensity_upper="ULTRA",
+            rule=CAVEMAN_INTENSITY_RULES["ultra"],
+        )
+        assert injected_content == expected
+
+    @pytest.mark.asyncio
+    async def test_cli_and_gateway_templates_match(self):
+        """CLI and gateway must emit byte-identical instruction text for the same
+        intensity. Wording drift between the two paths is how caveman started
+        slipping in the first place."""
+        import cli as cli_module
+
+        runner, _ = _make_runner()
+        await runner._handle_caveman_command(_make_event("/caveman full"))
+        gateway_msg = runner.session_store.rewrite_transcript.call_args[0][1][0]["content"]
+
+        c = object.__new__(cli_module.HermesCLI)
+        c.conversation_history = []
+        c.console = MagicMock()
+        c._inject_caveman_instruction("on", "full")
+        cli_msg = c.conversation_history[0]["content"]
+
+        assert gateway_msg == cli_msg
 
 
 # ---------------------------------------------------------------------------
