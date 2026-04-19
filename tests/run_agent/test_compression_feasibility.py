@@ -101,6 +101,185 @@ def test_no_warning_when_aux_context_sufficient(mock_get_client, mock_ctx_len):
     assert agent._compression_warning is None
 
 
+@patch("agent.auxiliary_client.get_text_auxiliary_client")
+@patch("agent.model_metadata.get_model_context_length")
+def test_no_warning_when_aux_context_from_custom_provider_config(mock_ctx_len, mock_get_client):
+    """Custom-provider context_length should suppress false compression warnings."""
+    agent = _make_agent(main_context=258_000, threshold_percent=0.50)
+    agent._agent_config = {
+        "model": {"context_length": 1_000_000},
+        "custom_providers": [
+            {
+                "name": "Example Gateway",
+                "base_url": "https://example-gateway.invalid/v1",
+                "models": {
+                    "gpt-5.4": {"context_length": 258_000},
+                },
+            }
+        ]
+    }
+
+    mock_client = MagicMock()
+    mock_client.base_url = "https://example-gateway.invalid/v1"
+    mock_client.api_key = "sk-aux"
+    mock_get_client.return_value = (mock_client, "gpt-5.4")
+
+    def _context_lookup(model, **kwargs):
+        if kwargs.get("config_context_length") == 258_000:
+            return 258_000
+        return 128_000
+
+    mock_ctx_len.side_effect = _context_lookup
+
+    messages = []
+    agent._emit_status = lambda msg: messages.append(msg)
+
+    agent._check_compression_model_feasibility()
+
+    assert len(messages) == 0
+    assert agent._compression_warning is None
+
+
+@patch("agent.auxiliary_client.get_text_auxiliary_client")
+@patch("agent.model_metadata.get_model_context_length")
+def test_custom_provider_context_resolution_uses_runtime_config_source(mock_ctx_len, mock_get_client):
+    """resolve_config_context_length should use the active runtime config source."""
+    agent = _make_agent(main_context=258_000, threshold_percent=0.50)
+    agent.config = {
+        "custom_providers": [
+            {
+                "name": "Example Gateway",
+                "base_url": "https://example-gateway.invalid/v1",
+                "models": {
+                    "gpt-5.4": {"context_length": 258_000},
+                },
+            }
+        ]
+    }
+    agent._agent_config = {}
+
+    mock_client = MagicMock()
+    mock_client.base_url = "https://example-gateway.invalid/v1"
+    mock_client.api_key = "sk-aux"
+    mock_get_client.return_value = (mock_client, "gpt-5.4")
+
+    def _context_lookup(model, **kwargs):
+        if kwargs.get("config_context_length") == 258_000:
+            return 258_000
+        return 128_000
+
+    mock_ctx_len.side_effect = _context_lookup
+
+    messages = []
+    agent._emit_status = lambda msg: messages.append(msg)
+
+    agent._check_compression_model_feasibility()
+
+    assert len(messages) == 0
+    assert agent._compression_warning is None
+
+
+@patch("agent.auxiliary_client.get_text_auxiliary_client")
+@patch("agent.model_metadata.get_model_context_length")
+def test_aux_feasibility_does_not_reuse_main_model_context_override_for_other_summary_models(
+    mock_ctx_len,
+    mock_get_client,
+):
+    """Top-level model.context_length must not mask a smaller aux model window."""
+    agent = _make_agent(main_context=1_000_000, threshold_percent=0.50)
+    agent.model = "gpt-5.4"
+    agent._agent_config = {
+        "model": {"context_length": 1_000_000},
+    }
+
+    mock_client = MagicMock()
+    mock_client.base_url = "https://example-gateway.invalid/v1"
+    mock_client.api_key = "sk-aux"
+    mock_get_client.return_value = (mock_client, "gpt-4.1-mini")
+    mock_ctx_len.return_value = 128_000
+
+    messages = []
+    agent._emit_status = lambda msg: messages.append(msg)
+
+    agent._check_compression_model_feasibility()
+
+    assert len(messages) == 1
+    assert "128,000" in messages[0]
+    assert "500,000" in messages[0]
+    mock_ctx_len.assert_called_once_with(
+        "gpt-4.1-mini",
+        base_url="https://example-gateway.invalid/v1",
+        api_key="sk-aux",
+        config_context_length=None,
+    )
+
+
+@patch("agent.auxiliary_client.get_text_auxiliary_client")
+@patch("agent.model_metadata.get_model_context_length", return_value=1_000_000)
+def test_feasibility_check_prefers_auxiliary_context_override(mock_ctx_len, mock_get_client):
+    """Explicit auxiliary.compression.context_length should override other guesses."""
+    agent = _make_agent(main_context=200_000, threshold_percent=0.85)
+    agent._agent_config = {
+        "model": {"context_length": 200_000},
+        "auxiliary": {
+            "compression": {
+                "context_length": 1_000_000,
+            },
+        },
+        "custom_providers": [
+            {
+                "name": "Example Gateway",
+                "base_url": "http://custom-endpoint:8080/v1",
+                "models": {
+                    "custom/big-model": {"context_length": 128_000},
+                },
+            }
+        ],
+    }
+    mock_client = MagicMock()
+    mock_client.base_url = "http://custom-endpoint:8080/v1"
+    mock_client.api_key = "sk-custom"
+    mock_get_client.return_value = (mock_client, "custom/big-model")
+
+    agent._emit_status = lambda msg: None
+    agent._check_compression_model_feasibility()
+
+    mock_ctx_len.assert_called_once_with(
+        "custom/big-model",
+        base_url="http://custom-endpoint:8080/v1",
+        api_key="sk-custom",
+        config_context_length=1_000_000,
+    )
+
+
+@patch("agent.auxiliary_client.get_text_auxiliary_client")
+@patch("agent.model_metadata.get_model_context_length", return_value=128_000)
+def test_feasibility_check_ignores_invalid_auxiliary_context_override(mock_ctx_len, mock_get_client):
+    """Invalid auxiliary.compression.context_length should fall back cleanly."""
+    agent = _make_agent(main_context=200_000, threshold_percent=0.50)
+    agent._agent_config = {
+        "auxiliary": {
+            "compression": {
+                "context_length": "not-a-number",
+            },
+        },
+    }
+    mock_client = MagicMock()
+    mock_client.base_url = "http://custom:8080/v1"
+    mock_client.api_key = "sk-test"
+    mock_get_client.return_value = (mock_client, "custom/model")
+
+    agent._emit_status = lambda msg: None
+    agent._check_compression_model_feasibility()
+
+    mock_ctx_len.assert_called_once_with(
+        "custom/model",
+        base_url="http://custom:8080/v1",
+        api_key="sk-test",
+        config_context_length=None,
+    )
+
+
 def test_feasibility_check_passes_live_main_runtime():
     """Compression feasibility should probe using the live session runtime."""
     agent = _make_agent(main_context=200_000, threshold_percent=0.50)

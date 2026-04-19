@@ -211,6 +211,93 @@ def _normalize_base_url(base_url: str) -> str:
     return (base_url or "").strip().rstrip("/")
 
 
+def resolve_config_context_length(
+    agent_config: Dict[str, Any] | None,
+    model: str,
+    base_url: str = "",
+    *,
+    primary_model: str | None = None,
+    primary_base_url: str = "",
+) -> int | None:
+    """Resolve context_length from config.yaml overrides.
+
+    Resolution order:
+    1. Top-level ``model.context_length`` when ``model`` matches the configured
+       primary model
+    2. Matching ``custom_providers[].models[model].context_length`` by base URL
+    """
+    if not isinstance(agent_config, dict):
+        return None
+
+    model_keys = [model]
+    stripped_model = _strip_provider_prefix(model)
+    if stripped_model not in model_keys:
+        model_keys.append(stripped_model)
+
+    primary_model_keys: list[str] = []
+    if primary_model:
+        primary_model_keys.append(primary_model)
+        stripped_primary_model = _strip_provider_prefix(primary_model)
+        if stripped_primary_model not in primary_model_keys:
+            primary_model_keys.append(stripped_primary_model)
+
+    normalized_base_url = _normalize_base_url(base_url)
+    normalized_primary_base_url = _normalize_base_url(primary_base_url)
+
+    matches_primary_model = bool(
+        primary_model_keys and any(key in primary_model_keys for key in model_keys)
+    )
+    same_primary_endpoint = matches_primary_model and (
+        (normalized_base_url and normalized_primary_base_url and normalized_base_url == normalized_primary_base_url)
+        or (not normalized_base_url and not normalized_primary_base_url)
+    )
+
+    if same_primary_endpoint:
+        model_cfg = agent_config.get("model", {})
+        if isinstance(model_cfg, dict):
+            raw_ctx = model_cfg.get("context_length")
+            if raw_ctx is not None:
+                try:
+                    ctx = int(raw_ctx)
+                    if ctx > 0:
+                        return ctx
+                except (TypeError, ValueError):
+                    pass
+
+    if not normalized_base_url:
+        return None
+
+    custom_providers = agent_config.get("custom_providers")
+    if not isinstance(custom_providers, list):
+        return None
+
+    for provider_cfg in custom_providers:
+        if not isinstance(provider_cfg, dict):
+            continue
+        provider_base_url = _normalize_base_url(provider_cfg.get("base_url") or "")
+        if provider_base_url != normalized_base_url:
+            continue
+        models_cfg = provider_cfg.get("models", {})
+        if not isinstance(models_cfg, dict):
+            return None
+        for model_key in model_keys:
+            model_override = models_cfg.get(model_key, {})
+            if not isinstance(model_override, dict):
+                continue
+            raw_ctx = model_override.get("context_length")
+            if raw_ctx is None:
+                continue
+            try:
+                ctx = int(raw_ctx)
+                if ctx > 0:
+                    return ctx
+            except (TypeError, ValueError):
+                pass
+        return None
+
+    return None
+
+
 def _is_openrouter_base_url(base_url: str) -> bool:
     return "openrouter.ai" in _normalize_base_url(base_url).lower()
 

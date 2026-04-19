@@ -1271,6 +1271,7 @@ class AIAgent:
             _agent_cfg = _load_agent_config()
         except Exception:
             _agent_cfg = {}
+        self._agent_config = _agent_cfg if isinstance(_agent_cfg, dict) else {}
 
         # Persistent memory (MEMORY.md + USER.md) -- loaded from disk
         self._memory_store = None
@@ -1975,7 +1976,10 @@ class AIAgent:
             return
         try:
             from agent.auxiliary_client import get_text_auxiliary_client
-            from agent.model_metadata import get_model_context_length
+            from agent.model_metadata import (
+                get_model_context_length,
+                resolve_config_context_length,
+            )
 
             client, aux_model = get_text_auxiliary_client(
                 "compression",
@@ -1999,23 +2003,38 @@ class AIAgent:
             aux_api_key = str(getattr(client, "api_key", ""))
 
             # Read user-configured context_length for the compression model.
-            # Custom endpoints often don't support /models API queries so
-            # get_model_context_length() falls through to the 128K default,
-            # ignoring the explicit config value.  Pass it as the highest-
-            # priority hint so the configured value is always respected.
-            _aux_cfg = (self.config or {}).get("auxiliary", {}).get("compression", {})
-            _aux_context_config = _aux_cfg.get("context_length") if isinstance(_aux_cfg, dict) else None
-            if _aux_context_config is not None:
+            # This is the most specific override, so it should win over the
+            # primary-model and custom_provider fallbacks below.
+            # Prefer an explicit auxiliary.compression.context_length override.
+            # If absent, fall back to the same config source used for the active
+            # runtime, then resolve per-model overrides from that same source.
+            _config_source = getattr(self, "config", None)
+            if not isinstance(_config_source, dict):
+                _config_source = getattr(self, "_agent_config", {}) or {}
+            _aux_cfg = _config_source.get("auxiliary", {}).get("compression", {})
+            aux_config_context_length = (
+                _aux_cfg.get("context_length") if isinstance(_aux_cfg, dict) else None
+            )
+            if aux_config_context_length is not None:
                 try:
-                    _aux_context_config = int(_aux_context_config)
+                    aux_config_context_length = int(aux_config_context_length)
                 except (TypeError, ValueError):
-                    _aux_context_config = None
+                    aux_config_context_length = None
+
+            if aux_config_context_length is None:
+                aux_config_context_length = resolve_config_context_length(
+                    _config_source,
+                    aux_model,
+                    aux_base_url,
+                    primary_model=getattr(self, "model", None),
+                    primary_base_url=getattr(self, "base_url", ""),
+                )
 
             aux_context = get_model_context_length(
                 aux_model,
                 base_url=aux_base_url,
                 api_key=aux_api_key,
-                config_context_length=_aux_context_config,
+                config_context_length=aux_config_context_length,
             )
 
             threshold = self.context_compressor.threshold_tokens
