@@ -8781,6 +8781,7 @@ class AIAgent:
         task_id: str = None,
         stream_callback: Optional[callable] = None,
         persist_user_message: Optional[str] = None,
+        skip_preflight_compression: bool = False,
     ) -> Dict[str, Any]:
         """
         Run a complete conversation with tool calling until completion.
@@ -8797,6 +8798,10 @@ class AIAgent:
                 transcripts/history when user_message contains API-only
                 synthetic prefixes.
                     or queuing follow-up prefetch work.
+            skip_preflight_compression: Skip the preflight compression check for
+                this turn. Used when the agent was temporarily swapped to a
+                smaller-context model (e.g. smart routing to a cheap model).
+                In-loop compression on API error still handles the fallback.
 
         Returns:
             Dict: Complete conversation result with final response and message history
@@ -8988,8 +8993,11 @@ class AIAgent:
         # while having a large existing session — compress proactively rather
         # than waiting for an API error (which might be caught as a non-retryable
         # 4xx and abort the request entirely).
+        # Skipped when the caller temporarily swapped to a smaller-context model
+        # for one turn (e.g. smart routing) — the session is sized for primary.
         if (
-            self.compression_enabled
+            not skip_preflight_compression
+            and self.compression_enabled
             and len(messages) > self.context_compressor.protect_first_n
                                 + self.context_compressor.protect_last_n + 1
         ):

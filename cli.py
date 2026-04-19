@@ -2887,6 +2887,33 @@ class HermesCLI:
         from agent.smart_model_routing import resolve_turn_route
         from hermes_cli.models import resolve_fast_mode_overrides
 
+        # Best-effort token estimate for the refuse-to-route check in
+        # smart_model_routing.  Short-circuit when smart routing is disabled
+        # so we don't pay the estimation cost on every turn unnecessarily.
+        _est_tokens = 0
+        _max_history_ratio = 0.50
+        if self._smart_model_routing.get("enabled"):
+            from agent.model_metadata import estimate_request_tokens_rough
+            _agent = getattr(self, "agent", None)
+            _sys_prompt = ""
+            _tools = None
+            if _agent is not None:
+                _sys_prompt = getattr(_agent, "_cached_system_prompt", "") or ""
+                _tools = getattr(_agent, "tools", None)
+                _cc = getattr(_agent, "context_compressor", None)
+                if _cc is not None:
+                    _max_history_ratio = (
+                        getattr(_cc, "threshold_percent", 0.50) or 0.50
+                    )
+            try:
+                _est_tokens = estimate_request_tokens_rough(
+                    self.conversation_history,
+                    system_prompt=_sys_prompt,
+                    tools=_tools,
+                )
+            except Exception:
+                _est_tokens = 0
+
         route = resolve_turn_route(
             user_message,
             self._smart_model_routing,
@@ -2900,6 +2927,8 @@ class HermesCLI:
                 "args": list(self.acp_args or []),
                 "credential_pool": getattr(self, "_credential_pool", None),
             },
+            current_request_tokens=_est_tokens,
+            max_history_ratio=_max_history_ratio,
         )
 
         service_tier = getattr(self, "service_tier", None)
@@ -6099,6 +6128,7 @@ class HermesCLI:
 
         turn_route = self._resolve_turn_agent_config(question)
         history_snapshot = list(self.conversation_history)
+        _is_smart_routed_turn = bool(turn_route.get("label"))
 
         preview = question[:60] + ("..." if len(question) > 60 else "")
         _cprint(f'  💬 /btw: "{preview}"')
@@ -6144,6 +6174,7 @@ class HermesCLI:
                     user_message=btw_prompt,
                     conversation_history=history_snapshot,
                     task_id=task_id,
+                    skip_preflight_compression=_is_smart_routed_turn,
                 )
 
                 response = (result.get("final_response") or "") if result else ""
@@ -7905,6 +7936,13 @@ class HermesCLI:
         if turn_route["signature"] != self._active_agent_route_signature:
             self.agent = None
 
+        # Smart routing picks a temporary per-turn model (e.g. cheap fallback),
+        # which rebuilds the agent with a ContextCompressor bound to that
+        # model's context_length.  Preflight compression would then fire
+        # against the temporary threshold and compress history sized for the
+        # primary model.  Mark the turn so run_conversation skips preflight.
+        _is_smart_routed_turn = bool(turn_route.get("label"))
+
         # Initialize agent if needed
         if self.agent is None:
             _cprint(f"{_DIM}Initializing agent...{_RST}")
@@ -8053,6 +8091,7 @@ class HermesCLI:
                         stream_callback=stream_callback,
                         task_id=self.session_id,
                         persist_user_message=message if _voice_prefix else None,
+                        skip_preflight_compression=_is_smart_routed_turn,
                     )
                 except Exception as exc:
                     logging.error("run_conversation raised: %s", exc, exc_info=True)
@@ -10532,6 +10571,7 @@ def main(
                 turn_route = cli._resolve_turn_agent_config(effective_query)
                 if turn_route["signature"] != cli._active_agent_route_signature:
                     cli.agent = None
+                _is_smart_routed_turn = bool(turn_route.get("label"))
                 if cli._init_agent(
                     model_override=turn_route["model"],
                     runtime_override=turn_route["runtime"],
@@ -10548,6 +10588,7 @@ def main(
                     result = cli.agent.run_conversation(
                         user_message=effective_query,
                         conversation_history=cli.conversation_history,
+                        skip_preflight_compression=_is_smart_routed_turn,
                     )
                     response = result.get("final_response", "") if isinstance(result, dict) else str(result)
                     if response:

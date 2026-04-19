@@ -511,6 +511,79 @@ class TestPreflightCompression:
 
         mock_compress.assert_not_called()
 
+    def test_skip_preflight_compression_flag(self, agent):
+        """skip_preflight_compression=True must bypass preflight even when over threshold.
+
+        Regression for smart_model_routing: when the agent is temporarily swapped to a
+        smaller-context model for one turn, preflight compression fires against the
+        temporary model's threshold and permanently compresses history sized for the
+        primary model.  Callers can pass skip_preflight_compression=True to opt out.
+        """
+        agent.compression_enabled = True
+        # Small context so history easily exceeds threshold
+        agent.context_compressor.context_length = 2000
+        agent.context_compressor.threshold_tokens = 200
+
+        big_history = []
+        for i in range(20):
+            big_history.append({"role": "user", "content": f"Message {i} with padding"})
+            big_history.append({"role": "assistant", "content": f"Response {i} with padding"})
+
+        ok_resp = _mock_response(content="Not compressed", finish_reason="stop")
+        agent.client.chat.completions.create.side_effect = [ok_resp]
+
+        with (
+            patch.object(agent, "_compress_context") as mock_compress,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(
+                "hello",
+                conversation_history=big_history,
+                skip_preflight_compression=True,
+            )
+
+        mock_compress.assert_not_called()
+        assert result["completed"] is True
+        assert result["final_response"] == "Not compressed"
+
+    def test_skip_preflight_false_still_compresses(self, agent):
+        """skip_preflight_compression=False (default) must preserve existing behavior."""
+        agent.compression_enabled = True
+        agent.context_compressor.context_length = 2000
+        agent.context_compressor.threshold_tokens = 200
+
+        big_history = []
+        for i in range(20):
+            big_history.append({"role": "user", "content": f"Message {i} with padding"})
+            big_history.append({"role": "assistant", "content": f"Response {i} with padding"})
+
+        ok_resp = _mock_response(content="After compression", finish_reason="stop")
+        agent.client.chat.completions.create.side_effect = [ok_resp]
+
+        with (
+            patch.object(agent, "_compress_context") as mock_compress,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            mock_compress.return_value = (
+                [
+                    {"role": "user", "content": f"{SUMMARY_PREFIX}\nPrevious conversation"},
+                    {"role": "user", "content": "hello"},
+                ],
+                "new system prompt",
+            )
+            result = agent.run_conversation(
+                "hello",
+                conversation_history=big_history,
+                skip_preflight_compression=False,
+            )
+
+        mock_compress.assert_called_once()
+        assert result["completed"] is True
+
 
 class TestToolResultPreflightCompression:
     """Compression should trigger when tool results push context past the threshold."""

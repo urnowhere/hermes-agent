@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from typing import Any, Dict, Optional
 
 from utils import is_truthy_value
+
+logger = logging.getLogger(__name__)
 
 _COMPLEX_KEYWORDS = {
     "debug",
@@ -59,6 +62,37 @@ def _coerce_int(value: Any, default: int) -> int:
         return default
 
 
+def _primary_route(primary: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the canonical primary-model route dict.
+
+    Used whenever smart routing declines to pick a cheap model — because the
+    message doesn't look simple, the cheap runtime can't be resolved, or the
+    estimated request won't fit the cheap model's context. ``label`` is None
+    so callers can distinguish primary from smart-routed turns.
+    """
+    return {
+        "model": primary.get("model"),
+        "runtime": {
+            "api_key": primary.get("api_key"),
+            "base_url": primary.get("base_url"),
+            "provider": primary.get("provider"),
+            "api_mode": primary.get("api_mode"),
+            "command": primary.get("command"),
+            "args": list(primary.get("args") or []),
+            "credential_pool": primary.get("credential_pool"),
+        },
+        "label": None,
+        "signature": (
+            primary.get("model"),
+            primary.get("provider"),
+            primary.get("base_url"),
+            primary.get("api_mode"),
+            primary.get("command"),
+            tuple(primary.get("args") or ()),
+        ),
+    }
+
+
 def choose_cheap_model_route(user_message: str, routing_config: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Return the configured cheap-model route when a message looks simple.
 
@@ -107,34 +141,36 @@ def choose_cheap_model_route(user_message: str, routing_config: Optional[Dict[st
     return route
 
 
-def resolve_turn_route(user_message: str, routing_config: Optional[Dict[str, Any]], primary: Dict[str, Any]) -> Dict[str, Any]:
+def resolve_turn_route(
+    user_message: str,
+    routing_config: Optional[Dict[str, Any]],
+    primary: Dict[str, Any],
+    *,
+    current_request_tokens: int = 0,
+    max_history_ratio: float = 0.50,
+) -> Dict[str, Any]:
     """Resolve the effective model/runtime for one turn.
 
     Returns a dict with model/runtime/signature/label fields.
+
+    Args:
+        current_request_tokens: Best-effort token estimate of the current
+            request (messages + system prompt + tools). When > 0, enables the
+            refuse-to-route check: if the estimate exceeds the cheap model's
+            context window times ``max_history_ratio``, smart routing falls
+            back to the primary model instead. When 0 (default), the check is
+            skipped — preserves backward compat for callers without an estimate.
+        max_history_ratio: Fraction of the cheap model's context length that
+            the current request may occupy before smart routing refuses. The
+            default of 0.50 mirrors ``ContextCompressor.threshold_percent`` so
+            smart routing only uses the cheap model in the zone where the cheap
+            model wouldn't even want to compress. Leaving the upper half of the
+            cheap context free gives room for tool outputs and responses within
+            the turn without triggering destructive in-loop compression.
     """
     route = choose_cheap_model_route(user_message, routing_config)
     if not route:
-        return {
-            "model": primary.get("model"),
-            "runtime": {
-                "api_key": primary.get("api_key"),
-                "base_url": primary.get("base_url"),
-                "provider": primary.get("provider"),
-                "api_mode": primary.get("api_mode"),
-                "command": primary.get("command"),
-                "args": list(primary.get("args") or []),
-                "credential_pool": primary.get("credential_pool"),
-            },
-            "label": None,
-            "signature": (
-                primary.get("model"),
-                primary.get("provider"),
-                primary.get("base_url"),
-                primary.get("api_mode"),
-                primary.get("command"),
-                tuple(primary.get("args") or ()),
-            ),
-        }
+        return _primary_route(primary)
 
     from hermes_cli.runtime_provider import resolve_runtime_provider
 
@@ -150,27 +186,33 @@ def resolve_turn_route(user_message: str, routing_config: Optional[Dict[str, Any
             explicit_base_url=route.get("base_url"),
         )
     except Exception:
-        return {
-            "model": primary.get("model"),
-            "runtime": {
-                "api_key": primary.get("api_key"),
-                "base_url": primary.get("base_url"),
-                "provider": primary.get("provider"),
-                "api_mode": primary.get("api_mode"),
-                "command": primary.get("command"),
-                "args": list(primary.get("args") or []),
-                "credential_pool": primary.get("credential_pool"),
-            },
-            "label": None,
-            "signature": (
-                primary.get("model"),
-                primary.get("provider"),
-                primary.get("base_url"),
-                primary.get("api_mode"),
-                primary.get("command"),
-                tuple(primary.get("args") or ()),
-            ),
-        }
+        return _primary_route(primary)
+
+    # Refuse-to-route: if the request won't fit comfortably inside the cheap
+    # model's context, fall back to primary rather than either (a) triggering
+    # preflight compression against the cheap threshold or (b) letting the
+    # cheap API call fail and hit in-loop compression. Both outcomes would
+    # permanently compress a session sized for the primary model.
+    if current_request_tokens > 0:
+        try:
+            from agent.model_metadata import get_model_context_length
+            cheap_ctx = get_model_context_length(
+                route.get("model") or "",
+                base_url=runtime.get("base_url") or "",
+                api_key=runtime.get("api_key") or "",
+                provider=runtime.get("provider"),
+            )
+        except Exception:
+            cheap_ctx = 0
+        if cheap_ctx and current_request_tokens > int(cheap_ctx * max_history_ratio):
+            logger.info(
+                "Smart route refused: est %d tokens > %.0f%% of %s context %d (staying on primary)",
+                current_request_tokens,
+                max_history_ratio * 100,
+                route.get("model") or "",
+                cheap_ctx,
+            )
+            return _primary_route(primary)
 
     return {
         "model": route.get("model"),
