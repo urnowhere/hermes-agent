@@ -2495,5 +2495,210 @@ class TestFallbackModelInheritance(unittest.TestCase):
         self.assertIsNone(kwargs["fallback_model"])
 
 
+class TestModelProviderOverride(unittest.TestCase):
+    """Per-call model/provider override (200426).
+
+    The schema exposes `model` and `provider` at top-level and `model` per-task.
+    These flow through `_resolve_delegation_credentials()` (top-level only) and
+    `_build_child_agent(model=...)` (per-task), so subagents can be routed to
+    a specific model independent of the config default.
+    """
+
+    def test_schema_exposes_model_and_provider_top_level(self):
+        """Top-level schema MUST expose `model` and `provider`."""
+        props = DELEGATE_TASK_SCHEMA["parameters"]["properties"]
+        self.assertIn("model", props)
+        self.assertIn("provider", props)
+        self.assertEqual(props["model"]["type"], "string")
+        self.assertEqual(props["provider"]["type"], "string")
+
+    def test_schema_exposes_model_per_task(self):
+        """Per-task schema MUST expose `model` (provider intentionally omitted; documented limitation)."""
+        task_props = DELEGATE_TASK_SCHEMA["parameters"]["properties"]["tasks"]["items"]["properties"]
+        self.assertIn("model", task_props)
+        self.assertNotIn("provider", task_props,
+            "Per-task `provider` not yet supported — workaround: use provider='openrouter' at top level")
+
+    def test_resolve_credentials_no_override(self):
+        """Without overrides, returns config defaults (None when nothing configured)."""
+        parent = _make_mock_parent()
+        with patch("tools.delegate_tool._load_config", return_value={}):
+            creds = _resolve_delegation_credentials({}, parent)
+        self.assertIsNone(creds["model"])
+        self.assertIsNone(creds["provider"])
+
+    def test_resolve_credentials_model_override_beats_config(self):
+        """model_override should take precedence over cfg['model']."""
+        parent = _make_mock_parent()
+        cfg = {"model": "config/default-model"}
+        creds = _resolve_delegation_credentials(
+            cfg, parent, model_override="anthropic/claude-opus-4-7"
+        )
+        self.assertEqual(creds["model"], "anthropic/claude-opus-4-7")
+
+    def test_resolve_credentials_provider_override_drives_runtime(self):
+        """provider_override should take precedence over cfg['provider'] AND drive credential lookup."""
+        parent = _make_mock_parent()
+        cfg = {"provider": "config-provider"}
+        fake_runtime = {
+            "provider": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "***",
+            "api_mode": "chat_completions",
+        }
+        with patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=fake_runtime) as mock_resolve:
+            creds = _resolve_delegation_credentials(
+                cfg, parent, provider_override="openrouter"
+            )
+        mock_resolve.assert_called_once_with(requested="openrouter")
+        self.assertEqual(creds["provider"], "openrouter")
+        self.assertEqual(creds["base_url"], "https://openrouter.ai/api/v1")
+
+    def test_resolve_credentials_invalid_provider_raises_valueerror(self):
+        """Unknown provider override should raise ValueError with helpful message."""
+        parent = _make_mock_parent()
+        with patch(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            side_effect=Exception("Unknown provider 'totally-fake'"),
+        ):
+            with self.assertRaises(ValueError) as ctx:
+                _resolve_delegation_credentials(
+                    {}, parent, provider_override="totally-fake"
+                )
+        self.assertIn("totally-fake", str(ctx.exception))
+        self.assertIn("Available providers", str(ctx.exception))
+
+    def test_delegate_task_invalid_provider_returns_tool_error(self):
+        """Bad provider override should bubble up as a tool_error, not a crash."""
+        parent = _make_mock_parent()
+        with patch(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            side_effect=Exception("Unknown provider 'totally-fake'"),
+        ):
+            result = json.loads(delegate_task(
+                goal="should never run",
+                provider="totally-fake",
+                parent_agent=parent,
+            ))
+        self.assertIn("error", result)
+        self.assertIn("totally-fake", result["error"])
+
+    @patch("tools.delegate_tool._build_child_agent")
+    @patch("tools.delegate_tool._run_single_child")
+    def test_delegate_task_top_level_model_override_threads_through(
+        self, mock_run, mock_build
+    ):
+        """Top-level model='X' should reach _build_child_agent(model='X')."""
+        mock_run.return_value = {
+            "task_index": 0, "status": "completed",
+            "summary": "ok", "api_calls": 1, "duration_seconds": 0.1,
+        }
+        mock_build.return_value = MagicMock()
+        parent = _make_mock_parent()
+
+        delegate_task(
+            goal="test override",
+            model="anthropic/claude-opus-4-7",
+            provider=None,
+            parent_agent=parent,
+        )
+        build_kwargs = mock_build.call_args[1]
+        self.assertEqual(build_kwargs["model"], "anthropic/claude-opus-4-7")
+
+    @patch("tools.delegate_tool._build_child_agent")
+    @patch("tools.delegate_tool._run_single_child")
+    def test_delegate_task_per_task_model_overrides_top_level(
+        self, mock_run, mock_build
+    ):
+        """In a batch, per-task model should override the top-level model for that task."""
+        mock_run.side_effect = [
+            {"task_index": 0, "status": "completed", "summary": "A", "api_calls": 1, "duration_seconds": 0.1},
+            {"task_index": 1, "status": "completed", "summary": "B", "api_calls": 1, "duration_seconds": 0.1},
+        ]
+        mock_build.return_value = MagicMock()
+        parent = _make_mock_parent()
+
+        delegate_task(
+            model="anthropic/claude-opus-4-7",  # batch default
+            tasks=[
+                {"goal": "use opus (inherits)"},
+                {"goal": "use haiku (override)", "model": "anthropic/claude-haiku-4-5"},
+            ],
+            parent_agent=parent,
+        )
+        self.assertEqual(mock_build.call_count, 2)
+        first_kwargs = mock_build.call_args_list[0][1]
+        second_kwargs = mock_build.call_args_list[1][1]
+        self.assertEqual(first_kwargs["model"], "anthropic/claude-opus-4-7")
+        self.assertEqual(second_kwargs["model"], "anthropic/claude-haiku-4-5")
+
+    def test_delegate_task_no_override_falls_back_to_config(self):
+        """With no override, _resolve_delegation_credentials returns cfg['model']."""
+        parent = _make_mock_parent()
+        cfg = {"model": "config/default-model"}
+        creds = _resolve_delegation_credentials(cfg, parent)
+        self.assertEqual(creds["model"], "config/default-model")
+
+
+class TestRunAgentDispatchForwarding(unittest.TestCase):
+    """Regression guard: _dispatch_delegate_task() must forward all schema params.
+
+    Upstream replaced the two hardcoded dispatch sites (pre-200426) with a
+    single _dispatch_delegate_task() helper. This test verifies that helper
+    forwards every param we depend on — model, provider, role, acp_command,
+    acp_args — so future schema additions only need one change to reach all
+    invocation paths.
+    """
+
+    def test_dispatch_helper_forwards_model_provider_role_acp(self):
+        """_dispatch_delegate_task must forward model=, provider=, role=, acp_command=, acp_args=."""
+        from pathlib import Path
+        run_agent_path = Path(__file__).resolve().parents[2] / "run_agent.py"
+        source = run_agent_path.read_text()
+
+        # Find the _dispatch_delegate_task method definition
+        method_token = "def _dispatch_delegate_task("
+        method_start = source.find(method_token)
+        self.assertNotEqual(method_start, -1, "_dispatch_delegate_task not found in run_agent.py")
+
+        # Find the end of the method's def signature line (the colon) so we
+        # search for _delegate_task( only inside the method body, not the def line.
+        colon_pos = source.find(":\n", method_start)
+        self.assertNotEqual(colon_pos, -1, "Could not find end of _dispatch_delegate_task def line")
+        method_body_start = colon_pos + 1
+
+        # Find the _delegate_task( call inside the method body
+        # Exclude the "def _dispatch_delegate_task(" itself (already past it)
+        inner_token = "_delegate_task("
+        call_start = source.find(inner_token, method_body_start)
+        self.assertNotEqual(call_start, -1,
+            "_delegate_task( call not found inside _dispatch_delegate_task body")
+
+        # Walk balanced parens to extract the argument block
+        depth = 0
+        i = call_start + len(inner_token) - 1  # position of the opening "("
+        end = -1
+        while i < len(source):
+            if source[i] == "(":
+                depth += 1
+            elif source[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+            i += 1
+        self.assertNotEqual(end, -1, "Unbalanced parens in _delegate_task( call")
+
+        dispatch_args = source[call_start + len(inner_token):end]
+        required_kwargs = ("model=", "provider=", "role=", "acp_command=", "acp_args=")
+        for kw in required_kwargs:
+            self.assertIn(
+                kw, dispatch_args,
+                f"_dispatch_delegate_task is missing '{kw}' — add "
+                f"`{kw}function_args.get('{kw[:-1]}')` to keep schema params from "
+                f"being silently dropped across all invocation paths."
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

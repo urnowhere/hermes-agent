@@ -1842,6 +1842,8 @@ def delegate_task(
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
     parent_agent=None,
 ) -> str:
     """
@@ -1911,7 +1913,11 @@ def delegate_task(
     # used by CLI/gateway startup.  When unconfigured, returns None values so
     # children inherit from the parent.
     try:
-        creds = _resolve_delegation_credentials(cfg, parent_agent)
+        creds = _resolve_delegation_credentials(
+            cfg, parent_agent,
+            model_override=model,
+            provider_override=provider,
+        )
     except ValueError as exc:
         return tool_error(str(exc))
 
@@ -1967,16 +1973,11 @@ def delegate_task(
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
             child = _build_child_agent(
-                task_index=i,
-                goal=t["goal"],
-                context=t.get("context"),
+                task_index=i, goal=t["goal"], context=t.get("context"),
                 toolsets=t.get("toolsets") or toolsets,
-                model=creds["model"],
-                max_iterations=effective_max_iter,
-                task_count=n_tasks,
-                parent_agent=parent_agent,
-                override_provider=creds["provider"],
-                override_base_url=creds["base_url"],
+                model=t.get("model") or creds["model"],
+                max_iterations=effective_max_iter, task_count=n_tasks, parent_agent=parent_agent,
+                override_provider=creds["provider"], override_base_url=creds["base_url"],
                 override_api_key=creds["api_key"],
                 override_api_mode=creds["api_mode"],
                 override_acp_command=t.get("acp_command")
@@ -2250,7 +2251,12 @@ def _resolve_child_credential_pool(effective_provider: Optional[str], parent_age
     return None
 
 
-def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
+def _resolve_delegation_credentials(
+    cfg: dict,
+    parent_agent,
+    model_override: Optional[str] = None,
+    provider_override: Optional[str] = None,
+) -> dict:
     """Resolve credentials for subagent delegation.
 
     If ``delegation.base_url`` is configured, subagents use that direct
@@ -2269,10 +2275,24 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     If neither base_url nor provider is configured, returns None values so the
     child inherits everything from the parent agent.
 
+    Per-call overrides:
+    - model_override: if set, takes precedence over cfg["model"]. Routes this
+      specific delegation to a different model.
+    - provider_override: if set, takes precedence over cfg["provider"]. Routes
+      this specific delegation to a different provider (e.g. openrouter).
+
     Raises ValueError with a user-friendly message on credential failure.
     """
-    configured_model = str(cfg.get("model") or "").strip() or None
-    configured_provider = str(cfg.get("provider") or "").strip() or None
+    configured_model = (
+        (model_override and str(model_override).strip())
+        or str(cfg.get("model") or "").strip()
+        or None
+    )
+    configured_provider = (
+        (provider_override and str(provider_override).strip())
+        or str(cfg.get("provider") or "").strip()
+        or None
+    )
     configured_base_url = str(cfg.get("base_url") or "").strip() or None
     configured_api_key = str(cfg.get("api_key") or "").strip() or None
 
@@ -2491,6 +2511,10 @@ DELEGATE_TASK_SCHEMA = {
                             "enum": ["leaf", "orchestrator"],
                             "description": "Per-task role override. See top-level 'role' for semantics.",
                         },
+                        "model": {
+                            "type": "string",
+                            "description": "Per-task model override (e.g. 'anthropic/claude-opus-4-7'). Overrides the top-level model for this task only.",
+                        },
                     },
                     "required": ["goal"],
                 },
@@ -2533,6 +2557,25 @@ DELEGATE_TASK_SCHEMA = {
                     "Only used when acp_command is set. Example: ['--acp', '--stdio', '--model', 'claude-opus-4-6']"
                 ),
             },
+            "model": {
+                "type": "string",
+                "description": (
+                    "Optional model override for the subagent(s). Format: "
+                    "'<provider>/<model>' (e.g. 'anthropic/claude-opus-4-7', "
+                    "'x-ai/grok-4.20-multi-agent', 'openrouter/auto'). "
+                    "When omitted, subagents use the delegation.model from config. "
+                    "Applies to all tasks in the batch unless a per-task model is set."
+                ),
+            },
+            "provider": {
+                "type": "string",
+                "description": (
+                    "Optional provider override (e.g. 'openrouter', 'anthropic', "
+                    "'nous'). Usually unneeded — provider is inferred from the "
+                    "model prefix. Set explicitly only when routing through a "
+                    "specific provider for the same model."
+                ),
+            },
         },
         "required": [],
     },
@@ -2556,6 +2599,8 @@ registry.register(
         acp_args=args.get("acp_args"),
         role=args.get("role"),
         parent_agent=kw.get("parent_agent"),
+        model=args.get("model"),
+        provider=args.get("provider"),
     ),
     check_fn=check_delegate_requirements,
     emoji="🔀",
