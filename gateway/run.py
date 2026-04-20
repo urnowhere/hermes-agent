@@ -24,6 +24,7 @@ import signal
 import tempfile
 import threading
 import time
+import dataclasses
 from collections import OrderedDict
 from contextvars import copy_context
 from pathlib import Path
@@ -8205,14 +8206,7 @@ class GatewayRunner:
                     # background process was launched from a thread).
                     _evt_thread = str(evt.get("thread_id") or "").strip() or None
                     if _evt_thread and not getattr(entry.origin, "thread_id", None):
-                        return SessionSource(
-                            platform=entry.origin.platform,
-                            chat_id=entry.origin.chat_id,
-                            chat_type=entry.origin.chat_type,
-                            thread_id=_evt_thread,
-                            user_id=entry.origin.user_id,
-                            user_name=entry.origin.user_name,
-                        )
+                        return dataclasses.replace(entry.origin, thread_id=_evt_thread)
                     return entry.origin
             except Exception as exc:
                 logger.debug(

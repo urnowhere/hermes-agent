@@ -191,3 +191,50 @@ class TestWatchNotificationThreadRouting:
 
         assert source is not None
         assert source.thread_id == "456"
+
+    def test_all_origin_fields_preserved_when_thread_patched(self, monkeypatch, tmp_path):
+        """All 11 SessionSource fields must survive when thread_id is patched.
+
+        Regression test: a manual SessionSource() constructor previously
+        dropped chat_name, chat_topic, user_id_alt, chat_id_alt, and is_bot.
+        Using dataclasses.replace() ensures all fields carry over.
+        """
+        runner = _build_runner(monkeypatch, tmp_path)
+
+        origin = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="123",
+            chat_name="general",
+            chat_type="group",
+            thread_id=None,
+            user_id="789",
+            user_name="Emiliyan",
+            chat_topic="Project discussion",
+            user_id_alt="alt-uuid-abc",
+            chat_id_alt="alt-group-xyz",
+            is_bot=False,
+        )
+        runner.session_store._entries["agent:main:discord:group:123:456"] = SimpleNamespace(
+            origin=origin,
+        )
+
+        evt = {
+            "session_id": "proc_abc",
+            "session_key": "agent:main:discord:group:123:456",
+            "thread_id": "456",
+        }
+
+        source = runner._build_process_event_source(evt)
+
+        assert source is not None
+        assert source.thread_id == "456"
+        assert source.platform == Platform.DISCORD
+        assert source.chat_id == "123"
+        assert source.chat_name == "general"
+        assert source.chat_type == "group"
+        assert source.user_id == "789"
+        assert source.user_name == "Emiliyan"
+        assert source.chat_topic == "Project discussion"
+        assert source.user_id_alt == "alt-uuid-abc"
+        assert source.chat_id_alt == "alt-group-xyz"
+        assert source.is_bot is False
