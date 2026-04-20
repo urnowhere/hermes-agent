@@ -253,6 +253,23 @@ class _ACPChatNamespace:
         self.completions = _ACPChatCompletions(client)
 
 
+class _ACPStreamResponse:
+    """Minimal iterable stream wrapper for Copilot ACP.
+
+    Hermes's main agent loop expects ``client.chat.completions.create(..., stream=True)``
+    to return an iterable of OpenAI-style chunks. Copilot ACP is fundamentally
+    synchronous, so we synthesize a tiny stream from the final response instead
+    of returning the raw ``SimpleNamespace`` completion object.
+    """
+
+    def __init__(self, chunks: list[SimpleNamespace]):
+        self._chunks = chunks
+        self.response = SimpleNamespace(headers={})
+
+    def __iter__(self):
+        return iter(self._chunks)
+
+
 class CopilotACPClient:
     """Minimal OpenAI-client-compatible facade for Copilot ACP."""
 
@@ -305,7 +322,7 @@ class CopilotACPClient:
         timeout: float | None = None,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: Any = None,
-        **_: Any,
+        **kwargs: Any,
     ) -> Any:
         prompt_text = _format_messages_as_prompt(
             messages or [],
@@ -351,6 +368,32 @@ class CopilotACPClient:
         )
         finish_reason = "tool_calls" if tool_calls else "stop"
         choice = SimpleNamespace(message=assistant_message, finish_reason=finish_reason)
+        if kwargs.get("stream"):
+            streamed_tool_calls = [
+                SimpleNamespace(
+                    index=i,
+                    id=tc.id,
+                    type=getattr(tc, "type", "function"),
+                    function=tc.function,
+                )
+                for i, tc in enumerate(tool_calls or [])
+            ] or None
+            delta = SimpleNamespace(
+                content=cleaned_text or None,
+                tool_calls=streamed_tool_calls,
+                reasoning=reasoning_text or None,
+                reasoning_content=reasoning_text or None,
+            )
+            # Propagate finish_reason on the delta-bearing chunk. The streaming
+            # accumulator in run_agent.py only inspects finish_reason on chunks
+            # that have choices; the empty-choices final chunk is for usage only.
+            # Without this, tool_calls silently degrade to finish_reason="stop".
+            chunk = SimpleNamespace(
+                choices=[SimpleNamespace(delta=delta, index=0, finish_reason=finish_reason)],
+                model=model or "copilot-acp",
+            )
+            final_chunk = SimpleNamespace(choices=[], usage=usage, model=model or "copilot-acp")
+            return _ACPStreamResponse([chunk, final_chunk])
         return SimpleNamespace(
             choices=[choice],
             usage=usage,
