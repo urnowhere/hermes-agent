@@ -62,6 +62,8 @@ VALID_HOOKS: Set[str] = {
     "on_session_end",
     "on_session_finalize",
     "on_session_reset",
+    "pre_compact",
+    "post_compact",
 }
 
 ENTRY_POINTS_GROUP = "hermes_agent.plugins"
@@ -734,9 +736,13 @@ def discover_plugins() -> None:
 def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
     """Invoke a lifecycle hook on all loaded plugins.
 
+    Auto-discovers plugins on first call if not yet discovered.
     Returns a list of non-``None`` return values from plugin callbacks.
     """
-    return get_plugin_manager().invoke_hook(hook_name, **kwargs)
+    manager = get_plugin_manager()
+    if not manager._discovered:
+        manager.discover_and_load()
+    return manager.invoke_hook(hook_name, **kwargs)
 
 
 
