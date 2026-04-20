@@ -8197,6 +8197,22 @@ class GatewayRunner:
                 self.session_store._ensure_loaded()
                 entry = self.session_store._entries.get(session_key)
                 if entry and getattr(entry, "origin", None):
+                    # The persisted origin may lack thread_id when the
+                    # session was first created from a non-threaded
+                    # message in the parent channel.  The event dict
+                    # carries the correct thread_id from the watcher
+                    # metadata (set via session_context when the
+                    # background process was launched from a thread).
+                    _evt_thread = str(evt.get("thread_id") or "").strip() or None
+                    if _evt_thread and not getattr(entry.origin, "thread_id", None):
+                        return SessionSource(
+                            platform=entry.origin.platform,
+                            chat_id=entry.origin.chat_id,
+                            chat_type=entry.origin.chat_type,
+                            thread_id=_evt_thread,
+                            user_id=entry.origin.user_id,
+                            user_name=entry.origin.user_name,
+                        )
                     return entry.origin
             except Exception as exc:
                 logger.debug(
