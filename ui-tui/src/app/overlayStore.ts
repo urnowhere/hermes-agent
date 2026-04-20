@@ -16,6 +16,9 @@ const buildOverlayState = (): OverlayState => ({
 
 export const $overlayState = atom<OverlayState>(buildOverlayState())
 
+/** Increments on every overlay mutation for tests and optional subscribers (cross-backend render sequencing). */
+export const $overlayRevision = atom(0)
+
 export const $isBlocked = computed(
   $overlayState,
   ({ approval, clarify, confirm, modelPicker, pager, picker, secret, skillsHub, sudo }) =>
@@ -24,7 +27,15 @@ export const $isBlocked = computed(
 
 export const getOverlayState = () => $overlayState.get()
 
-export const patchOverlayState = (next: Partial<OverlayState> | ((state: OverlayState) => OverlayState)) =>
-  $overlayState.set(typeof next === 'function' ? next($overlayState.get()) : { ...$overlayState.get(), ...next })
+export const patchOverlayState = (next: Partial<OverlayState> | ((state: OverlayState) => OverlayState)) => {
+  const prev = $overlayState.get()
+  const merged = typeof next === 'function' ? next(prev) : { ...prev, ...next }
 
-export const resetOverlayState = () => $overlayState.set(buildOverlayState())
+  $overlayState.set(merged)
+  $overlayRevision.set($overlayRevision.get() + 1)
+}
+
+export const resetOverlayState = () => {
+  $overlayState.set(buildOverlayState())
+  $overlayRevision.set($overlayRevision.get() + 1)
+}

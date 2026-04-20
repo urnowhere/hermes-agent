@@ -1,6 +1,6 @@
 import { AlternateScreen, Box, NoSelect, ScrollBox, Text } from '@hermes/ink'
 import { useStore } from '@nanostores/react'
-import { memo } from 'react'
+import { memo, useRef } from 'react'
 
 import type { AppLayoutProgressProps, AppLayoutProps } from '../app/interfaces.js'
 import { $isBlocked } from '../app/overlayStore.js'
@@ -153,6 +153,13 @@ const ComposerPane = memo(function ComposerPane({
 }: Pick<AppLayoutProps, 'actions' | 'composer' | 'status'>) {
   const ui = useStore($uiState)
   const isBlocked = useStore($isBlocked)
+  const goodVibesFreezeRef = useRef<number | undefined>(undefined)
+
+  if (!isBlocked) {
+    goodVibesFreezeRef.current = undefined
+  }
+
+  const heartTick = isBlocked ? (goodVibesFreezeRef.current ??= status.goodVibesTick) : status.goodVibesTick
   const sh = (composer.inputBuf[0] ?? composer.input).startsWith('!')
   const pw = sh ? 2 : 3
 
@@ -189,6 +196,7 @@ const ComposerPane = memo(function ComposerPane({
             cols={composer.cols}
             cwdLabel={status.cwdLabel}
             model={ui.info?.model?.split('/').pop() ?? ''}
+            pauseStatusChrome={isBlocked}
             sessionStartedAt={status.sessionStartedAt}
             showCost={ui.showCost}
             status={ui.status}
@@ -243,7 +251,7 @@ const ComposerPane = memo(function ComposerPane({
               />
 
               <Box position="absolute" right={0}>
-                <GoodVibesHeart t={ui.theme} tick={status.goodVibesTick} />
+                <GoodVibesHeart t={ui.theme} tick={heartTick} />
               </Box>
             </Box>
           </Box>

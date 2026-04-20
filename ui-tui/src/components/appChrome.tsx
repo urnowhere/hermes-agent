@@ -12,14 +12,19 @@ import type { Msg, Usage } from '../types.js'
 const FACE_TICK_MS = 2500
 const HEART_COLORS = ['#ff5fa2', '#ff4d6d']
 
-function FaceTicker({ color }: { color: string }) {
+function FaceTicker({ animated, color }: { animated?: boolean; color: string }) {
   const [tick, setTick] = useState(() => Math.floor(Math.random() * 1000))
+  const live = animated !== false
 
   useEffect(() => {
+    if (!live) {
+      return
+    }
+
     const id = setInterval(() => setTick(n => n + 1), FACE_TICK_MS)
 
     return () => clearInterval(id)
-  }, [])
+  }, [live])
 
   return (
     <Text color={color}>
@@ -55,15 +60,20 @@ function ctxBar(pct: number | undefined, w = 10) {
   return '█'.repeat(filled) + '░'.repeat(w - filled)
 }
 
-function SessionDuration({ startedAt }: { startedAt: number }) {
+function SessionDuration({ animate: sessionClockLive = true, startedAt }: { animate?: boolean; startedAt: number }) {
   const [now, setNow] = useState(() => Date.now())
 
   useEffect(() => {
     setNow(Date.now())
+
+    if (!sessionClockLive) {
+      return
+    }
+
     const id = setInterval(() => setNow(Date.now()), 1000)
 
     return () => clearInterval(id)
-  }, [startedAt])
+  }, [sessionClockLive, startedAt])
 
   return fmtDuration(now - startedAt)
 }
@@ -101,7 +111,8 @@ export function StatusRule({
   sessionStartedAt,
   showCost,
   voiceLabel,
-  t
+  t,
+  pauseStatusChrome = false
 }: StatusRuleProps) {
   const pct = usage.context_percent
   const barColor = ctxBarColor(pct, t)
@@ -120,7 +131,15 @@ export function StatusRule({
       <Box flexShrink={1} width={leftWidth}>
         <Text color={t.color.bronze} wrap="truncate-end">
           {'─ '}
-          {busy ? <FaceTicker color={statusColor} /> : <Text color={statusColor}>{status}</Text>}
+          {busy ? (
+            pauseStatusChrome ? (
+              <Text color={statusColor}>{status}</Text>
+            ) : (
+              <FaceTicker animated color={statusColor} />
+            )
+          ) : (
+            <Text color={statusColor}>{status}</Text>
+          )}
           <Text color={t.color.dim}> │ {model}</Text>
           {ctxLabel ? <Text color={t.color.dim}> │ {ctxLabel}</Text> : null}
           {bar ? (
@@ -132,7 +151,7 @@ export function StatusRule({
           {sessionStartedAt ? (
             <Text color={t.color.dim}>
               {' │ '}
-              <SessionDuration startedAt={sessionStartedAt} />
+              <SessionDuration animate={!pauseStatusChrome} startedAt={sessionStartedAt} />
             </Text>
           ) : null}
           {voiceLabel ? <Text color={t.color.dim}> │ {voiceLabel}</Text> : null}
@@ -288,6 +307,8 @@ interface StatusRuleProps {
   cols: number
   cwdLabel: string
   model: string
+  /** When true (blocking overlay open), freeze FaceTicker + session clock to reduce stdout churn vs prompts. */
+  pauseStatusChrome?: boolean
   sessionStartedAt?: number | null
   showCost: boolean
   status: string
