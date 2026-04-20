@@ -428,6 +428,15 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "moonshotai/Kimi-K2-Thinking",
         "moonshotai/Kimi-K2.6",
     ],
+    "zenmux": [
+        "anthropic/claude-opus-4.7",
+        "anthropic/claude-sonnet-4.6",
+        "openai/gpt-5.4",
+        "google/gemini-3-flash-preview",
+        "deepseek/deepseek-chat",
+        "x-ai/grok-4-fast",
+        "qwen/qwen3.6-plus",
+    ],
     # AWS Bedrock — static fallback list used when dynamic discovery is
     # unavailable (no boto3, no credentials, or API error).  The agent
     # prefers live discovery via ListFoundationModels + ListInferenceProfiles.
@@ -805,6 +814,7 @@ CANONICAL_PROVIDERS: list[ProviderEntry] = [
     ProviderEntry("kilocode",       "Kilo Code",                "Kilo Code (Kilo Gateway API)"),
     ProviderEntry("opencode-zen",   "OpenCode Zen",             "OpenCode Zen (35+ curated models, pay-as-you-go)"),
     ProviderEntry("opencode-go",    "OpenCode Go",              "OpenCode Go (open models, $10/month subscription)"),
+    ProviderEntry("zenmux",         "ZenMux",                   "ZenMux (200+ models, unified API key — zenmux.ai)"),
     ProviderEntry("bedrock",        "AWS Bedrock",              "AWS Bedrock (Claude, Nova, Llama, DeepSeek — IAM or API key)"),
     ProviderEntry("azure-foundry",  "Azure Foundry",            "Azure Foundry (OpenAI-style or Anthropic-style endpoint — your Azure AI deployment)"),
     ProviderEntry("ai-gateway",     "Vercel AI Gateway",        "Vercel AI Gateway"),
@@ -908,6 +918,7 @@ _PROVIDER_ALIASES = {
     "lm_studio": "lmstudio",
     "ollama": "custom",  # bare "ollama" = local; use "ollama-cloud" for cloud
     "ollama_cloud": "ollama-cloud",
+    "zenmux.ai": "zenmux",
 }
 
 
