@@ -853,11 +853,7 @@ DEFAULT_CONFIG = {
     },
 
     # Config schema version - bump this when adding new required fields
-<<<<<<< HEAD
-    "_config_version": 19,
-=======
     "_config_version": 21,
->>>>>>> upstream/main
 }
 
 # =============================================================================
