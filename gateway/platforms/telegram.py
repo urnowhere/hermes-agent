@@ -85,6 +85,11 @@ from gateway.platforms.telegram_network import (
     parse_fallback_ip_env,
 )
 from utils import atomic_replace
+from gateway.telegram_ids import (
+    looks_like_telegram_username,
+    normalize_telegram_chat_id,
+    telegram_chat_id_key,
+)
 
 
 def check_telegram_requirements() -> bool:
@@ -120,6 +125,38 @@ def _strip_mdv2(text: str) -> str:
     # Remove MarkdownV2 spoiler markers (||text|| → text)
     cleaned = re.sub(r'\|\|([^|]+)\|\|', r'\1', cleaned)
     return cleaned
+
+
+def _is_permanent_telegram_send_error(error: Exception, error_text: str) -> bool:
+    try:
+        from telegram.error import BadRequest, Forbidden
+    except (ImportError, AttributeError):
+        BadRequest = Forbidden = ()  # type: ignore[assignment,misc]
+    if BadRequest and isinstance(error, (BadRequest, Forbidden)):
+        return True
+    lowered = error_text.lower()
+    permanent_patterns = (
+        "chat not found",
+        "bot was blocked",
+        "bot blocked",
+        "not enough rights",
+        "not a member",
+        "group chat was deactivated",
+        "user is deactivated",
+        "peer_id_invalid",
+    )
+    return any(pattern in lowered for pattern in permanent_patterns)
+
+
+def _format_send_error(error: Exception, chat_id: Any) -> str:
+    message = str(error)
+    if looks_like_telegram_username(chat_id) and "chat not found" in message.lower():
+        return (
+            f"{message}. Telegram Bot API accepts @username chat IDs for public "
+            "channels/supergroups; private DMs need the numeric chat ID from "
+            "channel_directory.json."
+        )
+    return message
 
 
 # ---------------------------------------------------------------------------
@@ -642,7 +679,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
     async def _create_dm_topic(
         self,
-        chat_id: int,
+        chat_id: int | str,
         name: str,
         icon_color: Optional[int] = None,
         icon_custom_emoji_id: Optional[str] = None,
@@ -693,19 +730,15 @@ class TelegramAdapter(BasePlatformAdapter):
 
     async def rename_dm_topic(
         self,
-        chat_id: int,
+        chat_id: int | str,
         thread_id: int,
         name: str,
     ) -> None:
         """Rename a forum topic in a private (DM) chat."""
         if not self._bot:
             return
-        try:
-            chat_id_arg = int(chat_id)
-        except (TypeError, ValueError):
-            chat_id_arg = chat_id
         await self._bot.edit_forum_topic(
-            chat_id=chat_id_arg,
+            chat_id=normalize_telegram_chat_id(chat_id),
             message_thread_id=int(thread_id),
             name=name,
         )
@@ -714,7 +747,7 @@ class TelegramAdapter(BasePlatformAdapter):
             self.name, chat_id, thread_id, name,
         )
 
-    def _persist_dm_topic_thread_id(self, chat_id: int, topic_name: str, thread_id: int) -> None:
+    def _persist_dm_topic_thread_id(self, chat_id: int | str, topic_name: str, thread_id: int) -> None:
         """Save a newly created thread_id back into config.yaml so it persists across restarts."""
         try:
             from hermes_constants import get_hermes_home
@@ -739,7 +772,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
             changed = False
             for chat_entry in dm_topics:
-                if int(chat_entry.get("chat_id", 0)) != int(chat_id):
+                if telegram_chat_id_key(chat_entry.get("chat_id", "")) != telegram_chat_id_key(chat_id):
                     continue
                 for t in chat_entry.get("topics", []):
                     if t.get("name") == topic_name and not t.get("thread_id"):
@@ -827,7 +860,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 icon_emoji = topic_conf.get("icon_custom_emoji_id")
 
                 thread_id = await self._create_dm_topic(
-                    chat_id=int(chat_id),
+                    chat_id=normalize_telegram_chat_id(chat_id),
                     name=topic_name,
                     icon_color=icon_color,
                     icon_custom_emoji_id=icon_emoji,
@@ -840,13 +873,13 @@ class TelegramAdapter(BasePlatformAdapter):
                         self.name, cache_key, thread_id,
                     )
                     # Persist thread_id to config so we don't recreate on next restart
-                    self._persist_dm_topic_thread_id(int(chat_id), topic_name, thread_id)
+                    self._persist_dm_topic_thread_id(normalize_telegram_chat_id(chat_id), topic_name, thread_id)
 
                     # Send a seed message so the topic is visible in Telegram's client.
                     # Empty topics are hidden by the client UI until they contain a message.
                     try:
                         await self._bot.send_message(
-                            chat_id=int(chat_id),
+                            chat_id=normalize_telegram_chat_id(chat_id),
                             message_thread_id=thread_id,
                             text=f"\U0001f4cc {topic_name}",
                         )
@@ -1195,11 +1228,11 @@ class TelegramAdapter(BasePlatformAdapter):
         """Send a message to a Telegram chat."""
         if not self._bot:
             return SendResult(success=False, error="Not connected")
-        
+
         # Skip whitespace-only text to prevent Telegram 400 empty-text errors.
         if not content or not content.strip():
             return SendResult(success=True, message_id=None)
-        
+
         try:
             # Format and split message if needed
             formatted = self.format_message(content)
@@ -1244,7 +1277,7 @@ class TelegramAdapter(BasePlatformAdapter):
                         # Try Markdown first, fall back to plain text if it fails
                         try:
                             msg = await self._bot.send_message(
-                                chat_id=int(chat_id),
+                                chat_id=normalize_telegram_chat_id(chat_id),
                                 text=chunk,
                                 parse_mode=ParseMode.MARKDOWN_V2,
                                 reply_to_message_id=reply_to_id,
@@ -1257,7 +1290,7 @@ class TelegramAdapter(BasePlatformAdapter):
                                 logger.warning("[%s] MarkdownV2 parse failed, falling back to plain text: %s", self.name, md_error)
                                 plain_chunk = _strip_mdv2(chunk)
                                 msg = await self._bot.send_message(
-                                    chat_id=int(chat_id),
+                                    chat_id=normalize_telegram_chat_id(chat_id),
                                     text=plain_chunk,
                                     parse_mode=None,
                                     reply_to_message_id=reply_to_id,
@@ -1332,13 +1365,19 @@ class TelegramAdapter(BasePlatformAdapter):
             )
             
         except Exception as e:
-            logger.error("[%s] Failed to send Telegram message: %s", self.name, e, exc_info=True)
+            error_message = _format_send_error(e, chat_id)
+            logger.error("[%s] Failed to send Telegram message: %s", self.name, error_message, exc_info=True)
             # TimedOut means the request may have reached Telegram —
             # mark as non-retryable so _send_with_retry() doesn't re-send.
             _to = locals().get("_TimedOut")
             err_str = str(e).lower()
             is_timeout = (_to and isinstance(e, _to)) or "timed out" in err_str
-            return SendResult(success=False, error=str(e), retryable=not is_timeout)
+            is_permanent = _is_permanent_telegram_send_error(e, err_str)
+            return SendResult(
+                success=False,
+                error=error_message,
+                retryable=not (is_timeout or is_permanent),
+            )
 
     async def edit_message(
         self,
@@ -1355,7 +1394,7 @@ class TelegramAdapter(BasePlatformAdapter):
             formatted = self.format_message(content)
             try:
                 await self._bot.edit_message_text(
-                    chat_id=int(chat_id),
+                    chat_id=normalize_telegram_chat_id(chat_id),
                     message_id=int(message_id),
                     text=formatted,
                     parse_mode=ParseMode.MARKDOWN_V2,
@@ -1366,7 +1405,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     return SendResult(success=True, message_id=message_id)
                 # Fallback: retry without markdown formatting
                 await self._bot.edit_message_text(
-                    chat_id=int(chat_id),
+                    chat_id=normalize_telegram_chat_id(chat_id),
                     message_id=int(message_id),
                     text=content,
                 )
@@ -1385,7 +1424,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 ) + "…"
                 try:
                     await self._bot.edit_message_text(
-                        chat_id=int(chat_id),
+                        chat_id=normalize_telegram_chat_id(chat_id),
                         message_id=int(message_id),
                         text=truncated,
                     )
@@ -1407,7 +1446,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 await asyncio.sleep(wait)
                 try:
                     await self._bot.edit_message_text(
-                        chat_id=int(chat_id),
+                        chat_id=normalize_telegram_chat_id(chat_id),
                         message_id=int(message_id),
                         text=content,
                     )
@@ -1441,7 +1480,7 @@ class TelegramAdapter(BasePlatformAdapter):
             return False
         try:
             await self._bot.delete_message(
-                chat_id=int(chat_id),
+                chat_id=normalize_telegram_chat_id(chat_id),
                 message_id=int(message_id),
             )
             return True
@@ -1476,7 +1515,7 @@ class TelegramAdapter(BasePlatformAdapter):
             thread_id = self._metadata_thread_id(metadata)
             message_thread_id = self._message_thread_id_for_send(thread_id)
             msg = await self._bot.send_message(
-                chat_id=int(chat_id),
+                chat_id=normalize_telegram_chat_id(chat_id),
                 text=text,
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=keyboard,
@@ -1532,7 +1571,7 @@ class TelegramAdapter(BasePlatformAdapter):
             ])
 
             kwargs: Dict[str, Any] = {
-                "chat_id": int(chat_id),
+                "chat_id": normalize_telegram_chat_id(chat_id),
                 "text": text,
                 "parse_mode": ParseMode.HTML,
                 "reply_markup": keyboard,
@@ -1577,7 +1616,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
             thread_id = self._metadata_thread_id(metadata)
             kwargs: Dict[str, Any] = {
-                "chat_id": int(chat_id),
+                "chat_id": normalize_telegram_chat_id(chat_id),
                 "text": preview,
                 "parse_mode": ParseMode.MARKDOWN,
                 "reply_markup": keyboard,
@@ -1645,7 +1684,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
             thread_id = metadata.get("thread_id") if metadata else None
             msg = await self._bot.send_message(
-                chat_id=int(chat_id),
+                chat_id=normalize_telegram_chat_id(chat_id),
                 text=text,
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=keyboard,
@@ -2118,7 +2157,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 if ext in (".ogg", ".opus"):
                     _voice_thread = self._metadata_thread_id(metadata)
                     msg = await self._bot.send_voice(
-                        chat_id=int(chat_id),
+                        chat_id=normalize_telegram_chat_id(chat_id),
                         voice=audio_file,
                         caption=caption[:1024] if caption else None,
                         reply_to_message_id=int(reply_to) if reply_to else None,
@@ -2128,7 +2167,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     # Telegram's Bot API sendAudio only accepts MP3 / M4A.
                     _audio_thread = self._metadata_thread_id(metadata)
                     msg = await self._bot.send_audio(
-                        chat_id=int(chat_id),
+                        chat_id=normalize_telegram_chat_id(chat_id),
                         audio=audio_file,
                         caption=caption[:1024] if caption else None,
                         reply_to_message_id=int(reply_to) if reply_to else None,
@@ -2244,7 +2283,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     self.name, len(media), chunk_idx + 1, len(chunks),
                 )
                 await self._bot.send_media_group(
-                    chat_id=int(chat_id),
+                    chat_id=normalize_telegram_chat_id(chat_id),
                     media=media,
                     message_thread_id=_thread_id,
                 )
@@ -2285,7 +2324,7 @@ class TelegramAdapter(BasePlatformAdapter):
             _thread = self._metadata_thread_id(metadata)
             with open(image_path, "rb") as image_file:
                 msg = await self._bot.send_photo(
-                    chat_id=int(chat_id),
+                    chat_id=normalize_telegram_chat_id(chat_id),
                     photo=image_file,
                     caption=caption[:1024] if caption else None,
                     reply_to_message_id=int(reply_to) if reply_to else None,
@@ -2365,7 +2404,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
             with open(file_path, "rb") as f:
                 msg = await self._bot.send_document(
-                    chat_id=int(chat_id),
+                    chat_id=normalize_telegram_chat_id(chat_id),
                     document=f,
                     filename=display_name,
                     caption=caption[:1024] if caption else None,
@@ -2397,7 +2436,7 @@ class TelegramAdapter(BasePlatformAdapter):
             _thread = self._metadata_thread_id(metadata)
             with open(video_path, "rb") as f:
                 msg = await self._bot.send_video(
-                    chat_id=int(chat_id),
+                    chat_id=normalize_telegram_chat_id(chat_id),
                     video=f,
                     caption=caption[:1024] if caption else None,
                     reply_to_message_id=int(reply_to) if reply_to else None,
@@ -2433,7 +2472,7 @@ class TelegramAdapter(BasePlatformAdapter):
             # Telegram can send photos directly from URLs (up to ~5MB)
             _photo_thread = self._metadata_thread_id(metadata)
             msg = await self._bot.send_photo(
-                chat_id=int(chat_id),
+                chat_id=normalize_telegram_chat_id(chat_id),
                 photo=image_url,
                 caption=caption[:1024] if caption else None,  # Telegram caption limit
                 reply_to_message_id=int(reply_to) if reply_to else None,
@@ -2456,7 +2495,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     image_data = resp.content
                 
                 msg = await self._bot.send_photo(
-                    chat_id=int(chat_id),
+                    chat_id=normalize_telegram_chat_id(chat_id),
                     photo=image_data,
                     caption=caption[:1024] if caption else None,
                     reply_to_message_id=int(reply_to) if reply_to else None,
@@ -2488,7 +2527,7 @@ class TelegramAdapter(BasePlatformAdapter):
         try:
             _anim_thread = self._metadata_thread_id(metadata)
             msg = await self._bot.send_animation(
-                chat_id=int(chat_id),
+                chat_id=normalize_telegram_chat_id(chat_id),
                 animation=animation_url,
                 caption=caption[:1024] if caption else None,
                 reply_to_message_id=int(reply_to) if reply_to else None,
@@ -2517,7 +2556,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 # (e.g. topic deleted mid-session), we swallow the failure rather than
                 # showing a typing indicator in the wrong chat/All Messages.
                 await self._bot.send_chat_action(
-                    chat_id=int(chat_id),
+                    chat_id=normalize_telegram_chat_id(chat_id),
                     action="typing",
                     message_thread_id=message_thread_id,
                 )
@@ -2536,7 +2575,7 @@ class TelegramAdapter(BasePlatformAdapter):
             return {"name": "Unknown", "type": "dm"}
         
         try:
-            chat = await self._bot.get_chat(int(chat_id))
+            chat = await self._bot.get_chat(normalize_telegram_chat_id(chat_id))
             
             chat_type = "dm"
             if chat.type == ChatType.GROUP:
@@ -3625,7 +3664,7 @@ class TelegramAdapter(BasePlatformAdapter):
             return False
         try:
             await self._bot.set_message_reaction(
-                chat_id=int(chat_id),
+                chat_id=normalize_telegram_chat_id(chat_id),
                 message_id=int(message_id),
                 reaction=emoji,
             )
