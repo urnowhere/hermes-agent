@@ -2139,6 +2139,10 @@ def _(rid, params: dict) -> dict:
             target = found["id"]
         else:
             return _err(rid, 4007, "session not found")
+    try:
+        target = db.get_compression_tip(target) or target
+    except Exception:
+        pass
     sid = uuid.uuid4().hex[:8]
     _enable_gateway_prompts()
     try:

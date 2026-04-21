@@ -295,6 +295,9 @@ def test_session_resume_returns_hydrated_messages(server, monkeypatch):
         def get_session_by_title(self, _title):
             return None
 
+        def get_compression_tip(self, session_id):
+            return session_id
+
         def reopen_session(self, _sid):
             return None
 
@@ -327,6 +330,64 @@ def test_session_resume_returns_hydrated_messages(server, monkeypatch):
         {"role": "user", "text": "hello"},
         {"role": "assistant", "text": "yo"},
         {"role": "tool", "name": "tool", "context": ""},
+    ]
+
+
+def test_session_resume_follows_compression_tip(server, monkeypatch):
+    seen = {"reopened": None, "loaded": None, "made": None, "resumed": None}
+
+    class _DB:
+        def get_session(self, sid):
+            if sid in {"root-session", "tip-session"}:
+                return {"id": sid}
+            return None
+
+        def get_session_by_title(self, _title):
+            return None
+
+        def get_compression_tip(self, session_id):
+            assert session_id == "root-session"
+            return "tip-session"
+
+        def reopen_session(self, sid):
+            seen["reopened"] = sid
+            return None
+
+        def get_messages_as_conversation(self, sid, include_ancestors=False):
+            seen["loaded"] = sid
+            return [
+                {"role": "user", "content": f"history-from-{sid}"},
+            ]
+
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+
+    def _make_agent(sid, key, session_id=None):
+        seen["made"] = session_id
+        return object()
+
+    def _init_session(sid, key, agent, history, cols=80):
+        seen["resumed"] = key
+
+    monkeypatch.setattr(server, "_make_agent", _make_agent)
+    monkeypatch.setattr(server, "_init_session", _init_session)
+    monkeypatch.setattr(server, "_session_info", lambda _agent: {"model": "test/model"})
+
+    resp = server.handle_request(
+        {
+            "id": "r2",
+            "method": "session.resume",
+            "params": {"session_id": "root-session", "cols": 100},
+        }
+    )
+
+    assert "error" not in resp
+    assert seen["reopened"] == "tip-session"
+    assert seen["loaded"] == "tip-session"
+    assert seen["made"] == "tip-session"
+    assert seen["resumed"] == "tip-session"
+    assert resp["result"]["resumed"] == "tip-session"
+    assert resp["result"]["messages"] == [
+        {"role": "user", "text": "history-from-tip-session"},
     ]
 
 
