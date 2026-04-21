@@ -7707,6 +7707,12 @@ class AIAgent:
                 max_iterations=function_args.get("max_iterations"),
                 parent_agent=self,
             )
+        elif function_name == "subagent_memory_write":
+            from tools.subagent_memory_tool import subagent_memory_write as _smw
+            return _smw(
+                content=function_args.get("content", ""),
+                writer=getattr(self, "_subagent_memory_writer", None),
+            )
         else:
             return handle_function_call(
                 function_name, function_args, effective_task_id,
@@ -8275,6 +8281,15 @@ class AIAgent:
                         spinner.stop(cute_msg)
                     elif self._should_emit_quiet_tool_messages():
                         self._vprint(f"  {cute_msg}")
+            elif function_name == "subagent_memory_write":
+                from tools.subagent_memory_tool import subagent_memory_write as _smw
+                function_result = _smw(
+                    content=function_args.get("content", ""),
+                    writer=getattr(self, "_subagent_memory_writer", None),
+                )
+                tool_duration = time.time() - tool_start_time
+                if self.quiet_mode:
+                    self._vprint(f"  {_get_cute_tool_message_impl('subagent_memory_write', function_args, tool_duration, result=function_result)}")
             elif self._memory_manager and self._memory_manager.has_tool(function_name):
                 # Memory provider tools (hindsight_retain, honcho_search, etc.)
                 # These are not in the tool registry — route through MemoryManager.
