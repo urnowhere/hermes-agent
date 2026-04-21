@@ -413,12 +413,21 @@ WSL_ENVIRONMENT_HINT = (
 def build_environment_hints() -> str:
     """Return environment-specific guidance for the system prompt.
 
-    Detects WSL, and can be extended for Termux, Docker, etc.
+    Detects WSL, native Windows, and can be extended for Termux, Docker, etc.
     Returns an empty string when no special environment is detected.
     """
+    import platform
     hints: list[str] = []
     if is_wsl():
         hints.append(WSL_ENVIRONMENT_HINT)
+    elif platform.system() == "Windows":
+        hints.append(
+            "You are running on native Windows. The terminal uses Git Bash "
+            "(MSYS2), NOT Linux. Use Windows paths (C:/Users/...) and note "
+            "that some Linux commands may behave differently. For file "
+            "operations, prefer the built-in read_file, write_file, patch, "
+            "and search_files tools over shell commands."
+        )
     return "\n\n".join(hints)
 
 

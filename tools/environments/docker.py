@@ -553,10 +553,16 @@ class DockerEnvironment(BaseEnvironment):
         if self._container_id:
             try:
                 # Stop in background so cleanup doesn't block
-                stop_cmd = (
-                    f"(timeout 60 {self._docker_exe} stop {self._container_id} || "
-                    f"{self._docker_exe} rm -f {self._container_id}) >/dev/null 2>&1 &"
-                )
+                if sys.platform == "win32":
+                    stop_cmd = (
+                        f"start /b cmd /c \"timeout 60 {self._docker_exe} stop {self._container_id} "
+                        f"|| {self._docker_exe} rm -f {self._container_id}\" >nul 2>&1"
+                    )
+                else:
+                    stop_cmd = (
+                        f"(timeout 60 {self._docker_exe} stop {self._container_id} || "
+                        f"{self._docker_exe} rm -f {self._container_id}) >/dev/null 2>&1 &"
+                    )
                 subprocess.Popen(stop_cmd, shell=True)
             except Exception as e:
                 logger.warning("Failed to stop container %s: %s", self._container_id, e)
@@ -564,10 +570,16 @@ class DockerEnvironment(BaseEnvironment):
             if not self._persistent:
                 # Also schedule removal (stop only leaves it as stopped)
                 try:
-                    subprocess.Popen(
-                        f"sleep 3 && {self._docker_exe} rm -f {self._container_id} >/dev/null 2>&1 &",
-                        shell=True,
-                    )
+                    if sys.platform == "win32":
+                        rm_cmd = (
+                            f"start /b cmd /c \"timeout /t 3 /nobreak >nul "
+                            f"&& {self._docker_exe} rm -f {self._container_id}\" >nul 2>&1"
+                        )
+                    else:
+                        rm_cmd = (
+                            f"sleep 3 && {self._docker_exe} rm -f {self._container_id} >/dev/null 2>&1 &"
+                        )
+                    subprocess.Popen(rm_cmd, shell=True)
                 except Exception:
                     pass
             self._container_id = None

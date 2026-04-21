@@ -628,6 +628,8 @@ def _ensure_user_systemd_env() -> None:
     We detect the standard socket path and set the vars so all subsequent
     subprocess calls inherit them.
     """
+    if os.name == "nt":
+        return  # systemd not available on Windows
     uid = os.getuid()
     if "XDG_RUNTIME_DIR" not in os.environ:
         runtime_dir = f"/run/user/{uid}"
@@ -891,6 +893,9 @@ def print_systemd_scope_conflict_warning() -> None:
 
 
 def _require_root_for_system_service(action: str) -> None:
+    if os.name == "nt":
+        print(f"System gateway {action} is not supported on Windows.")
+        sys.exit(1)
     if os.geteuid() != 0:
         print(f"System gateway {action} requires root. Re-run with sudo.")
         sys.exit(1)
@@ -898,6 +903,9 @@ def _require_root_for_system_service(action: str) -> None:
 
 def _system_service_identity(run_as_user: str | None = None) -> tuple[str, str, str]:
     import getpass
+    if os.name == "nt":
+        username = run_as_user or os.getenv("USERNAME") or getpass.getuser()
+        return username, username, str(Path.home())
     import grp
     import pwd
 
@@ -999,11 +1007,15 @@ def get_systemd_linger_status() -> tuple[bool | None, str]:
     if not shutil.which("loginctl"):
         return None, "loginctl not found"
 
-    username = os.getenv("USER") or os.getenv("LOGNAME")
+    username = os.getenv("USER") or os.getenv("LOGNAME") or os.getenv("USERNAME")
     if not username:
         try:
-            import pwd
-            username = pwd.getpwuid(os.getuid()).pw_name
+            if os.name != "nt":
+                import pwd
+                username = pwd.getpwuid(os.getuid()).pw_name
+            else:
+                import getpass
+                username = getpass.getuser()
         except Exception:
             return None, "could not determine current user"
 
@@ -1051,6 +1063,8 @@ def _launchd_user_home() -> Path:
     Profile-mode Hermes often sets ``HOME`` to a profile-scoped directory, but
     launchd user agents still live under the actual account home.
     """
+    if os.name == "nt":
+        return Path.home()
     import pwd
 
     return Path(pwd.getpwuid(os.getuid()).pw_dir)
@@ -1987,6 +2001,13 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False):
                  hasn't fully exited yet.
     """
     sys.path.insert(0, str(PROJECT_ROOT))
+    
+    # Fix Windows cp950 encoding: reconfigure stdout/stderr to UTF-8
+    # so logging can emit CJK/emoji characters without UnicodeEncodeError.
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='backslashreplace')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8', errors='backslashreplace')
     
     from gateway.run import start_gateway
     

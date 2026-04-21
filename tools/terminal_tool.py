@@ -675,8 +675,10 @@ from tools.managed_tool_gateway import is_managed_tool_gateway_ready
 
 
 # Tool description for LLM
-TERMINAL_TOOL_DESCRIPTION = """Execute shell commands on a Linux environment. Filesystem usually persists between calls.
-
+import platform as _platform
+_SHELL_ENV = "Windows (Git Bash)" if _platform.system() == "Windows" else "Linux"
+TERMINAL_TOOL_DESCRIPTION = f"""Execute shell commands on a {_SHELL_ENV} environment. Filesystem usually persists between calls.
+{("IMPORTANT: You are on native Windows with Git Bash. Use Windows paths (C:/Users/...) not Unix paths (/home/...). Most GNU tools (find, grep, ls) work in Git Bash but prefer PowerShell-style approaches when possible. Use forward slashes in paths." if _platform.system() == "Windows" else "")}
 Do NOT use cat/head/tail to read files — use read_file instead.
 Do NOT use grep/rg/find to search — use search_files instead.
 Do NOT use ls to list directories — use search_files(target='files') instead.

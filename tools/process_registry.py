@@ -257,7 +257,15 @@ class ProcessRegistry:
         try:
             os.kill(pid, 0)
             return True
-        except (ProcessLookupError, PermissionError):
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            # Process exists but we can't signal it (e.g. owned by another user)
+            return True
+        except (OSError, SystemError):
+            # Windows: os.kill on certain PIDs (system, different bitness, etc.)
+            # can raise OSError WinError 11 / 87 or SystemError. Treat as not-alive
+            # so checkpoint recovery silently skips the entry instead of warning.
             return False
 
     def _refresh_detached_session(self, session: Optional[ProcessSession]) -> Optional[ProcessSession]:

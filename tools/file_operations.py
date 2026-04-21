@@ -27,6 +27,7 @@ Usage:
 
 import os
 import re
+import sys
 import difflib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -42,6 +43,24 @@ from tools.binary_extensions import BINARY_EXTENSIONS
 
 _HOME = str(Path.home())
 
+_UNIX_SENSITIVE_PATHS = [
+    os.path.join(_HOME, ".bashrc"),
+    os.path.join(_HOME, ".zshrc"),
+    os.path.join(_HOME, ".profile"),
+    os.path.join(_HOME, ".bash_profile"),
+    os.path.join(_HOME, ".zprofile"),
+    "/etc/sudoers",
+    "/etc/passwd",
+    "/etc/shadow",
+]
+
+_WINDOWS_SENSITIVE_PATHS = [
+    os.path.join(os.environ.get("SYSTEMROOT", r"C:\Windows"), "System32", "config", "SAM"),
+    os.path.join(os.environ.get("SYSTEMROOT", r"C:\Windows"), "System32", "config", "SYSTEM"),
+    os.path.join(os.environ.get("SYSTEMROOT", r"C:\Windows"), "System32", "config", "SECURITY"),
+    os.path.join(_HOME, "NTUSER.DAT"),
+] if sys.platform == "win32" else []
+
 WRITE_DENIED_PATHS = {
     os.path.realpath(p) for p in [
         os.path.join(_HOME, ".ssh", "authorized_keys"),
@@ -49,20 +68,22 @@ WRITE_DENIED_PATHS = {
         os.path.join(_HOME, ".ssh", "id_ed25519"),
         os.path.join(_HOME, ".ssh", "config"),
         str(get_hermes_home() / ".env"),
-        os.path.join(_HOME, ".bashrc"),
-        os.path.join(_HOME, ".zshrc"),
-        os.path.join(_HOME, ".profile"),
-        os.path.join(_HOME, ".bash_profile"),
-        os.path.join(_HOME, ".zprofile"),
         os.path.join(_HOME, ".netrc"),
         os.path.join(_HOME, ".pgpass"),
         os.path.join(_HOME, ".npmrc"),
         os.path.join(_HOME, ".pypirc"),
-        "/etc/sudoers",
-        "/etc/passwd",
-        "/etc/shadow",
-    ]
+    ] + _UNIX_SENSITIVE_PATHS + _WINDOWS_SENSITIVE_PATHS
 }
+
+_UNIX_DENIED_PREFIXES = [
+    "/etc/sudoers.d",
+    "/etc/systemd",
+]
+
+_WINDOWS_DENIED_PREFIXES = [
+    os.path.join(os.environ.get("SYSTEMROOT", r"C:\Windows"), "System32", "config"),
+    os.path.join(os.environ.get("SYSTEMROOT", r"C:\Windows"), "System32", "drivers"),
+] if sys.platform == "win32" else []
 
 WRITE_DENIED_PREFIXES = [
     os.path.realpath(p) + os.sep for p in [
@@ -70,12 +91,10 @@ WRITE_DENIED_PREFIXES = [
         os.path.join(_HOME, ".aws"),
         os.path.join(_HOME, ".gnupg"),
         os.path.join(_HOME, ".kube"),
-        "/etc/sudoers.d",
-        "/etc/systemd",
         os.path.join(_HOME, ".docker"),
         os.path.join(_HOME, ".azure"),
         os.path.join(_HOME, ".config", "gh"),
-    ]
+    ] + _UNIX_DENIED_PREFIXES + _WINDOWS_DENIED_PREFIXES
 ]
 
 

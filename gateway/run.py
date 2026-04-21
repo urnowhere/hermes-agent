@@ -2049,9 +2049,9 @@ class GatewayRunner:
                         error_code=None,
                         error_message=None,
                     )
-                    logger.info("✓ %s connected", platform.value)
+                    logger.info("[OK] %s connected", platform.value)
                 else:
-                    logger.warning("✗ %s failed to connect", platform.value)
+                    logger.warning("[FAIL] %s failed to connect", platform.value)
                     # Defensive cleanup: a failed connect() may have
                     # allocated resources (aiohttp.ClientSession, poll
                     # tasks, bridge subprocesses) before giving up.
@@ -2100,7 +2100,7 @@ class GatewayRunner:
                             "next_retry": time.monotonic() + 30,
                         }
             except Exception as e:
-                logger.error("✗ %s error: %s", platform.value, e)
+                logger.error("[FAIL] %s error: %s", platform.value, e)
                 # Same defensive cleanup path for exceptions — an adapter
                 # that raised mid-connect may still have a live
                 # aiohttp.ClientSession or child subprocess.
@@ -2432,7 +2432,7 @@ class GatewayRunner:
                             error_code=None,
                             error_message=None,
                         )
-                        logger.info("✓ %s reconnected successfully", platform.value)
+                        logger.info("[OK] %s reconnected successfully", platform.value)
 
                         # Rebuild channel directory with the new adapter
                         try:
@@ -2579,12 +2579,12 @@ class GatewayRunner:
                 try:
                     await adapter.cancel_background_tasks()
                 except Exception as e:
-                    logger.debug("✗ %s background-task cancel error: %s", platform.value, e)
+                    logger.debug("[FAIL] %s background-task cancel error: %s", platform.value, e)
                 try:
                     await adapter.disconnect()
-                    logger.info("✓ %s disconnected", platform.value)
+                    logger.info("[OK] %s disconnected", platform.value)
                 except Exception as e:
-                    logger.error("✗ %s disconnect error: %s", platform.value, e)
+                    logger.error("[FAIL] %s disconnect error: %s", platform.value, e)
 
             for _task in list(self._background_tasks):
                 if _task is self._stop_task:
@@ -10826,7 +10826,22 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         from agent.redact import RedactingFormatter
 
         _stderr_level = {0: logging.WARNING, 1: logging.INFO}.get(verbosity, logging.DEBUG)
-        _stderr_handler = logging.StreamHandler()
+        # Windows cp950 console fix: wrap stderr.buffer in a UTF-8 TextIOWrapper
+        # with errors='backslashreplace' so logging never crashes on CJK/emoji.
+        # sys.stderr.reconfigure() is unreliable once handlers are bound, so we
+        # construct an independent UTF-8 stream for the StreamHandler.
+        _stderr_stream = sys.stderr
+        _buf = getattr(sys.stderr, 'buffer', None)
+        if _buf is not None:
+            try:
+                import io as _io
+                _stderr_stream = _io.TextIOWrapper(
+                    _buf, encoding='utf-8', errors='backslashreplace',
+                    line_buffering=True, write_through=True,
+                )
+            except Exception:
+                _stderr_stream = sys.stderr
+        _stderr_handler = logging.StreamHandler(_stderr_stream)
         _stderr_handler.setLevel(_stderr_level)
         _stderr_handler.setFormatter(RedactingFormatter('%(levelname)s %(name)s: %(message)s'))
         logging.getLogger().addHandler(_stderr_handler)

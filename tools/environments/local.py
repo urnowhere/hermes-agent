@@ -153,15 +153,22 @@ def _find_bash() -> str:
     if custom and os.path.isfile(custom):
         return custom
 
-    found = shutil.which("bash")
-    if found:
-        return found
-
+    # Check Git Bash candidates FIRST — shutil.which("bash") may find WSL
+    # bash (WindowsApps\bash.exe) which routes to WSL and fails if no
+    # distribution is installed.
     for candidate in (
         os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "bin", "bash.exe"),
         os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Git", "bin", "bash.exe"),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Git", "bin", "bash.exe"),
     ):
+        if candidate and os.path.isfile(candidate):
+            return candidate
+
+    found = shutil.which("bash")
+    if found:
+        # Avoid WSL bash — check if it's the WindowsApps stub
+        if "windowsapps" not in found.lower():
+            return found
         if candidate and os.path.isfile(candidate):
             return candidate
 

@@ -341,7 +341,15 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
         if not stale:
             try:
                 os.kill(existing_pid, 0)
-            except (ProcessLookupError, PermissionError):
+            except ProcessLookupError:
+                stale = True
+            except PermissionError:
+                # Process exists but signal denied -- still alive, owned by another user
+                pass
+            except (OSError, SystemError):
+                # Windows: WinError 11 / 87 etc. on unreadable PIDs (system /
+                # different bitness / reused). Treat as stale so the lock can be
+                # acquired instead of bubbling the error up as a warning.
                 stale = True
             else:
                 current_start = _get_process_start_time(existing_pid)
@@ -578,6 +586,9 @@ def get_running_pid(
         os.kill(pid, 0)  # signal 0 = existence check, no actual signal sent
     except (ProcessLookupError, PermissionError):
         _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
+        return None
+    except (OSError, SystemError):
+        remove_pid_file()
         return None
 
     recorded_start = record.get("start_time")
