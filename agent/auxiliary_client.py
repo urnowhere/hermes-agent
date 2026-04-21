@@ -1057,12 +1057,16 @@ def _read_main_provider() -> str:
     return ""
 
 
-def _resolve_custom_runtime() -> Tuple[Optional[str], Optional[str], Optional[str]]:
+def _resolve_custom_runtime() -> Tuple[Optional[str], Optional[str], Optional[str], Dict[str, str]]:
     """Resolve the active custom/main endpoint the same way the main CLI does.
 
     This covers both env-driven OPENAI_BASE_URL setups and config-saved custom
     endpoints where the base URL lives in config.yaml instead of the live
     environment.
+
+    Returns ``(base_url, api_key, api_mode, headers)`` where ``headers`` mirrors
+    the main runtime's sanitized custom headers so auxiliary requests can hit
+    header-gated OpenAI-compatible proxies the same way the primary agent does.
     """
     try:
         from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -1076,7 +1080,7 @@ def _resolve_custom_runtime() -> Tuple[Optional[str], Optional[str], Optional[st
         openai_base = os.getenv("OPENAI_BASE_URL", "").strip().rstrip("/")
         openai_key = os.getenv("OPENAI_API_KEY", "").strip()
         if not openai_base:
-            return None, None, None
+            return None, None, None, {}
         runtime = {
             "base_url": openai_base,
             "api_key": openai_key,
@@ -1085,14 +1089,24 @@ def _resolve_custom_runtime() -> Tuple[Optional[str], Optional[str], Optional[st
     custom_base = runtime.get("base_url")
     custom_key = runtime.get("api_key")
     custom_mode = runtime.get("api_mode")
+    raw_headers = runtime.get("headers")
+    custom_headers: Dict[str, str] = {}
+    if isinstance(raw_headers, dict):
+        for key, value in raw_headers.items():
+            if key is None or value is None:
+                continue
+            key_str = str(key).strip()
+            value_str = str(value).strip()
+            if key_str and value_str:
+                custom_headers[key_str] = value_str
     if not isinstance(custom_base, str) or not custom_base.strip():
-        return None, None, None
+        return None, None, None, {}
 
     custom_base = custom_base.strip().rstrip("/")
     if base_url_host_matches(custom_base, "openrouter.ai"):
         # requested='custom' falls back to OpenRouter when no custom endpoint is
         # configured. Treat that as "no custom endpoint" for auxiliary routing.
-        return None, None, None
+        return None, None, None, {}
 
     # Local servers (Ollama, llama.cpp, vLLM, LM Studio) don't require auth.
     # Use a placeholder key — the OpenAI SDK requires a non-empty string but
@@ -1104,11 +1118,11 @@ def _resolve_custom_runtime() -> Tuple[Optional[str], Optional[str], Optional[st
     if not isinstance(custom_mode, str) or not custom_mode.strip():
         custom_mode = None
 
-    return custom_base, custom_key.strip(), custom_mode
+    return custom_base, custom_key.strip(), custom_mode, custom_headers
 
 
 def _current_custom_base_url() -> str:
-    custom_base, _, _ = _resolve_custom_runtime()
+    custom_base, _, _, _ = _resolve_custom_runtime()
     return custom_base or ""
 
 
@@ -1161,11 +1175,11 @@ def _validate_base_url(base_url: str) -> None:
 
 def _try_custom_endpoint() -> Tuple[Optional[Any], Optional[str]]:
     runtime = _resolve_custom_runtime()
-    if len(runtime) == 2:
-        custom_base, custom_key = runtime
-        custom_mode = None
-    else:
+    if len(runtime) == 3:
         custom_base, custom_key, custom_mode = runtime
+        custom_headers = {}
+    else:
+        custom_base, custom_key, custom_mode, custom_headers = runtime
     if not custom_base or not custom_key:
         return None, None
     if custom_base.lower().startswith(_CODEX_AUX_BASE_URL.lower()):
@@ -1174,6 +1188,8 @@ def _try_custom_endpoint() -> Tuple[Optional[Any], Optional[str]]:
     logger.debug("Auxiliary client: custom endpoint (%s, api_mode=%s)", model, custom_mode or "chat_completions")
     _clean_base, _dq = _extract_url_query_params(custom_base)
     _extra = {"default_query": _dq} if _dq else {}
+    if custom_headers:
+        _extra["default_headers"] = custom_headers
     if custom_mode == "codex_responses":
         real_client = OpenAI(api_key=custom_key, base_url=_clean_base, **_extra)
         return CodexAuxiliaryClient(real_client, model), model

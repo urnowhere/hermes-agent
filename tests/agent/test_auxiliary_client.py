@@ -360,7 +360,7 @@ class TestExpiredCodexFallback:
             "version": 1,
             "providers": {
                 "openai-codex": {
-                    "tokens": {"access_token": expired_jwt, "refresh_token": "r"},
+                    "tokens": {"access_token": expired_jwt, "refresh_token": "***"},
                 },
             },
         }))
@@ -368,12 +368,34 @@ class TestExpiredCodexFallback:
 
         # Simulate Ollama or custom endpoint
         with patch("agent.auxiliary_client._resolve_custom_runtime",
-                   return_value=("http://localhost:11434/v1", "sk-dummy")):
+                   return_value=("http://localhost:11434/v1", "sk-dummy", None, {})):
             with patch("agent.auxiliary_client.OpenAI") as mock_openai:
                 mock_openai.return_value = MagicMock()
                 from agent.auxiliary_client import _resolve_auto
                 client, model = _resolve_auto()
                 assert client is not None
+
+    def test_custom_endpoint_propagates_runtime_headers(self):
+        with patch(
+            "agent.auxiliary_client._resolve_custom_runtime",
+            return_value=(
+                "https://api.example.com/v1",
+                "sk-test",
+                "codex_responses",
+                {"User-Agent": "Mozilla/5.0", "X-Test": "1"},
+            ),
+        ), patch("agent.auxiliary_client.OpenAI") as mock_openai:
+            mock_openai.return_value = MagicMock()
+            from agent.auxiliary_client import _try_custom_endpoint
+
+            client, model = _try_custom_endpoint()
+
+            assert client is not None
+            kwargs = mock_openai.call_args.kwargs
+            assert kwargs["default_headers"] == {
+                "User-Agent": "Mozilla/5.0",
+                "X-Test": "1",
+            }
 
 
     def test_hermes_oauth_file_sets_oauth_flag(self, monkeypatch):

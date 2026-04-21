@@ -2108,6 +2108,7 @@ class HermesCLI:
         if isinstance(fb, dict):
             fb = [fb] if fb.get("provider") and fb.get("model") else []
         self._fallback_model = fb
+        self._runtime_headers: Dict[str, str] = {}
 
         # Signature of the currently-initialised agent's runtime.  Used to
         # rebuild the agent when provider / model / base_url changes across
@@ -3272,6 +3273,16 @@ class HermesCLI:
         resolved_acp_command = runtime.get("command")
         resolved_acp_args = list(runtime.get("args") or [])
         resolved_credential_pool = runtime.get("credential_pool")
+        resolved_headers_raw = runtime.get("headers")
+        resolved_headers = {}
+        if isinstance(resolved_headers_raw, dict):
+            for key, value in resolved_headers_raw.items():
+                if key is None or value is None:
+                    continue
+                key_str = str(key).strip()
+                value_str = str(value).strip()
+                if key_str and value_str:
+                    resolved_headers[key_str] = value_str
         if not isinstance(api_key, str) or not api_key:
             # Custom / local endpoints (llama.cpp, ollama, vLLM, etc.) often
             # don't require authentication.  When a base_url IS configured but
@@ -3302,12 +3313,14 @@ class HermesCLI:
             or resolved_acp_command != self.acp_command
             or resolved_acp_args != self.acp_args
         )
+        headers_changed = resolved_headers != getattr(self, "_runtime_headers", {})
         self.provider = resolved_provider
         self.api_mode = resolved_api_mode
         self.acp_command = resolved_acp_command
         self.acp_args = resolved_acp_args
         self._credential_pool = resolved_credential_pool
         self._provider_source = runtime.get("source")
+        self._runtime_headers = resolved_headers
         self.api_key = api_key
         self.base_url = base_url
 
@@ -3349,7 +3362,7 @@ class HermesCLI:
 
         # AIAgent/OpenAI client holds auth at init time, so rebuild if key,
         # routing, or the effective model changed.
-        if (credentials_changed or routing_changed or model_changed) and self.agent is not None:
+        if (credentials_changed or routing_changed or headers_changed or model_changed) and self.agent is not None:
             self.agent = None
             self._active_agent_route_signature = None
 
@@ -3373,6 +3386,7 @@ class HermesCLI:
             "command": self.acp_command,
             "args": list(self.acp_args or []),
             "credential_pool": getattr(self, "_credential_pool", None),
+            "headers": dict(getattr(self, "_runtime_headers", {}) or {}),
         }
         route = {
             "model": self.model,
@@ -3384,6 +3398,7 @@ class HermesCLI:
                 runtime["api_mode"],
                 runtime["command"],
                 tuple(runtime["args"]),
+                tuple(sorted(runtime["headers"].items())),
             ),
         }
 
@@ -3485,12 +3500,14 @@ class HermesCLI:
                 "command": self.acp_command,
                 "args": list(self.acp_args or []),
                 "credential_pool": getattr(self, "_credential_pool", None),
+                "headers": dict(getattr(self, "_runtime_headers", {}) or {}),
             }
             effective_model = model_override or self.model
             self.agent = AIAgent(
                 model=effective_model,
                 api_key=runtime.get("api_key"),
                 base_url=runtime.get("base_url"),
+                default_headers=runtime.get("headers"),
                 provider=runtime.get("provider"),
                 api_mode=runtime.get("api_mode"),
                 acp_command=runtime.get("command"),
@@ -3543,6 +3560,7 @@ class HermesCLI:
                 runtime.get("api_mode"),
                 runtime.get("command"),
                 tuple(runtime.get("args") or ()),
+                tuple(sorted((runtime.get("headers") or {}).items())),
             )
 
             if self._pending_title and self._session_db:

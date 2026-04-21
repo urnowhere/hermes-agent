@@ -36,6 +36,22 @@ def _normalize_custom_provider_name(value: str) -> str:
     return value.strip().lower().replace(" ", "-")
 
 
+def _normalize_custom_headers(raw_headers: Any) -> Dict[str, str]:
+    """Return sanitized custom headers from config."""
+    if not isinstance(raw_headers, dict):
+        return {}
+
+    headers: Dict[str, str] = {}
+    for key, value in raw_headers.items():
+        if key is None or value is None:
+            continue
+        key_str = str(key).strip()
+        value_str = str(value).strip()
+        if key_str and value_str:
+            headers[key_str] = value_str
+    return headers
+
+
 def _loopback_hostname(host: str) -> bool:
     h = (host or "").lower().rstrip(".")
     return h in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
@@ -127,6 +143,11 @@ def _get_model_config() -> Dict[str, Any]:
     if isinstance(model_cfg, str) and model_cfg.strip():
         return {"default": model_cfg.strip()}
     return {}
+
+
+def _get_model_headers(model_cfg: Dict[str, Any]) -> Dict[str, str]:
+    """Return sanitized custom headers from model config."""
+    return _normalize_custom_headers(model_cfg.get("headers"))
 
 
 def _provider_supports_explicit_api_mode(provider: Optional[str], configured_provider: Optional[str] = None) -> bool:
@@ -385,6 +406,7 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                         "base_url": base_url.strip(),
                         "api_key": resolved_api_key,
                         "model": entry.get("default_model", ""),
+                        "headers": _normalize_custom_headers(entry.get("headers")),
                     }
                     api_mode = _parse_api_mode(entry.get("api_mode"))
                     if api_mode:
@@ -403,6 +425,7 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                             "base_url": base_url.strip(),
                             "api_key": resolved_api_key,
                             "model": entry.get("default_model", ""),
+                            "headers": _normalize_custom_headers(entry.get("headers")),
                         }
                         api_mode = _parse_api_mode(entry.get("api_mode"))
                         if api_mode:
@@ -453,6 +476,9 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
         model_name = str(entry.get("model", "") or "").strip()
         if model_name:
             result["model"] = model_name
+        headers = _normalize_custom_headers(entry.get("headers"))
+        if headers:
+            result["headers"] = headers
         return result
 
     return None
@@ -483,6 +509,9 @@ def _resolve_named_custom_runtime(
         model_name = custom_provider.get("model")
         if model_name:
             pool_result["model"] = model_name
+        headers = _normalize_custom_headers(custom_provider.get("headers"))
+        if headers:
+            pool_result["headers"] = headers
         return pool_result
 
     api_key_candidates = [
@@ -507,6 +536,9 @@ def _resolve_named_custom_runtime(
     # provider name differs from the actual model string the API expects.
     if custom_provider.get("model"):
         result["model"] = custom_provider["model"]
+    headers = _normalize_custom_headers(custom_provider.get("headers"))
+    if headers:
+        result["headers"] = headers
     return result
 
 
@@ -599,12 +631,15 @@ def _resolve_openrouter_runtime(
             base_url, effective_provider, _parse_api_mode(model_cfg.get("api_mode")),
         )
         if pool_result:
+            headers = _get_model_headers(model_cfg)
+            if headers:
+                pool_result["headers"] = headers
             return pool_result
 
     if effective_provider == "custom" and not api_key and not _is_openrouter_url:
         api_key = "no-key-required"
 
-    return {
+    result = {
         "provider": effective_provider,
         "api_mode": _parse_api_mode(model_cfg.get("api_mode"))
         or _detect_api_mode_for_url(base_url)
@@ -613,6 +648,11 @@ def _resolve_openrouter_runtime(
         "api_key": api_key,
         "source": source,
     }
+    if effective_provider == "custom":
+        headers = _get_model_headers(model_cfg)
+        if headers:
+            result["headers"] = headers
+    return result
 
 
 def _resolve_azure_foundry_runtime(
