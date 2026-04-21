@@ -105,6 +105,26 @@ def _codex_curated_models() -> list[str]:
 
 
 _PROVIDER_MODELS: dict[str, list[str]] = {
+    "google": [
+        "gemini-3.1-pro-preview",
+        "gemini-3.1-flash-preview",
+        "gemini-3.1-flash",
+        "gemini-3.1-flash-lite-preview",
+        "gemini-3.0-pro-preview",
+        "gemini-3-pro-preview",
+        "gemini-3-flash-preview",
+        "gemini-3-flash",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.0-flash-exp",
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-lite",
+        "gemini-1.5-pro",
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-8b",
+    ],
+
     "nous": [
         "moonshotai/kimi-k2.6",
         "xiaomi/mimo-v2-pro",
