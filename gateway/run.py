@@ -339,6 +339,55 @@ def _expand_whatsapp_auth_aliases(identifier: str) -> set:
 
     return resolved
 
+
+def _build_agent_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert transcript/session messages into agent-safe conversation history."""
+    agent_history = []
+    for msg in history:
+        role = msg.get("role")
+        if not role:
+            continue
+
+        # Transcript metadata is for Hermes, not for the provider chat API.
+        if role in ("session_meta",):
+            continue
+
+        # The agent rebuilds its own system prompt for each run.
+        if role == "system":
+            continue
+
+        # Preserve rich assistant/tool messages so valid assistant->tool
+        # sequences survive reloads and retries.
+        has_tool_calls = "tool_calls" in msg
+        has_tool_call_id = "tool_call_id" in msg
+        is_tool_message = role == "tool"
+
+        if has_tool_calls or has_tool_call_id or is_tool_message:
+            clean_msg = {k: v for k, v in msg.items() if k != "timestamp"}
+            agent_history.append(clean_msg)
+            continue
+
+        content = msg.get("content")
+        if not content:
+            continue
+
+        if msg.get("mirror"):
+            mirror_src = msg.get("mirror_source", "another session")
+            content = f"[Delivered from {mirror_src}] {content}"
+
+        entry = {"role": role, "content": content}
+
+        # Preserve reasoning state on assistant messages across reloads.
+        if role == "assistant":
+            for _rkey in ("reasoning", "reasoning_details", "codex_reasoning_items"):
+                _rval = msg.get(_rkey)
+                if _rval:
+                    entry[_rkey] = _rval
+
+        agent_history.append(entry)
+
+    return agent_history
+
 logger = logging.getLogger(__name__)
 
 # Sentinel placed into _running_agents immediately when a session starts
@@ -3269,6 +3318,10 @@ class GatewayRunner:
                 # Clean up the running agent entry so the reset handler
                 # doesn't think an agent is still active.
                 return await self._handle_reset_command(event)
+
+            # /btw <question> — run a side question without interrupting
+            if _cmd_def_inner and _cmd_def_inner.name == "btw":
+                return await self._handle_btw_command(event)
 
             # /queue <prompt> — queue without interrupting
             if event.get_command() in ("queue", "q"):
@@ -6611,6 +6664,7 @@ class GatewayRunner:
             else:
                 session_entry = self.session_store.get_or_create_session(source)
                 history_snapshot = self.session_store.load_transcript(session_entry.session_id)
+            history_snapshot = _build_agent_history(history_snapshot)
 
             btw_prompt = (
                 "[Ephemeral /btw side question. Answer using the conversation "
@@ -9785,50 +9839,7 @@ class GatewayRunner:
             #      that may include tool_calls, tool_call_id, reasoning, etc.
             #      - These must be passed through intact so the API sees valid
             #        assistant→tool sequences (dropping tool_calls causes 500 errors)
-            agent_history = []
-            for msg in history:
-                role = msg.get("role")
-                if not role:
-                    continue
-                
-                # Skip metadata entries (tool definitions, session info)
-                # -- these are for transcript logging, not for the LLM
-                if role in ("session_meta",):
-                    continue
-                
-                # Skip system messages -- the agent rebuilds its own system prompt
-                if role == "system":
-                    continue
-                
-                # Rich agent messages (tool_calls, tool results) must be passed
-                # through intact so the API sees valid assistant→tool sequences
-                has_tool_calls = "tool_calls" in msg
-                has_tool_call_id = "tool_call_id" in msg
-                is_tool_message = role == "tool"
-                
-                if has_tool_calls or has_tool_call_id or is_tool_message:
-                    clean_msg = {k: v for k, v in msg.items() if k != "timestamp"}
-                    agent_history.append(clean_msg)
-                else:
-                    # Simple text message - just need role and content
-                    content = msg.get("content")
-                    if content:
-                        # Tag cross-platform mirror messages so the agent knows their origin
-                        if msg.get("mirror"):
-                            mirror_src = msg.get("mirror_source", "another session")
-                            content = f"[Delivered from {mirror_src}] {content}"
-                        entry = {"role": role, "content": content}
-                        # Preserve reasoning fields on assistant messages so
-                        # multi-turn reasoning context survives session reload.
-                        # The agent's _build_api_kwargs converts these to the
-                        # provider-specific format (reasoning_content, etc.).
-                        if role == "assistant":
-                            for _rkey in ("reasoning", "reasoning_details",
-                                          "codex_reasoning_items"):
-                                _rval = msg.get(_rkey)
-                                if _rval:
-                                    entry[_rkey] = _rval
-                        agent_history.append(entry)
+            agent_history = _build_agent_history(history)
             
             # Collect MEDIA paths already in history so we can exclude them
             # from the current turn's extraction. This is compression-safe:
