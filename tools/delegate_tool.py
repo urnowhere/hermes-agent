@@ -1084,24 +1084,35 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
 
 
 def _load_config() -> dict:
-    """Load delegation config from CLI_CONFIG or persistent config.
+    """Load the delegation section from ``~/.hermes/config.yaml``.
 
-    Checks the runtime config (cli.py CLI_CONFIG) first, then falls back
-    to the persistent config (hermes_cli/config.py load_config()) so that
-    ``delegation.model`` / ``delegation.provider`` are picked up regardless
-    of the entry point (CLI, gateway, cron).
+    Always reads fresh via ``hermes_cli.config.load_config()`` so that an
+    edit to ``config.yaml`` is picked up on the next ``delegate_task``
+    call without needing a CLI restart.
+
+    Earlier versions short-circuited through ``cli.CLI_CONFIG`` when it
+    was available, but that dict is populated **once** at
+    module-import time and is never re-read.  In long-lived CLI sessions,
+    that caused ``delegation.model`` / ``delegation.provider`` changes
+    made after startup to be silently ignored — see issue #11999.  The
+    short-circuit also misfired on startup configs that only contained
+    the built-in defaults (empty-string ``model``/``provider`` alongside
+    an integer ``max_iterations``): those produced a truthy-but-empty
+    dict that bypassed the persistent read entirely.
+
+    The persistent ``load_config()`` pipeline is cheap (single YAML
+    parse over a deep-merged deepcopy of ``DEFAULT_CONFIG``) and is the
+    same path the gateway and cron use, so unifying everyone on that
+    source of truth also removes a subtle CLI-only divergence.  In the
+    rare case ``hermes_cli.config`` can't be imported (heavily cut-down
+    installs), returns an empty dict so callers fall back to their
+    inherit-from-parent defaults.
     """
-    try:
-        from cli import CLI_CONFIG
-        cfg = CLI_CONFIG.get("delegation", {})
-        if cfg:
-            return cfg
-    except Exception:
-        pass
     try:
         from hermes_cli.config import load_config
         full = load_config()
-        return full.get("delegation", {})
+        delegation = full.get("delegation", {})
+        return delegation if isinstance(delegation, dict) else {}
     except Exception:
         return {}
 

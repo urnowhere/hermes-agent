@@ -14,6 +14,7 @@ import os
 import sys
 import threading
 import time
+import types
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -1323,6 +1324,236 @@ class TestDelegationReasoningEffort(unittest.TestCase):
         )
         call_kwargs = MockAgent.call_args[1]
         self.assertEqual(call_kwargs["reasoning_config"], {"enabled": True, "effort": "medium"})
+
+
+# =========================================================================
+# _load_config — regression for #11999
+# =========================================================================
+# ``delegate_task`` used to short-circuit through ``cli.CLI_CONFIG``, a dict
+# populated **once** at module-import time.  In long-lived CLI sessions this
+# meant ``delegation.model`` / ``delegation.provider`` edits to ``config.yaml``
+# after startup were silently ignored — subagents kept running on the parent's
+# model regardless of the user's override.  The check
+# (``if cfg: return cfg``) also misfired at startup when CLI_CONFIG contained
+# only built-in defaults — that's still a truthy dict, so the persistent
+# ``hermes_cli.config.load_config()`` path was never reached.
+#
+# The fix makes ``_load_config`` always read fresh from
+# ``hermes_cli.config.load_config()`` so config.yaml is the single source of
+# truth for every delegate_task call.
+
+
+class TestLoadConfigFreshReads(unittest.TestCase):
+    """Regression tests for #11999: ``_load_config`` must pick up
+    ``config.yaml`` edits made after CLI startup."""
+
+    def _write_config(self, path, content):
+        import yaml
+        with open(path, "w") as fh:
+            yaml.safe_dump(content, fh)
+
+    def test_picks_up_delegation_override_written_after_startup(self):
+        """Simulate the reporter's scenario: CLI started with no delegation
+        override, then user edits config.yaml.  ``_load_config`` must
+        return the new values."""
+        import tempfile, os
+        from tools.delegate_tool import _load_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            hhome = os.path.join(tmp, ".hermes")
+            os.makedirs(hhome)
+            cfg_path = os.path.join(hhome, "config.yaml")
+
+            # Startup state: no delegation section
+            self._write_config(cfg_path, {"model": "claude-opus-4-6"})
+            prev_home = os.environ.get("HERMES_HOME")
+            os.environ["HERMES_HOME"] = hhome
+            try:
+                # User edits config.yaml AFTER startup
+                self._write_config(cfg_path, {
+                    "model": "claude-opus-4-6",
+                    "delegation": {
+                        "model": "claude-sonnet-4-20250514",
+                        "provider": "anthropic",
+                    },
+                })
+                cfg = _load_config()
+                self.assertEqual(cfg.get("model"), "claude-sonnet-4-20250514")
+                self.assertEqual(cfg.get("provider"), "anthropic")
+            finally:
+                if prev_home is None:
+                    os.environ.pop("HERMES_HOME", None)
+                else:
+                    os.environ["HERMES_HOME"] = prev_home
+
+    def test_ignores_stale_cli_config_cache(self):
+        """Even when ``cli.CLI_CONFIG`` contains stale default values,
+        ``_load_config`` must consult the persistent config, not the
+        import-time cache.
+
+        Before the fix, a truthy-but-all-defaults CLI_CONFIG
+        (``{"model": "", "provider": "", ...}``) would short-circuit
+        the fresh read and return empty overrides — which the
+        downstream resolver interpreted as "no override, inherit from
+        parent"."""
+        import tempfile, os, sys
+        from tools.delegate_tool import _load_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            hhome = os.path.join(tmp, ".hermes")
+            os.makedirs(hhome)
+            cfg_path = os.path.join(hhome, "config.yaml")
+            self._write_config(cfg_path, {
+                "delegation": {
+                    "model": "claude-sonnet-4-20250514",
+                    "provider": "anthropic",
+                },
+            })
+
+            prev_home = os.environ.get("HERMES_HOME")
+            os.environ["HERMES_HOME"] = hhome
+
+            # Plant a stale CLI_CONFIG in sys.modules to simulate the
+            # import-time cache having empty-default delegation.
+            fake_cli = types.ModuleType("cli")
+            fake_cli.CLI_CONFIG = {
+                "delegation": {
+                    "max_iterations": 45,
+                    "default_toolsets": ["terminal", "file", "web"],
+                    "model": "",      # stale default
+                    "provider": "",   # stale default
+                    "base_url": "",
+                    "api_key": "",
+                },
+            }
+            prev_cli = sys.modules.get("cli")
+            sys.modules["cli"] = fake_cli
+            try:
+                cfg = _load_config()
+                self.assertEqual(cfg.get("model"), "claude-sonnet-4-20250514",
+                    f"stale CLI_CONFIG leaked into _load_config: {cfg}")
+                self.assertEqual(cfg.get("provider"), "anthropic")
+            finally:
+                if prev_cli is None:
+                    sys.modules.pop("cli", None)
+                else:
+                    sys.modules["cli"] = prev_cli
+                if prev_home is None:
+                    os.environ.pop("HERMES_HOME", None)
+                else:
+                    os.environ["HERMES_HOME"] = prev_home
+
+    def test_returns_dict_when_config_missing_delegation_section(self):
+        """With no delegation section at all in config.yaml, the
+        returned dict must be a proper dict (the defaults from
+        ``DEFAULT_CONFIG['delegation']``) so callers can safely
+        ``.get("model")`` without type errors."""
+        import tempfile, os
+        from tools.delegate_tool import _load_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            hhome = os.path.join(tmp, ".hermes")
+            os.makedirs(hhome)
+            self._write_config(os.path.join(hhome, "config.yaml"),
+                               {"model": "claude-opus-4-6"})
+
+            prev_home = os.environ.get("HERMES_HOME")
+            os.environ["HERMES_HOME"] = hhome
+            try:
+                cfg = _load_config()
+                self.assertIsInstance(cfg, dict)
+                # defaults-only → empty-string overrides, no crash on .get()
+                self.assertEqual(cfg.get("model", ""), "")
+                self.assertEqual(cfg.get("provider", ""), "")
+            finally:
+                if prev_home is None:
+                    os.environ.pop("HERMES_HOME", None)
+                else:
+                    os.environ["HERMES_HOME"] = prev_home
+
+    def test_non_dict_delegation_section_is_coerced_to_empty(self):
+        """A malformed ``delegation: something_not_a_dict`` entry must
+        yield an empty dict, not a list/string that would crash
+        ``.get()`` calls downstream in ``_resolve_delegation_credentials``."""
+        import tempfile, os
+        from tools.delegate_tool import _load_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            hhome = os.path.join(tmp, ".hermes")
+            os.makedirs(hhome)
+            # Write raw YAML to bypass safe_dump's dict coercion.
+            with open(os.path.join(hhome, "config.yaml"), "w") as fh:
+                fh.write("model: claude-opus-4-6\ndelegation: not-a-dict\n")
+
+            prev_home = os.environ.get("HERMES_HOME")
+            os.environ["HERMES_HOME"] = hhome
+            try:
+                cfg = _load_config()
+                self.assertEqual(cfg, {})
+            finally:
+                if prev_home is None:
+                    os.environ.pop("HERMES_HOME", None)
+                else:
+                    os.environ["HERMES_HOME"] = prev_home
+
+    def test_end_to_end_resolve_uses_fresh_config(self):
+        """Integration: the fix means
+        ``_resolve_delegation_credentials(_load_config(), parent)`` picks
+        up the post-startup override and produces non-None model/provider
+        in the credential bundle, so ``_build_child_agent`` subsequently
+        overrides the parent model.
+
+        Patches ``hermes_cli.runtime_provider.resolve_runtime_provider``
+        with a fixed credential bundle so the test is hermetic — does
+        not depend on a real ``ANTHROPIC_API_KEY`` / OAuth token or any
+        network-side behaviour of the runtime provider pipeline.
+        """
+        import tempfile, os
+        from tools.delegate_tool import _load_config, _resolve_delegation_credentials
+
+        parent = _make_mock_parent()
+        parent.model = "claude-opus-4-6"
+        parent.provider = "anthropic"
+        parent.base_url = "https://api.anthropic.com"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            hhome = os.path.join(tmp, ".hermes")
+            os.makedirs(hhome)
+            # Start with no override
+            with open(os.path.join(hhome, "config.yaml"), "w") as fh:
+                import yaml as _yaml
+                _yaml.safe_dump({"model": "claude-opus-4-6"}, fh)
+            with patch.dict(
+                os.environ,
+                {"HERMES_HOME": hhome, "ANTHROPIC_API_KEY": "sk-test"},
+                clear=False,
+            ), patch(
+                "hermes_cli.runtime_provider.resolve_runtime_provider",
+                return_value={
+                    "provider": "anthropic",
+                    "base_url": "https://api.anthropic.com",
+                    "api_key": "sk-test",
+                    "api_mode": "anthropic_messages",
+                },
+            ):
+                # User adds override
+                with open(os.path.join(hhome, "config.yaml"), "w") as fh:
+                    import yaml as _yaml
+                    _yaml.safe_dump({
+                        "model": "claude-opus-4-6",
+                        "delegation": {
+                            "model": "claude-sonnet-4-20250514",
+                            "provider": "anthropic",
+                        },
+                    }, fh)
+                cfg = _load_config()
+                creds = _resolve_delegation_credentials(cfg, parent)
+                self.assertEqual(creds["model"], "claude-sonnet-4-20250514")
+                # and ``_build_child_agent`` will later do:
+                #    effective_model = creds["model"] or parent.model
+                # which must now land on the delegation model, not parent's.
+                effective = creds["model"] or parent.model
+                self.assertEqual(effective, "claude-sonnet-4-20250514")
 
 
 if __name__ == "__main__":
