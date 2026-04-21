@@ -2,6 +2,7 @@
 
 import json
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 from gateway import status
@@ -104,6 +105,67 @@ class TestGatewayPidState:
 
         assert status.get_running_pid(pid_path, cleanup_stale=False) == os.getpid()
         assert pid_path.exists()
+
+    def test_get_running_pid_cleans_up_stale_foreign_pid_file(self, tmp_path, monkeypatch):
+        """Dead PID files from a previous gateway process must be unlinked.
+
+        Regression: remove_pid_file() only unlinks the current process's record,
+        so get_running_pid() would detect the dead PID but leave gateway.pid
+        behind, causing the next startup to lose the O_EXCL race immediately.
+        """
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        pid_path = tmp_path / "gateway.pid"
+        pid_path.write_text(json.dumps({
+            "pid": 36458,
+            "kind": "hermes-gateway",
+            "argv": ["python", "-m", "hermes_cli.main", "gateway", "run", "--replace"],
+            "start_time": None,
+        }))
+
+        def fake_kill(pid, sig):
+            raise ProcessLookupError
+
+        monkeypatch.setattr(status.os, "kill", fake_kill)
+
+        assert status.get_running_pid() is None
+        assert not pid_path.exists()
+
+    def test_get_running_pid_does_not_delete_replaced_pid_file(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        pid_path = tmp_path / "gateway.pid"
+        stale_record = {
+            "pid": 36458,
+            "kind": "hermes-gateway",
+            "argv": ["python", "-m", "hermes_cli.main", "gateway", "run", "--replace"],
+            "start_time": None,
+        }
+        fresh_record = {
+            "pid": 99999,
+            "kind": "hermes-gateway",
+            "argv": ["python", "-m", "hermes_cli.main", "gateway", "run", "--replace"],
+            "start_time": None,
+        }
+        pid_path.write_text(json.dumps(stale_record))
+
+        original_read_pid_record = status._read_pid_record
+        calls = {"count": 0}
+
+        def fake_read_pid_record(path=None):
+            target = path or (tmp_path / "gateway.pid")
+            calls["count"] += 1
+            if Path(target) == pid_path and calls["count"] >= 2:
+                pid_path.write_text(json.dumps(fresh_record))
+                return fresh_record
+            return original_read_pid_record(path)
+
+        def fake_kill(pid, sig):
+            raise ProcessLookupError
+
+        monkeypatch.setattr(status, "_read_pid_record", fake_read_pid_record)
+        monkeypatch.setattr(status.os, "kill", fake_kill)
+
+        assert status.get_running_pid() is None
+        assert json.loads(pid_path.read_text()) == fresh_record
 
 
 class TestGatewayRuntimeStatus:
@@ -288,6 +350,44 @@ class TestScopedLocks:
 
         status.release_scoped_lock("telegram-bot-token", "secret")
         assert not lock_path.exists()
+
+    def test_prune_stale_scoped_locks_removes_dead_owner_lock(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
+        lock_path = tmp_path / "locks" / "discord-bot-token-2bb80d537b1da3e3.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(json.dumps({
+            "pid": 36458,
+            "start_time": None,
+            "kind": "hermes-gateway",
+            "metadata": {"platform": "discord"},
+        }))
+
+        def fake_kill(pid, sig):
+            raise ProcessLookupError
+
+        monkeypatch.setattr(status.os, "kill", fake_kill)
+
+        assert status.prune_stale_scoped_locks() == 1
+        assert not lock_path.exists()
+
+    def test_prune_stale_scoped_locks_keeps_live_unreachable_owner_lock(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
+        lock_path = tmp_path / "locks" / "discord-bot-token-2bb80d537b1da3e3.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(json.dumps({
+            "pid": 36458,
+            "start_time": None,
+            "kind": "hermes-gateway",
+            "metadata": {"platform": "discord"},
+        }))
+
+        def fake_kill(pid, sig):
+            raise PermissionError
+
+        monkeypatch.setattr(status.os, "kill", fake_kill)
+
+        assert status.prune_stale_scoped_locks() == 0
+        assert lock_path.exists()
 
 
 class TestTakeoverMarker:

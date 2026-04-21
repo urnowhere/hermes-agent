@@ -1813,9 +1813,42 @@ def launchd_uninstall():
     
     print("✓ Service uninstalled")
 
+
+def _repair_stale_gateway_runtime_state() -> dict[str, int | bool]:
+    """Best-effort cleanup for stale runtime artifacts left by dead gateways."""
+    from gateway.status import clear_takeover_marker, get_running_pid, prune_stale_scoped_locks
+
+    profile_home = get_hermes_home()
+    pid_path = profile_home / "gateway.pid"
+    takeover_path = profile_home / ".gateway-takeover.json"
+    pid_file_removed = False
+    takeover_marker_removed = False
+
+    running_pid = get_running_pid()
+    if running_pid is None and pid_path.exists():
+        try:
+            pid_path.unlink(missing_ok=True)
+            pid_file_removed = True
+        except OSError:
+            pass
+
+    if running_pid is None and takeover_path.exists():
+        clear_takeover_marker()
+        takeover_marker_removed = not takeover_path.exists()
+
+    stale_locks_removed = prune_stale_scoped_locks()
+    return {
+        "pid_file_removed": pid_file_removed,
+        "takeover_marker_removed": takeover_marker_removed,
+        "stale_locks_removed": stale_locks_removed,
+    }
+
+
 def launchd_start():
     plist_path = get_launchd_plist_path()
     label = get_launchd_label()
+
+    _repair_stale_gateway_runtime_state()
 
     # Self-heal if the plist is missing entirely (e.g., manual cleanup, failed upgrade)
     if not plist_path.exists():
@@ -1853,6 +1886,7 @@ def launchd_stop():
         else:
             raise
     _wait_for_gateway_exit(timeout=10.0, force_after=5.0)
+    _repair_stale_gateway_runtime_state()
     print("✓ Service stopped")
 
 def _wait_for_gateway_exit(timeout: float = 10.0, force_after: float | None = 5.0) -> bool:

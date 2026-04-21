@@ -212,14 +212,25 @@ def _read_pid_record(pid_path: Optional[Path] = None) -> Optional[dict]:
     return None
 
 
-def _cleanup_invalid_pid_path(pid_path: Path, *, cleanup_stale: bool) -> None:
+def _cleanup_invalid_pid_path(
+    pid_path: Path,
+    *,
+    cleanup_stale: bool,
+    expected_record: Optional[dict] = None,
+) -> None:
     if not cleanup_stale:
         return
     try:
-        if pid_path == _get_pid_path():
-            remove_pid_file()
-        else:
-            pid_path.unlink(missing_ok=True)
+        current_record = _read_pid_record(pid_path)
+        if expected_record is None:
+            if current_record is not None or not pid_path.exists():
+                return
+        elif current_record != expected_record:
+            # Another process may have replaced the stale file with a fresh PID
+            # record between detection and cleanup. Never unlink a changed file.
+            return
+
+        pid_path.unlink(missing_ok=True)
     except Exception:
         pass
 
@@ -426,6 +437,55 @@ def release_scoped_lock(scope: str, identity: str) -> None:
         pass
 
 
+def prune_stale_scoped_locks() -> int:
+    """Remove lock files whose recorded owner is clearly stale.
+
+    This is the conservative counterpart to release_all_scoped_locks(): it only
+    removes invalid/corrupt records or locks whose owning PID is gone (or whose
+    recorded start_time no longer matches the live PID).
+    """
+    lock_dir = _get_lock_dir()
+    removed = 0
+    if not lock_dir.exists():
+        return 0
+
+    for lock_path in lock_dir.glob("*.lock"):
+        existing = _read_json_file(lock_path)
+        stale = existing is None
+        existing_pid = None
+        if existing is not None:
+            try:
+                existing_pid = int(existing["pid"])
+            except (KeyError, TypeError, ValueError):
+                stale = True
+
+        if not stale and existing_pid is not None:
+            try:
+                os.kill(existing_pid, 0)
+            except ProcessLookupError:
+                stale = True
+            except PermissionError:
+                stale = False
+            else:
+                recorded_start = existing.get("start_time") if isinstance(existing, dict) else None
+                current_start = _get_process_start_time(existing_pid)
+                if (
+                    recorded_start is not None
+                    and current_start is not None
+                    and current_start != recorded_start
+                ):
+                    stale = True
+
+        if stale:
+            try:
+                lock_path.unlink(missing_ok=True)
+                removed += 1
+            except OSError:
+                pass
+
+    return removed
+
+
 def release_all_scoped_locks() -> int:
     """Remove all scoped lock files in the lock directory.
 
@@ -591,24 +651,24 @@ def get_running_pid(
     try:
         pid = int(record["pid"])
     except (KeyError, TypeError, ValueError):
-        _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
+        _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale, expected_record=record)
         return None
 
     try:
         os.kill(pid, 0)  # signal 0 = existence check, no actual signal sent
     except (ProcessLookupError, PermissionError):
-        _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
+        _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale, expected_record=record)
         return None
 
     recorded_start = record.get("start_time")
     current_start = _get_process_start_time(pid)
     if recorded_start is not None and current_start is not None and current_start != recorded_start:
-        _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
+        _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale, expected_record=record)
         return None
 
     if not _looks_like_gateway_process(pid):
         if not _record_looks_like_gateway(record):
-            _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
+            _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale, expected_record=record)
             return None
 
     return pid

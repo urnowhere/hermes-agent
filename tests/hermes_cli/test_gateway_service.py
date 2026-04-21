@@ -268,6 +268,29 @@ class TestLaunchdServiceRecovery:
             ["launchctl", "kickstart", target],
         ]
 
+    def test_launchd_start_repairs_stale_runtime_state_before_kickstart(self, tmp_path, monkeypatch):
+        plist_path = tmp_path / "ai.hermes.gateway.plist"
+        plist_path.write_text(gateway_cli.generate_launchd_plist(), encoding="utf-8")
+        repair_calls = []
+        run_calls = []
+
+        monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+        monkeypatch.setattr(
+            gateway_cli,
+            "_repair_stale_gateway_runtime_state",
+            lambda: repair_calls.append("repair") or {"pid_file_removed": True, "takeover_marker_removed": False, "stale_locks_removed": 1},
+        )
+        monkeypatch.setattr(
+            gateway_cli.subprocess,
+            "run",
+            lambda cmd, check=False, **kwargs: run_calls.append(cmd) or SimpleNamespace(returncode=0, stdout="", stderr=""),
+        )
+
+        gateway_cli.launchd_start()
+
+        assert repair_calls == ["repair"]
+        assert run_calls == [["launchctl", "kickstart", f"{gateway_cli._launchd_domain()}/{gateway_cli.get_launchd_label()}"]]
+
     def test_launchd_restart_drains_running_gateway_before_kickstart(self, monkeypatch):
         calls = []
         target = f"{gateway_cli._launchd_domain()}/{gateway_cli.get_launchd_label()}"
@@ -373,6 +396,25 @@ class TestLaunchdServiceRecovery:
 
         assert len(wait_called) == 1
         assert wait_called[0] == {"timeout": 10.0, "force_after": 5.0}
+
+    def test_launchd_stop_repairs_stale_runtime_state_after_bootout(self, monkeypatch):
+        repair_calls = []
+
+        monkeypatch.setattr(
+            gateway_cli.subprocess,
+            "run",
+            lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+        )
+        monkeypatch.setattr(gateway_cli, "_wait_for_gateway_exit", lambda **kwargs: True)
+        monkeypatch.setattr(
+            gateway_cli,
+            "_repair_stale_gateway_runtime_state",
+            lambda: repair_calls.append("repair") or {"pid_file_removed": True, "takeover_marker_removed": False, "stale_locks_removed": 1},
+        )
+
+        gateway_cli.launchd_stop()
+
+        assert repair_calls == ["repair"]
 
     def test_launchd_status_reports_local_stale_plist_when_unloaded(self, tmp_path, monkeypatch, capsys):
         plist_path = tmp_path / "ai.hermes.gateway.plist"
