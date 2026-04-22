@@ -689,6 +689,100 @@ class TestAdapterBehavior(unittest.TestCase):
             adapter._on_reaction_event("im.message.reaction.created_v1", data)
         run_threadsafe.assert_called_once()
 
+    @patch.dict(os.environ, {}, clear=True)
+    @unittest.skipUnless(_HAS_LARK_OAPI, "lark-oapi not installed")
+    def test_typing_reaction_lifecycle_uses_source_message(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        adapter._typing_state["chat_1"] = ("om_src", None)
+        captured = {}
+
+        class _ReactionAPI:
+            def create(self, request):
+                captured["create_request"] = request
+                return SimpleNamespace(
+                    success=lambda: True,
+                    data=SimpleNamespace(reaction_id="r_typing_1"),
+                )
+
+            def delete(self, request):
+                captured["delete_request"] = request
+                return SimpleNamespace(success=lambda: True)
+
+        adapter._client = SimpleNamespace(
+            im=SimpleNamespace(v1=SimpleNamespace(message_reaction=_ReactionAPI()))
+        )
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch("gateway.platforms.feishu.asyncio.to_thread", side_effect=_direct):
+            asyncio.run(adapter.send_typing("chat_1"))
+            asyncio.run(adapter.stop_typing("chat_1"))
+
+        self.assertEqual(captured["create_request"].message_id, "om_src")
+        self.assertEqual(
+            captured["create_request"].request_body.reaction_type["emoji_type"],
+            "Typing",
+        )
+        self.assertEqual(captured["delete_request"].message_id, "om_src")
+        self.assertEqual(captured["delete_request"].reaction_id, "r_typing_1")
+        self.assertNotIn("chat_1", adapter._typing_state)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_handle_message_with_guards_tracks_only_inbound_messages_for_typing(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.base import MessageEvent, MessageType
+        from gateway.platforms.feishu import FeishuAdapter
+        from gateway.session import SessionSource
+
+        adapter = FeishuAdapter(PlatformConfig())
+        adapter.handle_message = AsyncMock()
+        source = SessionSource(
+            platform=adapter.platform,
+            chat_id="oc_chat",
+            chat_name="Feishu DM",
+            chat_type="dm",
+            user_id="ou_user",
+            user_name="张三",
+        )
+        event = MessageEvent(
+            text="hello",
+            message_type=MessageType.TEXT,
+            source=source,
+            message_id="om_src",
+            raw_message=SimpleNamespace(event=SimpleNamespace(message=SimpleNamespace())),
+        )
+
+        asyncio.run(adapter._handle_message_with_guards(event))
+
+        self.assertEqual(adapter._typing_state["oc_chat"], ("om_src", None))
+
+        synthetic_event = MessageEvent(
+            text="reaction:added:OK",
+            message_type=MessageType.TEXT,
+            source=source,
+            message_id="om_bot",
+            raw_message=SimpleNamespace(event=SimpleNamespace(reaction_type=SimpleNamespace(emoji_type="OK"))),
+        )
+
+        asyncio.run(adapter._handle_message_with_guards(synthetic_event))
+
+        self.assertEqual(adapter._typing_state["oc_chat"], ("om_src", None))
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_normalize_feishu_message_strips_feishu_mentions(self):
+        from gateway.platforms.feishu import normalize_feishu_message
+
+        normalized = normalize_feishu_message(
+            message_type="text",
+            raw_content=json.dumps({"text": "hi @_user_1  there @_user_2"}),
+        )
+
+        self.assertEqual(normalized.text_content, "hi there")
+
     @patch.dict(os.environ, {"FEISHU_GROUP_POLICY": "open"}, clear=True)
     def test_group_message_requires_mentions_even_when_policy_open(self):
         from gateway.config import PlatformConfig
@@ -3255,8 +3349,8 @@ class TestSenderNameResolution(unittest.TestCase):
 
 @unittest.skipUnless(_HAS_LARK_OAPI, "lark-oapi not installed")
 class TestProcessingReactions(unittest.TestCase):
-    """Typing on start → removed on SUCCESS, swapped for CrossMark on FAILURE,
-    removed (no replacement) on CANCELLED."""
+    """on_processing_start is a no-op (typing is handled by send_typing).
+    on_processing_complete adds CrossMark on FAILURE, nothing otherwise."""
 
     @staticmethod
     def _run(coro):
@@ -3322,67 +3416,43 @@ class TestProcessingReactions(unittest.TestCase):
 
     # ------------------------------------------------------------------ start
     @patch.dict(os.environ, {}, clear=True)
-    def test_start_adds_typing_and_caches_reaction_id(self):
+    def test_start_is_noop(self):
+        """on_processing_start is a no-op; typing is managed by send_typing."""
         adapter, tracker = self._build_adapter(next_reaction_id="r_typing")
         with self._patch_to_thread():
             self._run(adapter.on_processing_start(self._event()))
-        self.assertEqual(tracker.create_calls, ["Typing"])
-        self.assertEqual(adapter._pending_processing_reactions["om_msg"], "r_typing")
+        self.assertEqual(tracker.create_calls, [])
+        self.assertNotIn("om_msg", adapter._pending_processing_reactions)
 
     @patch.dict(os.environ, {}, clear=True)
-    def test_start_is_idempotent_for_same_message_id(self):
+    def test_start_is_idempotent_noop(self):
         adapter, tracker = self._build_adapter(next_reaction_id="r_typing")
         with self._patch_to_thread():
             self._run(adapter.on_processing_start(self._event()))
             self._run(adapter.on_processing_start(self._event()))
-        self.assertEqual(tracker.create_calls, ["Typing"])
+        self.assertEqual(tracker.create_calls, [])
 
     @patch.dict(os.environ, {}, clear=True)
-    def test_start_does_not_cache_when_create_fails(self):
+    def test_start_noop_regardless_of_create_result(self):
         adapter, tracker = self._build_adapter(create_success=False)
         with self._patch_to_thread():
             self._run(adapter.on_processing_start(self._event()))
-        self.assertEqual(tracker.create_calls, ["Typing"])
+        self.assertEqual(tracker.create_calls, [])
         self.assertNotIn("om_msg", adapter._pending_processing_reactions)
 
     # --------------------------------------------------------------- complete
     @patch.dict(os.environ, {}, clear=True)
-    def test_success_removes_typing_and_adds_nothing(self):
-        adapter, tracker = self._build_adapter(next_reaction_id="r_typing")
+    def test_success_is_noop(self):
+        adapter, tracker = self._build_adapter()
         with self._patch_to_thread():
-            self._run(adapter.on_processing_start(self._event()))
             self._run(
                 adapter.on_processing_complete(self._event(), ProcessingOutcome.SUCCESS)
             )
-        self.assertEqual(tracker.create_calls, ["Typing"])
-        self.assertEqual(tracker.delete_calls, ["r_typing"])
-        self.assertNotIn("om_msg", adapter._pending_processing_reactions)
+        self.assertEqual(tracker.create_calls, [])
+        self.assertEqual(tracker.delete_calls, [])
 
     @patch.dict(os.environ, {}, clear=True)
-    def test_failure_removes_typing_then_adds_cross_mark(self):
-        adapter, tracker = self._build_adapter(next_reaction_id="r_typing")
-        with self._patch_to_thread():
-            self._run(adapter.on_processing_start(self._event()))
-            self._run(
-                adapter.on_processing_complete(self._event(), ProcessingOutcome.FAILURE)
-            )
-        self.assertEqual(tracker.create_calls, ["Typing", "CrossMark"])
-        self.assertEqual(tracker.delete_calls, ["r_typing"])
-
-    @patch.dict(os.environ, {}, clear=True)
-    def test_cancelled_removes_typing_and_adds_nothing(self):
-        adapter, tracker = self._build_adapter(next_reaction_id="r_typing")
-        with self._patch_to_thread():
-            self._run(adapter.on_processing_start(self._event()))
-            self._run(
-                adapter.on_processing_complete(self._event(), ProcessingOutcome.CANCELLED)
-            )
-        self.assertEqual(tracker.create_calls, ["Typing"])
-        self.assertEqual(tracker.delete_calls, ["r_typing"])
-        self.assertNotIn("om_msg", adapter._pending_processing_reactions)
-
-    @patch.dict(os.environ, {}, clear=True)
-    def test_failure_without_preceding_start_still_adds_cross_mark(self):
+    def test_failure_adds_cross_mark(self):
         adapter, tracker = self._build_adapter()
         with self._patch_to_thread():
             self._run(
@@ -3392,54 +3462,18 @@ class TestProcessingReactions(unittest.TestCase):
         self.assertEqual(tracker.delete_calls, [])
 
     @patch.dict(os.environ, {}, clear=True)
-    def test_success_without_preceding_start_is_full_noop(self):
+    def test_cancelled_is_noop(self):
         adapter, tracker = self._build_adapter()
         with self._patch_to_thread():
             self._run(
-                adapter.on_processing_complete(self._event(), ProcessingOutcome.SUCCESS)
+                adapter.on_processing_complete(self._event(), ProcessingOutcome.CANCELLED)
             )
         self.assertEqual(tracker.create_calls, [])
         self.assertEqual(tracker.delete_calls, [])
-
-    # ------------------------- delete failure: don't stack badges -----------
-    @patch.dict(os.environ, {}, clear=True)
-    def test_delete_failure_on_failure_outcome_skips_cross_mark(self):
-        # Removing Typing is best-effort — but if it fails, we must NOT
-        # additionally add CrossMark, or the UI would show two contradictory
-        # badges. The handle stays in the cache for LRU to clean up later.
-        adapter, tracker = self._build_adapter(
-            next_reaction_id="r_typing", delete_success=False,
-        )
-        with self._patch_to_thread():
-            self._run(adapter.on_processing_start(self._event()))
-            self._run(
-                adapter.on_processing_complete(self._event(), ProcessingOutcome.FAILURE)
-            )
-        self.assertEqual(tracker.create_calls, ["Typing"])  # CrossMark NOT added
-        self.assertEqual(tracker.delete_calls, ["r_typing"])  # delete was attempted
-        self.assertEqual(
-            adapter._pending_processing_reactions["om_msg"], "r_typing",
-        )  # handle retained
-
-    @patch.dict(os.environ, {}, clear=True)
-    def test_delete_failure_on_success_outcome_retains_handle(self):
-        adapter, tracker = self._build_adapter(
-            next_reaction_id="r_typing", delete_success=False,
-        )
-        with self._patch_to_thread():
-            self._run(adapter.on_processing_start(self._event()))
-            self._run(
-                adapter.on_processing_complete(self._event(), ProcessingOutcome.SUCCESS)
-            )
-        self.assertEqual(tracker.create_calls, ["Typing"])
-        self.assertEqual(tracker.delete_calls, ["r_typing"])
-        self.assertEqual(
-            adapter._pending_processing_reactions["om_msg"], "r_typing",
-        )
 
     # ------------------------------------------------------------- env toggle
     @patch.dict(os.environ, {"FEISHU_REACTIONS": "false"}, clear=True)
-    def test_env_disable_short_circuits_both_hooks(self):
+    def test_env_disable_short_circuits_failure_hook(self):
         adapter, tracker = self._build_adapter()
         with self._patch_to_thread():
             self._run(adapter.on_processing_start(self._event()))
@@ -3448,34 +3482,3 @@ class TestProcessingReactions(unittest.TestCase):
             )
         self.assertEqual(tracker.create_calls, [])
         self.assertEqual(tracker.delete_calls, [])
-
-    # ------------------------------------------------------------- LRU bounds
-    @patch.dict(os.environ, {}, clear=True)
-    def test_cache_evicts_oldest_entry_beyond_size_limit(self):
-        from gateway.platforms.feishu import _FEISHU_PROCESSING_REACTION_CACHE_SIZE
-
-        adapter, _ = self._build_adapter()
-        counter = {"n": 0}
-
-        def _create(_request):
-            counter["n"] += 1
-            return SimpleNamespace(
-                success=lambda: True,
-                data=SimpleNamespace(reaction_id=f"r{counter['n']}"),
-            )
-
-        adapter._client.im.v1.message_reaction.create = _create
-
-        with self._patch_to_thread():
-            for i in range(_FEISHU_PROCESSING_REACTION_CACHE_SIZE + 1):
-                self._run(adapter.on_processing_start(self._event(f"om_{i}")))
-
-        self.assertNotIn("om_0", adapter._pending_processing_reactions)
-        self.assertIn(
-            f"om_{_FEISHU_PROCESSING_REACTION_CACHE_SIZE}",
-            adapter._pending_processing_reactions,
-        )
-        self.assertEqual(
-            len(adapter._pending_processing_reactions),
-            _FEISHU_PROCESSING_REACTION_CACHE_SIZE,
-        )

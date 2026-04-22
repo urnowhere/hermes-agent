@@ -1154,6 +1154,7 @@ class FeishuAdapter(BasePlatformAdapter):
         # Exec approval button state (approval_id → {session_key, message_id, chat_id})
         self._approval_state: Dict[int, Dict[str, str]] = {}
         self._approval_counter = itertools.count(1)
+        self._typing_state: Dict[str, tuple[str, Optional[str]]] = {}
         # Feishu reaction deletion requires the opaque reaction_id returned
         # by create, so we cache it per message_id.
         self._pending_processing_reactions: "OrderedDict[str, str]" = OrderedDict()
@@ -1722,8 +1723,28 @@ class FeishuAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=str(exc))
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
-        """Feishu bot API does not expose a typing indicator."""
-        return None
+        """Show a typing indicator by adding a reaction to the inbound message."""
+        current = self._typing_state.get(chat_id)
+        if not current:
+            return
+
+        message_id, reaction_id = current
+        if reaction_id:
+            return  # Already showing typing
+
+        reaction_id = await self._add_reaction(message_id, _FEISHU_REACTION_IN_PROGRESS)
+        if reaction_id:
+            self._typing_state[chat_id] = (message_id, reaction_id)
+
+    async def stop_typing(self, chat_id: str) -> None:
+        """Remove the typing-indicator reaction added by ``send_typing``."""
+        current = self._typing_state.pop(chat_id, None)
+        if not current:
+            return
+
+        message_id, reaction_id = current
+        if reaction_id:
+            await self._remove_reaction(message_id, reaction_id)
 
     async def send_image(
         self,
@@ -2303,6 +2324,11 @@ class FeishuAdapter(BasePlatformAdapter):
         chat_id = getattr(event.source, "chat_id", "") or "" if event.source else ""
         chat_lock = self._get_chat_lock(chat_id)
         async with chat_lock:
+            message_id = event.message_id
+            if message_id:
+                raw_event = getattr(getattr(event, "raw_message", None), "event", None)
+                if chat_id and getattr(raw_event, "message", None) is not None:
+                    self._typing_state[chat_id] = (message_id, None)
             await self.handle_message(event)
 
     # =========================================================================
@@ -2393,14 +2419,10 @@ class FeishuAdapter(BasePlatformAdapter):
         return self._pending_processing_reactions.pop(message_id, None)
 
     async def on_processing_start(self, event: MessageEvent) -> None:
-        if not self._reactions_enabled():
-            return
-        message_id = event.message_id
-        if not message_id or message_id in self._pending_processing_reactions:
-            return
-        reaction_id = await self._add_reaction(message_id, _FEISHU_REACTION_IN_PROGRESS)
-        if reaction_id:
-            self._remember_processing_reaction(message_id, reaction_id)
+        # Typing indicator is managed by send_typing / stop_typing via the
+        # _keep_typing loop in base.py, so this hook intentionally does nothing
+        # to avoid a duplicate reaction.
+        pass
 
     async def on_processing_complete(
         self, event: MessageEvent, outcome: ProcessingOutcome
@@ -2410,15 +2432,6 @@ class FeishuAdapter(BasePlatformAdapter):
         message_id = event.message_id
         if not message_id:
             return
-
-        start_reaction_id = self._pending_processing_reactions.get(message_id)
-        if start_reaction_id:
-            if not await self._remove_reaction(message_id, start_reaction_id):
-                # Don't stack a second badge on top of a Typing we couldn't
-                # remove — UI would read as both "working" and "done/failed"
-                # simultaneously. Keep the handle so LRU eventually evicts it.
-                return
-            self._pop_processing_reaction(message_id)
 
         if outcome is ProcessingOutcome.FAILURE:
             await self._add_reaction(message_id, _FEISHU_REACTION_FAILURE)
