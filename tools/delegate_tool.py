@@ -2573,7 +2573,12 @@ DELEGATE_TASK_SCHEMA = {
                     "Optional provider override (e.g. 'openrouter', 'anthropic', "
                     "'nous'). Usually unneeded — provider is inferred from the "
                     "model prefix. Set explicitly only when routing through a "
-                    "specific provider for the same model."
+                    "specific provider for the same model. "
+                    "NOTE: provider is resolved once per delegate_task call and "
+                    "shared across all tasks in the batch. If you need tasks on "
+                    "different providers, use provider='openrouter' at the top "
+                    "level with provider-prefixed model strings per task "
+                    "(e.g. 'anthropic/claude-haiku-4-5', 'x-ai/grok-4.1-fast')."
                 ),
             },
         },

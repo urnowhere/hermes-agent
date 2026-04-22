@@ -2652,6 +2652,7 @@ class TestRunAgentDispatchForwarding(unittest.TestCase):
 
     def test_dispatch_helper_forwards_model_provider_role_acp(self):
         """_dispatch_delegate_task must forward model=, provider=, role=, acp_command=, acp_args=."""
+        import re
         from pathlib import Path
         run_agent_path = Path(__file__).resolve().parents[2] / "run_agent.py"
         source = run_agent_path.read_text()
@@ -2661,35 +2662,57 @@ class TestRunAgentDispatchForwarding(unittest.TestCase):
         method_start = source.find(method_token)
         self.assertNotEqual(method_start, -1, "_dispatch_delegate_task not found in run_agent.py")
 
-        # Find the end of the method's def signature line (the colon) so we
-        # search for _delegate_task( only inside the method body, not the def line.
+        # Find the end of the method's def signature line so we search only
+        # inside the method body.
         colon_pos = source.find(":\n", method_start)
         self.assertNotEqual(colon_pos, -1, "Could not find end of _dispatch_delegate_task def line")
         method_body_start = colon_pos + 1
 
-        # Find the _delegate_task( call inside the method body
-        # Exclude the "def _dispatch_delegate_task(" itself (already past it)
-        inner_token = "_delegate_task("
-        call_start = source.find(inner_token, method_body_start)
-        self.assertNotEqual(call_start, -1,
+        # Locate the inner dispatch call as a WORD boundary match — prevents
+        # matching the tail of "_dispatch_delegate_task(" itself.
+        # The call is aliased as `_delegate_task = delegate_task` via import,
+        # so we match `_delegate_task(` preceded by whitespace/newline.
+        inner_match = re.search(r'(?<=\s)_delegate_task\(', source[method_body_start:])
+        self.assertIsNotNone(inner_match,
             "_delegate_task( call not found inside _dispatch_delegate_task body")
+        call_start = method_body_start + inner_match.start()
+        # Advance past the token to the opening "("
+        open_paren = method_body_start + inner_match.end() - 1  # position of "("
 
-        # Walk balanced parens to extract the argument block
+        # Walk balanced parens to extract the argument block, skipping string
+        # literals to avoid false matches on parens inside default values.
         depth = 0
-        i = call_start + len(inner_token) - 1  # position of the opening "("
+        i = open_paren
+        in_string = None
         end = -1
         while i < len(source):
-            if source[i] == "(":
-                depth += 1
-            elif source[i] == ")":
-                depth -= 1
-                if depth == 0:
-                    end = i
-                    break
+            ch = source[i]
+            if in_string:
+                if ch == "\\" and in_string != "'''":
+                    i += 2  # skip escaped char
+                    continue
+                if source[i:i+len(in_string)] == in_string:
+                    i += len(in_string)
+                    in_string = None
+                    continue
+            else:
+                for delim in ('"""', "'''", '"', "'"):
+                    if source[i:i+len(delim)] == delim:
+                        in_string = delim
+                        i += len(delim)
+                        break
+                else:
+                    if ch == "(":
+                        depth += 1
+                    elif ch == ")":
+                        depth -= 1
+                        if depth == 0:
+                            end = i
+                            break
             i += 1
         self.assertNotEqual(end, -1, "Unbalanced parens in _delegate_task( call")
 
-        dispatch_args = source[call_start + len(inner_token):end]
+        dispatch_args = source[open_paren + 1:end]
         required_kwargs = ("model=", "provider=", "role=", "acp_command=", "acp_args=")
         for kw in required_kwargs:
             self.assertIn(
