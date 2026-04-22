@@ -3192,6 +3192,36 @@ class TestMaxTokensParam:
         result = agent._max_tokens_param(4096)
         assert result == {"max_tokens": 4096}
 
+    # --- model-name-based detection (issue #13901) ---
+
+    def test_custom_endpoint_with_gpt5_uses_max_completion_tokens(self, agent):
+        """A custom/proxy endpoint serving gpt-5.4 must use max_completion_tokens."""
+        agent.base_url = "https://my-openai-gateway.example.com/v1"
+        agent.model = "gpt-5.4"
+        result = agent._max_tokens_param(4096)
+        assert result == {"max_completion_tokens": 4096}
+
+    def test_openrouter_with_gpt4o_uses_max_completion_tokens(self, agent):
+        """OpenRouter serving openai/gpt-4o-mini must use max_completion_tokens."""
+        agent.base_url = "https://openrouter.ai/api/v1"
+        agent.model = "openai/gpt-4o-mini"
+        result = agent._max_tokens_param(4096)
+        assert result == {"max_completion_tokens": 4096}
+
+    def test_custom_endpoint_with_llama3_uses_max_tokens(self, agent):
+        """Custom endpoint with a legacy/non-OpenAI model keeps max_tokens."""
+        agent.base_url = "https://my-llm-proxy.internal/v1"
+        agent.model = "llama3:70b"
+        result = agent._max_tokens_param(4096)
+        assert result == {"max_tokens": 4096}
+
+    def test_empty_model_no_regression(self, agent):
+        """Empty model string falls back to URL-only detection without crashing."""
+        agent.base_url = "http://localhost:11434/v1"
+        agent.model = ""
+        result = agent._max_tokens_param(4096)
+        assert result == {"max_tokens": 4096}
+
 
 # ---------------------------------------------------------------------------
 # System prompt stability for prompt caching
