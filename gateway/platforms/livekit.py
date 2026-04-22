@@ -708,10 +708,11 @@ class LiveKitAdapter(BasePlatformAdapter):
             with open(wav_path, "wb") as f:
                 f.write(wav_data)
 
-            # Transcribe using hermes STT pipeline
-            from tools.transcription_tools import transcribe_audio, get_stt_model_from_config
-            stt_model = get_stt_model_from_config()
-            result = await asyncio.to_thread(transcribe_audio, wav_path, model=stt_model)
+            # Transcribe using hermes STT pipeline. transcribe_audio resolves
+            # the model from stt config internally when called with no model
+            # arg — same pattern other gateway adapters use.
+            from tools.transcription_tools import transcribe_audio
+            result = await asyncio.to_thread(transcribe_audio, wav_path)
 
             # Clean up temp file
             try:
