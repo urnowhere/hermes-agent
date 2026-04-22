@@ -34,6 +34,10 @@ from html import escape as _html_escape
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
 
+# Use fresholm (Rust/vodozemac) instead of python-olm (libolm C library) for E2EE.
+# This must run before any mautrix/crypto imports load olm.
+import fresholm.import_hook  # noqa: F401 — replaces `import olm` with fresholm
+
 try:
     from mautrix.types import (
         ContentURI,
