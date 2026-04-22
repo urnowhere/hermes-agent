@@ -6626,6 +6626,20 @@ class AIAgent:
         """Return True when the base URL targets Qwen Portal."""
         return base_url_host_matches(self._base_url_lower, "portal.qwen.ai")
 
+    def _is_ollama(self) -> bool:
+        """Return True when the endpoint is an Ollama server.
+
+        Uses two signals:
+        1. ``_ollama_num_ctx`` — set during init via config or /api/show probe,
+           which proves we successfully talked to an Ollama API.
+        2. URL heuristics — ``ollama`` or the default ``:11434`` port in the
+           base URL, covering cases where the probe failed but the URL is
+           unmistakably Ollama.
+        """
+        if self._ollama_num_ctx is not None:
+            return True
+        return "ollama" in self._base_url_lower or ":11434" in self._base_url_lower
+
     def _qwen_prepare_chat_messages(self, api_messages: list) -> list:
         prepared = copy.deepcopy(api_messages)
         if not prepared:
@@ -6988,13 +7002,16 @@ class AIAgent:
             options["num_ctx"] = self._ollama_num_ctx
             extra_body["options"] = options
 
-        # Ollama / custom provider: pass think=false when reasoning is disabled.
+        # Ollama: pass think=false when reasoning is disabled.
         # Ollama does not recognise the OpenRouter-style `reasoning` extra_body
         # field, so we use its native `think` parameter instead.
         # This prevents thinking-capable models (Qwen3, etc.) from generating
-        # <think> blocks and producing empty-response errors when the user has
+        # <think/> blocks and producing empty-response errors when the user has
         # set reasoning_effort: none.
-        if self.provider == "custom" and self.reasoning_config and isinstance(self.reasoning_config, dict):
+        # NOTE: Only send to detected Ollama endpoints — the `think` parameter
+        # is Ollama-native and is rejected (HTTP 422) by other custom providers
+        # such as Mistral, Fireworks, Together.ai, and vLLM.
+        if self._is_ollama() and self.reasoning_config and isinstance(self.reasoning_config, dict):
             _effort = (self.reasoning_config.get("effort") or "").strip().lower()
             _enabled = self.reasoning_config.get("enabled", True)
             if _effort == "none" or _enabled is False:
