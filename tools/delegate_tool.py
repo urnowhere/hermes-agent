@@ -42,10 +42,11 @@ _MODEL_USAGE_LOG = Path.home() / ".hermes" / "logs" / "model_usage.jsonl"
 def _read_observability(task_id: str) -> Dict[str, Any] | None:
     """Read model_usage.jsonl and return a compact observability dict for task_id.
 
-    Returns None if the log doesn't exist or has no entries for this task.
-    Called once per subagent result before the final return — gives the LLM
-    ground-truth model routing data without requiring it to run a separate script.
+    Returns None if the log doesn't exist, task_id is falsy, or has no entries.
+    Called via _read_observability_batch() — do not call directly in hot paths.
     """
+    if not task_id:
+        return None
     if not _MODEL_USAGE_LOG.exists():
         return None
     entries = []
@@ -63,6 +64,38 @@ def _read_observability(task_id: str) -> Dict[str, Any] | None:
                     entries.append(e)
     except OSError:
         return None
+    return _build_observability(entries)
+
+
+def _load_observability_log() -> Dict[str, list]:
+    """Read the full model_usage.jsonl log once and return entries keyed by task_id.
+
+    Used by the batch enrichment block to avoid reading the log N times for an
+    N-task batch. Returns an empty dict if the log doesn't exist or can't be read.
+    """
+    if not _MODEL_USAGE_LOG.exists():
+        return {}
+    log_by_task: Dict[str, list] = {}
+    try:
+        with _MODEL_USAGE_LOG.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                tid = e.get("task_id")
+                if tid:
+                    log_by_task.setdefault(tid, []).append(e)
+    except OSError:
+        return {}
+    return log_by_task
+
+
+def _build_observability(entries: list) -> Dict[str, Any] | None:
+    """Build a compact observability dict from a list of log entries for one task."""
     if not entries:
         return None
 
@@ -74,12 +107,19 @@ def _read_observability(task_id: str) -> Dict[str, Any] | None:
     response_models = Counter(e.get("model_response", "unknown") for e in entries)
     request_models = Counter(e.get("model_request", "unknown") for e in entries)
 
-    # Auto-router resolutions
-    auto_resolutions = {
-        e.get("model_response"): e.get("model_request")
-        for e in entries
-        if e.get("model_request", "").endswith("/auto")
-    }
+    # Auto-router resolutions: requested → list of resolved models (preserves all)
+    # Key = requested model (e.g. "openrouter/auto"), value = Counter of what resolved
+    auto_resolutions: Dict[str, Any] = {}
+    for e in entries:
+        req = e.get("model_request", "")
+        if not req.endswith("/auto"):
+            continue
+        resp = e.get("model_response", "unknown")
+        auto_resolutions.setdefault(req, Counter())
+        auto_resolutions[req][resp] += 1
+    # Flatten Counters to dicts for JSON serialization
+    auto_resolutions = {k: dict(v) for k, v in auto_resolutions.items()}
+
     # Real mismatches (non-auto, non-alias)
     mismatches = []
     for e in entries:
@@ -2396,13 +2436,15 @@ def delegate_task(
     total_duration = round(time.monotonic() - overall_start, 2)
 
     # Enrich each result with task_id and inline observability data from the
-    # model_usage.jsonl log. This ensures the LLM always sees ground-truth
-    # model routing data in the tool return without requiring a separate script call.
+    # model_usage.jsonl log. Read the log once for the whole batch (O(1) lookup
+    # per result), then attach ground-truth routing data to each entry so the
+    # LLM sees it in the tool return without needing to run a separate script.
+    _obs_log = _load_observability_log()
     for entry in results:
         tid = entry.pop("_task_id", None)
         if tid:
             entry["task_id"] = tid
-            obs = _read_observability(tid)
+            obs = _build_observability(_obs_log.get(tid, []))
             if obs:
                 entry["observability"] = obs
 

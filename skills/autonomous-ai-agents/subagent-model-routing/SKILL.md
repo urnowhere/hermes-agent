@@ -221,13 +221,33 @@ cronjob(
 
 For automated background tasks (email scanning, file parsing, briefings), Budget tier models are usually sufficient. Pin a specific model when the task has known quality requirements.
 
-## Verifying What Actually Ran
+## Model Observability
+
+`delegate_task` results include two fields that provide ground-truth model routing data without requiring a separate script call:
+
+- **`task_id`** — the child's unique task ID (e.g. `subagent-0-a3f9c12b`)
+- **`observability`** — a dict populated from the model usage log at return time:
+
+```json
+{
+  "models_used": {"google/gemini-2.5-flash": 8},
+  "models_requested": {"openrouter/auto": 8},
+  "api_calls": 8,
+  "tokens": {"input": 24312, "output": 1847},
+  "duration_seconds": 18.4,
+  "auto_router_resolutions": {
+    "openrouter/auto": {"google/gemini-2.5-flash": 8}
+  }
+}
+```
+
+`auto_router_resolutions` is keyed by the **requested** model; the value is a dict of **resolved** models with call counts. `models_used` is ground truth — read from `~/.hermes/logs/model_usage.jsonl` by the `model_observability` plugin.
+
+**If `override_mismatches` is non-empty, proactively alert the user** — a model override was silently dropped and the task ran on the wrong model.
+
+**If `observability` is absent:** both the inline field and the `model_metadata_for_task.py` fallback script depend on the same observability plugin. Without the plugin, neither method works. Note this explicitly rather than silently omitting the metadata.
 
 The `model_observability` plugin (if installed) logs every API call to `~/.hermes/logs/model_usage.jsonl`. Each entry includes `model_request` (what was sent) and `model_response` (what actually responded). Always check this log after a delegation where the model mattered — OpenRouter's auto-router may resolve `openrouter/auto` to a different model than expected.
-
-```bash
-tail -5 ~/.hermes/logs/model_usage.jsonl | python3 -m json.tool
-```
 
 ## Mismatch Warnings
 
