@@ -543,6 +543,21 @@ DEFAULT_CONFIG = {
         # Enabled by default for non-local backends (SSH); local is always opt-in
         # via TERMINAL_LOCAL_PERSISTENT env var.
         "persistent_shell": True,
+        # Nsjail backend — lightweight Linux-only namespace sandbox. No daemon,
+        # no image pull, ~20 ms per exec. Safer than local but much cheaper
+        # than Docker for short-lived code runs.
+        # Optional path to a user-supplied nsjail.cfg (protobuf text-format).
+        # When set, Hermes delegates all sandbox policy to that file and only
+        # injects the time limit. Leave empty to use Hermes's built-in defaults
+        # (rootfs read-only, writable cwd, tmpfs /tmp, no network).
+        "nsjail_config": "",
+        # Allow outbound network access from inside the jail. Off by default —
+        # nsjail puts the process in a fresh network namespace with no routes.
+        "nsjail_allow_net": False,
+        # Env var names to forward from the host into the jail (beyond PATH /
+        # HOME / LANG / locale defaults). Provider API keys are still filtered
+        # out by the shared subprocess-env blocklist.
+        "nsjail_forward_env": [],
     },
     
     "browser": {
@@ -4689,6 +4704,8 @@ def set_config_value(key: str, value: str):
         "terminal.container_memory": "TERMINAL_CONTAINER_MEMORY",
         "terminal.container_disk": "TERMINAL_CONTAINER_DISK",
         "terminal.container_persistent": "TERMINAL_CONTAINER_PERSISTENT",
+        "terminal.nsjail_config": "TERMINAL_NSJAIL_CONFIG",
+        "terminal.nsjail_allow_net": "TERMINAL_NSJAIL_ALLOW_NET",
     }
     if key in _config_to_env_sync:
         save_env_value(_config_to_env_sync[key], str(value))

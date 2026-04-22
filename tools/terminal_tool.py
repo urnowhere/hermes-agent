@@ -882,6 +882,7 @@ def _transform_sudo_command(command: str | None) -> tuple[str | None, str | None
 
 # Environment classes now live in tools/environments/
 from tools.environments.local import LocalEnvironment as _LocalEnvironment
+from tools.environments.nsjail import NsjailEnvironment as _NsjailEnvironment
 from tools.environments.singularity import SingularityEnvironment as _SingularityEnvironment
 from tools.environments.ssh import SSHEnvironment as _SSHEnvironment
 from tools.environments.docker import DockerEnvironment as _DockerEnvironment
@@ -1086,6 +1087,10 @@ def _get_env_config() -> Dict[str, Any]:
         "container_persistent": os.getenv("TERMINAL_CONTAINER_PERSISTENT", "true").lower() in ("true", "1", "yes"),
         "docker_volumes": _parse_env_var("TERMINAL_DOCKER_VOLUMES", "[]", json.loads, "valid JSON"),
         "docker_run_as_host_user": os.getenv("TERMINAL_DOCKER_RUN_AS_HOST_USER", "false").lower() in ("true", "1", "yes"),
+        # Nsjail-specific config (ignored for non-nsjail backends)
+        "nsjail_config": os.getenv("TERMINAL_NSJAIL_CONFIG", ""),
+        "nsjail_allow_net": os.getenv("TERMINAL_NSJAIL_ALLOW_NET", "false").lower() in ("true", "1", "yes"),
+        "nsjail_forward_env": _parse_env_var("TERMINAL_NSJAIL_FORWARD_ENV", "[]", json.loads, "valid JSON"),
     }
 
 
@@ -1131,7 +1136,17 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
 
     if env_type == "local":
         return _LocalEnvironment(cwd=cwd, timeout=timeout)
-    
+
+    elif env_type == "nsjail":
+        return _NsjailEnvironment(
+            cwd=cwd, timeout=timeout,
+            cpu=cpu, memory=memory, disk=disk,
+            task_id=task_id,
+            config_file=cc.get("nsjail_config") or None,
+            allow_net=bool(cc.get("nsjail_allow_net", False)),
+            forward_env=cc.get("nsjail_forward_env", []) or [],
+        )
+
     elif env_type == "docker":
         return _DockerEnvironment(
             image=image, cwd=cwd, timeout=timeout,
@@ -1242,7 +1257,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
 
     else:
         raise ValueError(
-            f"Unknown environment type: {env_type}. Use 'local', 'docker', "
+            f"Unknown environment type: {env_type}. Use 'local', 'nsjail', 'docker', "
             f"'singularity', 'modal', 'daytona', 'vercel_sandbox', or 'ssh'"
         )
 
@@ -1778,7 +1793,7 @@ def terminal_tool(
                             }
 
                         container_config = None
-                        if env_type in ("docker", "singularity", "modal", "daytona", "vercel_sandbox"):
+                        if env_type in ("docker", "singularity", "modal", "daytona", "vercel_sandbox", "nsjail"):
                             container_config = {
                                 "container_cpu": config.get("container_cpu", 1),
                                 "container_memory": config.get("container_memory", 5120),
@@ -1791,6 +1806,9 @@ def terminal_tool(
                                 "docker_forward_env": config.get("docker_forward_env", []),
                                 "docker_env": config.get("docker_env", {}),
                                 "docker_run_as_host_user": config.get("docker_run_as_host_user", False),
+                                "nsjail_config": config.get("nsjail_config", ""),
+                                "nsjail_allow_net": config.get("nsjail_allow_net", False),
+                                "nsjail_forward_env": config.get("nsjail_forward_env", []),
                             }
 
                         local_config = None
