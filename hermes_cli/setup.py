@@ -1182,11 +1182,12 @@ def setup_terminal_backend(config: dict):
         "Modal - serverless cloud sandbox",
         "SSH - run on a remote machine",
         "Daytona - persistent cloud development environment",
+        "Novita - a secure, fast, and programmable sandbox environment",
     ]
-    idx_to_backend = {0: "local", 1: "docker", 2: "modal", 3: "ssh", 4: "daytona"}
-    backend_to_idx = {"local": 0, "docker": 1, "modal": 2, "ssh": 3, "daytona": 4}
+    idx_to_backend = {0: "local", 1: "docker", 2: "modal", 3: "ssh", 4: "daytona", 5: "novita"}
+    backend_to_idx = {"local": 0, "docker": 1, "modal": 2, "ssh": 3, "daytona": 4, "novita": 5}
 
-    next_idx = 5
+    next_idx = 6
     if is_linux:
         terminal_choices.append("Singularity/Apptainer - HPC-friendly container")
         idx_to_backend[next_idx] = "singularity"
@@ -1440,6 +1441,62 @@ def setup_terminal_backend(config: dict):
         save_env_value("TERMINAL_DAYTONA_IMAGE", image)
 
         _prompt_container_resources(config)
+
+    elif selected_backend == "novita":
+        print_success("Terminal backend: Novita")
+        print_info("Cloud sandboxes with filesystem persistence.")
+        print_info("Each session gets a dedicated sandbox that pauses between runs.")
+        print_info("Sign up at: https://novita.ai")
+
+        # Check if novita_sandbox SDK is installed
+        try:
+            __import__("novita_sandbox")
+        except ImportError:
+            print_info("Installing novita_sandbox SDK...")
+            import subprocess
+
+            uv_bin = shutil.which("uv")
+            if uv_bin:
+                result = subprocess.run(
+                    [uv_bin, "pip", "install", "--python", sys.executable, "novita_sandbox", "--pre"],
+                    capture_output=True,
+                    text=True,
+                )
+            else:
+                result = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "novita_sandbox", "--pre"],
+                    capture_output=True,
+                    text=True,
+                )
+            if result.returncode == 0:
+                print_success("novita_sandbox SDK installed")
+            else:
+                print_warning("Install failed — run manually: pip install novita_sandbox --pre")
+                if result.stderr:
+                    print_info(f"  Error: {result.stderr.strip().splitlines()[-1]}")
+
+        # Novita API key
+        print()
+        existing_key = get_env_value("NOVITA_API_KEY")
+        if existing_key:
+            print_info("  Novita API key: already configured")
+            if prompt_yes_no("  Update API key?", False):
+                api_key = prompt("    Novita API key", password=True)
+                if api_key:
+                    save_env_value("NOVITA_API_KEY", api_key)
+                    print_success("    Updated")
+        else:
+            api_key = prompt("    Novita API key", password=True)
+            if api_key:
+                save_env_value("NOVITA_API_KEY", api_key)
+                print_success("    Configured")
+
+        # Novita template (optional — uses default base template if empty)
+        current_template = config.get("terminal", {}).get("novita_image", "")
+        print_info("  Sandbox template (optional — leave blank to use the default base template)")
+        template = prompt("  Template name or ID", current_template)
+        config["terminal"]["novita_image"] = template
+        save_env_value("TERMINAL_NOVITA_IMAGE", template)
 
     elif selected_backend == "ssh":
         print_success("Terminal backend: SSH")
