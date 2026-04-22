@@ -1,0 +1,728 @@
+[
+  {
+    "id": "file_read_basic",
+    "category": "file",
+    "description": "Read a file using read_file tool",
+    "prompt": "Read the file at /etc/hostname and tell me its contents.",
+    "available_tools": ["read_file"],
+    "expected": {
+      "function_name": "read_file",
+      "arguments": {
+        "required_args": ["path"],
+        "arg_values": {"path": "/etc/hostname"}
+      }
+    }
+  },
+  {
+    "id": "file_read_with_offset",
+    "category": "file",
+    "description": "Read a specific range of lines from a file",
+    "prompt": "Read lines 10 through 30 of the file /var/log/syslog.",
+    "available_tools": ["read_file"],
+    "expected": {
+      "function_name": "read_file",
+      "arguments": {
+        "required_args": ["path", "offset"],
+        "arg_values": {"path": "/var/log/syslog"},
+        "arg_types": {"offset": "int"}
+      }
+    }
+  },
+  {
+    "id": "file_write_new",
+    "category": "file",
+    "description": "Write content to a new file",
+    "prompt": "Create a file at /tmp/hello.txt with the content: Hello, world!",
+    "available_tools": ["write_file"],
+    "expected": {
+      "function_name": "write_file",
+      "arguments": {
+        "required_args": ["path", "content"],
+        "arg_values": {"path": "/tmp/hello.txt"},
+        "arg_substring_checks": {"content": "Hello, world!"}
+      }
+    }
+  },
+  {
+    "id": "file_write_python_script",
+    "category": "file",
+    "description": "Write a Python script to a file",
+    "prompt": "Write a Python script to /tmp/greet.py that prints 'Hello from hermes'.",
+    "available_tools": ["write_file"],
+    "expected": {
+      "function_name": "write_file",
+      "arguments": {
+        "required_args": ["path", "content"],
+        "arg_values": {"path": "/tmp/greet.py"},
+        "arg_substring_checks": {"content": "print"}
+      }
+    }
+  },
+  {
+    "id": "file_patch_replace",
+    "category": "file",
+    "description": "Replace a string in a file using patch tool",
+    "prompt": "In the file /tmp/config.txt which contains the line 'debug=false', change 'debug=false' to 'debug=true'.",
+    "available_tools": ["patch"],
+    "expected": {
+      "function_name": "patch",
+      "arguments": {
+        "required_args": ["path", "old_string", "new_string"],
+        "arg_values": {
+          "path": "/tmp/config.txt",
+          "old_string": "debug=false",
+          "new_string": "debug=true"
+        }
+      }
+    }
+  },
+  {
+    "id": "file_patch_default_mode",
+    "category": "file",
+    "description": "patch tool defaults to replace mode",
+    "prompt": "In /tmp/app.py, replace the line 'VERSION = \"1.0\"' with 'VERSION = \"2.0\"'.",
+    "available_tools": ["patch"],
+    "expected": {
+      "function_name": "patch",
+      "arguments": {
+        "required_args": ["path", "old_string", "new_string"],
+        "arg_values": {
+          "old_string": "VERSION = \"1.0\"",
+          "new_string": "VERSION = \"2.0\""
+        }
+      }
+    }
+  },
+  {
+    "id": "file_search_content",
+    "category": "file",
+    "description": "Search file contents by regex pattern",
+    "prompt": "Search for all lines containing 'TODO' in the /home/eric/Docker/Stack/hermes-agent directory.",
+    "available_tools": ["search_files"],
+    "expected": {
+      "function_name": "search_files",
+      "arguments": {
+        "required_args": ["pattern"],
+        "arg_values": {"target": "content"},
+        "arg_substring_checks": {"pattern": "TODO"}
+      }
+    }
+  },
+  {
+    "id": "file_search_by_filename",
+    "category": "file",
+    "description": "Find files by glob pattern",
+    "prompt": "Find all Python files in /home/eric/Docker/Stack/hermes-agent/tools/.",
+    "available_tools": ["search_files"],
+    "expected": {
+      "function_name": "search_files",
+      "arguments": {
+        "required_args": ["pattern"],
+        "arg_values": {"target": "files"},
+        "arg_substring_checks": {"pattern": ".py"}
+      }
+    }
+  },
+  {
+    "id": "file_no_tool_for_math",
+    "category": "file",
+    "description": "File tools should not be called for non-file tasks",
+    "prompt": "What is 15 multiplied by 7?",
+    "available_tools": ["read_file", "write_file", "patch", "search_files"],
+    "expected": {
+      "no_tool_calls": true
+    }
+  },
+  {
+    "id": "file_read_not_terminal",
+    "category": "file",
+    "description": "Prefer read_file over terminal for reading files",
+    "prompt": "Show me the contents of /etc/os-release.",
+    "available_tools": ["read_file", "terminal"],
+    "expected": {
+      "function_name": "read_file",
+      "arguments": {
+        "required_args": ["path"],
+        "arg_values": {"path": "/etc/os-release"}
+      }
+    }
+  },
+  {
+    "id": "terminal_list_files",
+    "category": "terminal",
+    "description": "Run ls command via terminal",
+    "prompt": "List the files in the /tmp directory using a shell command.",
+    "available_tools": ["terminal"],
+    "expected": {
+      "function_name": "terminal",
+      "arguments": {
+        "required_args": ["command"],
+        "arg_substring_checks": {"command": "/tmp"}
+      }
+    }
+  },
+  {
+    "id": "terminal_check_python_version",
+    "category": "terminal",
+    "description": "Check Python version via terminal",
+    "prompt": "What version of Python is installed? Run the appropriate shell command to check.",
+    "available_tools": ["terminal"],
+    "expected": {
+      "function_name": "terminal",
+      "arguments": {
+        "required_args": ["command"],
+        "arg_substring_checks": {"command": "python"}
+      }
+    }
+  },
+  {
+    "id": "terminal_create_directory",
+    "category": "terminal",
+    "description": "Create a directory via terminal",
+    "prompt": "Create a directory called 'test_output' inside /tmp using a shell command.",
+    "available_tools": ["terminal"],
+    "expected": {
+      "function_name": "terminal",
+      "arguments": {
+        "required_args": ["command"],
+        "arg_substring_checks": {"command": "test_output"}
+      }
+    }
+  },
+  {
+    "id": "terminal_run_python_script",
+    "category": "terminal",
+    "description": "Run an existing Python script via terminal",
+    "prompt": "Run the Python script at /tmp/greet.py using a shell command.",
+    "available_tools": ["terminal"],
+    "expected": {
+      "function_name": "terminal",
+      "arguments": {
+        "required_args": ["command"],
+        "arg_substring_checks": {"command": "greet.py"}
+      }
+    }
+  },
+  {
+    "id": "todo_create_tasks",
+    "category": "todo",
+    "description": "Create a multi-step todo list from a self-contained prompt",
+    "prompt": "I need to set up a new Python project. Create a todo list with these steps: 1) Create a virtual environment with python -m venv .venv, 2) Install dependencies with pip install -r requirements.txt, 3) Run the tests with pytest, 4) Commit the results with git commit -m 'initial setup'.",
+    "available_tools": ["todo"],
+    "expected": {
+      "function_name": "todo",
+      "arguments": {
+        "list_field_check": {"field": "todos", "min_items": 4},
+        "arg_types": {"todos": "list"}
+      }
+    }
+  },
+  {
+    "id": "todo_create_single",
+    "category": "todo",
+    "description": "Create a single todo item",
+    "prompt": "Add a task to my todo list: 'Review pull request #42 in the hermes-agent repo'.",
+    "available_tools": ["todo"],
+    "expected": {
+      "function_name": "todo",
+      "arguments": {
+        "list_field_check": {"field": "todos", "min_items": 1},
+        "arg_types": {"todos": "list"}
+      }
+    }
+  },
+  {
+    "id": "todo_read_list",
+    "category": "todo",
+    "description": "Read the current todo list by calling todo with no arguments",
+    "prompt": "What's on my todo list right now?",
+    "available_tools": ["todo"],
+    "expected": {
+      "function_name": "todo",
+      "arguments": {}
+    }
+  },
+  {
+    "id": "todo_update_with_merge",
+    "category": "todo",
+    "description": "Update an existing todo item using merge=true",
+    "prompt": "I have a todo list with item id='setup-venv' (content='Create virtual environment', status='pending'). Mark that item as in_progress. Use merge mode so you don't replace the whole list.",
+    "available_tools": ["todo"],
+    "expected": {
+      "function_name": "todo",
+      "arguments": {
+        "required_args": ["todos"],
+        "arg_values": {"merge": true},
+        "list_field_check": {"field": "todos", "min_items": 1}
+      }
+    }
+  },
+  {
+    "id": "todo_complete_task",
+    "category": "todo",
+    "description": "Mark a todo item as completed",
+    "prompt": "I have a todo list with one item: id='write-tests', content='Write unit tests for scorer.py', status='in_progress'. I just finished writing the tests. Mark it as completed using merge mode.",
+    "available_tools": ["todo"],
+    "expected": {
+      "function_name": "todo",
+      "arguments": {
+        "required_args": ["todos"],
+        "arg_values": {"merge": true}
+      }
+    }
+  },
+  {
+    "id": "todo_replace_list",
+    "category": "todo",
+    "description": "Replace the entire todo list with a fresh plan",
+    "prompt": "Replace my entire todo list with a new 3-item plan: 1) Read the spec doc, 2) Write the implementation, 3) Run the tests.",
+    "available_tools": ["todo"],
+    "expected": {
+      "function_name": "todo",
+      "arguments": {
+        "list_field_check": {"field": "todos", "min_items": 3}
+      }
+    }
+  },
+  {
+    "id": "todo_not_needed_simple",
+    "category": "todo",
+    "description": "Simple questions should not trigger todo tool",
+    "prompt": "What is the capital of France?",
+    "available_tools": ["todo"],
+    "expected": {
+      "no_tool_calls": true
+    }
+  },
+  {
+    "id": "memory_add_user_pref",
+    "category": "memory",
+    "description": "Save a user preference to memory",
+    "prompt": "Remember that my name is Eric and I prefer concise responses.",
+    "available_tools": ["memory"],
+    "expected": {
+      "function_name": "memory",
+      "arguments": {
+        "required_args": ["action", "target"],
+        "arg_values": {"action": "add", "target": "user"},
+        "arg_substring_checks": {"content": "Eric"}
+      }
+    }
+  },
+  {
+    "id": "memory_add_env_fact",
+    "category": "memory",
+    "description": "Save an environment fact to memory store",
+    "prompt": "Remember that the project uses Python 3.12 and lives at /home/eric/Docker/Stack/hermes-agent.",
+    "available_tools": ["memory"],
+    "expected": {
+      "function_name": "memory",
+      "arguments": {
+        "required_args": ["action", "target", "content"],
+        "arg_values": {"action": "add", "target": "memory"}
+      }
+    }
+  },
+  {
+    "id": "memory_replace_entry",
+    "category": "memory",
+    "description": "Replace an existing memory entry",
+    "prompt": "Update my memory: I previously noted my timezone was UTC but it's actually America/Denver. Find the old entry containing 'UTC' and replace it with 'America/Denver'.",
+    "available_tools": ["memory"],
+    "expected": {
+      "function_name": "memory",
+      "arguments": {
+        "required_args": ["action", "target", "old_text"],
+        "arg_values": {"action": "replace"},
+        "arg_substring_checks": {"old_text": "UTC"}
+      }
+    }
+  },
+  {
+    "id": "memory_remove_entry",
+    "category": "memory",
+    "description": "Remove a memory entry by identifying text",
+    "prompt": "Forget the memory entry about my old API key — it contains the text 'sk-old-key-prefix'. Remove it.",
+    "available_tools": ["memory"],
+    "expected": {
+      "function_name": "memory",
+      "arguments": {
+        "required_args": ["action", "target", "old_text"],
+        "arg_values": {"action": "remove"},
+        "arg_substring_checks": {"old_text": "sk-old-key-prefix"}
+      }
+    }
+  },
+  {
+    "id": "memory_not_needed",
+    "category": "memory",
+    "description": "Don't use memory for ephemeral task state",
+    "prompt": "I just finished step 1 of my task. Move on to step 2.",
+    "available_tools": ["memory"],
+    "expected": {
+      "no_tool_calls": true
+    }
+  },
+  {
+    "id": "web_search_basic",
+    "category": "web",
+    "description": "Search the web for a topic",
+    "prompt": "Search the web for the latest release of Python.",
+    "available_tools": ["web_search"],
+    "expected": {
+      "function_name": "web_search",
+      "arguments": {
+        "required_args": ["query"],
+        "arg_substring_checks": {"query": "Python"}
+      }
+    }
+  },
+  {
+    "id": "web_search_technical",
+    "category": "web",
+    "description": "Search for technical documentation",
+    "prompt": "Search the web for how to use asyncio.gather in Python.",
+    "available_tools": ["web_search"],
+    "expected": {
+      "function_name": "web_search",
+      "arguments": {
+        "required_args": ["query"],
+        "arg_substring_checks": {"query": "asyncio"}
+      }
+    }
+  },
+  {
+    "id": "web_extract_url",
+    "category": "web",
+    "description": "Extract content from a URL",
+    "prompt": "Extract the content from https://docs.python.org/3/library/asyncio.html",
+    "available_tools": ["web_extract"],
+    "expected": {
+      "function_name": "web_extract",
+      "arguments": {
+        "required_args": ["urls"],
+        "arg_types": {"urls": "list"},
+        "list_field_check": {"field": "urls", "min_items": 1}
+      }
+    }
+  },
+  {
+    "id": "web_extract_multiple_urls",
+    "category": "web",
+    "description": "Extract content from multiple URLs",
+    "prompt": "Extract content from these two pages: https://docs.python.org/3/library/json.html and https://docs.python.org/3/library/os.html",
+    "available_tools": ["web_extract"],
+    "expected": {
+      "function_name": "web_extract",
+      "arguments": {
+        "required_args": ["urls"],
+        "list_field_check": {"field": "urls", "min_items": 2}
+      }
+    }
+  },
+  {
+    "id": "web_search_not_terminal",
+    "category": "web",
+    "description": "Use web_search instead of terminal for web queries",
+    "prompt": "Look up the current version of the openai Python package.",
+    "available_tools": ["web_search", "terminal"],
+    "expected": {
+      "function_name": "web_search",
+      "arguments": {
+        "required_args": ["query"]
+      }
+    }
+  },
+  {
+    "id": "web_extract_pdf",
+    "category": "web",
+    "description": "Extract content from a PDF URL",
+    "prompt": "Extract the text from this arxiv paper PDF: https://arxiv.org/pdf/2303.08774.pdf",
+    "available_tools": ["web_extract"],
+    "expected": {
+      "function_name": "web_extract",
+      "arguments": {
+        "required_args": ["urls"],
+        "list_field_check": {"field": "urls", "min_items": 1}
+      }
+    }
+  },
+  {
+    "id": "cron_create_daily",
+    "category": "cron",
+    "description": "Create a recurring daily cron job",
+    "prompt": "Schedule a cron job that runs every day at 9am to check the system disk usage and send a summary to Telegram. Name it 'disk-check'.",
+    "available_tools": ["cronjob"],
+    "expected": {
+      "function_name": "cronjob",
+      "arguments": {
+        "required_args": ["action", "prompt", "schedule"],
+        "arg_values": {"action": "create"},
+        "arg_substring_checks": {"name": "disk"}
+      }
+    }
+  },
+  {
+    "id": "cron_create_one_shot",
+    "category": "cron",
+    "description": "Create a one-shot future cron job",
+    "prompt": "In 30 minutes, run a one-time job that searches the web for 'Python 3.14 release notes' and sends the result to Telegram.",
+    "available_tools": ["cronjob"],
+    "expected": {
+      "function_name": "cronjob",
+      "arguments": {
+        "required_args": ["action", "prompt", "schedule"],
+        "arg_values": {"action": "create"}
+      }
+    }
+  },
+  {
+    "id": "cron_list_jobs",
+    "category": "cron",
+    "description": "List all cron jobs",
+    "prompt": "Show me all my scheduled cron jobs.",
+    "available_tools": ["cronjob"],
+    "expected": {
+      "function_name": "cronjob",
+      "arguments": {
+        "required_args": ["action"],
+        "arg_values": {"action": "list"}
+      }
+    }
+  },
+  {
+    "id": "cron_remove_job",
+    "category": "cron",
+    "description": "Remove a cron job by ID",
+    "prompt": "Delete the cron job with id 'disk-check-abc123'.",
+    "available_tools": ["cronjob"],
+    "expected": {
+      "function_name": "cronjob",
+      "arguments": {
+        "required_args": ["action", "job_id"],
+        "arg_values": {"action": "remove", "job_id": "disk-check-abc123"}
+      }
+    }
+  },
+  {
+    "id": "cron_pause_job",
+    "category": "cron",
+    "description": "Pause an active cron job",
+    "prompt": "Pause the cron job with id 'weather-report-xyz789'.",
+    "available_tools": ["cronjob"],
+    "expected": {
+      "function_name": "cronjob",
+      "arguments": {
+        "required_args": ["action", "job_id"],
+        "arg_values": {"action": "pause", "job_id": "weather-report-xyz789"}
+      }
+    }
+  },
+  {
+    "id": "send_message_telegram",
+    "category": "messaging",
+    "description": "Send a message to the Telegram home channel",
+    "prompt": "Send 'Build complete — all tests passed' to Telegram.",
+    "available_tools": ["send_message"],
+    "expected": {
+      "function_name": "send_message",
+      "arguments": {
+        "required_args": ["target", "message"],
+        "arg_values": {"action": "send"},
+        "arg_substring_checks": {
+          "target": "telegram",
+          "message": "Build complete"
+        }
+      }
+    }
+  },
+  {
+    "id": "send_message_list_targets",
+    "category": "messaging",
+    "description": "List available messaging targets before sending to a specific channel",
+    "prompt": "Send a message to the #dev-alerts channel on Discord, but first check what channels are available.",
+    "available_tools": ["send_message"],
+    "expected": {
+      "function_name": "send_message",
+      "arguments": {
+        "arg_values": {"action": "list"}
+      }
+    }
+  },
+  {
+    "id": "send_message_discord",
+    "category": "messaging",
+    "description": "Send a message to a specific Discord channel",
+    "prompt": "Send 'Deployment to staging is complete' to discord:#engineering.",
+    "available_tools": ["send_message"],
+    "expected": {
+      "function_name": "send_message",
+      "arguments": {
+        "required_args": ["target", "message"],
+        "arg_substring_checks": {
+          "target": "discord",
+          "message": "staging"
+        }
+      }
+    }
+  },
+  {
+    "id": "skill_create",
+    "category": "skills",
+    "description": "Create a new skill",
+    "prompt": "Create a new skill called 'deploy-checklist' with this content:\n---\nname: deploy-checklist\ndescription: Use before deploying to production\n---\n\n# Deploy Checklist\n1. Run tests\n2. Review diff\n3. Tag the release\n4. Push to main",
+    "available_tools": ["skill_manage"],
+    "expected": {
+      "function_name": "skill_manage",
+      "arguments": {
+        "required_args": ["action", "name", "content"],
+        "arg_values": {"action": "create", "name": "deploy-checklist"}
+      }
+    }
+  },
+  {
+    "id": "skill_patch",
+    "category": "skills",
+    "description": "Patch an existing skill using old_string/new_string",
+    "prompt": "Update the skill 'deploy-checklist': find the line '3. Tag the release' and replace it with '3. Tag the release with git tag v<version>'.",
+    "available_tools": ["skill_manage"],
+    "expected": {
+      "function_name": "skill_manage",
+      "arguments": {
+        "required_args": ["action", "name", "old_string", "new_string"],
+        "arg_values": {
+          "action": "patch",
+          "name": "deploy-checklist",
+          "old_string": "3. Tag the release"
+        }
+      }
+    }
+  },
+  {
+    "id": "skill_delete",
+    "category": "skills",
+    "description": "Delete a skill by name",
+    "prompt": "Delete the skill named 'deploy-checklist'.",
+    "available_tools": ["skill_manage"],
+    "expected": {
+      "function_name": "skill_manage",
+      "arguments": {
+        "required_args": ["action", "name"],
+        "arg_values": {"action": "delete", "name": "deploy-checklist"}
+      }
+    }
+  },
+  {
+    "id": "vision_analyze_url",
+    "category": "vision",
+    "description": "Analyze an image from a URL",
+    "prompt": "Analyze this image and describe what you see: https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/240px-PNG_transparency_demonstration_1.png",
+    "available_tools": ["vision_analyze"],
+    "expected": {
+      "function_name": "vision_analyze",
+      "arguments": {
+        "required_args": ["image_url", "question"],
+        "arg_substring_checks": {"image_url": "wikimedia"}
+      }
+    }
+  },
+  {
+    "id": "vision_analyze_local",
+    "category": "vision",
+    "description": "Analyze a local image file",
+    "prompt": "Analyze the image at /tmp/screenshot.png and describe its contents.",
+    "available_tools": ["vision_analyze"],
+    "expected": {
+      "function_name": "vision_analyze",
+      "arguments": {
+        "required_args": ["image_url", "question"],
+        "arg_values": {"image_url": "/tmp/screenshot.png"}
+      }
+    }
+  },
+  {
+    "id": "vision_identify_object",
+    "category": "vision",
+    "description": "Answer a specific question about an image",
+    "prompt": "Look at this photo and tell me what breed of dog is shown: https://upload.wikimedia.org/wikipedia/commons/2/26/YellowLabradorLooking_new.jpg",
+    "available_tools": ["vision_analyze"],
+    "expected": {
+      "function_name": "vision_analyze",
+      "arguments": {
+        "required_args": ["image_url", "question"],
+        "arg_substring_checks": {"question": "dog"}
+      }
+    }
+  },
+  {
+    "id": "image_generate_basic",
+    "category": "image",
+    "description": "Generate an image from a text prompt",
+    "prompt": "Generate an image of a red fox sitting in a snowy forest.",
+    "available_tools": ["image_generate"],
+    "expected": {
+      "function_name": "image_generate",
+      "arguments": {
+        "required_args": ["prompt"],
+        "arg_substring_checks": {"prompt": "fox"}
+      }
+    }
+  },
+  {
+    "id": "image_generate_with_aspect",
+    "category": "image",
+    "description": "Generate a portrait-orientation image",
+    "prompt": "Generate a portrait-oriented image of a lighthouse at sunset on a rocky coastline.",
+    "available_tools": ["image_generate"],
+    "expected": {
+      "function_name": "image_generate",
+      "arguments": {
+        "required_args": ["prompt"],
+        "arg_values": {"aspect_ratio": "portrait"},
+        "arg_substring_checks": {"prompt": "lighthouse"}
+      }
+    }
+  },
+  {
+    "id": "image_generate_square",
+    "category": "image",
+    "description": "Generate a square image",
+    "prompt": "Create a square image of a minimalist geometric logo with blue and white colors.",
+    "available_tools": ["image_generate"],
+    "expected": {
+      "function_name": "image_generate",
+      "arguments": {
+        "required_args": ["prompt"],
+        "arg_values": {"aspect_ratio": "square"}
+      }
+    }
+  },
+  {
+    "id": "tts_basic",
+    "category": "tts",
+    "description": "Convert text to speech",
+    "prompt": "Say this out loud: 'Hello, your deployment completed successfully.'",
+    "available_tools": ["text_to_speech"],
+    "expected": {
+      "function_name": "text_to_speech",
+      "arguments": {
+        "required_args": ["text"],
+        "arg_substring_checks": {"text": "deployment"}
+      }
+    }
+  },
+  {
+    "id": "tts_announcement",
+    "category": "tts",
+    "description": "Convert a longer announcement to speech",
+    "prompt": "Read this announcement aloud: 'The system will be down for maintenance on Saturday from 2am to 4am UTC. Please save your work before that time.'",
+    "available_tools": ["text_to_speech"],
+    "expected": {
+      "function_name": "text_to_speech",
+      "arguments": {
+        "required_args": ["text"],
+        "arg_substring_checks": {"text": "maintenance"}
+      }
+    }
+  }
+]

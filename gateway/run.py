@@ -4422,7 +4422,13 @@ class GatewayRunner:
                 "session_id": session_entry.session_id,
                 "message": message_text[:500],
             }
-            await self.hooks.emit("agent:start", hook_ctx)
+            # mechovation: context injection — emit_collecting returns strings from
+            # hook handlers; append to context_prompt so they reach the agent's
+            # ephemeral system prompt via _run_agent. Wiring point: this block +
+            # HookRegistry.emit_collecting in gateway/hooks.py.
+            _injections = await self.hooks.emit_collecting("agent:start", hook_ctx)
+            if _injections:
+                context_prompt += "\n\n" + "\n\n".join(_injections)
 
             # Run the agent
             agent_result = await self._run_agent(

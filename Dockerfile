@@ -16,7 +16,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Non-root user for runtime; UID can be overridden via HERMES_UID at runtime
-RUN useradd -u 10000 -m -d /opt/data hermes
+RUN useradd -u 1000 -m -d /opt/data hermes
 
 COPY --chmod=0755 --from=gosu_source /gosu /usr/local/bin/
 COPY --chmod=0755 --from=uv_source /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
@@ -45,7 +45,18 @@ RUN cd web && npm run build
 RUN chown hermes:hermes /opt/hermes
 USER hermes
 RUN uv venv && \
-    uv pip install --no-cache-dir -e ".[all]"
+    uv pip install --no-cache-dir -e ".[all]" && \
+    uv pip install --no-cache-dir \
+        crawl4ai==0.8.6 \
+        uptime-kuma-api==1.2.1 \
+        openpyxl \
+        xlsxwriter \
+        pandas \
+        python-docx \
+        docxtpl && \
+    uv pip install --no-cache-dir --no-deps \
+        pirateweather==1.0.0 \
+        python-pptx
 
 # ---------- Runtime ----------
 ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist

@@ -135,6 +135,37 @@ class HookRegistry:
             except Exception as e:
                 print(f"[hooks] Error loading hook {hook_dir.name}: {e}", flush=True)
 
+    async def emit_collecting(
+        self,
+        event_type: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> List[str]:
+        """
+        Like emit(), but collects and returns non-None string results from handlers.
+        Used for agent:start context injection. Errors are caught and logged.
+        """
+        if context is None:
+            context = {}
+
+        handlers = list(self._handlers.get(event_type, []))
+
+        if ":" in event_type:
+            base = event_type.split(":")[0]
+            wildcard_key = f"{base}:*"
+            handlers.extend(self._handlers.get(wildcard_key, []))
+
+        results = []
+        for fn in handlers:
+            try:
+                result = fn(event_type, context)
+                if asyncio.iscoroutine(result):
+                    result = await result
+                if result is not None:
+                    results.append(str(result))
+            except Exception as e:
+                print(f"[hooks] Error in handler for '{event_type}': {e}", flush=True)
+        return results
+
     async def emit(self, event_type: str, context: Optional[Dict[str, Any]] = None) -> None:
         """
         Fire all handlers registered for an event.
