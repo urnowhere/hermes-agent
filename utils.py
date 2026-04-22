@@ -269,3 +269,53 @@ def base_url_host_matches(base_url: str, domain: str) -> bool:
     if not domain:
         return False
     return hostname == domain or hostname.endswith("." + domain)
+
+
+# ─── Model Parameter Helpers ──────────────────────────────────────────────────
+
+
+# Model-name prefixes that require ``max_completion_tokens`` instead of
+# ``max_tokens``.  This is a server-side constraint: OpenAI enforces it for
+# these families regardless of which endpoint is used, so we must detect by
+# model name rather than by base URL.
+_MAX_COMPLETION_TOKENS_PREFIXES = (
+    "gpt-4o",
+    "gpt-4.1",
+    "gpt-5",
+    "o1",
+    "o3",
+    "o4",
+)
+
+
+def model_forces_max_completion_tokens(model: str) -> bool:
+    """Return True for model families that require ``max_completion_tokens``.
+
+    OpenAI's newer model families (gpt-4o, gpt-4.1, gpt-5, o1, o3, o4) reject
+    ``max_tokens`` and require ``max_completion_tokens`` instead.  This
+    constraint is model-enforced at the server, not URL-enforced at the client,
+    so checking the base URL hostname is insufficient for custom/proxy endpoints.
+
+    This helper strips vendor prefixes (e.g. ``openai/gpt-5.4`` → ``gpt-5.4``)
+    so OpenRouter-style routing names are handled transparently.
+
+    Args:
+        model: Model identifier, optionally prefixed with ``vendor/``.
+
+    Returns:
+        True if the model requires ``max_completion_tokens``.
+
+    Examples::
+
+        model_forces_max_completion_tokens("gpt-5.4")              # True
+        model_forces_max_completion_tokens("openai/gpt-4o-mini")   # True
+        model_forces_max_completion_tokens("o3-mini")               # True
+        model_forces_max_completion_tokens("llama3")                # False
+        model_forces_max_completion_tokens("")                      # False
+    """
+    m = (model or "").strip().lower()
+    if not m:
+        return False
+    if "/" in m:
+        m = m.rsplit("/", 1)[-1]
+    return any(m.startswith(prefix) for prefix in _MAX_COMPLETION_TOKENS_PREFIXES)

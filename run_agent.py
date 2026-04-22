@@ -124,7 +124,7 @@ from agent.trajectory import (
     convert_scratchpad_to_think, has_incomplete_scratchpad,
     save_trajectory as _save_trajectory_to_file,
 )
-from utils import atomic_json_write, base_url_host_matches, base_url_hostname, env_var_enabled, normalize_proxy_url
+from utils import atomic_json_write, base_url_host_matches, base_url_hostname, env_var_enabled, model_forces_max_completion_tokens, normalize_proxy_url
 
 
 
@@ -2455,12 +2455,14 @@ class AIAgent:
 
     def _max_tokens_param(self, value: int) -> dict:
         """Return the correct max tokens kwarg for the current provider.
-        
-        OpenAI's newer models (gpt-4o, o-series, gpt-5+) require
-        'max_completion_tokens'. OpenRouter, local models, and older
-        OpenAI models use 'max_tokens'.
+
+        OpenAI's newer models (gpt-4o, gpt-4.1, o-series, gpt-5+) require
+        'max_completion_tokens'. This constraint is model-enforced at the
+        server, not URL-enforced, so we check both the URL *and* the model
+        name — the latter covers custom/proxy endpoints serving new-family
+        models.
         """
-        if self._is_direct_openai_url():
+        if self._is_direct_openai_url() or model_forces_max_completion_tokens(self.model):
             return {"max_completion_tokens": value}
         return {"max_tokens": value}
 
