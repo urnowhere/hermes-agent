@@ -42,6 +42,10 @@ _MODEL_USAGE_LOG = Path.home() / ".hermes" / "logs" / "model_usage.jsonl"
 def _read_observability(task_id: str) -> Dict[str, Any] | None:
     """Read model_usage.jsonl and return a compact observability dict for task_id.
 
+    **Optional feature** — requires the model_observability plugin to be installed.
+    If the log doesn't exist (plugin absent), returns None silently. delegate_task
+    still succeeds and the 'observability' field is simply omitted from the result.
+
     Returns None if the log doesn't exist, task_id is falsy, or has no entries.
     Called via _read_observability_batch() — do not call directly in hot paths.
     """

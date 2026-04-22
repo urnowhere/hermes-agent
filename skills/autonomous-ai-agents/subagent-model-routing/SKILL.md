@@ -223,10 +223,13 @@ For automated background tasks (email scanning, file parsing, briefings), Budget
 
 ## Model Observability
 
-`delegate_task` results include two fields that provide ground-truth model routing data without requiring a separate script call:
+> **Optional feature — requires the `model_observability` plugin.**
+> Without the plugin, `delegate_task` works exactly as before: this section does not apply and no fields are added. Install the plugin to enable ground-truth model routing data in results.
+
+When the `model_observability` plugin is installed, every `delegate_task` result includes two additional fields:
 
 - **`task_id`** — the child's unique task ID (e.g. `subagent-0-a3f9c12b`)
-- **`observability`** — a dict populated from the model usage log at return time:
+- **`observability`** — a compact dict read from the model usage log at return time:
 
 ```json
 {
@@ -241,13 +244,11 @@ For automated background tasks (email scanning, file parsing, briefings), Budget
 }
 ```
 
-`auto_router_resolutions` is keyed by the **requested** model; the value is a dict of **resolved** models with call counts. `models_used` is ground truth — read from `~/.hermes/logs/model_usage.jsonl` by the `model_observability` plugin.
+`auto_router_resolutions` is keyed by the **requested** model; the value is a dict of **resolved** models with call counts. `models_used` is ground truth.
 
 **If `override_mismatches` is non-empty, proactively alert the user** — a model override was silently dropped and the task ran on the wrong model.
 
-**If `observability` is absent:** both the inline field and the `model_metadata_for_task.py` fallback script depend on the same observability plugin. Without the plugin, neither method works. Note this explicitly rather than silently omitting the metadata.
-
-The `model_observability` plugin (if installed) logs every API call to `~/.hermes/logs/model_usage.jsonl`. Each entry includes `model_request` (what was sent) and `model_response` (what actually responded). Always check this log after a delegation where the model mattered — OpenRouter's auto-router may resolve `openrouter/auto` to a different model than expected.
+**If `observability` is absent** (plugin not installed, or log has no entries for this task), treat it as a no-op — `delegate_task` still succeeded. Do not warn the user unless model identity was critical to the task.
 
 ## Mismatch Warnings
 
