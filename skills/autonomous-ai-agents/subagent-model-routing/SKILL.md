@@ -12,6 +12,11 @@ metadata:
 
 # Subagent Model Routing
 
+> **⚠️ LIVE DATA DEPENDENCY**
+> The tier tables, whitelist membership, and pricing data in this skill are **not static** — they are maintained by an automated weekly refresh process. If you are operating in an environment where this automation is running (a Hermes Agent workspace with the OpenRouter Model Refresh cron configured), the local copy of this skill at `~/.hermes/skills/autonomous-ai-agents/subagent-model-routing/SKILL.md` will be more current than what you're reading here. Load the local skill if available.
+>
+> If this is a standalone install without the refresh cron, treat the tier tables and model lists below as a **starting point**, not a live reference. Verify pricing against [openrouter.ai/models](https://openrouter.ai/models) before making cost-sensitive routing decisions.
+
 **Load this skill every time you use `delegate_task` and the user has not explicitly specified a model or provider.** The `delegate_task` schema description will prompt you to load it — follow that prompt. Wrong model selection silently degrades output quality or wastes cost with no error message.
 
 ## Why This Matters
