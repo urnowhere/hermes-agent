@@ -28,12 +28,86 @@ from concurrent.futures import (
     ThreadPoolExecutor,
     TimeoutError as FuturesTimeoutError,
 )
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from toolsets import TOOLSETS
 from tools import file_state
 from tools.terminal_tool import set_approval_callback as _set_subagent_approval_cb
 from utils import base_url_hostname, is_truthy_value
+
+_MODEL_USAGE_LOG = Path.home() / ".hermes" / "logs" / "model_usage.jsonl"
+
+
+def _read_observability(task_id: str) -> Dict[str, Any] | None:
+    """Read model_usage.jsonl and return a compact observability dict for task_id.
+
+    Returns None if the log doesn't exist or has no entries for this task.
+    Called once per subagent result before the final return — gives the LLM
+    ground-truth model routing data without requiring it to run a separate script.
+    """
+    if not _MODEL_USAGE_LOG.exists():
+        return None
+    entries = []
+    try:
+        with _MODEL_USAGE_LOG.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if e.get("task_id") == task_id:
+                    entries.append(e)
+    except OSError:
+        return None
+    if not entries:
+        return None
+
+    from collections import Counter
+    total_calls = len(entries)
+    tokens_in = sum(e.get("tokens_in", 0) for e in entries)
+    tokens_out = sum(e.get("tokens_out", 0) for e in entries)
+    duration_s = round(sum(e.get("duration_s", 0.0) for e in entries), 2)
+    response_models = Counter(e.get("model_response", "unknown") for e in entries)
+    request_models = Counter(e.get("model_request", "unknown") for e in entries)
+
+    # Auto-router resolutions
+    auto_resolutions = {
+        e.get("model_response"): e.get("model_request")
+        for e in entries
+        if e.get("model_request", "").endswith("/auto")
+    }
+    # Real mismatches (non-auto, non-alias)
+    mismatches = []
+    for e in entries:
+        req = e.get("model_request", "")
+        resp = e.get("model_response", "")
+        if req.endswith("/auto") or e.get("match", True):
+            continue
+        req_slug = req.split("/", 1)[-1] if "/" in req else req
+        resp_slug = resp.split("/", 1)[-1] if "/" in resp else resp
+        req_parts = set(req_slug.replace("-", " ").split())
+        resp_parts = set(resp_slug.replace("-", " ").split())
+        if len(req_parts & resp_parts) >= 2:
+            continue  # cosmetic alias
+        mismatches.append({"requested": req, "actual": resp})
+
+    obs: Dict[str, Any] = {
+        "models_used": dict(response_models.most_common()),
+        "models_requested": dict(request_models.most_common()),
+        "api_calls": total_calls,
+        "tokens": {"input": tokens_in, "output": tokens_out},
+        "duration_seconds": duration_s,
+    }
+    if auto_resolutions:
+        obs["auto_router_resolutions"] = auto_resolutions
+    if mismatches:
+        obs["override_mismatches"] = mismatches
+    return obs
+
 
 
 # Tools that children must never have access to
@@ -1763,6 +1837,7 @@ def _run_single_child(
                 )
                 else 0.0
             ),
+            "_task_id": child_task_id,
         }
         if status == "failed":
             entry["error"] = result.get("error", "Subagent did not produce a response.")
@@ -2320,13 +2395,21 @@ def delegate_task(
 
     total_duration = round(time.monotonic() - overall_start, 2)
 
-    return json.dumps(
-        {
-            "results": results,
-            "total_duration_seconds": total_duration,
-        },
-        ensure_ascii=False,
-    )
+    # Enrich each result with task_id and inline observability data from the
+    # model_usage.jsonl log. This ensures the LLM always sees ground-truth
+    # model routing data in the tool return without requiring a separate script call.
+    for entry in results:
+        tid = entry.pop("_task_id", None)
+        if tid:
+            entry["task_id"] = tid
+            obs = _read_observability(tid)
+            if obs:
+                entry["observability"] = obs
+
+    return json.dumps({
+        "results": results,
+        "total_duration_seconds": total_duration,
+    }, ensure_ascii=False)
 
 
 def _resolve_child_credential_pool(effective_provider: Optional[str], parent_agent):
