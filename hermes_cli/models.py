@@ -63,6 +63,12 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
     ("arcee-ai/trinity-large-thinking",  ""),
     ("openai/gpt-5.4-pro",              ""),
     ("openai/gpt-5.4-nano",             ""),
+    ("anthropic/claude-opus-4.6-fast",  "fast"),
+    ("deepseek/deepseek-v3.2",          ""),
+    ("deepseek/deepseek-v3.2-speciale", ""),
+    ("moonshotai/kimi-k2-thinking",     ""),
+    ("qwen/qwen3-max",                 ""),
+    ("qwen/qwen3.5-122b-a10b",         ""),
 ]
 
 _openrouter_catalog_cache: list[tuple[str, str]] | None = None
@@ -128,7 +134,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "z-ai/glm-5.1",
         "z-ai/glm-5v-turbo",
         "z-ai/glm-5-turbo",
-        "x-ai/grok-4.20-beta",
+        "x-ai/grok-4.20",
         "nvidia/nemotron-3-super-120b-a12b",
         "nvidia/nemotron-3-super-120b-a12b:free",
         "arcee-ai/trinity-large-preview:free",
@@ -136,6 +142,12 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "openai/gpt-5.4-pro",
         "openai/gpt-5.4-nano",
         "openrouter/elephant-alpha",
+        "anthropic/claude-opus-4.6-fast",
+        "deepseek/deepseek-v3.2",
+        "deepseek/deepseek-v3.2-speciale",
+        "moonshotai/kimi-k2-thinking",
+        "qwen/qwen3-max",
+        "qwen/qwen3.5-122b-a10b",
     ],
     "openai-codex": _codex_curated_models(),
     "copilot-acp": [
