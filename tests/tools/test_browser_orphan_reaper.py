@@ -4,10 +4,41 @@ daemons whose Python parent exited without cleaning up."""
 import os
 import signal
 import textwrap
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
+
+
+def _patch_liveness(mock_kill):
+    """Context manager that patches all liveness-probe surfaces to use
+    ``mock_kill`` semantics.
+
+    Legacy tests monkey-patched ``os.kill`` globally. Since
+    ``gateway.status.pid_is_alive`` now bypasses ``os.kill`` on Windows
+    (where it is unreliable in both directions — can raise for healthy
+    processes, can return success for exited ones), we also patch the
+    internal probe so that ``mock_kill`` drives the simulated state on
+    every platform.
+    """
+    stack = ExitStack()
+    stack.enter_context(patch("os.kill", side_effect=mock_kill))
+
+    def fake_probe(pid, flag):
+        try:
+            mock_kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return flag
+
+    import gateway.status as _status
+    stack.enter_context(
+        patch.object(_status, "_probe_pid_alive", side_effect=fake_probe)
+    )
+    return stack
 
 
 @pytest.fixture
@@ -89,7 +120,7 @@ class TestReapOrphanedBrowserSessions:
                 return  # pretend process exists
             # Don't actually kill anything
 
-        with patch("os.kill", side_effect=mock_kill):
+        with _patch_liveness(mock_kill):
             _reap_orphaned_browser_sessions()
 
         # Should have checked existence (sig 0) then killed (SIGTERM)
@@ -112,7 +143,7 @@ class TestReapOrphanedBrowserSessions:
         def mock_kill(pid, sig):
             kill_calls.append((pid, sig))
 
-        with patch("os.kill", side_effect=mock_kill):
+        with _patch_liveness(mock_kill):
             _reap_orphaned_browser_sessions()
 
         # Should NOT have tried to kill anything
@@ -130,7 +161,7 @@ class TestReapOrphanedBrowserSessions:
             if sig == 0:
                 raise PermissionError("not our process")
 
-        with patch("os.kill", side_effect=mock_kill):
+        with _patch_liveness(mock_kill):
             _reap_orphaned_browser_sessions()
 
         # Dir should still exist (we didn't touch someone else's process)
@@ -202,7 +233,7 @@ class TestOwnerPidCrossProcess:
                 return  # pretend daemon exists too
             # Don't actually kill anything
 
-        with patch("os.kill", side_effect=mock_kill):
+        with _patch_liveness(mock_kill):
             _reap_orphaned_browser_sessions()
 
         # We should have checked the owner (sig 0) but never tried to kill
@@ -230,7 +261,7 @@ class TestOwnerPidCrossProcess:
                 return  # daemon still alive
             # SIGTERM to daemon — noop in test
 
-        with patch("os.kill", side_effect=mock_kill):
+        with _patch_liveness(mock_kill):
             _reap_orphaned_browser_sessions()
 
         # Owner checked (returned dead), daemon checked (alive), daemon killed
@@ -258,7 +289,7 @@ class TestOwnerPidCrossProcess:
         def mock_kill(pid, sig):
             kill_calls.append((pid, sig))
 
-        with patch("os.kill", side_effect=mock_kill):
+        with _patch_liveness(mock_kill):
             _reap_orphaned_browser_sessions()
 
         # Legacy path took over → tracked → not reaped
@@ -284,7 +315,7 @@ class TestOwnerPidCrossProcess:
             if pid == 22222 and sig == 0:
                 raise PermissionError("not our user")
 
-        with patch("os.kill", side_effect=mock_kill):
+        with _patch_liveness(mock_kill):
             _reap_orphaned_browser_sessions()
 
         # Must NOT have tried to kill the daemon

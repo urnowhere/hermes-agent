@@ -610,15 +610,16 @@ def _reap_orphaned_browser_sessions():
         if os.path.isfile(owner_pid_file):
             try:
                 owner_pid = int(Path(owner_pid_file).read_text().strip())
-                try:
-                    os.kill(owner_pid, 0)
-                    owner_alive = True
-                except ProcessLookupError:
-                    owner_alive = False
-                except PermissionError:
-                    # Owner exists but we can't signal it (different uid).
-                    # Treat as alive — don't reap someone else's session.
-                    owner_alive = True
+                # pid_is_alive is the only correct liveness probe on every
+                # platform. On Windows in particular, os.kill(pid, 0) can
+                # return success for a process that has already exited if
+                # a handle to it is still open — which would make us treat
+                # a dead owner as alive and skip cleanup. flag=True means
+                # "don't reap cross-user sessions".
+                from gateway.status import pid_is_alive
+                owner_alive = pid_is_alive(
+                    owner_pid, treat_permission_denied_as_alive=True
+                )
             except (ValueError, OSError):
                 owner_alive = None  # corrupt file — fall through
 
@@ -645,15 +646,21 @@ def _reap_orphaned_browser_sessions():
             shutil.rmtree(socket_dir, ignore_errors=True)
             continue
 
-        # Check if the daemon is still alive
-        try:
-            os.kill(daemon_pid, 0)  # signal 0 = existence check
-        except ProcessLookupError:
-            # Already dead, just clean up the dir
+        # Check if the daemon is still alive. Three-way distinction:
+        #   confirmed dead    → clean up socket dir and move on
+        #   permission-denied → leave alone (cross-user daemon)
+        #   truly alive       → fall through to reap
+        # We use pid_is_alive twice with different flags to tease apart
+        # "exists-but-can't-signal" from "exists-and-we-own-it" — on
+        # Windows os.kill inline can't safely distinguish exited vs. alive,
+        # so we consult the helper (which uses Win32 APIs directly).
+        from gateway.status import pid_is_alive
+        if not pid_is_alive(daemon_pid, treat_permission_denied_as_alive=True):
+            # Confirmed dead
             shutil.rmtree(socket_dir, ignore_errors=True)
             continue
-        except PermissionError:
-            # Alive but owned by someone else — leave it alone
+        if not pid_is_alive(daemon_pid):
+            # Exists but owned by someone else — leave it alone
             continue
 
         # Daemon is alive and its owner is dead (or legacy + untracked).  Reap.

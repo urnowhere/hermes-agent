@@ -10830,12 +10830,11 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                     pass
                 return False
             # Wait up to 10 seconds for the old process to exit
+            from gateway.status import pid_is_alive
             for _ in range(20):
-                try:
-                    os.kill(existing_pid, 0)
-                    time.sleep(0.5)
-                except (ProcessLookupError, PermissionError):
+                if not pid_is_alive(existing_pid):
                     break  # Process is gone
+                time.sleep(0.5)
             else:
                 # Still alive after 10s — force kill
                 logger.warning(

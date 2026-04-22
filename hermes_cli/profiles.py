@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import List, Optional
 
+from gateway.status import pid_is_alive
+
 _PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 # Directories bootstrapped inside every new profile
@@ -653,9 +655,7 @@ def _stop_gateway_process(profile_dir: Path) -> None:
         # Wait up to 10s for graceful shutdown
         for _ in range(20):
             _time.sleep(0.5)
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
+            if not pid_is_alive(pid, treat_permission_denied_as_alive=True):
                 print(f"✓ Gateway stopped (PID {pid})")
                 return
         # Force kill

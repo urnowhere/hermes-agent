@@ -28,6 +28,140 @@ _LOCKS_DIRNAME = "gateway-locks"
 _IS_WINDOWS = sys.platform == "win32"
 _UNSET = object()
 
+_WINDOWS_KERNEL32 = None
+
+
+def _get_windows_kernel32():
+    """Lazy-load and cache kernel32 with function prototypes set.
+
+    Called only on Windows. Opens the DLL with ``use_last_error=True`` so
+    ``ctypes.get_last_error()`` reports the Win32 LastError captured
+    immediately after the failing call, rather than whatever the Python
+    runtime subsequently clobbered into thread-local state.
+    """
+    global _WINDOWS_KERNEL32
+    if _WINDOWS_KERNEL32 is not None:
+        return _WINDOWS_KERNEL32
+    import ctypes
+    from ctypes import wintypes
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    k.OpenProcess.restype = wintypes.HANDLE
+    k.CloseHandle.argtypes = (wintypes.HANDLE,)
+    k.CloseHandle.restype = wintypes.BOOL
+    k.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    k.WaitForSingleObject.restype = wintypes.DWORD
+    _WINDOWS_KERNEL32 = k
+    return k
+
+
+def _pid_is_alive_windows(pid: int, treat_permission_denied_as_alive: bool) -> bool:
+    """Windows-specific liveness probe using OpenProcess + WaitForSingleObject.
+
+    ``os.kill(pid, 0)`` is unreliable on Windows. Depending on the target
+    process's architecture, privilege level, and the caller's access rights
+    it can raise ``OSError(WinError 11)`` for healthy processes,
+    ``OSError(WinError 87)``/``SystemError`` for PIDs the kernel rejects as
+    malformed, or succeed for PIDs that have already exited. This helper
+    instead queries the Win32 API directly.
+
+    Uses ``WaitForSingleObject(handle, 0)`` rather than
+    ``GetExitCodeProcess``: MSDN explicitly warns that the latter is
+    unreliable for liveness because a process which legitimately exits
+    with exit code ``STILL_ACTIVE (259)`` reads as still running.
+    ``WaitForSingleObject`` has no equivalent quirk and only needs
+    ``SYNCHRONIZE`` access.
+    """
+    import ctypes
+
+    SYNCHRONIZE = 0x00100000
+    WAIT_OBJECT_0 = 0
+    WAIT_TIMEOUT = 0x102
+    ERROR_ACCESS_DENIED = 5
+
+    try:
+        kernel32 = _get_windows_kernel32()
+    except (AttributeError, OSError):
+        return True  # Can't probe — be conservative, assume alive.
+
+    handle = kernel32.OpenProcess(SYNCHRONIZE, False, int(pid))
+    if not handle:
+        err = ctypes.get_last_error()
+        if err == ERROR_ACCESS_DENIED:
+            return treat_permission_denied_as_alive
+        return False
+    try:
+        wait_result = kernel32.WaitForSingleObject(handle, 0)
+        if wait_result == WAIT_OBJECT_0:
+            return False  # signaled — process has terminated
+        if wait_result == WAIT_TIMEOUT:
+            return True  # not signaled — still running
+        return True  # WAIT_FAILED or unexpected — assume alive conservatively
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _probe_pid_alive(pid_int: int, treat_permission_denied_as_alive: bool) -> bool:
+    """Low-level platform probe. Split out so tests can monkey-patch it.
+
+    POSIX uses ``os.kill(pid, 0)`` — the traditional idiom. Windows uses
+    the Win32 API directly; ``os.kill(pid, 0)`` on Windows is unreliable
+    in BOTH directions (can raise on healthy PIDs, can succeed for exited
+    PIDs whose handles are still open), so we do not consult it at all.
+    """
+    if _IS_WINDOWS:
+        return _pid_is_alive_windows(pid_int, treat_permission_denied_as_alive)
+    try:
+        os.kill(pid_int, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return treat_permission_denied_as_alive
+    except OSError:
+        return False
+
+
+def pid_is_alive(pid, *, treat_permission_denied_as_alive: bool = False) -> bool:
+    """Return whether ``pid`` refers to a live process.
+
+    A cross-platform replacement for ``os.kill(pid, 0)``.
+
+    On POSIX this delegates to ``os.kill(pid, 0)`` — the standard idiom.
+    On Windows we use ``OpenProcess`` + ``WaitForSingleObject`` via
+    ctypes. ``os.kill(pid, 0)`` on Windows is deliberately NOT consulted
+    because it is unreliable in both directions: it can raise
+    ``OSError(WinError 11)`` / ``OSError(WinError 87)`` / ``SystemError``
+    for healthy processes (the original bug that motivated this helper),
+    AND it can return success for processes that have already exited
+    when another handle to them remains open — masking the exit.
+
+    Tests that previously monkey-patched ``status.os.kill`` to simulate
+    process states should monkey-patch ``status._probe_pid_alive`` (or
+    ``status._pid_is_alive_windows`` on Windows) instead, so the test
+    simulates the real probe on every platform.
+
+    Args:
+        pid: PID to probe. Non-integer / non-positive values return ``False``.
+        treat_permission_denied_as_alive: Controls what to return when the
+            kernel reports the process exists but we lack permission to
+            query it — POSIX ``PermissionError`` or Windows
+            ``ERROR_ACCESS_DENIED``. Applied on every platform. Callers
+            that previously swallowed ``PermissionError`` alongside
+            ``ProcessLookupError`` should pass ``False`` (the default) to
+            preserve their semantics; callers that treated permission-
+            denied processes as alive (see
+            ``test_owner_pid_permission_error_treated_as_alive``) should
+            pass ``True``.
+    """
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid_int <= 0:
+        return False
+    return _probe_pid_alive(pid_int, treat_permission_denied_as_alive)
+
 
 def _get_pid_path() -> Path:
     """Return the path to the gateway PID file, respecting HERMES_HOME."""
@@ -359,9 +493,7 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
 
         stale = existing_pid is None
         if not stale:
-            try:
-                os.kill(existing_pid, 0)
-            except (ProcessLookupError, PermissionError):
+            if not pid_is_alive(existing_pid):
                 stale = True
             else:
                 current_start = _get_process_start_time(existing_pid)
@@ -594,9 +726,7 @@ def get_running_pid(
         _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
         return None
 
-    try:
-        os.kill(pid, 0)  # signal 0 = existence check, no actual signal sent
-    except (ProcessLookupError, PermissionError):
+    if not pid_is_alive(pid):
         _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
         return None
 

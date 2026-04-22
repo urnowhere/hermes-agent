@@ -61,7 +61,7 @@ class TestGatewayPidState:
             "start_time": 123,
         }))
 
-        monkeypatch.setattr(status.os, "kill", lambda pid, sig: None)
+        monkeypatch.setattr(status, "_probe_pid_alive", lambda pid, flag=False: True)
         monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
         monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: None)
 
@@ -77,7 +77,7 @@ class TestGatewayPidState:
             "start_time": 123,
         }))
 
-        monkeypatch.setattr(status.os, "kill", lambda pid, sig: None)
+        monkeypatch.setattr(status, "_probe_pid_alive", lambda pid, flag=False: True)
         monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
         monkeypatch.setattr(
             status,
@@ -98,7 +98,7 @@ class TestGatewayPidState:
             "start_time": 123,
         }))
 
-        monkeypatch.setattr(status.os, "kill", lambda pid, sig: None)
+        monkeypatch.setattr(status, "_probe_pid_alive", lambda pid, flag=False: True)
         monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
         monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: None)
 
@@ -221,7 +221,7 @@ class TestScopedLocks:
             "kind": "hermes-gateway",
         }))
 
-        monkeypatch.setattr(status.os, "kill", lambda pid, sig: None)
+        monkeypatch.setattr(status, "_probe_pid_alive", lambda pid, flag=False: True)
         monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
 
         acquired, existing = status.acquire_scoped_lock("telegram-bot-token", "secret", metadata={"platform": "telegram"})
@@ -239,10 +239,7 @@ class TestScopedLocks:
             "kind": "hermes-gateway",
         }))
 
-        def fake_kill(pid, sig):
-            raise ProcessLookupError
-
-        monkeypatch.setattr(status.os, "kill", fake_kill)
+        monkeypatch.setattr(status, "_probe_pid_alive", lambda pid, flag=False: False)
 
         acquired, existing = status.acquire_scoped_lock("telegram-bot-token", "secret", metadata={"platform": "telegram"})
 
@@ -466,3 +463,118 @@ class TestTakeoverMarker:
 
         # We are not the target — must NOT consume as planned
         assert result is False
+
+
+class TestPidIsAlive:
+    """Unit tests for the public pid_is_alive helper — input validation
+    and delegation to ``_probe_pid_alive``."""
+
+    def test_returns_false_for_zero(self):
+        assert status.pid_is_alive(0) is False
+
+    def test_returns_false_for_negative(self):
+        assert status.pid_is_alive(-1) is False
+
+    def test_returns_false_for_none(self):
+        assert status.pid_is_alive(None) is False
+
+    def test_returns_false_for_non_integer_string(self):
+        assert status.pid_is_alive("not-a-pid") is False
+
+    def test_coerces_integer_string(self, monkeypatch):
+        monkeypatch.setattr(status, "_probe_pid_alive", lambda pid, flag: True)
+        assert status.pid_is_alive("1234") is True
+
+    def test_delegates_to_probe_pid_alive_true(self, monkeypatch):
+        captured = {}
+
+        def fake_probe(pid, flag):
+            captured["pid"] = pid
+            captured["flag"] = flag
+            return True
+
+        monkeypatch.setattr(status, "_probe_pid_alive", fake_probe)
+        assert status.pid_is_alive(1234) is True
+        assert captured == {"pid": 1234, "flag": False}
+
+    def test_delegates_to_probe_pid_alive_false(self, monkeypatch):
+        monkeypatch.setattr(status, "_probe_pid_alive", lambda pid, flag: False)
+        assert status.pid_is_alive(1234) is False
+
+    def test_forwards_permission_flag(self, monkeypatch):
+        captured = {}
+
+        def fake_probe(pid, flag):
+            captured["flag"] = flag
+            return flag
+
+        monkeypatch.setattr(status, "_probe_pid_alive", fake_probe)
+        assert status.pid_is_alive(
+            1234, treat_permission_denied_as_alive=True
+        ) is True
+        assert captured == {"flag": True}
+
+
+class TestProbePidAlive:
+    """Unit tests for the platform-dispatching _probe_pid_alive."""
+
+    def test_posix_returns_true_when_os_kill_succeeds(self, monkeypatch):
+        monkeypatch.setattr(status, "_IS_WINDOWS", False)
+        monkeypatch.setattr(status.os, "kill", lambda pid, sig: None)
+        assert status._probe_pid_alive(1234, False) is True
+
+    def test_posix_returns_false_on_process_lookup_error(self, monkeypatch):
+        def fake_kill(pid, sig):
+            raise ProcessLookupError()
+        monkeypatch.setattr(status, "_IS_WINDOWS", False)
+        monkeypatch.setattr(status.os, "kill", fake_kill)
+        assert status._probe_pid_alive(1234, False) is False
+
+    def test_posix_permission_denied_applies_flag(self, monkeypatch):
+        def fake_kill(pid, sig):
+            raise PermissionError()
+        monkeypatch.setattr(status, "_IS_WINDOWS", False)
+        monkeypatch.setattr(status.os, "kill", fake_kill)
+        assert status._probe_pid_alive(1234, False) is False
+        assert status._probe_pid_alive(1234, True) is True
+
+    def test_posix_oserror_returns_false(self, monkeypatch):
+        def fake_kill(pid, sig):
+            raise OSError("EINVAL")
+        monkeypatch.setattr(status, "_IS_WINDOWS", False)
+        monkeypatch.setattr(status.os, "kill", fake_kill)
+        assert status._probe_pid_alive(1234, False) is False
+
+    def test_windows_bypasses_os_kill_entirely(self, monkeypatch):
+        """On Windows we must NOT consult os.kill at all — it is
+        unreliable in both directions. The only source of truth is
+        _pid_is_alive_windows."""
+        kill_calls = []
+
+        def fake_kill(pid, sig):
+            kill_calls.append(pid)
+            return None
+
+        def fake_windows(pid, flag):
+            return True
+
+        monkeypatch.setattr(status, "_IS_WINDOWS", True)
+        monkeypatch.setattr(status.os, "kill", fake_kill)
+        monkeypatch.setattr(status, "_pid_is_alive_windows", fake_windows)
+
+        assert status._probe_pid_alive(1234, False) is True
+        assert kill_calls == [], "os.kill must not be called on Windows"
+
+    def test_windows_forwards_flag_to_windows_helper(self, monkeypatch):
+        captured = {}
+
+        def fake_windows(pid, flag):
+            captured["pid"] = pid
+            captured["flag"] = flag
+            return flag
+
+        monkeypatch.setattr(status, "_IS_WINDOWS", True)
+        monkeypatch.setattr(status, "_pid_is_alive_windows", fake_windows)
+
+        assert status._probe_pid_alive(1234, True) is True
+        assert captured == {"pid": 1234, "flag": True}
