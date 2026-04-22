@@ -2672,21 +2672,41 @@ class TestModelProviderMismatchWarning(unittest.TestCase):
 
     def test_no_warning_without_slash(self):
         """Bare model name (no provider prefix) should not warn."""
-        import logging
         with self.assertNoLogs("tools.delegate_tool", level="WARNING"):
             _warn_model_provider_mismatch("grok-4.1-fast", "anthropic", 0)
 
     def test_no_warning_when_task_model_none(self):
         """None task_model should not warn."""
-        import logging
         with self.assertNoLogs("tools.delegate_tool", level="WARNING"):
             _warn_model_provider_mismatch(None, "anthropic", 0)
 
     def test_no_warning_when_provider_none(self):
         """None resolved_provider (inherit from parent) should not warn."""
-        import logging
         with self.assertNoLogs("tools.delegate_tool", level="WARNING"):
             _warn_model_provider_mismatch("x-ai/grok-4.1-fast", None, 0)
+
+    def test_no_warning_auto_with_openrouter(self):
+        """model='auto' with provider='openrouter' is valid — OpenRouter's own routing model."""
+        with self.assertNoLogs("tools.delegate_tool", level="WARNING"):
+            _warn_model_provider_mismatch("auto", "openrouter", 0)
+
+    def test_no_warning_openrouter_auto_with_openrouter(self):
+        """model='openrouter/auto' with provider='openrouter' is valid."""
+        with self.assertNoLogs("tools.delegate_tool", level="WARNING"):
+            _warn_model_provider_mismatch("openrouter/auto", "openrouter", 0)
+
+    def test_warns_auto_with_non_openrouter_provider(self):
+        """model='auto' with provider='anthropic' should warn — 'auto' is OpenRouter-only."""
+        with self.assertLogs("tools.delegate_tool", level="WARNING") as cm:
+            _warn_model_provider_mismatch("auto", "anthropic", 0)
+        self.assertTrue(any("auto" in line for line in cm.output))
+        self.assertTrue(any("anthropic" in line for line in cm.output))
+
+    def test_warns_openrouter_auto_with_non_openrouter_provider(self):
+        """model='openrouter/auto' with provider='anthropic' should warn."""
+        with self.assertLogs("tools.delegate_tool", level="WARNING") as cm:
+            _warn_model_provider_mismatch("openrouter/auto", "anthropic", 0)
+        self.assertTrue(any("openrouter/auto" in line for line in cm.output))
 
     @patch("tools.delegate_tool._build_child_agent")
     @patch("tools.delegate_tool._run_single_child")

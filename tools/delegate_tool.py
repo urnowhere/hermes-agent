@@ -326,23 +326,52 @@ def _warn_model_provider_mismatch(
     resolved_provider: Optional[str],
     task_index: int,
 ) -> None:
-    """Emit a warning when a per-task model prefix is incompatible with the
+    """Emit a warning when a per-task model is incompatible with the
     resolved provider credentials.
 
-    Example mismatch: top-level provider='anthropic' (credentials resolved for
-    Anthropic's API) but per-task model='x-ai/grok-4.1-fast'.  The child will
-    call Anthropic's endpoint with a foreign model name and receive an opaque
-    404/invalid-model error.  A warning at dispatch time names the problem
-    before the subagent spins up.
+    Two cases are checked:
 
-    OpenRouter is explicitly excluded — it's a meta-router that accepts
-    provider-prefixed model strings as a feature, so 'x-ai/...' paired with
-    provider='openrouter' is valid and intentional.
+    1. Provider-prefixed model string (e.g. 'x-ai/grok-4.1-fast') with a
+       non-matching resolved provider (e.g. 'anthropic'). The child will call
+       the wrong endpoint and receive an opaque invalid-model error.
 
-    Only fires when both task_model contains a '/' prefix AND the normalized
-    prefix looks like a different provider than resolved_provider.
+    2. OpenRouter-specific bare model names (e.g. 'auto', 'openrouter/auto')
+       used with a non-OpenRouter provider. 'auto' is OpenRouter's meta-routing
+       model and is meaningless on any other provider.
+
+    OpenRouter and other registered aggregator providers are excluded from
+    the prefix-mismatch check because they accept provider-prefixed model
+    strings as a feature.
+
+    Only warning-level — does not block execution.
     """
-    if not task_model or not resolved_provider or "/" not in task_model:
+    if not task_model or not resolved_provider:
+        return
+
+    # --- Case 2: OpenRouter-specific bare model names ---
+    # 'auto' (and 'openrouter/auto') are only valid on OpenRouter.
+    # Normalize by stripping an 'openrouter/' prefix first.
+    bare_model = task_model.strip().lower()
+    if bare_model.startswith("openrouter/"):
+        bare_model = bare_model[len("openrouter/"):]
+    _OPENROUTER_ONLY_MODELS = frozenset({"auto"})
+    if bare_model in _OPENROUTER_ONLY_MODELS:
+        try:
+            from hermes_cli.model_normalize import _normalize_provider_alias
+            norm_resolved = _normalize_provider_alias(resolved_provider)
+        except Exception:
+            norm_resolved = (resolved_provider or "").strip().lower()
+        if norm_resolved not in ("openrouter", "auto", ""):
+            logger.warning(
+                "delegate_task task[%d]: per-task model=%r is an OpenRouter-specific "
+                "model and is not valid on provider=%r. Use provider='openrouter' to "
+                "route through OpenRouter, or choose a model supported by %r.",
+                task_index, task_model, resolved_provider, resolved_provider,
+            )
+        return  # handled — don't fall through to prefix check
+
+    # --- Case 1: Provider-prefixed model strings ---
+    if "/" not in task_model:
         return
 
     model_prefix = task_model.split("/", 1)[0].strip().lower()
