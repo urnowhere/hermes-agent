@@ -10196,6 +10196,14 @@ class GatewayRunner:
         if tool_progress_enabled:
             progress_task = asyncio.create_task(send_progress_messages())
 
+        # Start continuous typing indicator (refreshes every 4s; Telegram expires at ~5s)
+        _typing_adapter_for_task = self.adapters.get(source.platform)
+        typing_task = None
+        if _typing_adapter_for_task and hasattr(_typing_adapter_for_task, '_keep_typing'):
+            typing_task = asyncio.create_task(
+                _typing_adapter_for_task._keep_typing(source.chat_id, interval=4.0, metadata=_progress_metadata)
+            )
+
         # Start stream consumer task — polls for consumer creation since it
         # happens inside run_sync (thread pool) after the agent is constructed.
         stream_task = None
@@ -10705,7 +10713,9 @@ class GatewayRunner:
                     channel_prompt=next_channel_prompt,
                 )
         finally:
-            # Stop progress sender, interrupt monitor, and notification task
+            # Stop typing, progress sender, interrupt monitor, and notification task
+            if typing_task:
+                typing_task.cancel()
             if progress_task:
                 progress_task.cancel()
             interrupt_monitor.cancel()
@@ -10730,7 +10740,7 @@ class GatewayRunner:
                 self._update_runtime_status("draining")
             
             # Wait for cancelled tasks
-            for task in [progress_task, interrupt_monitor, tracking_task, _notify_task]:
+            for task in [typing_task, progress_task, interrupt_monitor, tracking_task, _notify_task]:
                 if task:
                     try:
                         await task

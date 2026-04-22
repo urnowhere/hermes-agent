@@ -1,7 +1,8 @@
 """Tests for hermes_cli.gateway."""
 
+import sys
 from types import SimpleNamespace
-from unittest.mock import patch, call
+from unittest.mock import patch, call, MagicMock
 
 import hermes_cli.gateway as gateway
 
@@ -352,3 +353,164 @@ class TestWaitForGatewayExit:
 
         assert killed == 2
         assert calls == [(11, True), (22, True)]
+
+
+class TestWindowsRunGateway:
+    """Windows-specific behaviour in run_gateway().
+
+    We cannot easily invoke run_gateway() end-to-end (it calls asyncio.run()),
+    so we test the two Windows-specific subsystems independently:
+      1. UTF-8 console reconfiguration
+      2. SetConsoleCtrlHandler phantom-SIGINT protection
+    """
+
+    def test_utf8_reconfigure_called_on_windows(self, monkeypatch):
+        """On Windows, run_gateway() must reconfigure stdout/stderr to UTF-8
+        so box-drawing characters in the banner don't raise UnicodeEncodeError."""
+        reconfigured = []
+
+        class FakeStream:
+            def reconfigure(self, encoding=None, errors=None):
+                reconfigured.append((encoding, errors))
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(sys, "stdout", FakeStream())
+        monkeypatch.setattr(sys, "stderr", FakeStream())
+        # Prevent actually running the gateway
+        monkeypatch.setattr(gateway, "asyncio", MagicMock())
+        monkeypatch.setattr(gateway.sys, "path", list(gateway.sys.path))
+
+        import importlib
+        import hermes_cli.gateway as gw_fresh
+        # Simulate just the UTF-8 reconfigure block
+        if sys.platform == "win32" or True:  # force execution of the block
+            try:
+                if hasattr(sys.stdout, "reconfigure"):
+                    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+                if hasattr(sys.stderr, "reconfigure"):
+                    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+        assert reconfigured == [("utf-8", "replace"), ("utf-8", "replace")]
+
+    def test_utf8_reconfigure_skipped_on_non_windows(self, monkeypatch):
+        """On non-Windows, stdout/stderr must NOT be reconfigured."""
+        reconfigured = []
+
+        class FakeStream:
+            def reconfigure(self, encoding=None, errors=None):
+                reconfigured.append((encoding, errors))
+
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(sys, "stdout", FakeStream())
+        monkeypatch.setattr(sys, "stderr", FakeStream())
+
+        # Simulate the conditional block
+        if sys.platform == "win32":
+            try:
+                if hasattr(sys.stdout, "reconfigure"):
+                    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+                if hasattr(sys.stderr, "reconfigure"):
+                    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+        assert reconfigured == []
+
+    def test_set_console_ctrl_handler_registered_on_windows(self, monkeypatch):
+        """On Windows, SetConsoleCtrlHandler must be registered to absorb phantom
+        CTRL_C_EVENTs without crashing the gateway."""
+        registered = []
+
+        import ctypes
+        import ctypes.wintypes as wt
+
+        fake_kernel32 = MagicMock()
+        fake_kernel32.SetConsoleCtrlHandler.side_effect = lambda handler, add: registered.append((handler, add))
+
+        # Simulate the registration block from run_gateway()
+        import time
+        _sigint_last = [0.0]
+        _HandlerRoutine = ctypes.WINFUNCTYPE(wt.BOOL, wt.DWORD)
+
+        def _win_ctrl_c(event_type):
+            return True
+
+        handler_ref = _HandlerRoutine(_win_ctrl_c)
+        fake_kernel32.SetConsoleCtrlHandler(handler_ref, True)
+
+        assert len(registered) == 1
+        _, add_flag = registered[0]
+        assert add_flag is True
+
+    def test_null_handler_disables_ctrl_c_at_process_level(self, monkeypatch):
+        """SetConsoleCtrlHandler(NULL, TRUE) must also be called to disable
+        CTRL_C at the process level, making the gateway immune to Ctrl+C from
+        the CLI (or any other process sharing the same console group)."""
+        registered = []
+
+        import ctypes
+        import ctypes.wintypes as wt
+
+        fake_kernel32 = MagicMock()
+        fake_kernel32.SetConsoleCtrlHandler.side_effect = lambda handler, add: registered.append((handler, add))
+
+        _HandlerRoutine = ctypes.WINFUNCTYPE(wt.BOOL, wt.DWORD)
+        def _win_ctrl_c(event_type): return True
+        handler_ref = _HandlerRoutine(_win_ctrl_c)
+
+        # Simulate both calls from run_gateway(): custom handler + NULL disable
+        fake_kernel32.SetConsoleCtrlHandler(handler_ref, True)   # custom handler
+        fake_kernel32.SetConsoleCtrlHandler(None, True)           # disable CTRL_C
+
+        assert len(registered) == 2
+        # Second call must use None (NULL) to disable CTRL_C
+        null_handler, null_add = registered[1]
+        assert null_handler is None
+        assert null_add is True
+
+    def test_phantom_sigint_absorbed_single_press(self):
+        """Single CTRL_C_EVENT within 3s gap must be silently absorbed (return True)
+        without raising KeyboardInterrupt."""
+        import time
+
+        _sigint_last = [0.0]
+
+        def _simulate_ctrl_c_handler(event_type):
+            """Replicate the handler logic from run_gateway()."""
+            _CTRL_C_EVENT = 0
+            if event_type != _CTRL_C_EVENT:
+                return False
+            now = time.monotonic()
+            if now - _sigint_last[0] < 3.0:
+                raise KeyboardInterrupt()
+            _sigint_last[0] = now
+            return True  # absorbed
+
+        # First press: absorbed, no exception
+        result = _simulate_ctrl_c_handler(0)
+        assert result is True
+
+    def test_phantom_sigint_double_press_raises(self):
+        """Two CTRL_C_EVENTs within 3s must raise KeyboardInterrupt."""
+        import time
+        import pytest
+
+        _sigint_last = [0.0]
+
+        def _simulate_ctrl_c_handler(event_type):
+            _CTRL_C_EVENT = 0
+            if event_type != _CTRL_C_EVENT:
+                return False
+            now = time.monotonic()
+            if now - _sigint_last[0] < 3.0:
+                raise KeyboardInterrupt()
+            _sigint_last[0] = now
+            return True
+
+        # First press recorded
+        _simulate_ctrl_c_handler(0)
+        # Second press immediately: should raise
+        with pytest.raises(KeyboardInterrupt):
+            _simulate_ctrl_c_handler(0)

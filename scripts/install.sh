@@ -11,7 +11,35 @@
 # Or with options:
 #   curl -fsSL ... | bash -s -- --no-venv --skip-setup
 #
+# Windows users: this script does not support CMD or PowerShell.
+# Run the PowerShell installer instead:
+#   irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1 | iex
+#
 # ============================================================================
+
+# ---------------------------------------------------------------------------
+# Early Windows detection — must happen BEFORE set -e so the helpful message
+# is always printed even when running under Git Bash / MSYS2 / Cygwin.
+# CMD and PowerShell users cannot reach this script (bash not on PATH), so
+# this guard is purely for Git Bash users who may have followed Linux docs.
+# ---------------------------------------------------------------------------
+_UNAME="$(uname -s 2>/dev/null || true)"
+case "$_UNAME" in
+    CYGWIN*|MINGW*|MSYS*)
+        echo ""
+        echo "╔══════════════════════════════════════════════════════════╗"
+        echo "║         Windows detected — wrong installer               ║"
+        echo "╠══════════════════════════════════════════════════════════╣"
+        echo "║  This script is for Linux / macOS.                       ║"
+        echo "║  On Windows, use the PowerShell installer instead:       ║"
+        echo "╠══════════════════════════════════════════════════════════╣"
+        echo "║  irm https://raw.githubusercontent.com/NousResearch/     ║"
+        echo "║      hermes-agent/main/scripts/install.ps1 | iex         ║"
+        echo "╚══════════════════════════════════════════════════════════╝"
+        echo ""
+        exit 1
+        ;;
+esac
 
 set -e
 

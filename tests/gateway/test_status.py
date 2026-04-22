@@ -466,3 +466,78 @@ class TestTakeoverMarker:
 
         # We are not the target — must NOT consume as planned
         assert result is False
+
+
+class TestWindowsOsKillCompat:
+    """Regression tests: os.kill(pid, 0) on Windows raises OSError (WinError 87)
+    instead of ProcessLookupError for dead/invalid PIDs.  Both get_running_pid()
+    and acquire_scoped_lock() must treat this as "process not found" rather than
+    re-raising and crashing the gateway.
+    """
+
+    def test_get_running_pid_treats_oserror_as_dead_process(self, tmp_path, monkeypatch):
+        """OSError from os.kill should be caught and None returned (process is dead).
+
+        Note: remove_pid_file() intentionally skips deletion when the file's PID
+        differs from os.getpid() (protects against --replace race conditions), so
+        we only assert that the return value is None, not that the file is gone.
+        """
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        pid_path = tmp_path / "gateway.pid"
+        pid_path.write_text(json.dumps({
+            "pid": 99999,
+            "kind": "hermes-gateway",
+            "argv": ["python", "-m", "hermes_cli.main", "gateway"],
+            "start_time": None,
+        }))
+
+        def fake_kill(pid, sig):
+            raise OSError(87, "The parameter is incorrect")  # WinError 87
+
+        monkeypatch.setattr(status.os, "kill", fake_kill)
+
+        result = status.get_running_pid()
+        assert result is None  # OSError must NOT propagate as an unhandled exception
+
+    def test_get_running_pid_treats_system_error_as_dead_process(self, tmp_path, monkeypatch):
+        """SystemError from os.kill should also be treated as process-not-found."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        pid_path = tmp_path / "gateway.pid"
+        pid_path.write_text(json.dumps({
+            "pid": 99999,
+            "kind": "hermes-gateway",
+            "argv": ["python", "-m", "hermes_cli.main", "gateway"],
+            "start_time": None,
+        }))
+
+        def fake_kill(pid, sig):
+            raise SystemError("invalid PID")
+
+        monkeypatch.setattr(status.os, "kill", fake_kill)
+
+        result = status.get_running_pid()
+        assert result is None
+
+    def test_acquire_scoped_lock_treats_oserror_as_stale(self, tmp_path, monkeypatch):
+        """OSError from os.kill in acquire_scoped_lock should treat the lock as stale."""
+        monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
+        lock_path = tmp_path / "locks" / "telegram-bot-token-2bb80d537b1da3e3.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(json.dumps({
+            "pid": 99999,
+            "start_time": 123,
+            "kind": "hermes-gateway",
+        }))
+
+        def fake_kill(pid, sig):
+            raise OSError(87, "The parameter is incorrect")  # WinError 87
+
+        monkeypatch.setattr(status.os, "kill", fake_kill)
+
+        acquired, existing = status.acquire_scoped_lock(
+            "telegram-bot-token", "secret", metadata={"platform": "telegram"}
+        )
+
+        assert acquired is True
+        payload = json.loads(lock_path.read_text())
+        assert payload["pid"] == os.getpid()
