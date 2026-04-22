@@ -717,6 +717,48 @@ platform_toolsets:
 #       log_level: "info"       # audit verbosity
 
 # =============================================================================
+# Text-to-Speech
+# =============================================================================
+# Generate spoken audio from text.
+# Providers:
+#   edge       - free cloud voices
+#   elevenlabs - premium API voices
+#   openai     - OpenAI TTS API
+#   minimax    - MiniMax TTS API
+#   neutts     - local Neural TTS
+#   piper      - local/offline Piper CLI + local models
+#
+# Set API keys in .env when needed. Local/offline providers do not require API keys.
+tts:
+  provider: "edge"             # edge | elevenlabs | openai | minimax | neutts | piper
+  edge:
+    voice: "en-US-AriaNeural"
+  elevenlabs:
+    voice_id: "pNInz6obpgDQGcFmaJgB"
+    model_id: "eleven_multilingual_v2"
+  openai:
+    model: "gpt-4o-mini-tts"
+    voice: "alloy"             # alloy | echo | fable | onyx | nova | shimmer
+  minimax:
+    model: "speech-2.8-hd"
+    voice_id: "English_Graceful_Lady"
+  neutts:
+    ref_audio: ""              # optional local reference audio
+    ref_text: ""               # optional local reference transcript
+    model: "neuphonic/neutts-air-q4-gguf"
+    device: "cpu"              # cpu | cuda | mps
+  piper:
+    binary_path: "piper"       # local/offline Piper CLI binary
+    model: "pl_PL-gosia-medium"  # preset model id chosen in setup
+    model_path: ""             # optional local .onnx override for advanced/manual setups
+    config_path: ""            # optional local .onnx.json override
+    models_dir: ""             # optional model cache dir (default: HERMES_HOME/tts/piper)
+    speaker: ""                # optional speaker id/name for multi-speaker voices
+    sample_rate: 0             # optional output sample rate override
+    # Common path: use `hermes setup tts`, choose a language/voice preset,
+    # and let Hermes download the model into HERMES_HOME/tts/piper.
+
+# =============================================================================
 # Voice Transcription (Speech-to-Text)
 # =============================================================================
 # Automatically transcribe voice messages on messaging platforms.

@@ -618,7 +618,7 @@ DEFAULT_CONFIG = {
     # limit (OpenAI 4096, xAI 15000, MiniMax 10000, ElevenLabs 5k-40k model-aware,
     # Gemini 5000, Edge 5000, Mistral 4000, NeuTTS/KittenTTS 2000).
     "tts": {
-        "provider": "edge",  # "edge" (free) | "elevenlabs" (premium) | "openai" | "xai" | "minimax" | "mistral" | "neutts" (local)
+        "provider": "edge",  # "edge" (free) | "elevenlabs" (premium) | "openai" | "xai" | "minimax" | "mistral" | "gemini" | "neutts" (local) | "kittentts" (local) | "piper" (local/offline)
         "edge": {
             "voice": "en-US-AriaNeural",
             # Popular: AriaNeural, JennyNeural, AndrewNeural, BrianNeural, SoniaNeural
@@ -647,6 +647,16 @@ DEFAULT_CONFIG = {
             "ref_text": "",   # Path to reference voice transcript (empty = bundled default)
             "model": "neuphonic/neutts-air-q4-gguf",  # HuggingFace model repo
             "device": "cpu",  # cpu, cuda, or mps
+        },
+        "piper": {
+            "binary_path": "piper",             # Local/offline Piper CLI binary
+            "model": "pl_PL-gosia-medium",      # Preset model id chosen in setup (language is part of the model name)
+            "model_path": "",                   # Optional local .onnx override for advanced/manual setups
+            "config_path": "",                  # Optional local .onnx.json override
+            "models_dir": "",                   # Optional model cache dir (default: HERMES_HOME/tts/piper)
+            "speaker": "",                      # Optional speaker id/name for multi-speaker voices
+            "sample_rate": 0,                   # Optional output sample rate override
+            # Piper models are local/offline assets and usually take tens to hundreds of MB each
         },
     },
     

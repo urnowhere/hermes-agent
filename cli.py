@@ -7802,7 +7802,7 @@ class HermesCLI:
         if self._voice_tts:
             from tools.tts_tool import check_tts_requirements
             if not check_tts_requirements():
-                _cprint(f"{_DIM}Warning: No TTS provider available. Install edge-tts or set API keys.{_RST}")
+                _cprint(f"{_DIM}Warning: No TTS provider available. Install/configure a provider with 'hermes setup tts'.{_RST}")
 
         _cprint(f"{_ACCENT}Voice TTS {status}.{_RST}")
 

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 
 from hermes_cli.nous_subscription import get_nous_subscription_features
+from piper_catalog import PIPER_VOICE_CATALOG_URL
 from tools.tool_backend_helpers import managed_nous_tools_enabled
 from utils import base_url_hostname
 from hermes_constants import get_optional_skills_dir
@@ -475,6 +476,12 @@ def _print_setup_summary(config: dict, hermes_home):
             tool_status.append(("Text-to-Speech (KittenTTS local)", True, None))
         else:
             tool_status.append(("Text-to-Speech (KittenTTS — not installed)", False, "run 'hermes setup tts'"))
+    elif tts_provider == "piper":
+        piper_ok, reason = _check_piper_status(config)
+        if piper_ok:
+            tool_status.append(("Text-to-Speech (Piper local/offline)", True, None))
+        else:
+            tool_status.append(("Text-to-Speech (Piper local/offline)", False, reason or "run 'hermes setup tts'"))
     else:
         tool_status.append(("Text-to-Speech (Edge TTS)", True, None))
 
@@ -961,8 +968,750 @@ def _install_kittentts_deps() -> bool:
         return False
 
 
+_PIPER_LANGUAGE_PRESETS = [
+    (
+        "Albanian",
+        [
+            ("Edon (medium, ~64MB)", "sq_AL-edon-medium"),
+        ],
+    ),
+    (
+        "Arabic",
+        [
+            ("Kareem (low, ~63MB)", "ar_JO-kareem-low"),
+            ("Kareem (medium, ~63MB)", "ar_JO-kareem-medium"),
+        ],
+    ),
+    (
+        "Basque",
+        [
+            ("Antton (medium, ~64MB)", "eu_ES-antton-medium"),
+            ("Maider (medium, ~64MB)", "eu_ES-maider-medium"),
+        ],
+    ),
+    (
+        "Bulgarian",
+        [
+            ("Dimitar (medium, ~63MB)", "bg_BG-dimitar-medium"),
+        ],
+    ),
+    (
+        "Catalan",
+        [
+            ("UPC Ona (medium, ~63MB)", "ca_ES-upc_ona-medium"),
+            ("UPC Ona (x_low, ~21MB)", "ca_ES-upc_ona-x_low"),
+            ("UPC Pau (x_low, ~28MB)", "ca_ES-upc_pau-x_low"),
+        ],
+    ),
+    (
+        "Chinese",
+        [
+            ("Chaowen (medium, ~63MB)", "zh_CN-chaowen-medium"),
+            ("Huayan (medium, ~63MB)", "zh_CN-huayan-medium"),
+            ("Huayan (x_low, ~21MB)", "zh_CN-huayan-x_low"),
+            ("Xiao Ya (medium, ~63MB)", "zh_CN-xiao_ya-medium"),
+        ],
+    ),
+    (
+        "Czech",
+        [
+            ("Jirka (low, ~63MB)", "cs_CZ-jirka-low"),
+            ("Jirka (medium, ~63MB)", "cs_CZ-jirka-medium"),
+        ],
+    ),
+    (
+        "Danish",
+        [
+            ("Talesyntese (medium, ~63MB)", "da_DK-talesyntese-medium"),
+        ],
+    ),
+    (
+        "Dutch (Belgium)",
+        [
+            ("Nathalie (medium, ~63MB)", "nl_BE-nathalie-medium"),
+            ("Nathalie (x_low, ~21MB)", "nl_BE-nathalie-x_low"),
+            ("Rdh (medium, ~63MB)", "nl_BE-rdh-medium"),
+            ("Rdh (x_low, ~21MB)", "nl_BE-rdh-x_low"),
+        ],
+    ),
+    (
+        "Dutch (Netherlands)",
+        [
+            ("Alex (medium, ~64MB)", "nl_NL-alex-medium"),
+            ("Mls (medium, ~77MB)", "nl_NL-mls-medium"),
+            ("Mls 5809 (low, ~63MB)", "nl_NL-mls_5809-low"),
+            ("Mls 7432 (low, ~63MB)", "nl_NL-mls_7432-low"),
+            ("Pim (medium, ~64MB)", "nl_NL-pim-medium"),
+            ("Ronnie (medium, ~63MB)", "nl_NL-ronnie-medium"),
+        ],
+    ),
+    (
+        "English (UK)",
+        [
+            ("Alan (low, ~63MB)", "en_GB-alan-low"),
+            ("Alan (medium, ~63MB)", "en_GB-alan-medium"),
+            ("Alba (medium, ~63MB)", "en_GB-alba-medium"),
+            ("Aru (medium, ~77MB)", "en_GB-aru-medium"),
+            ("Cori (high, ~114MB)", "en_GB-cori-high"),
+            ("Cori (medium, ~64MB)", "en_GB-cori-medium"),
+            ("Jenny Dioco (medium, ~63MB)", "en_GB-jenny_dioco-medium"),
+            ("Northern English Male (medium, ~63MB)", "en_GB-northern_english_male-medium"),
+            ("Semaine (medium, ~77MB)", "en_GB-semaine-medium"),
+            ("Southern English Female (low, ~63MB)", "en_GB-southern_english_female-low"),
+            ("Vctk (medium, ~77MB)", "en_GB-vctk-medium"),
+        ],
+    ),
+    (
+        "English (US)",
+        [
+            ("Amy (low, ~63MB)", "en_US-amy-low"),
+            ("Amy (medium, ~63MB)", "en_US-amy-medium"),
+            ("Arctic (medium, ~77MB)", "en_US-arctic-medium"),
+            ("Bryce (medium, ~64MB)", "en_US-bryce-medium"),
+            ("Danny (low, ~63MB)", "en_US-danny-low"),
+            ("Hfc Female (medium, ~63MB)", "en_US-hfc_female-medium"),
+            ("Hfc Male (medium, ~63MB)", "en_US-hfc_male-medium"),
+            ("Joe (medium, ~63MB)", "en_US-joe-medium"),
+            ("John (medium, ~64MB)", "en_US-john-medium"),
+            ("Kathleen (low, ~63MB)", "en_US-kathleen-low"),
+            ("Kristin (medium, ~64MB)", "en_US-kristin-medium"),
+            ("Kusal (medium, ~63MB)", "en_US-kusal-medium"),
+            ("L2ARCTIC (medium, ~77MB)", "en_US-l2arctic-medium"),
+            ("Lessac (high, ~114MB)", "en_US-lessac-high"),
+            ("Lessac (low, ~63MB)", "en_US-lessac-low"),
+            ("Lessac (medium, ~63MB)", "en_US-lessac-medium"),
+            ("Libritts (high, ~137MB)", "en_US-libritts-high"),
+            ("Libritts R (medium, ~79MB)", "en_US-libritts_r-medium"),
+            ("Ljspeech (high, ~114MB)", "en_US-ljspeech-high"),
+            ("Ljspeech (medium, ~64MB)", "en_US-ljspeech-medium"),
+            ("Norman (medium, ~64MB)", "en_US-norman-medium"),
+            ("Reza Ibrahim (medium, ~64MB)", "en_US-reza_ibrahim-medium"),
+            ("Ryan (high, ~121MB)", "en_US-ryan-high"),
+            ("Ryan (low, ~63MB)", "en_US-ryan-low"),
+            ("Ryan (medium, ~63MB)", "en_US-ryan-medium"),
+            ("Sam (medium, ~63MB)", "en_US-sam-medium"),
+        ],
+    ),
+    (
+        "Farsi",
+        [
+            ("Amir (medium, ~64MB)", "fa_IR-amir-medium"),
+            ("Ganji (medium, ~64MB)", "fa_IR-ganji-medium"),
+            ("Ganji Adabi (medium, ~64MB)", "fa_IR-ganji_adabi-medium"),
+            ("Gyro (medium, ~63MB)", "fa_IR-gyro-medium"),
+            ("Reza Ibrahim (medium, ~64MB)", "fa_IR-reza_ibrahim-medium"),
+        ],
+    ),
+    (
+        "Finnish",
+        [
+            ("Harri (low, ~70MB)", "fi_FI-harri-low"),
+            ("Harri (medium, ~63MB)", "fi_FI-harri-medium"),
+        ],
+    ),
+    (
+        "French",
+        [
+            ("Gilles (low, ~63MB)", "fr_FR-gilles-low"),
+            ("Mls (medium, ~77MB)", "fr_FR-mls-medium"),
+            ("Mls 1840 (low, ~63MB)", "fr_FR-mls_1840-low"),
+            ("Siwis (low, ~28MB)", "fr_FR-siwis-low"),
+            ("Siwis (medium, ~63MB)", "fr_FR-siwis-medium"),
+            ("Tom (medium, ~64MB)", "fr_FR-tom-medium"),
+            ("Upmc (medium, ~77MB)", "fr_FR-upmc-medium"),
+        ],
+    ),
+    (
+        "Georgian",
+        [
+            ("Natia (medium, ~63MB)", "ka_GE-natia-medium"),
+        ],
+    ),
+    (
+        "German",
+        [
+            ("Eva K (x_low, ~21MB)", "de_DE-eva_k-x_low"),
+            ("Karlsson (low, ~63MB)", "de_DE-karlsson-low"),
+            ("Kerstin (low, ~63MB)", "de_DE-kerstin-low"),
+            ("Mls (medium, ~77MB)", "de_DE-mls-medium"),
+            ("Pavoque (low, ~63MB)", "de_DE-pavoque-low"),
+            ("Ramona (low, ~63MB)", "de_DE-ramona-low"),
+            ("Thorsten (high, ~114MB)", "de_DE-thorsten-high"),
+            ("Thorsten (low, ~63MB)", "de_DE-thorsten-low"),
+            ("Thorsten (medium, ~63MB)", "de_DE-thorsten-medium"),
+            ("Thorsten Emotional (medium, ~77MB)", "de_DE-thorsten_emotional-medium"),
+        ],
+    ),
+    (
+        "Greek",
+        [
+            ("Rapunzelina (low, ~63MB)", "el_GR-rapunzelina-low"),
+            ("Rapunzelina (medium, ~63MB)", "el_GR-rapunzelina-medium"),
+        ],
+    ),
+    (
+        "Hindi",
+        [
+            ("Pratham (medium, ~64MB)", "hi_IN-pratham-medium"),
+            ("Priyamvada (medium, ~64MB)", "hi_IN-priyamvada-medium"),
+            ("Rohan (medium, ~63MB)", "hi_IN-rohan-medium"),
+        ],
+    ),
+    (
+        "Hungarian",
+        [
+            ("Anna (medium, ~63MB)", "hu_HU-anna-medium"),
+            ("Berta (medium, ~63MB)", "hu_HU-berta-medium"),
+            ("Imre (medium, ~63MB)", "hu_HU-imre-medium"),
+        ],
+    ),
+    (
+        "Icelandic",
+        [
+            ("Bui (medium, ~76MB)", "is_IS-bui-medium"),
+            ("Salka (medium, ~76MB)", "is_IS-salka-medium"),
+            ("Steinn (medium, ~76MB)", "is_IS-steinn-medium"),
+            ("Ugla (medium, ~76MB)", "is_IS-ugla-medium"),
+        ],
+    ),
+    (
+        "Indonesian",
+        [
+            ("News Tts (medium, ~63MB)", "id_ID-news_tts-medium"),
+        ],
+    ),
+    (
+        "Italian",
+        [
+            ("Paola (medium, ~64MB)", "it_IT-paola-medium"),
+            ("Riccardo (x_low, ~28MB)", "it_IT-riccardo-x_low"),
+        ],
+    ),
+    (
+        "Kazakh",
+        [
+            ("Iseke (x_low, ~28MB)", "kk_KZ-iseke-x_low"),
+            ("Issai (high, ~128MB)", "kk_KZ-issai-high"),
+            ("Raya (x_low, ~28MB)", "kk_KZ-raya-x_low"),
+        ],
+    ),
+    (
+        "Kurmanji Kurdish",
+        [
+            ("Berfin Renas (medium, ~77MB)", "ku_TR-berfin_renas-medium"),
+        ],
+    ),
+    (
+        "Latvian",
+        [
+            ("Aivars (medium, ~64MB)", "lv_LV-aivars-medium"),
+        ],
+    ),
+    (
+        "Luxembourgish",
+        [
+            ("Marylux (medium, ~63MB)", "lb_LU-marylux-medium"),
+        ],
+    ),
+    (
+        "Malayalam",
+        [
+            ("Arjun (medium, ~63MB)", "ml_IN-arjun-medium"),
+            ("Meera (medium, ~63MB)", "ml_IN-meera-medium"),
+        ],
+    ),
+    (
+        "Nepali",
+        [
+            ("Chitwan (medium, ~63MB)", "ne_NP-chitwan-medium"),
+            ("Google (medium, ~77MB)", "ne_NP-google-medium"),
+            ("Google (x_low, ~28MB)", "ne_NP-google-x_low"),
+        ],
+    ),
+    (
+        "Norwegian",
+        [
+            ("Nvcc (medium, ~77MB)", "no_NO-nvcc-medium"),
+            ("Talesyntese (medium, ~63MB)", "no_NO-talesyntese-medium"),
+        ],
+    ),
+    (
+        "Polish",
+        [
+            ("Bass (high, ~114MB)", "pl_PL-bass-high"),
+            ("Darkman (medium, ~63MB)", "pl_PL-darkman-medium"),
+            ("Gosia (medium, ~63MB)", "pl_PL-gosia-medium"),
+            ("Mc Speech (medium, ~63MB)", "pl_PL-mc_speech-medium"),
+            ("Mls 6892 (low, ~63MB)", "pl_PL-mls_6892-low"),
+        ],
+    ),
+    (
+        "Portuguese (Brazil)",
+        [
+            ("Cadu (medium, ~63MB)", "pt_BR-cadu-medium"),
+            ("Edresson (low, ~63MB)", "pt_BR-edresson-low"),
+            ("Faber (medium, ~63MB)", "pt_BR-faber-medium"),
+            ("Jeff (medium, ~63MB)", "pt_BR-jeff-medium"),
+        ],
+    ),
+    (
+        "Portuguese (Portugal)",
+        [
+            ("Tugão (medium, ~63MB)", "pt_PT-tugão-medium"),
+        ],
+    ),
+    (
+        "Romanian",
+        [
+            ("Mihai (medium, ~63MB)", "ro_RO-mihai-medium"),
+        ],
+    ),
+    (
+        "Russian",
+        [
+            ("Denis (medium, ~63MB)", "ru_RU-denis-medium"),
+            ("Dmitri (medium, ~63MB)", "ru_RU-dmitri-medium"),
+            ("Irina (medium, ~63MB)", "ru_RU-irina-medium"),
+            ("Ruslan (medium, ~63MB)", "ru_RU-ruslan-medium"),
+        ],
+    ),
+    (
+        "Serbian",
+        [
+            ("Serbski Institut (medium, ~77MB)", "sr_RS-serbski_institut-medium"),
+        ],
+    ),
+    (
+        "Slovak",
+        [
+            ("Lili (medium, ~63MB)", "sk_SK-lili-medium"),
+        ],
+    ),
+    (
+        "Slovenian",
+        [
+            ("Artur (medium, ~63MB)", "sl_SI-artur-medium"),
+        ],
+    ),
+    (
+        "Spanish (Argentina)",
+        [
+            ("Daniela (high, ~114MB)", "es_AR-daniela-high"),
+        ],
+    ),
+    (
+        "Spanish (Mexico)",
+        [
+            ("Ald (medium, ~63MB)", "es_MX-ald-medium"),
+            ("Claude (high, ~63MB)", "es_MX-claude-high"),
+        ],
+    ),
+    (
+        "Spanish (Spain)",
+        [
+            ("Carlfm (x_low, ~28MB)", "es_ES-carlfm-x_low"),
+            ("Davefx (medium, ~63MB)", "es_ES-davefx-medium"),
+            ("Mls 10246 (low, ~63MB)", "es_ES-mls_10246-low"),
+            ("Mls 9972 (low, ~63MB)", "es_ES-mls_9972-low"),
+            ("Sharvard (medium, ~77MB)", "es_ES-sharvard-medium"),
+        ],
+    ),
+    (
+        "Swahili",
+        [
+            ("Lanfrica (medium, ~63MB)", "sw_CD-lanfrica-medium"),
+        ],
+    ),
+    (
+        "Swedish",
+        [
+            ("Alma (medium, ~63MB)", "sv_SE-alma-medium"),
+            ("Lisa (medium, ~64MB)", "sv_SE-lisa-medium"),
+            ("NST (medium, ~63MB)", "sv_SE-nst-medium"),
+        ],
+    ),
+    (
+        "Telugu",
+        [
+            ("Maya (medium, ~63MB)", "te_IN-maya-medium"),
+            ("Padmavathi (medium, ~64MB)", "te_IN-padmavathi-medium"),
+            ("Venkatesh (medium, ~64MB)", "te_IN-venkatesh-medium"),
+        ],
+    ),
+    (
+        "Turkish",
+        [
+            ("DFKI (medium, ~63MB)", "tr_TR-dfki-medium"),
+        ],
+    ),
+    (
+        "Ukrainian",
+        [
+            ("Lada (x_low, ~21MB)", "uk_UA-lada-x_low"),
+            ("Ukrainian Tts (medium, ~77MB)", "uk_UA-ukrainian_tts-medium"),
+        ],
+    ),
+    (
+        "Urdu",
+        [
+            ("Fasih (medium, ~64MB)", "ur_PK-fasih-medium"),
+        ],
+    ),
+    (
+        "Vietnamese",
+        [
+            ("25HOURS Single (low, ~63MB)", "vi_VN-25hours_single-low"),
+            ("VAIS1000 (medium, ~63MB)", "vi_VN-vais1000-medium"),
+            ("Vivos (x_low, ~28MB)", "vi_VN-vivos-x_low"),
+        ],
+    ),
+    (
+        "Welsh",
+        [
+            ("Bu Tts (medium, ~77MB)", "cy_GB-bu_tts-medium"),
+            ("Gwryw Gogleddol (medium, ~64MB)", "cy_GB-gwryw_gogleddol-medium"),
+        ],
+    ),
+]
+
+_PIPER_CUSTOM_LANGUAGE_LABEL = "Other / any Piper model"
+_PIPER_MORE_LANGUAGES_LABEL = "More languages"
+_PIPER_BACK_LABEL = "Back"
+_PIPER_CUSTOM_MODEL_EXAMPLE = "en_US-lessac-medium"
+_PIPER_LOCAL_MODELS_LABEL = "Local downloaded models"
+_PIPER_KEEP_CURRENT_LABEL = "Keep current Piper settings"
+_PIPER_PRIMARY_LANGUAGE_LABELS = [
+    "English (US)",
+    "English (UK)",
+    "Polish",
+    "German",
+    "French",
+    "Spanish (Spain)",
+    "Italian",
+    "Portuguese (Brazil)",
+    "Ukrainian",
+]
+_PIPER_LANGUAGE_PRESET_MAP = dict(_PIPER_LANGUAGE_PRESETS)
+
+
+def _find_piper_preset_indices(model_name: str) -> tuple[int, int]:
+    normalized = str(model_name or "").strip()
+    for language_idx, (_language, voices) in enumerate(_PIPER_LANGUAGE_PRESETS):
+        for voice_idx, (_label, voice_model) in enumerate(voices):
+            if voice_model == normalized:
+                return language_idx, voice_idx
+    return 0, 0
+
+
+def _get_piper_language_choice_groups() -> tuple[list[str], list[str]]:
+    primary = [label for label in _PIPER_PRIMARY_LANGUAGE_LABELS if label in _PIPER_LANGUAGE_PRESET_MAP]
+    primary_set = set(primary)
+    more = [label for label, _voices in _PIPER_LANGUAGE_PRESETS if label not in primary_set]
+    return primary, more
+
+
+def _list_local_piper_models(config: Dict[str, Any]) -> list[tuple[str, str]]:
+    """Return local Piper models as (label, model_id) pairs."""
+    try:
+        from tools.tts_tool import _get_piper_config, _resolve_piper_models_dir, _parse_piper_model_name
+
+        models_dir = _resolve_piper_models_dir(_get_piper_config(config.get("tts", {})))
+    except Exception:
+        return []
+
+    if not models_dir.exists():
+        return []
+
+    local_models: list[tuple[str, str]] = []
+    for model_path in sorted(models_dir.glob("*.onnx")):
+        config_path = model_path.with_suffix(model_path.suffix + ".json")
+        if not config_path.exists():
+            continue
+        model_id = model_path.stem
+        try:
+            locale, voice, quality = _parse_piper_model_name(model_id)
+            label = f"{locale} / {voice} / {quality} (local)"
+        except ValueError:
+            label = f"{model_id} (local)"
+        local_models.append((label, model_id))
+    return local_models
+
+
+def _print_piper_binary_help(binary_path: str) -> None:
+    print_warning(f"Piper CLI is not installed or not on PATH: {binary_path}")
+    print_info("Hermes can install Piper into its active virtualenv with: python -m pip install -U piper-tts")
+    if sys.platform == "darwin":
+        print_info("You can also install Piper CLI manually with Homebrew or an official release bundle.")
+    elif sys.platform == "win32":
+        print_info("You can also install Piper CLI manually and ensure piper.exe is available on PATH.")
+    else:
+        print_info("You can also install Piper CLI manually with your package manager or an official release bundle.")
+
+
+def _install_piper_cli() -> bool:
+    """Install Piper CLI into the active Hermes Python environment."""
+    import subprocess
+    import sys
+
+    print()
+    print_info("Installing Piper CLI into the active Hermes environment...")
+    print()
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-U", "piper-tts", "--quiet"],
+            check=True,
+            timeout=300,
+        )
+        print_success("piper-tts installed successfully")
+        return True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        print_error(f"Failed to install piper-tts: {e}")
+        print_info("Try manually: python -m pip install -U piper-tts")
+        return False
+
+
+def _download_piper_model_during_setup(config: Dict[str, Any]) -> tuple[bool, Optional[str]]:
+    try:
+        from tools.tts_tool import _get_piper_config, _resolve_piper_model_paths
+
+        model_path, _config_path, model_name, _models_dir = _resolve_piper_model_paths(
+            _get_piper_config(config.get("tts", {})),
+            allow_download=True,
+        )
+        chosen = model_name or model_path.name
+        print_success(f"Piper voice ready: {chosen}")
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _check_piper_status(config: Dict[str, Any]) -> tuple[bool, Optional[str]]:
+    """Return whether Piper is configured well enough to run."""
+    try:
+        from tools.tts_tool import _get_piper_config, _resolve_piper_binary, _resolve_piper_model_paths
+
+        piper_config = _get_piper_config(config.get("tts", {}))
+        _resolve_piper_binary(piper_config)
+        model_path_raw = str(piper_config.get("model_path") or "").strip()
+        if model_path_raw:
+            _resolve_piper_model_paths(piper_config, allow_download=False)
+        else:
+            model_name = str(piper_config.get("model") or "").strip()
+            if not model_name:
+                return False, "set a Piper voice or model_path"
+            _resolve_piper_model_paths(piper_config, allow_download=False)
+        return True, None
+    except FileNotFoundError:
+        return False, "Piper binary not found"
+    except ValueError as exc:
+        message = str(exc)
+        if "not downloaded yet" in message:
+            return False, "Piper model not downloaded yet"
+        return False, message
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _ensure_piper_binary_ready(piper_cfg: dict, *, prompt_for_path: bool) -> bool:
+    if prompt_for_path:
+        piper_cfg["binary_path"] = prompt("Piper binary path", str(piper_cfg.get("binary_path") or "piper"))
+
+    try:
+        from tools.tts_tool import _resolve_piper_binary
+
+        _resolve_piper_binary(piper_cfg)
+        return True
+    except FileNotFoundError:
+        print()
+        _print_piper_binary_help(str(piper_cfg.get("binary_path") or "piper"))
+        print()
+        if prompt_yes_no("Install Piper CLI into the Hermes environment now?", True):
+            if not _install_piper_cli():
+                return False
+            try:
+                _resolve_piper_binary(piper_cfg)
+                return True
+            except FileNotFoundError:
+                print_warning("Piper CLI still is not available after installation.")
+                print_info("Set an explicit Piper binary path or re-run setup after activating the updated environment.")
+                return False
+        return False
+
+
+def _configure_piper_settings(config: dict) -> bool:
+    """Interactive Piper configuration flow."""
+    tts_cfg = config.setdefault("tts", {})
+    piper_cfg = dict(tts_cfg.get("piper") or {})
+
+    print()
+    print_info("Piper is a local/offline TTS provider with local voice models.")
+    print_info("Install the Piper CLI first, then let Hermes manage the voice model.")
+    print_info("Voice models are local assets and average around ~100MB, with lighter voices around ~25-70MB and some higher-quality ones around ~130MB.")
+    print()
+
+    has_existing_model = bool(str(piper_cfg.get("model") or "").strip() or str(piper_cfg.get("model_path") or "").strip())
+    binary_ready = False
+    if has_existing_model:
+        binary_ready = _ensure_piper_binary_ready(piper_cfg, prompt_for_path=False)
+    if not binary_ready:
+        if not _ensure_piper_binary_ready(piper_cfg, prompt_for_path=True):
+            return False
+
+    while True:
+        local_models = _list_local_piper_models(config)
+        mode_choices = ["Preset language and voice"]
+        if local_models:
+            mode_choices.append(_PIPER_LOCAL_MODELS_LABEL)
+        mode_choices.extend(
+            [
+                "Local model path (manual/custom)",
+                "Advanced settings",
+                _PIPER_KEEP_CURRENT_LABEL,
+            ]
+        )
+        has_manual_model = bool(str(piper_cfg.get("model_path") or "").strip())
+        current_model = str(piper_cfg.get("model") or "").strip()
+        if has_manual_model:
+            default_mode = mode_choices.index("Local model path (manual/custom)")
+        elif local_models and any(model_id == current_model for _label, model_id in local_models):
+            default_mode = mode_choices.index(_PIPER_LOCAL_MODELS_LABEL)
+        elif has_existing_model:
+            default_mode = mode_choices.index(_PIPER_KEEP_CURRENT_LABEL)
+        else:
+            default_mode = 0
+        mode_idx = prompt_choice("How should Hermes use Piper models?", mode_choices, default_mode)
+        selected_mode = mode_choices[mode_idx]
+
+        if selected_mode == "Advanced settings":
+            print_info("Advanced Piper settings are for binary and manual path changes.")
+            piper_cfg["binary_path"] = prompt("Piper binary path", str(piper_cfg.get("binary_path") or "piper"))
+            if not _ensure_piper_binary_ready(piper_cfg, prompt_for_path=False):
+                return False
+            continue
+        if selected_mode == "Preset language and voice":
+            current_model = str(piper_cfg.get("model") or "")
+            default_language_idx, default_voice_idx = _find_piper_preset_indices(current_model)
+            current_language_label = _PIPER_LANGUAGE_PRESETS[default_language_idx][0]
+            primary_language_choices, more_language_choices = _get_piper_language_choice_groups()
+            selected_language_label = None
+            while True:
+                language_choices = list(primary_language_choices)
+                if more_language_choices:
+                    language_choices.append(_PIPER_MORE_LANGUAGES_LABEL)
+                language_choices.extend([_PIPER_CUSTOM_LANGUAGE_LABEL, _PIPER_BACK_LABEL])
+                if current_language_label in primary_language_choices:
+                    language_default_idx = language_choices.index(current_language_label)
+                elif current_language_label in more_language_choices:
+                    language_default_idx = language_choices.index(_PIPER_MORE_LANGUAGES_LABEL)
+                else:
+                    language_default_idx = language_choices.index(_PIPER_CUSTOM_LANGUAGE_LABEL)
+                language_idx = prompt_choice(
+                    "Select Piper language:",
+                    language_choices,
+                    language_default_idx,
+                )
+                selected_language_label = language_choices[language_idx]
+                if selected_language_label == _PIPER_BACK_LABEL:
+                    break
+                if selected_language_label == _PIPER_MORE_LANGUAGES_LABEL:
+                    more_choices = list(more_language_choices) + [_PIPER_BACK_LABEL]
+                    more_default_idx = (
+                        more_choices.index(current_language_label)
+                        if current_language_label in more_language_choices
+                        else 0
+                    )
+                    more_language_idx = prompt_choice(
+                        "Select Piper language (more):",
+                        more_choices,
+                        more_default_idx,
+                    )
+                    selected_language_label = more_choices[more_language_idx]
+                    if selected_language_label == _PIPER_BACK_LABEL:
+                        continue
+                if selected_language_label == _PIPER_CUSTOM_LANGUAGE_LABEL:
+                    print_info(f"Browse available Piper voices/models: {PIPER_VOICE_CATALOG_URL}")
+                    current_model_value = str(piper_cfg.get("model") or "").strip()
+                    default_custom_model = (
+                        current_model_value
+                        if current_model_value and "_" in current_model_value and "-" in current_model_value
+                        else _PIPER_CUSTOM_MODEL_EXAMPLE
+                    )
+                    selected_model = prompt(
+                        "Piper model id",
+                        default_custom_model,
+                    ).strip()
+                else:
+                    voice_presets = _PIPER_LANGUAGE_PRESET_MAP[selected_language_label]
+                    voice_choices = [label for label, _model in voice_presets] + [_PIPER_BACK_LABEL]
+                    voice_idx = prompt_choice(
+                        f"Select Piper voice for {selected_language_label}:",
+                        voice_choices,
+                        default_voice_idx if selected_language_label == current_language_label else 0,
+                    )
+                    if voice_choices[voice_idx] == _PIPER_BACK_LABEL:
+                        continue
+                    selected_model = voice_presets[voice_idx][1]
+                piper_cfg["model"] = selected_model
+                piper_cfg["model_path"] = ""
+                piper_cfg["config_path"] = ""
+                if prompt_yes_no("Download this Piper voice now?", True):
+                    print()
+                    print_info("Downloading Piper voice files...")
+                    tts_cfg["piper"] = piper_cfg
+                    downloaded, reason = _download_piper_model_during_setup(config)
+                    if not downloaded:
+                        print_warning(f"Could not download Piper voice yet: {reason}")
+                        print_info(f"Verify the Piper model id in the official voice catalog: {_PIPER_VOICE_CATALOG_URL}")
+                        print_info("Expected format: <locale>-<voice>-<quality> (for example en_US-lessac-medium).")
+                        print_info("Hermes can try again later, but Piper will not be fully ready until the model is local.")
+                break
+            if selected_language_label == _PIPER_BACK_LABEL:
+                continue
+            break
+
+        if selected_mode == _PIPER_LOCAL_MODELS_LABEL:
+            current_model = str(piper_cfg.get("model") or "").strip()
+            local_choices = [label for label, _model_id in local_models] + [_PIPER_BACK_LABEL]
+            default_local_idx = 0
+            for idx, (_label, model_id) in enumerate(local_models):
+                if model_id == current_model:
+                    default_local_idx = idx
+                    break
+            local_choice_idx = prompt_choice(
+                "Select local Piper model:",
+                local_choices,
+                default_local_idx,
+            )
+            if local_choices[local_choice_idx] == _PIPER_BACK_LABEL:
+                continue
+            selected_model = local_models[local_choice_idx][1]
+            piper_cfg["model"] = selected_model
+            piper_cfg["model_path"] = ""
+            piper_cfg["config_path"] = ""
+            print_success(f"Using local Piper model: {selected_model}")
+            break
+
+        if selected_mode == "Local model path (manual/custom)":
+            current_model_path = str(piper_cfg.get("model_path") or "")
+            print_info("Point this to the local Piper .onnx model file, not the folder.")
+            print_info("The matching .onnx.json file should be next to it unless you set config_path manually.")
+            print_info("Example: ~/.hermes/tts/piper/en_US-lessac-medium.onnx")
+            piper_cfg["model_path"] = prompt("Piper model path", current_model_path)
+            break
+
+        print_info("Keeping current Piper model settings.")
+        break
+
+    tts_cfg["piper"] = piper_cfg
+
+    ready, reason = _check_piper_status(config)
+    if ready:
+        print_success("Piper configuration looks ready")
+    else:
+        print_warning(f"Piper saved, but needs attention: {reason}")
+    return True
 def _setup_tts_provider(config: dict):
-    """Interactive TTS provider selection with install flow for NeuTTS."""
+    """Interactive TTS provider selection with local/cloud provider flows."""
     tts_config = config.get("tts", {})
     current_provider = tts_config.get("provider", "edge")
     subscription_features = get_nous_subscription_features(config)
@@ -977,6 +1726,7 @@ def _setup_tts_provider(config: dict):
         "gemini": "Google Gemini TTS",
         "neutts": "NeuTTS",
         "kittentts": "KittenTTS",
+        "piper": "Piper",
     }
     current_label = provider_labels.get(current_provider, current_provider)
 
@@ -1001,9 +1751,10 @@ def _setup_tts_provider(config: dict):
             "Google Gemini TTS (30 prebuilt voices, prompt-controllable, needs API key)",
             "NeuTTS (local on-device, free, ~300MB model download)",
             "KittenTTS (local on-device, free, lightweight ~25-80MB ONNX)",
+            "Piper (local on-device, free, 40+ languages, 150+ voice models)",
         ]
     )
-    providers.extend(["edge", "elevenlabs", "openai", "xai", "minimax", "mistral", "gemini", "neutts", "kittentts"])
+    providers.extend(["edge", "elevenlabs", "openai", "xai", "minimax", "mistral", "gemini", "neutts", "kittentts", "piper"])
     choices.append(f"Keep current ({current_label})")
     keep_current_idx = len(choices) - 1
     idx = prompt_choice("Select TTS provider:", choices, keep_current_idx)
@@ -1096,6 +1847,10 @@ def _setup_tts_provider(config: dict):
             else:
                 print_warning("No API key provided. Falling back to Edge TTS.")
                 selected = "edge"
+    elif selected == "piper":
+        if not _configure_piper_settings(config):
+            print_info("Keeping the current TTS provider until Piper CLI is installed.")
+            return
 
     elif selected == "mistral":
         existing = get_env_value("MISTRAL_API_KEY")
