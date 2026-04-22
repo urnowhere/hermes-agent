@@ -141,17 +141,67 @@ General models lack the discipline to follow precise integration requirements �
 
 **Decision rule for writing code:** If the task requires calling 3+ existing functions from a codebase, or referencing specific file paths, constants, or patterns from an existing monolith — consider writing it directly in the orchestrator instead of delegating. Context transfer cost can exceed delegation benefit.
 
-## When to Skip Delegation Entirely
+## When to Delegate
 
-Delegate when a task:
-- Is reasoning-heavy and would flood your context with intermediate data
-- Can run in parallel with other independent tasks
-- Requires a different model than the parent session
+**Handle it yourself (no delegation) when:**
+- The task is 3 tool calls or fewer
+- You already hold all the context — transferring it to a subagent would cost more than doing it yourself
+- Two prior delegations have already failed on the same task — write it yourself at that point
+- The task requires your ongoing session state or personality (e.g. replying to the user, maintaining conversation history)
 
-Do not delegate when:
-- The task requires deep context from your current session that would be expensive to transfer
-- It's a single tool call
-- Two prior delegations have already failed on the same task — write it yourself
+**Delegate when:**
+- The task is reasoning-heavy and would flood your context with intermediate data
+- It can run in parallel with other independent tasks (batch mode)
+- It genuinely needs a different model capability — coding specialist, second opinion, vision, etc.
+- The user explicitly requests a specific model or provider
+
+## Escalation Ladder
+
+In autonomous mode (cron jobs, background tasks), never skip steps. Start cheap, escalate only with evidence. When the user is present, offer the tradeoff before escalating — it's their budget.
+
+```
+1. Handle it yourself (orchestrator)        free
+2. Budget-tier model                         default starting point for delegation
+3. Different budget model for perspective    when first result is uncertain or incomplete
+4. Standard-tier model                       when budget tier underperforms or task warrants it
+5. Coding-tier model                         mandatory for any task involving writing/modifying code
+6. Premium-tier model                        trusted second opinion, code review, architecture only
+   └── ONLY after above steps fail, or task explicitly requires it
+```
+
+**Autonomous mode rule:** Never self-select Premium without exhausting cheaper options first. The cost difference is 10–40×.
+
+**User-present rule:** Before escalating past Standard, say what you have and offer the choice: *"I could get a second opinion from a stronger model — your call."* The user may know context you don't.
+
+## Cost-Effective Patterns
+
+### Many for One
+Three Budget-tier calls ≈ one Standard-tier call in cost, but yields three independent perspectives instead of one. Use when you want diverse results or when a single model might miss edge cases.
+
+```python
+delegate_task(
+    provider="openrouter",
+    tasks=[
+        {"goal": "...", "model": "google/gemini-2.5-flash"},
+        {"goal": "...", "model": "x-ai/grok-4.1-fast"},
+        {"goal": "...", "model": "meta-llama/llama-4-maverick"},
+    ]
+)
+```
+
+### Scout Party
+Send Budget models to investigate first. Escalate to Standard or Premium only if the scouts can't crack it. If the cheap models return good results, skip the escalation entirely.
+
+```python
+# Round 1: scouts
+result = delegate_task(goal="...", model="google/gemini-2.5-flash", provider="openrouter")
+# Round 2: only if needed
+if result_is_insufficient:
+    result = delegate_task(goal="...", model="anthropic/claude-haiku-4-5", provider="openrouter")
+```
+
+### Orchestrator-Direct
+When a task requires 3+ existing functions from a codebase, specific file paths, or tight integration with patterns only you have loaded — write it yourself. Context transfer cost to a subagent often exceeds the delegation benefit. See the *Critical: Coding Tasks Need Coding Models* section for a case study.
 
 ## Cron Job Model Pinning
 
