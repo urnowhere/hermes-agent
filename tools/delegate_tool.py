@@ -356,9 +356,18 @@ def _warn_model_provider_mismatch(
     except Exception:
         return  # normalisation unavailable — skip silently
 
-    # openrouter is a meta-router; provider-prefixed models are its API
-    if norm_resolved in ("openrouter",):
-        return
+    # Aggregator providers (openrouter, opencode, vercel, etc.) accept
+    # provider-prefixed model strings as a feature — routing x-ai/... through
+    # openrouter is valid and intentional. Use the canonical registry check
+    # rather than a hardcoded list so new aggregators are covered automatically.
+    try:
+        from hermes_cli.providers import is_aggregator
+        if is_aggregator(norm_resolved):
+            return
+    except Exception:
+        # Fallback: openrouter is the most common aggregator
+        if norm_resolved in ("openrouter",):
+            return
 
     if norm_prefix and norm_resolved and norm_prefix != norm_resolved:
         logger.warning(
@@ -2027,6 +2036,9 @@ def delegate_task(
             # Warn early if a per-task model prefix is incompatible with the
             # resolved provider (e.g. model='x-ai/...' but provider='anthropic').
             if t.get("model"):
+                # creds["provider"] may be None when no provider is configured
+                # (child inherits from parent); mismatch check is skipped in
+                # that case — see _warn_model_provider_mismatch docstring.
                 _warn_model_provider_mismatch(t["model"], creds["provider"], i)
             child = _build_child_agent(
                 task_index=i, goal=t["goal"], context=t.get("context"),

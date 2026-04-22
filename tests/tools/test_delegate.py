@@ -2660,12 +2660,15 @@ class TestModelProviderMismatchWarning(unittest.TestCase):
             _warn_model_provider_mismatch("anthropic/claude-haiku-4-5", "anthropic", 0)
 
     def test_no_warning_when_openrouter_resolved(self):
-        """Any model prefix with openrouter provider should not warn (openrouter is a meta-router)."""
-        import logging
+        """Aggregator providers (openrouter, opencode, etc.) accept provider-prefixed
+        model strings as a feature — no warning should fire for them."""
         with self.assertNoLogs("tools.delegate_tool", level="WARNING"):
             _warn_model_provider_mismatch("x-ai/grok-4.1-fast", "openrouter", 0)
         with self.assertNoLogs("tools.delegate_tool", level="WARNING"):
             _warn_model_provider_mismatch("anthropic/claude-haiku-4-5", "openrouter", 0)
+        # opencode is also an aggregator in the providers registry
+        with self.assertNoLogs("tools.delegate_tool", level="WARNING"):
+            _warn_model_provider_mismatch("x-ai/grok-4.1-fast", "opencode", 0)
 
     def test_no_warning_without_slash(self):
         """Bare model name (no provider prefix) should not warn."""
