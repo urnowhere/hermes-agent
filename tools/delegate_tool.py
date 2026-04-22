@@ -321,6 +321,57 @@ def _normalize_role(r: Optional[str]) -> str:
     return "leaf"
 
 
+def _warn_model_provider_mismatch(
+    task_model: Optional[str],
+    resolved_provider: Optional[str],
+    task_index: int,
+) -> None:
+    """Emit a warning when a per-task model prefix is incompatible with the
+    resolved provider credentials.
+
+    Example mismatch: top-level provider='anthropic' (credentials resolved for
+    Anthropic's API) but per-task model='x-ai/grok-4.1-fast'.  The child will
+    call Anthropic's endpoint with a foreign model name and receive an opaque
+    404/invalid-model error.  A warning at dispatch time names the problem
+    before the subagent spins up.
+
+    OpenRouter is explicitly excluded — it's a meta-router that accepts
+    provider-prefixed model strings as a feature, so 'x-ai/...' paired with
+    provider='openrouter' is valid and intentional.
+
+    Only fires when both task_model contains a '/' prefix AND the normalized
+    prefix looks like a different provider than resolved_provider.
+    """
+    if not task_model or not resolved_provider or "/" not in task_model:
+        return
+
+    model_prefix = task_model.split("/", 1)[0].strip().lower()
+    if not model_prefix:
+        return
+
+    try:
+        from hermes_cli.model_normalize import _normalize_provider_alias
+        norm_prefix = _normalize_provider_alias(model_prefix)
+        norm_resolved = _normalize_provider_alias(resolved_provider)
+    except Exception:
+        return  # normalisation unavailable — skip silently
+
+    # openrouter is a meta-router; provider-prefixed models are its API
+    if norm_resolved in ("openrouter",):
+        return
+
+    if norm_prefix and norm_resolved and norm_prefix != norm_resolved:
+        logger.warning(
+            "delegate_task task[%d]: per-task model=%r has provider prefix %r "
+            "but credentials were resolved for provider=%r. The child agent will "
+            "call %r's endpoint with a foreign model name, which usually returns "
+            "an invalid-model error. To route tasks to different providers, set "
+            "provider='openrouter' at the top level and use provider-prefixed "
+            "model strings per task (e.g. 'anthropic/claude-haiku-4-5').",
+            task_index, task_model, model_prefix, resolved_provider, resolved_provider,
+        )
+
+
 def _get_max_concurrent_children() -> int:
     """Read delegation.max_concurrent_children from config, falling back to
     DELEGATION_MAX_CONCURRENT_CHILDREN env var, then the default (3).
@@ -1972,10 +2023,15 @@ def delegate_task(
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
+            task_model = t.get("model") or creds["model"]
+            # Warn early if a per-task model prefix is incompatible with the
+            # resolved provider (e.g. model='x-ai/...' but provider='anthropic').
+            if t.get("model"):
+                _warn_model_provider_mismatch(t["model"], creds["provider"], i)
             child = _build_child_agent(
                 task_index=i, goal=t["goal"], context=t.get("context"),
                 toolsets=t.get("toolsets") or toolsets,
-                model=t.get("model") or creds["model"],
+                model=task_model,
                 max_iterations=effective_max_iter, task_count=n_tasks, parent_agent=parent_agent,
                 override_provider=creds["provider"], override_base_url=creds["base_url"],
                 override_api_key=creds["api_key"],

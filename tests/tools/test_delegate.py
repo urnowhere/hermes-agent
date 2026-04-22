@@ -32,6 +32,7 @@ from tools.delegate_tool import (
     _strip_blocked_tools,
     _resolve_child_credential_pool,
     _resolve_delegation_credentials,
+    _warn_model_provider_mismatch,
 )
 
 
@@ -2638,6 +2639,80 @@ class TestModelProviderOverride(unittest.TestCase):
         cfg = {"model": "config/default-model"}
         creds = _resolve_delegation_credentials(cfg, parent)
         self.assertEqual(creds["model"], "config/default-model")
+
+
+class TestModelProviderMismatchWarning(unittest.TestCase):
+    """_warn_model_provider_mismatch emits a logger.warning on cross-provider
+    per-task model assignments, and stays silent for valid cases.
+    """
+
+    def test_warns_on_foreign_model_prefix(self):
+        """x-ai/... model with anthropic provider should warn."""
+        with self.assertLogs("tools.delegate_tool", level="WARNING") as cm:
+            _warn_model_provider_mismatch("x-ai/grok-4.1-fast", "anthropic", 0)
+        self.assertTrue(any("x-ai/grok-4.1-fast" in line for line in cm.output))
+        self.assertTrue(any("anthropic" in line for line in cm.output))
+
+    def test_no_warning_for_matching_prefix(self):
+        """anthropic/claude-haiku with anthropic provider should not warn."""
+        import logging
+        with self.assertNoLogs("tools.delegate_tool", level="WARNING"):
+            _warn_model_provider_mismatch("anthropic/claude-haiku-4-5", "anthropic", 0)
+
+    def test_no_warning_when_openrouter_resolved(self):
+        """Any model prefix with openrouter provider should not warn (openrouter is a meta-router)."""
+        import logging
+        with self.assertNoLogs("tools.delegate_tool", level="WARNING"):
+            _warn_model_provider_mismatch("x-ai/grok-4.1-fast", "openrouter", 0)
+        with self.assertNoLogs("tools.delegate_tool", level="WARNING"):
+            _warn_model_provider_mismatch("anthropic/claude-haiku-4-5", "openrouter", 0)
+
+    def test_no_warning_without_slash(self):
+        """Bare model name (no provider prefix) should not warn."""
+        import logging
+        with self.assertNoLogs("tools.delegate_tool", level="WARNING"):
+            _warn_model_provider_mismatch("grok-4.1-fast", "anthropic", 0)
+
+    def test_no_warning_when_task_model_none(self):
+        """None task_model should not warn."""
+        import logging
+        with self.assertNoLogs("tools.delegate_tool", level="WARNING"):
+            _warn_model_provider_mismatch(None, "anthropic", 0)
+
+    def test_no_warning_when_provider_none(self):
+        """None resolved_provider (inherit from parent) should not warn."""
+        import logging
+        with self.assertNoLogs("tools.delegate_tool", level="WARNING"):
+            _warn_model_provider_mismatch("x-ai/grok-4.1-fast", None, 0)
+
+    @patch("tools.delegate_tool._build_child_agent")
+    @patch("tools.delegate_tool._run_single_child")
+    def test_warning_fires_in_delegate_task_batch(self, mock_run, mock_build):
+        """End-to-end: mismatch warning fires during delegate_task batch dispatch."""
+        mock_run.return_value = {
+            "task_index": 0, "status": "completed",
+            "summary": "ok", "api_calls": 1, "duration_seconds": 0.1,
+        }
+        mock_build.return_value = MagicMock()
+        parent = _make_mock_parent()
+
+        fake_runtime = {
+            "provider": "anthropic",
+            "base_url": "https://api.anthropic.com/v1",
+            "api_key": "sk-ant-test",
+            "api_mode": "anthropic_messages",
+        }
+        with patch(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            return_value=fake_runtime,
+        ):
+            with self.assertLogs("tools.delegate_tool", level="WARNING") as cm:
+                delegate_task(
+                    provider="anthropic",
+                    tasks=[{"goal": "run something", "model": "x-ai/grok-4.1-fast"}],
+                    parent_agent=parent,
+                )
+        self.assertTrue(any("x-ai/grok-4.1-fast" in line for line in cm.output))
 
 
 class TestRunAgentDispatchForwarding(unittest.TestCase):
