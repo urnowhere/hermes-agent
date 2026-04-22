@@ -1547,6 +1547,7 @@ def terminal_tool(
                                 "modal_mode": config.get("modal_mode", "auto"),
                                 "docker_volumes": config.get("docker_volumes", []),
                                 "docker_mount_cwd_to_workspace": config.get("docker_mount_cwd_to_workspace", False),
+                                "docker_forward_env": config.get("docker_forward_env", []),
                             }
 
                         local_config = None
