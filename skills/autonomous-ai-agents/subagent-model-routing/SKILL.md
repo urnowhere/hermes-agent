@@ -17,6 +17,9 @@ metadata:
 >
 > If this is a standalone install without the refresh cron, treat the tier tables and model lists below as a **starting point**, not a live reference. Verify pricing against [openrouter.ai/models](https://openrouter.ai/models) before making cost-sensitive routing decisions.
 
+> **ℹ️ AGGREGATOR ASSUMPTION**
+> The routing recommendations, tier tables, and whitelist guidance in this skill assume access to an **aggregator provider** (OpenRouter or equivalent) that serves models from multiple vendors under a single API key. The `delegate_task` patch itself is **provider-agnostic** — model and provider overrides work with any configured provider. If you are running against a single native provider (Anthropic, OpenAI, etc.), the override feature works fine but the tier tables and whitelist guidance do not apply — use your provider's own model catalog instead.
+
 **Load this skill every time you use `delegate_task` and the user has not explicitly specified a model or provider.** The `delegate_task` schema description will prompt you to load it — follow that prompt. Wrong model selection silently degrades output quality or wastes cost with no error message.
 
 ## Why This Matters
