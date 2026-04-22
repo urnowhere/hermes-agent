@@ -2560,7 +2560,13 @@ DELEGATE_TASK_SCHEMA = {
         "(default 2) and can be disabled globally via "
         "delegation.orchestrator_enabled=false.\n"
         "- Each subagent gets its own terminal session (separate working directory and state).\n"
-        "- Results are always returned as an array, one entry per task."
+        "- Results are always returned as an array, one entry per task.\n"
+        "\n"
+        "MODEL SELECTION: If the user has not explicitly specified a model or provider "
+        "for this delegation, load the 'subagent-model-routing' skill before filling "
+        "in the 'model' and 'provider' parameters. That skill contains the routing "
+        "decision matrix, tier tables, and known failure modes. Using the wrong model "
+        "silently degrades output quality or wastes cost with no error."
     ),
     "parameters": {
         "type": "object",
@@ -2624,7 +2630,11 @@ DELEGATE_TASK_SCHEMA = {
                         },
                         "model": {
                             "type": "string",
-                            "description": "Per-task model override (e.g. 'anthropic/claude-opus-4-7'). Overrides the top-level model for this task only.",
+                            "description": (
+                                "Per-task model override (e.g. 'anthropic/claude-haiku-4-5'). "
+                                "Overrides the top-level model for this task only. "
+                                "See the 'subagent-model-routing' skill for selection guidance."
+                            ),
                         },
                     },
                     "required": ["goal"],
@@ -2671,25 +2681,31 @@ DELEGATE_TASK_SCHEMA = {
             "model": {
                 "type": "string",
                 "description": (
-                    "Optional model override for the subagent(s). Format: "
-                    "'<provider>/<model>' (e.g. 'anthropic/claude-opus-4-7', "
-                    "'x-ai/grok-4.20-multi-agent', 'openrouter/auto'). "
-                    "When omitted, subagents use the delegation.model from config. "
-                    "Applies to all tasks in the batch unless a per-task model is set."
+                    "Model for the subagent(s). Format: '<provider>/<model>' "
+                    "(e.g. 'anthropic/claude-haiku-4-5', 'x-ai/grok-4.1-fast', "
+                    "'openrouter/auto'). When omitted, subagents use "
+                    "delegation.model from config. Applies to all tasks in the "
+                    "batch unless a per-task model is set. "
+                    "Load the 'subagent-model-routing' skill to select the right "
+                    "model — task type, cost tier, and capability requirements all "
+                    "affect which model to use. Wrong model = silent quality "
+                    "degradation or wasted cost."
                 ),
             },
             "provider": {
                 "type": "string",
                 "description": (
-                    "Optional provider override (e.g. 'openrouter', 'anthropic', "
-                    "'nous'). Usually unneeded — provider is inferred from the "
-                    "model prefix. Set explicitly only when routing through a "
-                    "specific provider for the same model. "
-                    "NOTE: provider is resolved once per delegate_task call and "
-                    "shared across all tasks in the batch. If you need tasks on "
-                    "different providers, use provider='openrouter' at the top "
-                    "level with provider-prefixed model strings per task "
-                    "(e.g. 'anthropic/claude-haiku-4-5', 'x-ai/grok-4.1-fast')."
+                    "Provider for the subagent(s) (e.g. 'openrouter', "
+                    "'anthropic'). Usually omitted — provider is inferred from "
+                    "the model prefix and parent config. Set explicitly when "
+                    "routing through a specific provider. "
+                    "IMPORTANT: provider is resolved once per call and shared "
+                    "across all tasks in the batch — you cannot mix native "
+                    "providers in one batch. For mixed-provider batches, use "
+                    "provider='openrouter' with provider-prefixed model strings "
+                    "per task (e.g. 'anthropic/claude-haiku-4-5' and "
+                    "'x-ai/grok-4.1-fast' in the same batch). "
+                    "See the 'subagent-model-routing' skill for routing rules."
                 ),
             },
         },
