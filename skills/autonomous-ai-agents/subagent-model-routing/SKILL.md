@@ -1,24 +1,20 @@
 ---
 name: subagent-model-routing
-description: Model selection guide for delegate_task and cron jobs. Load this skill whenever you use delegate_task and the user has not explicitly specified a model — it provides the routing decision matrix, tier tables, provider rules, and known failure modes.
-version: 1.0.0
-author: thesunofdog
-license: MIT
-metadata:
-  hermes:
-    tags: [delegation, models, routing, cost, orchestration]
-    related_skills: [multi-agent-orchestration, claude-code, codex, hermes-agent]
+description: Model selection guide for delegate_task and cron jobs — use openrouter/auto with a named whitelist. Updated with live OpenRouter pricing.
+version: 2
+tags: [delegation, cost, models, routing, auto-router]
 ---
 
 # Subagent Model Routing
 
-> **⚠️ LIVE DATA DEPENDENCY**
-> The tier tables, whitelist membership, and pricing data in this skill are **not static** — they are maintained by an automated weekly refresh process. If you are operating in an environment where this automation is running (a Hermes Agent workspace with the OpenRouter Model Refresh cron configured), the local copy of this skill at `~/.hermes/skills/autonomous-ai-agents/subagent-model-routing/SKILL.md` will be more current than what you're reading here. Load the local skill if available.
->
-> If this is a standalone install without the refresh cron, treat the tier tables and model lists below as a **starting point**, not a live reference. Verify pricing against [openrouter.ai/models](https://openrouter.ai/models) before making cost-sensitive routing decisions.
+> **MAINTENANCE NOTICE**
+> The whitelist tables and tier pricing in this skill are maintained by an automated weekly refresh cron job.
+> **Canonical source:** `scripts/refresh_openrouter_models.py` (`WHITELISTS` dict)
+> **Last updated:** 220426
+> **Staleness warning:** If today's date is more than 10 days after the "Last updated" date above, treat the whitelist tables and pricing data as a starting point — verify against live OpenRouter pricing before making high-stakes routing decisions.
+> **Changes:** Never edit whitelist/tier sections manually. When changes are approved from the weekly cron report, patch BOTH this skill AND `scripts/refresh_openrouter_models.py → WHITELISTS` atomically in the same session, then update the "Last updated" date above.
 
-> **ℹ️ AGGREGATOR ASSUMPTION**
-> The routing recommendations, tier tables, and whitelist guidance in this skill assume access to an **aggregator provider** (OpenRouter or equivalent) that serves models from multiple vendors under a single API key. The `delegate_task` patch itself is **provider-agnostic** — model and provider overrides work with any configured provider. If you are running against a single native provider (Anthropic, OpenAI, etc.), the override feature works fine but the tier tables and whitelist guidance do not apply — use your provider's own model catalog instead.
+Load this skill EVERY TIME you use delegate_task or create a cron job.      
 
 **Load this skill every time you use `delegate_task` and the user has not explicitly specified a model or provider.** The `delegate_task` schema description will prompt you to load it — follow that prompt. Wrong model selection silently degrades output quality or wastes cost with no error message.
 
@@ -223,13 +219,10 @@ For automated background tasks (email scanning, file parsing, briefings), Budget
 
 ## Model Observability
 
-> **Optional feature — requires the `model_observability` plugin.**
-> Without the plugin, `delegate_task` works exactly as before: this section does not apply and no fields are added. Install the plugin to enable ground-truth model routing data in results.
-
-When the `model_observability` plugin is installed, every `delegate_task` result includes two additional fields:
+`delegate_task` results include two fields that provide ground-truth model routing data without requiring a separate script call:
 
 - **`task_id`** — the child's unique task ID (e.g. `subagent-0-a3f9c12b`)
-- **`observability`** — a compact dict read from the model usage log at return time:
+- **`observability`** — a dict populated from the model usage log at return time:
 
 ```json
 {
@@ -244,11 +237,13 @@ When the `model_observability` plugin is installed, every `delegate_task` result
 }
 ```
 
-`auto_router_resolutions` is keyed by the **requested** model; the value is a dict of **resolved** models with call counts. `models_used` is ground truth.
+`auto_router_resolutions` is keyed by the **requested** model; the value is a dict of **resolved** models with call counts. `models_used` is ground truth — read from `~/.hermes/logs/model_usage.jsonl` by the `model_observability` plugin.
 
 **If `override_mismatches` is non-empty, proactively alert the user** — a model override was silently dropped and the task ran on the wrong model.
 
-**If `observability` is absent** (plugin not installed, or log has no entries for this task), treat it as a no-op — `delegate_task` still succeeded. Do not warn the user unless model identity was critical to the task.
+**If `observability` is absent:** both the inline field and the `model_metadata_for_task.py` fallback script depend on the same observability plugin. Without the plugin, neither method works. Note this explicitly rather than silently omitting the metadata.
+
+The `model_observability` plugin (if installed) logs every API call to `~/.hermes/logs/model_usage.jsonl`. Each entry includes `model_request` (what was sent) and `model_response` (what actually responded). Always check this log after a delegation where the model mattered — OpenRouter's auto-router may resolve `openrouter/auto` to a different model than expected.
 
 ## Mismatch Warnings
 
@@ -305,3 +300,5 @@ cronjob(
 ### Without the refresh cron
 
 If you're running without this automation, treat the tier tables in this skill as a starting point. Verify pricing against [openrouter.ai/models](https://openrouter.ai/models) before making cost-sensitive routing decisions, and update the skill manually when you notice significant changes.
+
+---

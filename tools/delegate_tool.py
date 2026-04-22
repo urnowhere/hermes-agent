@@ -52,6 +52,7 @@ def _read_observability(task_id: str) -> Dict[str, Any] | None:
     if not task_id:
         return None
     if not _MODEL_USAGE_LOG.exists():
+        logger.debug("observability log not found at %s — plugin may not be installed", _MODEL_USAGE_LOG)
         return None
     entries = []
     try:
@@ -78,6 +79,7 @@ def _load_observability_log() -> Dict[str, list]:
     N-task batch. Returns an empty dict if the log doesn't exist or can't be read.
     """
     if not _MODEL_USAGE_LOG.exists():
+        logger.debug("observability log not found at %s — plugin may not be installed", _MODEL_USAGE_LOG)
         return {}
     log_by_task: Dict[str, list] = {}
     try:
@@ -129,6 +131,8 @@ def _build_observability(entries: list) -> Dict[str, Any] | None:
     for e in entries:
         req = e.get("model_request", "")
         resp = e.get("model_response", "")
+        # match=False means confirmed mismatch per model_observability plugin contract.
+        # Default True (not a mismatch) when field is absent — plugin always sets it explicitly.
         if req.endswith("/auto") or e.get("match", True):
             continue
         req_slug = req.split("/", 1)[-1] if "/" in req else req
