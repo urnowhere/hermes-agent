@@ -183,3 +183,51 @@ tail -5 ~/.hermes/logs/model_usage.jsonl | python3 -m json.tool
 2. An OpenRouter-specific bare model name (`auto`, `openrouter/auto`) is used with a non-OpenRouter provider
 
 These are early warnings — they do not block execution. Check your logs if a per-task model call fails with an unexpected API error.
+
+## Keeping This Skill Current
+
+The tier tables and pricing data in this skill go stale as OpenRouter's catalog evolves — new models launch, pricing changes, and older models are deprecated. The recommended way to stay current is a weekly automated refresh cron job.
+
+### How it works
+
+A script (`scripts/refresh_openrouter_models.py`, included in this repo) polls the OpenRouter `/api/v1/models` endpoint weekly, diffs the live catalog against your configured whitelists, and delivers a read-only digest to the operator for review. The operator approves changes; only then does an agent update the skill and the script's whitelist dict together.
+
+**The three-component loop:**
+
+```
+scripts/refresh_openrouter_models.py   ← canonical source of truth for whitelists
+         ↓  runs weekly via cron
+   digest delivered to operator
+         ↓  operator approves
+  skill + script patched atomically    ← both updated in same session
+```
+
+### Setup
+
+1. Copy `scripts/refresh_openrouter_models.py` to `~/.hermes/scripts/`
+2. Customize the `WHITELISTS` dict and `TRACKED_PROVIDERS` set for your use case
+3. Set `OPENROUTER_API_KEY` in your environment
+4. Create the cron job (see `CRON_PROMPT_TEMPLATE` at the bottom of the script):
+
+```python
+cronjob(
+    action="create",
+    name="OpenRouter Model Refresh",
+    script="refresh_openrouter_models.py",
+    schedule="0 11 * * 0",   # every Sunday at 11 AM
+    model={"model": "openrouter/auto", "provider": "openrouter"},
+    deliver="origin",
+    prompt=CRON_PROMPT_TEMPLATE,
+)
+```
+
+### Rules
+
+- **The cron agent is read-only.** It never writes files. It reports and stops.
+- **All changes require operator approval** in a subsequent session.
+- **Updates are atomic.** When approved, patch both the script's `WHITELISTS` dict and the skill's tier tables in the same session. A partial update leaves them inconsistent.
+- **Never edit the skill's whitelist/tier sections manually.** The script is the source of truth; the skill is the mirror.
+
+### Without the refresh cron
+
+If you're running without this automation, treat the tier tables in this skill as a starting point. Verify pricing against [openrouter.ai/models](https://openrouter.ai/models) before making cost-sensitive routing decisions, and update the skill manually when you notice significant changes.
