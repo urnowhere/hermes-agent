@@ -138,8 +138,11 @@ TRACKED_PROVIDERS: set[str] = {
     "meta-llama",
 }
 
-# Price change threshold for flagging significant shifts (20% = 0.20)
-PRICE_CHANGE_THRESHOLD: float = 0.20
+# PRICE_CHANGE_THRESHOLD: reserved for a future pricing-delta feature.
+# The script currently reports a live pricing snapshot but does not compare
+# against a baseline (previous run or skill file). Implementing delta tracking
+# would require persisting previous prices to disk between runs. Not yet
+# implemented — when added, use this threshold (20%) to filter noise.
 
 # ---------------------------------------------------------------------------
 # Implementation — no customization needed below this line
@@ -166,12 +169,19 @@ def fetch_models(api_key: str, order: str | None = None) -> list[dict]:
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return data.get("data", [])
+            raw = resp.read().decode("utf-8")
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"OpenRouter API returned {e.code}: {e.reason}") from e
     except Exception as e:
         raise RuntimeError(f"Failed to fetch models: {e}") from e
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"OpenRouter returned malformed JSON (offset {e.pos}): {e.msg}\n"
+            f"Response snippet: {raw[:200]!r}"
+        ) from e
+    return data.get("data", [])
 
 
 def parse_price(pricing: dict, key: str) -> float | None:

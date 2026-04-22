@@ -2746,78 +2746,54 @@ class TestRunAgentDispatchForwarding(unittest.TestCase):
     forwards every param we depend on — model, provider, role, acp_command,
     acp_args — so future schema additions only need one change to reach all
     invocation paths.
+
+    Uses mock-based verification rather than source-text inspection so the test
+    stays stable across argument reordering, reformatting, and minor refactors.
     """
 
-    def test_dispatch_helper_forwards_model_provider_role_acp(self):
+    @patch("tools.delegate_tool.delegate_task")
+    def test_dispatch_helper_forwards_model_provider_role_acp(self, mock_delegate):
         """_dispatch_delegate_task must forward model=, provider=, role=, acp_command=, acp_args=."""
-        import re
-        from pathlib import Path
-        run_agent_path = Path(__file__).resolve().parents[2] / "run_agent.py"
-        source = run_agent_path.read_text()
+        import importlib
+        import run_agent as ra
 
-        # Find the _dispatch_delegate_task method definition
-        method_token = "def _dispatch_delegate_task("
-        method_start = source.find(method_token)
-        self.assertNotEqual(method_start, -1, "_dispatch_delegate_task not found in run_agent.py")
+        mock_delegate.return_value = {"results": [], "total_duration_seconds": 0.1}
 
-        # Find the end of the method's def signature line so we search only
-        # inside the method body.
-        colon_pos = source.find(":\n", method_start)
-        self.assertNotEqual(colon_pos, -1, "Could not find end of _dispatch_delegate_task def line")
-        method_body_start = colon_pos + 1
+        function_args = {
+            "goal": "test goal",
+            "model": "openai/gpt-5.1-codex",
+            "provider": "openrouter",
+            "role": "orchestrator",
+            "acp_command": "claude",
+            "acp_args": ["--acp", "--stdio"],
+        }
 
-        # Locate the inner dispatch call as a WORD boundary match — prevents
-        # matching the tail of "_dispatch_delegate_task(" itself.
-        # The call is aliased as `_delegate_task = delegate_task` via import,
-        # so we match `_delegate_task(` preceded by whitespace/newline.
-        inner_match = re.search(r'(?<=\s)_delegate_task\(', source[method_body_start:])
-        self.assertIsNotNone(inner_match,
-            "_delegate_task( call not found inside _dispatch_delegate_task body")
-        call_start = method_body_start + inner_match.start()
-        # Advance past the token to the opening "("
-        open_paren = method_body_start + inner_match.end() - 1  # position of "("
+        # Instantiate AIAgent without __init__ and call _dispatch_delegate_task
+        # directly — tests the real forwarding path, not source text.
+        agent = ra.AIAgent.__new__(ra.AIAgent)
+        agent._dispatch_delegate_task(function_args=function_args)
 
-        # Walk balanced parens to extract the argument block, skipping string
-        # literals to avoid false matches on parens inside default values.
-        depth = 0
-        i = open_paren
-        in_string = None
-        end = -1
-        while i < len(source):
-            ch = source[i]
-            if in_string:
-                if ch == "\\" and in_string != "'''":
-                    i += 2  # skip escaped char
-                    continue
-                if source[i:i+len(in_string)] == in_string:
-                    i += len(in_string)
-                    in_string = None
-                    continue
-            else:
-                for delim in ('"""', "'''", '"', "'"):
-                    if source[i:i+len(delim)] == delim:
-                        in_string = delim
-                        i += len(delim)
-                        break
-                else:
-                    if ch == "(":
-                        depth += 1
-                    elif ch == ")":
-                        depth -= 1
-                        if depth == 0:
-                            end = i
-                            break
-            i += 1
-        self.assertNotEqual(end, -1, "Unbalanced parens in _delegate_task( call")
+        self.assertTrue(mock_delegate.called, "_dispatch_delegate_task did not call delegate_task")
+        call_kwargs = mock_delegate.call_args.kwargs
 
-        dispatch_args = source[open_paren + 1:end]
-        required_kwargs = ("model=", "provider=", "role=", "acp_command=", "acp_args=")
-        for kw in required_kwargs:
+        required = {
+            "model": "openai/gpt-5.1-codex",
+            "provider": "openrouter",
+            "role": "orchestrator",
+            "acp_command": "claude",
+            "acp_args": ["--acp", "--stdio"],
+        }
+        for key, expected in required.items():
             self.assertIn(
-                kw, dispatch_args,
-                f"_dispatch_delegate_task is missing '{kw}' — add "
-                f"`{kw}function_args.get('{kw[:-1]}')` to keep schema params from "
+                key, call_kwargs,
+                f"_dispatch_delegate_task is missing '{key}=' — add "
+                f"`{key}=function_args.get('{key}')` to keep schema params from "
                 f"being silently dropped across all invocation paths."
+            )
+            self.assertEqual(
+                call_kwargs[key], expected,
+                f"_dispatch_delegate_task forwarded wrong value for '{key}': "
+                f"expected {expected!r}, got {call_kwargs[key]!r}"
             )
 
 
