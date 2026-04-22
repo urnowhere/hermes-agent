@@ -131,6 +131,10 @@ MAX_DEPTH = 1  # flat by default: parent (0) -> child (1); grandchild rejected u
 _MIN_SPAWN_DEPTH = 1
 _MAX_SPAWN_DEPTH_CAP = 3
 
+# Model names that are only meaningful on OpenRouter (meta-routing or
+# aggregator-specific). Used by _warn_model_provider_mismatch.
+_OPENROUTER_ONLY_MODELS: frozenset = frozenset({"auto"})
+
 
 # ---------------------------------------------------------------------------
 # Runtime state: pause flag + active subagent registry
@@ -354,20 +358,30 @@ def _warn_model_provider_mismatch(
     bare_model = task_model.strip().lower()
     if bare_model.startswith("openrouter/"):
         bare_model = bare_model[len("openrouter/"):]
-    _OPENROUTER_ONLY_MODELS = frozenset({"auto"})
     if bare_model in _OPENROUTER_ONLY_MODELS:
         try:
             from hermes_cli.model_normalize import _normalize_provider_alias
+            from hermes_cli.providers import is_aggregator
             norm_resolved = _normalize_provider_alias(resolved_provider)
+            # Aggregators (openrouter, opencode, etc.) are all valid targets
+            # for OpenRouter-only models — skip silently.
+            if is_aggregator(norm_resolved) or norm_resolved == "":
+                return
         except Exception:
+            # Alias resolution unavailable — fall back to raw string comparison.
+            # Unlike Case 1, a raw comparison is safe here: the only valid
+            # resolved provider for 'auto' is openrouter, always spelled the
+            # same way. Case 1 can't safely skip by raw comparison because
+            # provider aliases (xai vs x-ai, etc.) would produce false positives.
             norm_resolved = (resolved_provider or "").strip().lower()
-        if norm_resolved not in ("openrouter", "auto", ""):
-            logger.warning(
-                "delegate_task task[%d]: per-task model=%r is an OpenRouter-specific "
-                "model and is not valid on provider=%r. Use provider='openrouter' to "
-                "route through OpenRouter, or choose a model supported by %r.",
-                task_index, task_model, resolved_provider, resolved_provider,
-            )
+            if norm_resolved in ("openrouter", ""):
+                return
+        logger.warning(
+            "delegate_task task[%d]: per-task model=%r is an OpenRouter-specific "
+            "model and is not valid on provider=%r. Use provider='openrouter' to "
+            "route through OpenRouter, or choose a model supported by %r.",
+            task_index, task_model, resolved_provider, resolved_provider,
+        )
         return  # handled — don't fall through to prefix check
 
     # --- Case 1: Provider-prefixed model strings ---
