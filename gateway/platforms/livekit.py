@@ -42,12 +42,15 @@ except ImportError:
     rtc = None  # type: ignore[assignment]
 
 try:
-    from livekit.api import AccessToken, VideoGrants
+    from livekit.api import AccessToken, VideoGrants, LiveKitAPI
+    from livekit.protocol.room import ListParticipantsRequest
     LIVEKIT_API_AVAILABLE = True
 except ImportError:
     LIVEKIT_API_AVAILABLE = False
     AccessToken = None  # type: ignore[assignment,misc]
     VideoGrants = None  # type: ignore[assignment,misc]
+    LiveKitAPI = None  # type: ignore[assignment,misc]
+    ListParticipantsRequest = None  # type: ignore[assignment,misc]
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
@@ -63,7 +66,8 @@ logger = logging.getLogger(__name__)
 SILENCE_THRESHOLD_SECONDS = 1.5   # seconds of silence → end of utterance
 MIN_SPEECH_DURATION = 0.5         # minimum seconds to process (skip noise)
 RMS_SILENCE_FLOOR = 50            # PCM RMS below this is silence
-POLL_INTERVAL = 0.2               # silence check interval in seconds
+POLL_INTERVAL = 0.2               # silence check interval when active
+IDLE_POLL_INTERVAL = 2.0          # silence check interval when no remote participants
 
 # LiveKit audio defaults
 SAMPLE_RATE = 48000
@@ -71,6 +75,10 @@ NUM_CHANNELS = 1
 
 # Reconnection
 RECONNECT_BACKOFF = [2, 5, 10, 30, 60]
+MAX_RECONNECT_ATTEMPTS = 10       # give up after this many consecutive failures
+
+# Presence polling (when no humans in room, we stay out and poll)
+PRESENCE_POLL_INTERVAL = 30.0     # seconds between room-presence checks
 
 
 def check_livekit_requirements() -> bool:
@@ -127,6 +135,8 @@ class LiveKitAdapter(BasePlatformAdapter):
         self._local_track: Optional["rtc.LocalAudioTrack"] = None
         self._silence_task: Optional[asyncio.Task] = None
         self._connect_task: Optional[asyncio.Task] = None
+        self._presence_task: Optional[asyncio.Task] = None
+        self._graceful_leave: bool = False  # set while intentionally leaving
 
         # Per-participant audio buffers: identity -> (pcm bytearray, last_audio_time)
         self._audio_buffers: Dict[str, bytearray] = {}
@@ -178,7 +188,13 @@ class LiveKitAdapter(BasePlatformAdapter):
     # -- Connection lifecycle -----------------------------------------------
 
     async def connect(self) -> bool:
-        """Connect to LiveKit room."""
+        """Start the LiveKit adapter.
+
+        Presence-aware: if the room already has at least one remote
+        participant, join immediately. Otherwise stay out and run a
+        presence watcher that joins as soon as someone arrives. Either
+        way the adapter is "connected" from the gateway's point of view.
+        """
         if not LIVEKIT_AVAILABLE:
             logger.warning("[%s] livekit SDK not installed. Run: pip install 'hermes-agent[livekit]'", self.name)
             return False
@@ -189,6 +205,67 @@ class LiveKitAdapter(BasePlatformAdapter):
             logger.warning("[%s] LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET required", self.name)
             return False
 
+        self._running = True
+
+        # Check if anyone is in the room already. If not, don't consume a
+        # participant slot — just watch.
+        count = await self._count_remote_participants()
+        if count > 0:
+            logger.info("[%s] %d participant(s) already in '%s', joining", self.name, count, self._room_name)
+            return await self._join_room()
+
+        logger.info("[%s] Room '%s' empty, watching for participants (poll %ds)", self.name, self._room_name, int(PRESENCE_POLL_INTERVAL))
+        self._mark_connected()
+        self._presence_task = asyncio.create_task(self._presence_watch_loop())
+        return True
+
+    async def _count_remote_participants(self) -> int:
+        """Count non-local participants currently in the room via the Server API.
+
+        Returns 0 on any error (room missing, network blip, etc.) — callers
+        treat that as "nobody here, keep polling".
+        """
+        try:
+            # Server API expects http(s):// scheme; convert from ws(s)://.
+            http_url = self._url
+            if http_url.startswith("wss://"):
+                http_url = "https://" + http_url[6:]
+            elif http_url.startswith("ws://"):
+                http_url = "http://" + http_url[5:]
+            http_url = http_url.rstrip("/")
+
+            client = LiveKitAPI(url=http_url, api_key=self._api_key, api_secret=self._api_secret)
+            try:
+                resp = await client.room.list_participants(
+                    ListParticipantsRequest(room=self._room_name)
+                )
+                return len(resp.participants)
+            finally:
+                await client.aclose()
+        except Exception as e:
+            logger.debug("[%s] presence check failed: %s", self.name, e)
+            return 0
+
+    async def _presence_watch_loop(self) -> None:
+        """Poll the room; join as soon as a remote participant appears."""
+        try:
+            while self._running:
+                await asyncio.sleep(PRESENCE_POLL_INTERVAL)
+                if not self._running:
+                    return
+                if self._room is not None:
+                    # Something else joined us (manual reconnect?); stop polling.
+                    return
+                count = await self._count_remote_participants()
+                if count > 0:
+                    logger.info("[%s] Participant detected in '%s', joining", self.name, self._room_name)
+                    if await self._join_room():
+                        return  # joined — done polling
+        except asyncio.CancelledError:
+            return
+
+    async def _join_room(self) -> bool:
+        """Actually establish the LiveKit room connection and start audio I/O."""
         try:
             self._room = rtc.Room()
 
@@ -253,6 +330,14 @@ class LiveKitAdapter(BasePlatformAdapter):
         self._running = False
         self._mark_disconnected()
 
+        if self._presence_task:
+            self._presence_task.cancel()
+            try:
+                await self._presence_task
+            except asyncio.CancelledError:
+                pass
+            self._presence_task = None
+
         if self._silence_task:
             self._silence_task.cancel()
             try:
@@ -271,7 +356,11 @@ class LiveKitAdapter(BasePlatformAdapter):
         self._audio_streams.clear()
 
         if self._room:
-            await self._room.disconnect()
+            self._graceful_leave = True
+            try:
+                await self._room.disconnect()
+            finally:
+                self._graceful_leave = False
             self._room = None
 
         self._audio_source = None
@@ -317,34 +406,96 @@ class LiveKitAdapter(BasePlatformAdapter):
         self._cleanup_participant(identity)
 
     def _on_participant_disconnected(self, participant: "rtc.RemoteParticipant"):
-        """Clean up when a participant leaves the room."""
+        """Clean up when a participant leaves the room.
+
+        If we're now alone in the room, drop the connection and go back
+        to presence polling — no need to consume a participant slot while
+        nobody's here to talk to.
+        """
         identity = participant.identity
         logger.info("[%s] Participant disconnected: %s", self.name, identity)
         self._cleanup_participant(identity)
 
+        if self._room and not self._room.remote_participants:
+            logger.info("[%s] Last participant left '%s', leaving room", self.name, self._room_name)
+            asyncio.create_task(self._leave_and_watch())
+
+    async def _leave_and_watch(self) -> None:
+        """Tear down the room connection and resume presence polling."""
+        # Stop silence detection and audio streams, but keep self._running
+        # so the presence loop can resume us later.
+        if self._silence_task:
+            self._silence_task.cancel()
+            try:
+                await self._silence_task
+            except asyncio.CancelledError:
+                pass
+            self._silence_task = None
+
+        for task in self._audio_streams.values():
+            task.cancel()
+        self._audio_streams.clear()
+        self._audio_buffers.clear()
+        self._last_audio_time.clear()
+        self._speaking_participants.clear()
+
+        if self._room:
+            self._graceful_leave = True
+            try:
+                await self._room.disconnect()
+            except Exception as e:
+                logger.debug("[%s] leave error: %s", self.name, e)
+            finally:
+                self._graceful_leave = False
+            self._room = None
+        self._audio_source = None
+        self._local_track = None
+
+        if self._running and (self._presence_task is None or self._presence_task.done()):
+            self._presence_task = asyncio.create_task(self._presence_watch_loop())
+
     def _on_disconnected(self, reason: str = ""):
-        """Handle unexpected room disconnection — schedule reconnection."""
-        if not self._running:
+        """Handle unexpected room disconnection — schedule reconnection.
+
+        Graceful leaves (empty room, full teardown) set ``_graceful_leave``
+        so we don't fight with ``_leave_and_watch`` / ``disconnect``.
+        """
+        if not self._running or self._graceful_leave:
             return
         logger.warning("[%s] Disconnected from room: %s. Will reconnect.", self.name, reason)
         self._connect_task = asyncio.create_task(self._reconnect_loop())
 
     async def _reconnect_loop(self):
-        """Reconnect to LiveKit with exponential backoff."""
+        """Reconnect to LiveKit with exponential backoff.
+
+        Caps at MAX_RECONNECT_ATTEMPTS consecutive failures — beyond that the
+        adapter stays disconnected rather than spamming a misconfigured URL
+        forever. The user can restart the gateway to retry.
+        """
         backoff_idx = 0
+        attempts = 0
         while self._running:
+            if attempts >= MAX_RECONNECT_ATTEMPTS:
+                logger.error(
+                    "[%s] Giving up after %d reconnect attempts. Restart the gateway to try again.",
+                    self.name, attempts,
+                )
+                self._running = False
+                self._mark_disconnected()
+                return
             delay = RECONNECT_BACKOFF[min(backoff_idx, len(RECONNECT_BACKOFF) - 1)]
-            logger.info("[%s] Reconnecting in %ds...", self.name, delay)
+            logger.info("[%s] Reconnecting in %ds (attempt %d/%d)...", self.name, delay, attempts + 1, MAX_RECONNECT_ATTEMPTS)
             await asyncio.sleep(delay)
             if not self._running:
                 return
             try:
-                if await self.connect():
+                if await self._join_room():
                     logger.info("[%s] Reconnected successfully", self.name)
                     return
             except Exception as e:
                 logger.warning("[%s] Reconnect attempt failed: %s", self.name, e)
             backoff_idx += 1
+            attempts += 1
 
     async def _resolve_agent_name(self):
         """Ask the LLM for the agent's name, then update the display name in-place."""
@@ -425,12 +576,21 @@ class LiveKitAdapter(BasePlatformAdapter):
         decide whether they are currently speaking or silent.  When
         silence exceeds the threshold, we extract the utterance and
         send it for transcription.
+
+        Drops to a slower poll when no participants are buffered — saves
+        CPU without delaying utterance detection (a joining participant
+        will trigger ``_on_track_subscribed`` immediately, not on the
+        next loop tick).
         """
         # bytes per poll interval (how much audio one tick represents)
         bytes_per_tick = int(SAMPLE_RATE * NUM_CHANNELS * 2 * POLL_INTERVAL)
 
         try:
             while self._running:
+                # No one to listen to — sleep longer.
+                if not self._audio_buffers:
+                    await asyncio.sleep(IDLE_POLL_INTERVAL)
+                    continue
                 await asyncio.sleep(POLL_INTERVAL)
 
                 for identity in list(self._audio_buffers.keys()):
