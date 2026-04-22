@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import threading
 import time
@@ -230,6 +231,48 @@ def test_config_set_model_global_persists(monkeypatch):
     assert saved["model"]["base_url"] == "https://api.anthropic.com"
 
 
+def test_config_set_model_syncs_inference_provider_env(monkeypatch):
+    """After an explicit provider switch, HERMES_INFERENCE_PROVIDER must
+    reflect the user's choice so ambient re-resolution (credential pool
+    refresh, aux clients) picks up the new provider instead of the original
+    one persisted in config or shell env.
+
+    Regression: a TUI user switched openrouter → anthropic and the TUI kept
+    trying openrouter because the env-var-backed resolvers still saw the old
+    provider.
+    """
+    class _Agent:
+        provider = "openrouter"
+        model = "old/model"
+        base_url = ""
+        api_key = "sk-or"
+
+        def switch_model(self, **_kwargs):
+            return None
+
+    result = types.SimpleNamespace(
+        success=True,
+        new_model="claude-sonnet-4.6",
+        target_provider="anthropic",
+        api_key="sk-ant",
+        base_url="https://api.anthropic.com",
+        api_mode="anthropic_messages",
+        warning_message="",
+    )
+
+    server._sessions["sid"] = _session(agent=_Agent())
+    monkeypatch.setenv("HERMES_INFERENCE_PROVIDER", "openrouter")
+    monkeypatch.setattr("hermes_cli.model_switch.switch_model", lambda **_kwargs: result)
+    monkeypatch.setattr(server, "_restart_slash_worker", lambda session: None)
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+
+    server.handle_request(
+        {"id": "1", "method": "config.set", "params": {"session_id": "sid", "key": "model", "value": "claude-sonnet-4.6 --provider anthropic"}}
+    )
+
+    assert os.environ["HERMES_INFERENCE_PROVIDER"] == "anthropic"
+
+
 def test_config_set_personality_rejects_unknown_name(monkeypatch):
     monkeypatch.setattr(server, "_available_personalities", lambda cfg=None: {"helpful": "You are helpful."})
     resp = server.handle_request(
@@ -350,6 +393,11 @@ def test_prompt_submit_expands_context_refs(monkeypatch):
 def test_image_attach_appends_local_image(monkeypatch):
     fake_cli = types.ModuleType("cli")
     fake_cli._IMAGE_EXTENSIONS = {".png"}
+    fake_cli._detect_file_drop = lambda raw: {
+        "path": Path("/tmp/cat.png"),
+        "is_image": True,
+        "remainder": "",
+    }
     fake_cli._split_path_input = lambda raw: (raw, "")
     fake_cli._resolve_attachment_path = lambda raw: Path("/tmp/cat.png")
 
@@ -360,6 +408,31 @@ def test_image_attach_appends_local_image(monkeypatch):
 
     assert resp["result"]["attached"] is True
     assert resp["result"]["name"] == "cat.png"
+    assert len(server._sessions["sid"]["attached_images"]) == 1
+
+
+def test_image_attach_accepts_unquoted_screenshot_path_with_spaces(monkeypatch):
+    screenshot = Path("/tmp/Screenshot 2026-04-21 at 1.04.43 PM.png")
+    fake_cli = types.ModuleType("cli")
+    fake_cli._IMAGE_EXTENSIONS = {".png"}
+    fake_cli._detect_file_drop = lambda raw: {
+        "path": screenshot,
+        "is_image": True,
+        "remainder": "",
+    }
+    fake_cli._split_path_input = lambda raw: ("/tmp/Screenshot", "2026-04-21 at 1.04.43 PM.png")
+    fake_cli._resolve_attachment_path = lambda raw: None
+
+    server._sessions["sid"] = _session()
+    monkeypatch.setitem(sys.modules, "cli", fake_cli)
+
+    resp = server.handle_request(
+        {"id": "1", "method": "image.attach", "params": {"session_id": "sid", "path": str(screenshot)}}
+    )
+
+    assert resp["result"]["attached"] is True
+    assert resp["result"]["path"] == str(screenshot)
+    assert resp["result"]["remainder"] == ""
     assert len(server._sessions["sid"]["attached_images"]) == 1
 
 
@@ -1108,3 +1181,79 @@ def test_session_create_no_race_keeps_worker_alive(monkeypatch):
 
     # Cleanup
     server._sessions.pop(sid, None)
+
+
+# --------------------------------------------------------------------------
+# model.options — curated-list parity with `hermes model` and classic /model
+# --------------------------------------------------------------------------
+
+
+def test_model_options_does_not_overwrite_curated_models(monkeypatch):
+    """The TUI model.options handler must surface the same curated model
+    list as `hermes model` and the classic CLI /model picker.
+
+    Regression: earlier versions of this handler unconditionally replaced
+    each provider's curated ``models`` field with ``provider_model_ids()``
+    (live /models catalog).  That pulled in hundreds of non-agentic models
+    for providers like Nous whose /models endpoint returns image/video
+    generators, rerankers, embeddings, and TTS models alongside chat models.
+    """
+    curated_providers = [
+        {
+            "slug": "nous",
+            "name": "Nous",
+            "models": ["moonshotai/kimi-k2.5", "anthropic/claude-opus-4.7"],
+            "total_models": 30,
+            "source": "built-in",
+            "is_current": False,
+            "is_user_defined": False,
+        },
+    ]
+
+    monkeypatch.setattr(
+        server,
+        "_load_cfg",
+        lambda: {"providers": {}, "custom_providers": []},
+    )
+
+    with patch(
+        "hermes_cli.model_switch.list_authenticated_providers",
+        return_value=curated_providers,
+    ) as listing:
+        # If provider_model_ids gets called at all, the handler is still
+        # overwriting curated with live — that's the regression we're
+        # guarding against.
+        with patch("hermes_cli.models.provider_model_ids") as live_fetch:
+            resp = server._methods["model.options"](99, {"session_id": ""})
+
+    assert "result" in resp, resp
+    providers = resp["result"]["providers"]
+    nous = next((p for p in providers if p.get("slug") == "nous"), None)
+    assert nous is not None
+    assert nous["models"] == [
+        "moonshotai/kimi-k2.5",
+        "anthropic/claude-opus-4.7",
+    ]
+    assert nous["total_models"] == 30
+    # Handler must not consult the live catalog — curated is the truth.
+    live_fetch.assert_not_called()
+    # list_authenticated_providers is the single source.
+    assert listing.call_count == 1
+
+
+def test_model_options_propagates_list_exception(monkeypatch):
+    """If list_authenticated_providers itself raises, surface as an RPC
+    error rather than swallowing to a blank picker."""
+    monkeypatch.setattr(
+        server,
+        "_load_cfg",
+        lambda: {"providers": {}, "custom_providers": []},
+    )
+    with patch(
+        "hermes_cli.model_switch.list_authenticated_providers",
+        side_effect=RuntimeError("catalog blew up"),
+    ):
+        resp = server._methods["model.options"](77, {"session_id": ""})
+    assert "error" in resp
+    assert resp["error"]["code"] == 5033
+    assert "catalog blew up" in resp["error"]["message"]
