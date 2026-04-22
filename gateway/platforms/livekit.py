@@ -77,8 +77,16 @@ NUM_CHANNELS = 1
 RECONNECT_BACKOFF = [2, 5, 10, 30, 60]
 MAX_RECONNECT_ATTEMPTS = 10       # give up after this many consecutive failures
 
-# Presence polling (when no humans in room, we stay out and poll)
-PRESENCE_POLL_INTERVAL = 30.0     # seconds between room-presence checks
+# Presence polling (when no humans in room, we stay out and poll).
+# Defaults differ by deployment:
+#   - LiveKit Cloud has real API rate limits and we pay per-minute, so
+#     30s keeps headroom while still waking fast enough for normal UX.
+#   - Self-hosted LiveKit has no limits and no cost pressure, so we poll
+#     aggressively enough that the first speaker doesn't wait noticeably.
+# Override with LIVEKIT_PRESENCE_POLL_INTERVAL (seconds) in the env if
+# neither default fits.
+PRESENCE_POLL_INTERVAL_CLOUD = 30.0
+PRESENCE_POLL_INTERVAL_LOCAL = 5.0
 
 
 def check_livekit_requirements() -> bool:
@@ -137,6 +145,29 @@ class LiveKitAdapter(BasePlatformAdapter):
         self._connect_task: Optional[asyncio.Task] = None
         self._presence_task: Optional[asyncio.Task] = None
         self._graceful_leave: bool = False  # set while intentionally leaving
+
+        self._presence_poll_interval: float = self._resolve_presence_poll_interval()
+
+    def _resolve_presence_poll_interval(self) -> float:
+        """Pick the presence-poll interval: env override > cloud/local default.
+
+        LiveKit Cloud hosts on ``*.livekit.cloud``; anything else is treated
+        as a self-hosted deployment and gets the faster default.
+        """
+        override = os.getenv("LIVEKIT_PRESENCE_POLL_INTERVAL", "").strip()
+        if override:
+            try:
+                parsed = float(override)
+                if parsed > 0:
+                    logger.info("[%s] presence poll interval=%.1fs (LIVEKIT_PRESENCE_POLL_INTERVAL)", self.name, parsed)
+                    return parsed
+            except ValueError:
+                logger.warning("[%s] LIVEKIT_PRESENCE_POLL_INTERVAL=%r is not a number; using default", self.name, override)
+
+        is_cloud = ".livekit.cloud" in self._url.lower()
+        interval = PRESENCE_POLL_INTERVAL_CLOUD if is_cloud else PRESENCE_POLL_INTERVAL_LOCAL
+        logger.info("[%s] presence poll interval=%.1fs (%s default)", self.name, interval, "cloud" if is_cloud else "local")
+        return interval
 
         # Per-participant audio buffers: identity -> (pcm bytearray, last_audio_time)
         self._audio_buffers: Dict[str, bytearray] = {}
@@ -214,7 +245,7 @@ class LiveKitAdapter(BasePlatformAdapter):
             logger.info("[%s] %d participant(s) already in '%s', joining", self.name, count, self._room_name)
             return await self._join_room()
 
-        logger.info("[%s] Room '%s' empty, watching for participants (poll %ds)", self.name, self._room_name, int(PRESENCE_POLL_INTERVAL))
+        logger.info("[%s] Room '%s' empty, watching for participants (poll %.1fs)", self.name, self._room_name, self._presence_poll_interval)
         self._mark_connected()
         self._presence_task = asyncio.create_task(self._presence_watch_loop())
         return True
@@ -250,7 +281,7 @@ class LiveKitAdapter(BasePlatformAdapter):
         """Poll the room; join as soon as a remote participant appears."""
         try:
             while self._running:
-                await asyncio.sleep(PRESENCE_POLL_INTERVAL)
+                await asyncio.sleep(self._presence_poll_interval)
                 if not self._running:
                     return
                 if self._room is not None:

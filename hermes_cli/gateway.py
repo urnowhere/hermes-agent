@@ -2796,6 +2796,8 @@ _PLATFORMS = [
             {"name": "LIVEKIT_ALLOWED_USERS", "prompt": "Allowed participant identities (comma-separated, or empty)", "password": False,
              "is_allowlist": True,
              "help": "Restrict which LiveKit participants can interact with the agent."},
+            {"name": "LIVEKIT_PRESENCE_POLL_INTERVAL", "prompt": "Presence poll interval seconds (empty = auto)", "password": False,
+             "help": "Seconds between room-presence checks when no humans are in the room. Leave empty to auto-select: 30s for *.livekit.cloud, 5s for self-hosted."},
         ],
     },
 ]
