@@ -201,7 +201,10 @@ class TestIdempotencyCache:
 
 
 class TestAdapterInit:
-    def test_default_config(self):
+    def test_default_config(self, monkeypatch):
+        monkeypatch.delenv("API_SERVER_PORT", raising=False)
+        monkeypatch.delenv("API_SERVER_HOST", raising=False)
+        monkeypatch.delenv("API_SERVER_KEY", raising=False)
         config = PlatformConfig(enabled=True)
         adapter = APIServerAdapter(config)
         assert adapter._host == "127.0.0.1"
