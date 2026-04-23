@@ -12,6 +12,7 @@ from hermes_cli.webhook import (
     _save_subscriptions,
     _subscriptions_path,
     _is_webhook_enabled,
+    CorruptSubscriptionsError,
 )
 
 
@@ -139,11 +140,29 @@ class TestPersistence:
         data = json.loads(path.read_text())
         assert "persist" in data
 
-    def test_corrupted_file(self):
+    def test_corrupted_file_raises(self):
         path = _subscriptions_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("broken{{{")
+        with pytest.raises(CorruptSubscriptionsError, match="invalid JSON"):
+            _load_subscriptions()
+
+    def test_non_dict_json_raises(self):
+        path = _subscriptions_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('["a", "b"]')
+        with pytest.raises(CorruptSubscriptionsError, match="not a mapping"):
+            _load_subscriptions()
+
+    def test_missing_file_returns_empty(self):
         assert _load_subscriptions() == {}
+
+    def test_valid_file_returns_data(self):
+        path = _subscriptions_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"demo": {"url": "/hook/demo"}}')
+        data = _load_subscriptions()
+        assert data == {"demo": {"url": "/hook/demo"}}
 
 
 class TestWebhookEnabledGate:
