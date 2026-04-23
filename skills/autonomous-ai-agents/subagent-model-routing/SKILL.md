@@ -132,6 +132,19 @@ Use for code review, architecture decisions, or when you want a trusted second o
 - `openai/o3` — deep reasoning
 - `anthropic/claude-sonnet-4` — high-quality Anthropic
 
+## Adversarial Code Review: Use a Different Coding Model, Not a Reasoning Model
+
+**Adversarial value comes from different training DNA, not deeper reasoning.**
+
+Reasoning models (o3, o4-mini, grok-4.20) apply extended logical deduction — useful for math proofs, not for catching Python integration anti-patterns or abstraction violations. Code review needs coding muscle: pattern recognition trained on code, not inference chains.
+
+**Correct adversarial pairing:**
+- Implementation: `openai/gpt-5.1-codex-mini`
+- Adversarial review: `openai/gpt-5.1-codex` — same family, different capacity, different tendencies
+- Maximum divergence review: `anthropic/claude-sonnet-4` — completely different training basis from OpenAI Codex; catches what a Codex model is systematically blind to
+
+**Wrong choice for code review:** `grok-4.20`, `o3`, `o4-mini`. These are reasoning specialists; use them for architecture decisions, cost modeling, or logic proofs — not for catching bad abstractions in a codebase.
+
 ## Critical: Coding Tasks Need Coding Models
 
 **Never use general-purpose models (Gemini Flash, Grok Fast, Llama) for tasks that involve writing or modifying code.**
