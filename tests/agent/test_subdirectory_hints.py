@@ -5,7 +5,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch
 
-from agent.subdirectory_hints import SubdirectoryHintTracker
+from agent.subdirectory_hints import SubdirectoryHintTracker, _is_within_workspace
 
 
 @pytest.fixture
@@ -122,17 +122,19 @@ class TestSubdirectoryHintTracker:
         assert result is not None
         assert "Frontend rules" in result
 
-    def test_outside_working_dir_still_checked(self, tmp_path, project):
-        """Paths outside working_dir are still checked for hints."""
-        other_project = tmp_path / "other"
-        other_project.mkdir()
-        (other_project / "AGENTS.md").write_text("Other project rules")
-        tracker = SubdirectoryHintTracker(working_dir=str(project))
-        result = tracker.check_tool_call(
-            "read_file", {"path": str(other_project / "file.py")}
-        )
-        assert result is not None
-        assert "Other project rules" in result
+    def test_outside_workspace_blocked(self, tmp_path, project):
+        """Paths outside the workspace boundary must NOT load hints."""
+        # Create a directory outside the project workspace (sibling of tmp_path)
+        import tempfile
+        with tempfile.TemporaryDirectory() as other_root:
+            other_project = Path(other_root) / "other"
+            other_project.mkdir()
+            (other_project / "AGENTS.md").write_text("Other project rules")
+            tracker = SubdirectoryHintTracker(working_dir=str(project))
+            result = tracker.check_tool_call(
+                "read_file", {"path": str(other_project / "file.py")}
+            )
+            assert result is None, "Hints from outside workspace must not be loaded"
 
     def test_workdir_arg(self, project):
         """The workdir argument from terminal tool is checked."""
@@ -232,3 +234,82 @@ class TestPermissionErrorHandling:
             )
             # Result may be None (backend skipped) — the key point is no crash
             assert result is None or isinstance(result, str)
+
+
+class TestWorkspaceBoundary:
+    """Tests that hint discovery is scoped to the workspace boundary."""
+
+    def test_path_within_workspace_discovered(self, project):
+        """Paths inside the workspace load hints normally."""
+        tracker = SubdirectoryHintTracker(working_dir=str(project))
+        result = tracker.check_tool_call(
+            "read_file", {"path": str(project / "backend" / "src" / "main.py")}
+        )
+        assert result is not None
+        assert "Backend-specific" in result
+
+    def test_path_outside_workspace_blocked(self, tmp_path):
+        """Paths outside the workspace must not load hints."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "AGENTS.md").write_text("Injected instructions")
+
+        tracker = SubdirectoryHintTracker(working_dir=str(workspace))
+        result = tracker.check_tool_call(
+            "read_file", {"path": str(outside / "file.py")}
+        )
+        assert result is None
+
+    def test_ancestor_walk_stops_at_workspace_boundary(self, tmp_path):
+        """Walking up from a deep path must stop at the workspace root."""
+        workspace = tmp_path / "workspace"
+        deep = workspace / "a" / "b" / "c"
+        deep.mkdir(parents=True)
+        # Put AGENTS.md above the workspace — it must NOT be found
+        (tmp_path / "AGENTS.md").write_text("Should not be discovered")
+
+        tracker = SubdirectoryHintTracker(working_dir=str(workspace))
+        result = tracker.check_tool_call(
+            "read_file", {"path": str(deep / "file.py")}
+        )
+        assert result is None
+
+    def test_terminal_command_outside_workspace_blocked(self, tmp_path):
+        """Terminal commands with paths outside workspace must not trigger hints."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        outside = tmp_path / "external"
+        outside.mkdir()
+        (outside / "AGENTS.md").write_text("External instructions")
+
+        tracker = SubdirectoryHintTracker(working_dir=str(workspace))
+        result = tracker.check_tool_call(
+            "terminal", {"command": f"cat {outside}/file.py"}
+        )
+        assert result is None
+
+
+class TestIsWithinWorkspace:
+    """Unit tests for the _is_within_workspace helper."""
+
+    def test_same_directory(self, tmp_path):
+        assert _is_within_workspace(tmp_path, tmp_path) is True
+
+    def test_subdirectory(self, tmp_path):
+        child = tmp_path / "sub"
+        child.mkdir()
+        assert _is_within_workspace(child, tmp_path) is True
+
+    def test_outside(self, tmp_path):
+        other = tmp_path.parent / "other"
+        assert _is_within_workspace(other, tmp_path) is False
+
+    def test_prefix_attack(self, tmp_path):
+        """Ensure /foo/bar does not match /foo/barbaz."""
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        attack = tmp_path / "project-evil"
+        attack.mkdir()
+        assert _is_within_workspace(attack, workspace) is False
