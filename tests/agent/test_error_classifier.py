@@ -1040,3 +1040,107 @@ class TestSSLTransientPatterns:
         result = classify_api_error(e)
         assert result.reason == FailoverReason.timeout
         assert result.retryable is True
+
+
+# ── Test: Overloaded errors (Issue #14038) ────────────────────────────
+
+class TestOverloadedErrorClassification:
+    """Overloaded errors must classify as server-side overload, NOT rate_limit.
+
+    The key insight: overloaded errors should NOT rotate credentials because
+    the API key is valid — the server is just busy.  Before the fix,
+    messages like "temporarily overloaded, please try again later" matched
+    _RATE_LIMIT_PATTERNS ("try again in"), causing credential pool exhaustion.
+    """
+
+    def test_temporarily_overloaded_is_overloaded_not_rate_limit(self):
+        """Z.AI code 1305: 'temporarily overloaded, please try again later'.
+
+        This is the exact bug: 'try again' matches _RATE_LIMIT_PATTERNS,
+        but the overloaded check must take priority.
+        """
+        e = Exception(
+            "The service may be temporarily overloaded, please try again later"
+        )
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.overloaded
+        assert result.reason != FailoverReason.rate_limit
+        assert result.retryable is True
+        assert result.should_rotate_credential is False
+
+    def test_overloaded_plain(self):
+        """Plain 'overloaded' in message → overloaded."""
+        e = Exception("The model is overloaded right now")
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.overloaded
+        assert result.retryable is True
+        assert result.should_rotate_credential is False
+
+    def test_service_is_busy(self):
+        """'service is busy' → overloaded."""
+        e = Exception("service is busy, please wait")
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.overloaded
+        assert result.should_rotate_credential is False
+
+    def test_server_is_overloaded(self):
+        """'server is overloaded' → overloaded."""
+        e = Exception("server is overloaded with requests")
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.overloaded
+        assert result.should_rotate_credential is False
+
+    def test_overloaded_via_400_status_code(self):
+        """Some providers return overloaded as 400 — must still classify correctly."""
+        e = MockAPIError(
+            "The service may be temporarily overloaded, please try again later",
+            status_code=400,
+            body={"error": {"message": "The service may be temporarily overloaded, please try again later"}},
+        )
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.overloaded
+        assert result.should_rotate_credential is False
+
+    def test_overloaded_200_with_error_body(self):
+        """HTTP 200 with overloaded message in body (Z.AI code 1305 scenario)."""
+        class OverloadedOK(Exception):
+            status_code = 200
+            body = {
+                "error": {
+                    "code": "1305",
+                    "message": "The service may be temporarily overloaded, please try again later",
+                }
+            }
+        result = classify_api_error(OverloadedOK("temporarily overloaded"))
+        assert result.reason == FailoverReason.overloaded
+        assert result.should_rotate_credential is False
+
+    # ── Regression: rate_limit patterns must still work ──
+
+    def test_too_many_requests_still_rate_limit(self):
+        """Regression: 'too many requests' must still classify as rate_limit."""
+        e = Exception("too many requests, please slow down")
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.rate_limit
+        assert result.should_rotate_credential is True
+
+    def test_rate_limit_reached_still_rate_limit(self):
+        """Regression: 'rate limit' must still classify as rate_limit."""
+        e = Exception("rate limit reached for this model")
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.rate_limit
+        assert result.should_rotate_credential is True
+
+    def test_429_still_rate_limit(self):
+        """Regression: HTTP 429 must still classify as rate_limit."""
+        e = MockAPIError("Too Many Requests", status_code=429)
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.rate_limit
+        assert result.should_rotate_credential is True
+
+    def test_503_still_overloaded(self):
+        """Regression: HTTP 503 still classifies via status code path."""
+        e = MockAPIError("Service Unavailable", status_code=503)
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.overloaded
+        assert result.retryable is True

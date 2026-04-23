@@ -118,6 +118,17 @@ _RATE_LIMIT_PATTERNS = [
     "servicequotaexceededexception",
 ]
 
+# Patterns that indicate server-side overload (NOT a credential issue).
+# Must be checked BEFORE _RATE_LIMIT_PATTERNS because overloaded messages
+# often contain "try again" which matches rate_limit patterns.  Rotating
+# credentials is wrong here — the API key is valid, the server is just busy.
+_OVERLOADED_PATTERNS = [
+    "overloaded",
+    "temporarily overloaded",
+    "service is busy",
+    "server is overloaded",
+]
+
 # Usage-limit patterns that need disambiguation (could be billing OR rate_limit)
 _USAGE_LIMIT_PATTERNS = [
     "usage limit",
@@ -647,6 +658,12 @@ def _classify_400(
             should_fallback=True,
         )
 
+    # Overloaded patterns — server-side overload, NOT a credential issue.
+    # Must come before rate_limit check: overloaded messages often contain
+    # "try again" which would otherwise match _RATE_LIMIT_PATTERNS.
+    if any(p in error_msg for p in _OVERLOADED_PATTERNS):
+        return result_fn(FailoverReason.overloaded, retryable=True)
+
     # Some providers return rate limit / billing errors as 400 instead of 429/402.
     # Check these patterns before falling through to format_error.
     if any(p in error_msg for p in _RATE_LIMIT_PATTERNS):
@@ -781,6 +798,12 @@ def _classify_by_message(
             should_rotate_credential=True,
             should_fallback=True,
         )
+
+    # Overloaded patterns — server-side overload, NOT a credential issue.
+    # Must come before rate_limit check: overloaded messages often contain
+    # "try again" which would otherwise match _RATE_LIMIT_PATTERNS.
+    if any(p in error_msg for p in _OVERLOADED_PATTERNS):
+        return result_fn(FailoverReason.overloaded, retryable=True)
 
     # Rate limit patterns
     if any(p in error_msg for p in _RATE_LIMIT_PATTERNS):
