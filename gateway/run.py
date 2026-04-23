@@ -3245,6 +3245,17 @@ class GatewayRunner:
             if event.get_command() == "status":
                 return await self._handle_status_command(event)
 
+            # /approve and /deny must bypass the running-agent interrupt logic
+            # so they resolve the blocked approval instead of being treated as
+            # a generic interrupt.  Without this, button-press callbacks (and
+            # even typed /approve) interrupt the agent and return None, so the
+            # command never reaches _handle_approve_command.
+            _evt_cmd_raw = event.get_command()
+            if _evt_cmd_raw in ("approve", "deny"):
+                return await (self._handle_approve_command(event)
+                              if _evt_cmd_raw == "approve"
+                              else self._handle_deny_command(event))
+
             # Resolve the command once for all early-intercept checks below.
             from hermes_cli.commands import (
                 ACTIVE_SESSION_BYPASS_COMMANDS as _DEDICATED_HANDLERS,
@@ -9991,12 +10002,32 @@ class GatewayRunner:
                     f"Reply `/approve` to execute, `/approve session` to approve this pattern "
                     f"for the session, `/approve always` to approve permanently, or `/deny` to cancel."
                 )
+                # Build inline keyboard for platforms that support it (Telegram)
+                approval_metadata = dict(_status_thread_metadata or {})
+                try:
+                    if source.platform == Platform.TELEGRAM:
+                        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                        keyboard = InlineKeyboardMarkup([
+                            [
+                                InlineKeyboardButton("✅ Approve", callback_data="approve"),
+                                InlineKeyboardButton("🔄 Session", callback_data="approve session"),
+                                InlineKeyboardButton("♾️ Always", callback_data="approve always"),
+                            ],
+                            [
+                                InlineKeyboardButton("❌ Deny", callback_data="deny"),
+                            ],
+                        ])
+                        approval_metadata["reply_markup"] = keyboard
+                        logger.debug("Approval inline keyboard attached for Telegram")
+                except Exception as _kb_err:
+                    logger.debug("Could not build approval keyboard: %s", _kb_err)
+
                 try:
                     asyncio.run_coroutine_threadsafe(
                         _status_adapter.send(
                             _status_chat_id,
                             msg,
-                            metadata=_status_thread_metadata,
+                            metadata=approval_metadata,
                         ),
                         _loop_for_step,
                     ).result(timeout=15)

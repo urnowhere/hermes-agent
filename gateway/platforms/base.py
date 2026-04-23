@@ -1694,6 +1694,30 @@ class BasePlatformAdapter(ABC):
             thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
         )
         
+        # Approval/deny commands must bypass the session queue — they unblock
+        # the active agent and should be processed immediately even when a
+        # session is already running.  Without this, button-press callbacks
+        # (and even typed /approve) get queued as interrupts and never reach
+        # the approval handler in time.
+        if event.message_type == MessageType.COMMAND:
+            cmd_text = (event.text or "").strip().lstrip("/").lower()
+            cmd_name = cmd_text.split()[0] if cmd_text else ""
+            if cmd_name in ("approve", "deny"):
+                logger.debug(
+                    "[%s] Approval/deny command bypassing session queue for %s",
+                    self.name, session_key,
+                )
+                task = asyncio.create_task(
+                    self._process_message_background(event, session_key)
+                )
+                try:
+                    self._background_tasks.add(task)
+                except TypeError:
+                    return
+                if hasattr(task, "add_done_callback"):
+                    task.add_done_callback(self._background_tasks.discard)
+                return
+        
         # Check if there's already an active handler for this session
         if session_key in self._active_sessions:
             # Certain commands must bypass the active-session guard and be

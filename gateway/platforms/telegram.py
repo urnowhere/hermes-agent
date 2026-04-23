@@ -29,6 +29,7 @@ try:
         CommandHandler,
         CallbackQueryHandler,
         MessageHandler as TelegramMessageHandler,
+        CallbackQueryHandler,
         ContextTypes,
         filters,
     )
@@ -761,7 +762,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Document.ALL | filters.Sticker.ALL,
                 self._handle_media_message
             ))
-            # Handle inline keyboard button callbacks (update prompts)
+            # Inline keyboard button callbacks (approval, update prompts, etc.)
             self._app.add_handler(CallbackQueryHandler(self._handle_callback_query))
             
             # Start polling — retry initialize() for transient TLS resets
@@ -997,7 +998,8 @@ class TelegramAdapter(BasePlatformAdapter):
                 ]
             
             message_ids = []
-            thread_id = self._metadata_thread_id(metadata)
+            thread_id = metadata.get("thread_id") if metadata else None
+            reply_markup = metadata.get("reply_markup") if metadata else None
             
             try:
                 from telegram.error import NetworkError as _NetErr
@@ -1017,6 +1019,8 @@ class TelegramAdapter(BasePlatformAdapter):
             for i, chunk in enumerate(chunks):
                 should_thread = self._should_thread_reply(reply_to, i)
                 reply_to_id = int(reply_to) if should_thread else None
+                # Attach inline buttons to the first chunk only
+                chunk_reply_markup = reply_markup if i == 0 else None
                 effective_thread_id = self._message_thread_id_for_send(thread_id)
 
                 msg = None
@@ -1030,6 +1034,7 @@ class TelegramAdapter(BasePlatformAdapter):
                                 parse_mode=ParseMode.MARKDOWN_V2,
                                 reply_to_message_id=reply_to_id,
                                 message_thread_id=effective_thread_id,
+                                reply_markup=chunk_reply_markup,
                                 **self._link_preview_kwargs(),
                             )
                         except Exception as md_error:
@@ -1043,6 +1048,7 @@ class TelegramAdapter(BasePlatformAdapter):
                                     parse_mode=None,
                                     reply_to_message_id=reply_to_id,
                                     message_thread_id=effective_thread_id,
+                                    reply_markup=chunk_reply_markup,
                                     **self._link_preview_kwargs(),
                                 )
                             else:
@@ -2408,6 +2414,72 @@ class TelegramAdapter(BasePlatformAdapter):
         
         event = self._build_message_event(update.message, MessageType.COMMAND, update_id=update.update_id)
         await self.handle_message(event)
+
+    async def _handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle inline keyboard button presses (e.g. approval buttons).
+        
+        Translates the callback_data into a synthetic /approve or /deny command
+        and dispatches it through the normal message handler pipeline so the
+        gateway processes it exactly as if the user typed the command.
+        """
+        query = update.callback_query
+        if not query or not query.data:
+            return
+
+        callback_data = query.data
+        chat = query.message.chat if query.message else None
+        user = query.from_user
+
+        if not chat or not user:
+            await query.answer("Error: missing context")
+            return
+
+        # Build synthetic command text from callback_data
+        # callback_data examples: "approve", "approve session", "approve always", "deny"
+        command_text = f"/{callback_data}" if not callback_data.startswith("/") else callback_data
+
+        logger.info("[%s] Callback query from user %s: %s", self.name, user.id, command_text)
+
+        # Determine chat type
+        chat_type = "dm"
+        if ChatType and chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+            chat_type = "group"
+        elif ChatType and chat.type == ChatType.CHANNEL:
+            chat_type = "channel"
+
+        source = self.build_source(
+            chat_id=str(chat.id),
+            chat_name=chat.title or (chat.full_name if hasattr(chat, "full_name") else None),
+            chat_type=chat_type,
+            user_id=str(user.id),
+            user_name=user.full_name,
+            thread_id=str(query.message.message_thread_id) if query.message and query.message.message_thread_id else None,
+        )
+
+        event = MessageEvent(
+            text=command_text,
+            message_type=MessageType.COMMAND,
+            source=source,
+            raw_message=query,
+            message_id=str(query.message.message_id) if query.message else None,
+        )
+
+        # Dispatch through the normal handler (same path as typed commands)
+        await self.handle_message(event)
+
+        # Acknowledge the button press to remove the "loading" spinner in Telegram
+        try:
+            await query.answer()
+        except Exception as e:
+            logger.debug("[%s] Failed to answer callback query: %s", self.name, e)
+
+        # Remove the inline keyboard buttons from the original message
+        # so the user can't press them again after the action is resolved.
+        try:
+            if query.message and hasattr(query.message, 'edit_reply_markup'):
+                await query.message.edit_reply_markup(reply_markup=None)
+        except Exception as e:
+            logger.debug("[%s] Failed to remove inline keyboard: %s", self.name, e)
     
     async def _handle_location_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming location/venue pin messages."""
