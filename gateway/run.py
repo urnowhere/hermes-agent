@@ -14,6 +14,7 @@ Usage:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -3118,7 +3119,10 @@ class GatewayRunner:
             logger.debug("Ignoring message with no user_id from %s", source.platform.value)
             return None
         elif not self._is_user_authorized(source):
-            logger.warning("Unauthorized user: %s (%s) on %s", source.user_id, source.user_name, source.platform.value)
+            # Redact PII from logs — hash user_id to avoid logging phone numbers,
+            # email addresses, or other personally identifiable information.
+            _uid_hash = hashlib.sha256((source.user_id or "").encode()).hexdigest()[:12]
+            logger.warning("Unauthorized user: %s on %s", _uid_hash, source.platform.value)
             # In DMs: offer pairing code. In groups: silently ignore.
             if source.chat_type == "dm" and self._get_unauthorized_dm_behavior(source.platform) == "pair":
                 platform_name = source.platform.value if source.platform else "unknown"

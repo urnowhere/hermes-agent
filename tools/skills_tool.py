@@ -893,6 +893,17 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
 
         from agent.skill_utils import get_external_skills_dirs
 
+        # Security: Prevent path traversal via the skill name parameter
+        if ".." in Path(name).parts:
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": "Path traversal ('..') is not allowed in skill names.",
+                    "hint": "Use a simple skill name or category/name format",
+                },
+                ensure_ascii=False,
+            )
+
         # Build list of all skill directories to search
         all_dirs = []
         if SKILLS_DIR.exists():

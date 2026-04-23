@@ -164,7 +164,6 @@ class MemoryStore:
                     """,
                     (content, category, tags, self.default_trust),
                 )
-                self._conn.commit()
                 fact_id: int = cur.lastrowid  # type: ignore[assignment]
             except sqlite3.IntegrityError:
                 # Duplicate content — return existing id
@@ -173,13 +172,18 @@ class MemoryStore:
                 ).fetchone()
                 return int(row["fact_id"])
 
-            # Entity extraction and linking
+            # Entity extraction and linking — done before commit so that the
+            # fact row and its entity links are committed atomically.  A crash
+            # between the old commit and entity linking would leave orphaned
+            # facts with no entity relationships.
             for name in self._extract_entities(content):
                 entity_id = self._resolve_entity(name)
                 self._link_fact_entity(fact_id, entity_id)
 
             # Compute HRR vector after entity linking
             self._compute_hrr_vector(fact_id, content)
+
+            self._conn.commit()
             self._rebuild_bank(category)
 
             return fact_id
@@ -453,7 +457,9 @@ class MemoryStore:
         cur = self._conn.execute(
             "INSERT INTO entities (name) VALUES (?)", (name,)
         )
-        self._conn.commit()
+        # Note: commit is deferred to the caller (add_fact) for atomicity
+        # when called within a transaction. Standalone calls should commit
+        # explicitly after this returns.
         return int(cur.lastrowid)  # type: ignore[return-value]
 
     def _link_fact_entity(self, fact_id: int, entity_id: int) -> None:
@@ -465,7 +471,7 @@ class MemoryStore:
             """,
             (fact_id, entity_id),
         )
-        self._conn.commit()
+        # Note: commit is deferred to the caller (add_fact) for atomicity.
 
     def _compute_hrr_vector(self, fact_id: int, content: str) -> None:
         """Compute and store HRR vector for a fact. No-op if numpy unavailable."""

@@ -6155,11 +6155,17 @@ class HermesCLI:
                 qcmd = quick_commands[base_cmd.lstrip("/")]
                 if qcmd.get("type") == "exec":
                     import subprocess
+                    import shlex as _shlex
                     exec_cmd = qcmd.get("command", "")
                     if exec_cmd:
                         try:
+                            # Use shlex.split to avoid shell=True, which could
+                            # execute arbitrary code if the config file is
+                            # tampered with. Commands needing shell features
+                            # (pipes, globs) should be wrapped as:
+                            #   command: "bash -c 'your | pipeline'"
                             result = subprocess.run(
-                                exec_cmd, shell=True, capture_output=True,
+                                _shlex.split(exec_cmd), capture_output=True,
                                 text=True, timeout=30
                             )
                             output = result.stdout.strip() or result.stderr.strip()
