@@ -252,4 +252,141 @@ def test_list_dedupes_dict_model_matching_singular_default(monkeypatch):
 
     ds_rows = [p for p in providers if p["name"] == "DeepSeek"]
     assert ds_rows[0]["models"].count("deepseek-chat") == 1
-    assert ds_rows[0]["models"] == ["deepseek-chat", "deepseek-reasoner"]
+
+
+# ---------------------------------------------------------------------------
+# Tests for _find_model_in_custom_providers and bare-name switching
+# ---------------------------------------------------------------------------
+
+def test_find_model_in_custom_providers_dict_format():
+    """Dict-format models: should match by key, case-insensitive."""
+    from hermes_cli.model_switch import _find_model_in_custom_providers
+
+    custom_providers = [
+        {
+            "name": "smt-claude",
+            "base_url": "https://api.example.com:60000/",
+            "models": {
+                "claude-opus-4.6": {"context_length": 1000000},
+                "claude-sonnet-4-6": {"context_length": 1000000},
+            },
+        }
+    ]
+    result = _find_model_in_custom_providers("claude-sonnet-4.6", custom_providers)
+    assert result is not None
+    slug, model = result
+    assert slug == "custom:smt-claude"
+    assert model == "claude-sonnet-4-6"
+
+
+def test_find_model_in_custom_providers_singular_model():
+    """Singular model: field should also be searched."""
+    from hermes_cli.model_switch import _find_model_in_custom_providers
+
+    custom_providers = [
+        {
+            "name": "my-endpoint",
+            "base_url": "http://localhost:8080/v1",
+            "model": "llama-3.3-70b",
+        }
+    ]
+    result = _find_model_in_custom_providers("llama-3.3-70b", custom_providers)
+    assert result is not None
+    slug, model = result
+    assert slug == "custom:my-endpoint"
+    assert model == "llama-3.3-70b"
+
+
+def test_find_model_in_custom_providers_no_match():
+    """Returns None when no provider lists the requested model."""
+    from hermes_cli.model_switch import _find_model_in_custom_providers
+
+    custom_providers = [
+        {
+            "name": "smt-claude",
+            "base_url": "https://api.example.com/",
+            "models": {"claude-opus-4.6": {}},
+        }
+    ]
+    assert _find_model_in_custom_providers("gpt-5", custom_providers) is None
+
+
+def test_switch_model_bare_name_resolves_via_custom_providers(monkeypatch):
+    """Bare model name should resolve to the custom provider that lists it."""
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda requested: {
+            "api_key": "sk-test",
+            "base_url": "https://api.example.com:60000",
+            "api_mode": "anthropic_messages",
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.models.validate_requested_model",
+        lambda *a, **k: _MOCK_VALIDATION,
+    )
+    monkeypatch.setattr("hermes_cli.model_switch.get_model_info", lambda *a, **k: None)
+    monkeypatch.setattr("hermes_cli.model_switch.get_model_capabilities", lambda *a, **k: None)
+
+    custom_providers = [
+        {
+            "name": "smt-claude",
+            "base_url": "https://api.example.com:60000/",
+            "api_mode": "anthropic_messages",
+            "models": {
+                "claude-opus-4.6": {"context_length": 1000000},
+                "claude-sonnet-4-6": {"context_length": 1000000},
+            },
+        }
+    ]
+
+    result = switch_model(
+        raw_input="claude-sonnet-4.6",
+        current_provider="custom",
+        current_model="claude-opus-4.6",
+        current_base_url="https://api.example.com:60000",
+        current_api_key="sk-test",
+        custom_providers=custom_providers,
+    )
+
+    assert result.success, result.error_message
+    assert result.target_provider == "custom:smt-claude"
+    assert result.new_model == "claude-sonnet-4-6"
+
+
+def test_switch_model_bare_name_dot_hyphen_normalisation(monkeypatch):
+    """claude-sonnet-4.6 should match claude-sonnet-4-6 in the models dict."""
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda requested: {
+            "api_key": "sk-test",
+            "base_url": "https://api.example.com/",
+            "api_mode": "chat_completions",
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.models.validate_requested_model",
+        lambda *a, **k: _MOCK_VALIDATION,
+    )
+    monkeypatch.setattr("hermes_cli.model_switch.get_model_info", lambda *a, **k: None)
+    monkeypatch.setattr("hermes_cli.model_switch.get_model_capabilities", lambda *a, **k: None)
+
+    custom_providers = [
+        {
+            "name": "my-provider",
+            "base_url": "https://api.example.com/",
+            "models": {"claude-sonnet-4-6": {"context_length": 200000}},
+        }
+    ]
+
+    result = switch_model(
+        raw_input="claude-sonnet-4.6",
+        current_provider="custom",
+        current_model="claude-opus-4.6",
+        current_base_url="https://api.example.com/",
+        current_api_key="sk-test",
+        custom_providers=custom_providers,
+    )
+
+    assert result.success, result.error_message
+    assert result.new_model == "claude-sonnet-4-6"

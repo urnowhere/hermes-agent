@@ -2314,6 +2314,10 @@ def validate_requested_model(
     normalized = normalize_provider(provider)
     if normalized == "openrouter" and base_url and "openrouter.ai" not in base_url:
         normalized = "custom"
+    # Named custom providers (e.g. "custom:smt-claude") behave identically to
+    # the generic "custom" provider for validation purposes — probe the endpoint.
+    if normalized.startswith("custom:"):
+        normalized = "custom"
     requested_for_lookup = requested
     if normalized == "copilot":
         requested_for_lookup = normalize_copilot_model_id(

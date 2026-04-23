@@ -404,6 +404,51 @@ def _resolve_alias_fallback(
     return None
 
 
+def _find_model_in_custom_providers(
+    model_name: str,
+    custom_providers: list,
+) -> "tuple[str, str] | None":
+    """Search custom_providers for a provider that lists *model_name*.
+
+    Checks the ``models`` dict/list on each entry.  Returns
+    ``(provider_slug, model_name)`` for the first match, or ``None``.
+
+    Matching is case-insensitive and also normalises dots to hyphens so
+    ``claude-sonnet-4.6`` matches ``claude-sonnet-4-6`` and vice-versa.
+    """
+    from hermes_cli.providers import custom_provider_slug
+
+    def _norm(s: str) -> str:
+        return s.lower().replace(".", "-")
+
+    needle = _norm(model_name)
+
+    for entry in custom_providers:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name", "")
+        if not name:
+            continue
+        slug = custom_provider_slug(name)
+
+        models_field = entry.get("models")
+        candidates: list = []
+        if isinstance(models_field, dict):
+            candidates = list(models_field.keys())
+        elif isinstance(models_field, list):
+            candidates = [m for m in models_field if isinstance(m, str)]
+        # Also include the singular default model
+        singular = entry.get("model", "")
+        if singular and singular not in candidates:
+            candidates.append(singular)
+
+        for candidate in candidates:
+            if _norm(candidate) == needle:
+                return (slug, candidate)
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Core model-switching pipeline
 # ---------------------------------------------------------------------------
@@ -594,6 +639,20 @@ def switch_model(
                             raw_input, new_model,
                         )
 
+        # --- Step c2: Search custom_providers for a matching model name ---
+        # When the user types a bare model name (e.g. "claude-sonnet-4.6") and
+        # custom_providers are configured, scan every provider's models list for
+        # a match before falling through to the generic live-API probe.  This
+        # lets users switch models without knowing which custom provider hosts it.
+        if not resolved_alias and custom_providers and target_provider == current_provider:
+            _cp_match = _find_model_in_custom_providers(new_model, custom_providers)
+            if _cp_match is not None:
+                target_provider, new_model = _cp_match
+                logger.debug(
+                    "Model '%s' found in custom_providers, switching to %s",
+                    raw_input, target_provider,
+                )
+
         # --- Step d: Aggregator catalog search ---
         if is_aggregator(target_provider) and not resolved_alias:
             catalog = list_provider_models(target_provider)
@@ -614,7 +673,8 @@ def switch_model(
         # --- Step e: detect_provider_for_model() as last resort ---
         _base = current_base_url or ""
         is_custom = current_provider in ("custom", "local") or (
-            "localhost" in _base or "127.0.0.1" in _base
+            current_provider.startswith("custom:")
+            or "localhost" in _base or "127.0.0.1" in _base
         )
 
         if (
