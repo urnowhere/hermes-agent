@@ -52,6 +52,44 @@ class TestIndentDifference:
         assert "bar" in new
 
 
+class TestStrategyOrdering:
+    """Tests that indentation_flexible (lstrip) runs before line_trimmed (strip),
+    ensuring indentation_flexible is no longer dead code."""
+
+    def test_indentation_differs_trailing_ws_matters(self):
+        """When only leading whitespace (indentation) differs, indentation_flexible
+        should match via lstrip(), preserving trailing whitespace precision.
+        This proves indentation_flexible is reachable (not dead code)."""
+        # Content has 4-space indent; pattern has 2-space indent.
+        # Trailing whitespace is identical on both sides.
+        content = "    x = 1\n    y = 2"
+        old_string = "  x = 1\n  y = 2"
+        new_string = "  a = 10\n  b = 20"
+        new, count, strategy, err = fuzzy_find_and_replace(content, old_string, new_string)
+        assert err is None
+        assert count == 1
+        assert strategy == "indentation_flexible", (
+            f"Expected indentation_flexible to match (proving it is not dead code), "
+            f"got strategy={strategy}"
+        )
+
+    def test_both_leading_and_trailing_ws_differ(self):
+        """When both leading AND trailing whitespace differ, indentation_flexible
+        (lstrip only) cannot match, but line_trimmed (strip) should catch it."""
+        # Content has trailing spaces on each line; pattern does not.
+        # Indentation also differs.
+        content = "    x = 1   \n    y = 2   "
+        old_string = "  x = 1\n  y = 2"
+        new_string = "  a = 10\n  b = 20"
+        new, count, strategy, err = fuzzy_find_and_replace(content, old_string, new_string)
+        assert err is None
+        assert count == 1
+        assert strategy == "line_trimmed", (
+            f"Expected line_trimmed to catch the case where trailing ws also differs, "
+            f"got strategy={strategy}"
+        )
+
+
 class TestReplaceAll:
     def test_multiple_matches_without_flag_errors(self):
         content = "aaa bbb aaa"
