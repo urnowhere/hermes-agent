@@ -13,6 +13,7 @@ import re
 from typing import Dict, Optional
 import ssl
 import time
+from pathlib import Path
 
 from agent.redact import redact_sensitive_text
 
@@ -260,16 +261,38 @@ def _handle_send(args):
 
     used_home_channel = False
     if not chat_id:
+        current_chat_id = ""
+        current_thread_id = None
+        try:
+            from gateway.session_context import get_session_env
+            current_platform = get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower()
+            if current_platform == platform_name:
+                current_chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "").strip()
+                current_thread_id = get_session_env("HERMES_SESSION_THREAD_ID", "").strip() or None
+        except Exception:
+            current_platform = ""
+
+        if platform_name == "dingtalk" and media_files and current_chat_id:
+            chat_id = current_chat_id
+            thread_id = thread_id or current_thread_id
+
         home = config.get_home_channel(platform)
         if not home and platform_name == "weixin":
             wx_home = os.getenv("WEIXIN_HOME_CHANNEL", "").strip()
             if wx_home:
                 from gateway.config import HomeChannel
                 home = HomeChannel(platform=platform, chat_id=wx_home, name="Weixin Home")
-        if home:
+        if not chat_id and not home:
+            try:
+                if current_platform == platform_name and current_chat_id:
+                    chat_id = current_chat_id
+                    thread_id = thread_id or current_thread_id
+            except Exception:
+                pass
+        if not chat_id and home:
             chat_id = home.chat_id
             used_home_channel = True
-        else:
+        elif not chat_id:
             return json.dumps({
                 "error": f"No home channel set for {platform_name} to determine where to send the message. "
                 f"Either specify a channel directly with '{platform_name}:CHANNEL_NAME', "
@@ -556,11 +579,27 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             last_result = result
         return last_result
 
+    # --- DingTalk: native attachment support via adapter media sends ---
+    if platform == Platform.DINGTALK and media_files:
+        last_result = None
+        for i, chunk in enumerate(chunks):
+            is_last = (i == len(chunks) - 1)
+            result = await _send_dingtalk_via_adapter(
+                pconfig,
+                chat_id,
+                chunk,
+                media_files=media_files if is_last else [],
+            )
+            if isinstance(result, dict) and result.get("error"):
+                return result
+            last_result = result
+        return last_result
+
     # --- Non-media platforms ---
     if media_files and not message.strip():
         return {
             "error": (
-                f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal and yuanbao; "
+                f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal, dingtalk and yuanbao; "
                 f"target {platform.value} had only media attachments"
             )
         }
@@ -568,7 +607,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     if media_files:
         warning = (
             f"MEDIA attachments were omitted for {platform.value}; "
-            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal and yuanbao"
+            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, dingtalk and yuanbao"
         )
 
     last_result = None
@@ -1253,6 +1292,7 @@ async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, 
                 return _error(f"Matrix send failed: {last_result.error}")
 
         for media_path, is_voice in media_files:
+            media_path = _resolve_media_path_for_current_host(media_path)
             if not os.path.exists(media_path):
                 return _error(f"Media file not found: {media_path}")
 
@@ -1341,6 +1381,141 @@ async def _send_dingtalk(extra, chat_id, message):
         return {"success": True, "platform": "dingtalk", "chat_id": chat_id}
     except Exception as e:
         return _error(f"DingTalk send failed: {e}")
+
+
+async def _send_dingtalk_via_adapter(pconfig, chat_id, message, media_files=None):
+    """Send via the DingTalk adapter so native media uploads are preserved."""
+    try:
+        from gateway.platforms.dingtalk import DingTalkAdapter
+        import httpx
+    except ImportError:
+        return {"error": "DingTalk adapter not available."}
+
+    media_files = media_files or []
+
+    try:
+        adapter = DingTalkAdapter(pconfig)
+        adapter._http_client = httpx.AsyncClient(timeout=30.0)
+
+        # Cross-platform send_message targets do not carry an inbound message
+        # context, so seed a minimal pseudo-context for proactive media routing.
+        adapter._message_contexts[str(chat_id)] = _build_dingtalk_send_context(chat_id)
+
+        last_result = None
+        if message.strip() and not media_files:
+            last_result = await adapter.send(chat_id, message)
+            if not last_result.success:
+                return _error(f"DingTalk send failed: {last_result.error}")
+
+        for media_path, is_voice in media_files:
+            if not os.path.exists(media_path):
+                return _error(f"Media file not found: {media_path}")
+
+            ext = os.path.splitext(media_path)[1].lower()
+            if ext in _IMAGE_EXTS:
+                last_result = await adapter.send_image_file(chat_id, media_path)
+            elif ext in _VIDEO_EXTS:
+                last_result = await adapter.send_video(chat_id, media_path)
+            elif ext in _VOICE_EXTS and is_voice:
+                last_result = await adapter.send_voice(chat_id, media_path)
+            elif ext in _AUDIO_EXTS:
+                last_result = await adapter.send_voice(chat_id, media_path)
+            else:
+                last_result = await adapter.send_document(chat_id, media_path)
+
+            if not last_result.success:
+                return _error(f"DingTalk media send failed: {last_result.error}")
+
+        if last_result is None:
+            return {"error": "No deliverable text or media remained after processing MEDIA tags"}
+
+        payload = {
+            "success": True,
+            "platform": "dingtalk",
+            "chat_id": chat_id,
+            "message_id": last_result.message_id,
+        }
+        if message.strip() and media_files:
+            payload["warning"] = "Media sent; companion text was omitted for DingTalk proactive media delivery."
+        return payload
+    except Exception as e:
+        return _error(f"DingTalk send failed: {e}")
+    finally:
+        try:
+            await adapter.disconnect()
+        except Exception:
+            pass
+
+
+def _resolve_media_path_for_current_host(media_path: str) -> str:
+    """Map copied-session /home/<user>/ paths to this host's home when possible."""
+    path = Path(media_path).expanduser()
+    if path.exists():
+        return str(path)
+
+    parts = path.parts
+    if len(parts) > 3 and parts[0] == "/" and parts[1] == "home":
+        mapped = Path.home().joinpath(*parts[3:])
+        if mapped.exists():
+            return str(mapped)
+
+    return str(path)
+
+
+def _build_dingtalk_send_context(chat_id: str):
+    """Build a minimal pseudo inbound context for proactive DingTalk media routing."""
+    from gateway.session_context import get_session_env
+
+    chat_id = str(chat_id)
+    session_platform = get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower()
+    session_chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "").strip()
+    robot_code = ""
+    if session_platform == "dingtalk" and session_chat_id == chat_id:
+        robot_code = get_session_env("HERMES_SESSION_DINGTALK_ROBOT_CODE", "").strip()
+    origin = _lookup_session_origin("dingtalk", chat_id)
+    chat_type = str((origin or {}).get("chat_type") or "dm").strip().lower()
+    is_group = chat_type == "group"
+    sender_staff_id = ""
+    sender_id = ""
+    if origin:
+        sender_staff_id = str(origin.get("user_id_alt") or "").strip()
+        sender_id = str(origin.get("user_id") or "").strip()
+        if not robot_code:
+            robot_code = str(origin.get("robot_code") or "").strip()
+    return type(
+        "DingTalkSendContext",
+        (),
+        {
+            "conversation_id": chat_id if is_group else "",
+            "conversation_type": "2" if is_group else "1",
+            "sender_staff_id": sender_staff_id,
+            "sender_id": sender_id,
+            "robot_code": robot_code,
+        },
+    )()
+
+
+def _lookup_session_origin(platform_name: str, chat_id: str) -> Optional[dict]:
+    """Look up the latest session origin for a platform/chat_id pair."""
+    sessions_path = Path.home() / ".hermes" / "sessions" / "sessions.json"
+    if not sessions_path.exists():
+        return None
+    try:
+        with sessions_path.open(encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+
+    for session in data.values():
+        origin = session.get("origin") or {}
+        if origin.get("platform") != platform_name:
+            continue
+        if str(origin.get("chat_id") or "") != str(chat_id):
+            continue
+        payload = dict(origin)
+        payload["chat_type"] = session.get("chat_type") or origin.get("chat_type")
+        return payload
+    return None
 
 
 async def _send_wecom(extra, chat_id, message):
