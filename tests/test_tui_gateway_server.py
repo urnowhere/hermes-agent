@@ -273,6 +273,83 @@ def test_config_set_model_syncs_inference_provider_env(monkeypatch):
     assert os.environ["HERMES_INFERENCE_PROVIDER"] == "anthropic"
 
 
+def test_config_set_model_forwards_user_defined_provider_context(monkeypatch):
+    class _Agent:
+        provider = "openrouter"
+        model = "old/model"
+        base_url = ""
+        api_key = "sk-old"
+
+        def switch_model(self, **_kwargs):
+            return None
+
+    result = types.SimpleNamespace(
+        success=True,
+        new_model="llama3",
+        target_provider="local-ollama",
+        api_key="no-key-required",
+        base_url="http://localhost:11434/v1",
+        api_mode="chat_completions",
+        warning_message="",
+    )
+    seen = {}
+
+    def _switch_model(**kwargs):
+        seen.update(kwargs)
+        return result
+
+    server._sessions["sid"] = _session(agent=_Agent())
+    monkeypatch.setattr(
+        server,
+        "_load_cfg",
+        lambda: {
+            "providers": {
+                "local-ollama": {
+                    "api": "http://localhost:11434/v1",
+                    "default_model": "llama3",
+                }
+            },
+            "custom_providers": [
+                {
+                    "name": "Remote Cloud",
+                    "base_url": "https://example.com/v1",
+                    "model": "gpt-5.4",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr("hermes_cli.model_switch.switch_model", _switch_model)
+    monkeypatch.setattr(server, "_restart_slash_worker", lambda session: None)
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+
+    resp = server.handle_request(
+        {
+            "id": "1",
+            "method": "config.set",
+            "params": {
+                "session_id": "sid",
+                "key": "model",
+                "value": "llama3 --provider local-ollama",
+            },
+        }
+    )
+
+    assert resp["result"]["value"] == "llama3"
+    assert seen["user_providers"] == {
+        "local-ollama": {
+            "api": "http://localhost:11434/v1",
+            "default_model": "llama3",
+        }
+    }
+    assert seen["custom_providers"] == [
+        {
+            "name": "Remote Cloud",
+            "base_url": "https://example.com/v1",
+            "model": "gpt-5.4",
+        }
+    ]
+
+
 def test_config_set_personality_rejects_unknown_name(monkeypatch):
     monkeypatch.setattr(server, "_available_personalities", lambda cfg=None: {"helpful": "You are helpful."})
     resp = server.handle_request(
@@ -1257,3 +1334,30 @@ def test_model_options_propagates_list_exception(monkeypatch):
     assert "error" in resp
     assert resp["error"]["code"] == 5033
     assert "catalog blew up" in resp["error"]["message"]
+
+
+def test_model_options_forwards_picker_provider_allowlist(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "_load_cfg",
+        lambda: {
+            "model": {"picker_providers": ["anthropic", "custom"]},
+            "providers": {},
+            "custom_providers": [],
+        },
+    )
+
+    captured = {}
+
+    def _fake_list_authenticated_providers(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    with patch(
+        "hermes_cli.model_switch.list_authenticated_providers",
+        _fake_list_authenticated_providers,
+    ):
+        resp = server._methods["model.options"](101, {"session_id": ""})
+
+    assert "result" in resp, resp
+    assert captured["picker_providers"] == ["anthropic", "custom"]

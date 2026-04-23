@@ -598,6 +598,49 @@ def test_cmd_model_forwards_nous_login_tls_options(monkeypatch):
     }
 
 
+def test_cli_model_picker_forwards_picker_provider_allowlist(monkeypatch):
+    cli = _import_cli()
+    shell = cli.HermesCLI(model="gpt-5", compact=True, max_turns=1)
+    shell.model = "gpt-5"
+    shell.provider = "openrouter"
+
+    captured = {}
+
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {
+            "model": {
+                "default": "gpt-5",
+                "provider": "openrouter",
+                "picker_providers": ["anthropic", "custom"],
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.config.get_compatible_custom_providers",
+        lambda cfg: [],
+    )
+
+    def _fake_list_authenticated_providers(**kwargs):
+        captured.update(kwargs)
+        return [{"slug": "anthropic", "name": "Anthropic", "models": []}]
+
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.list_authenticated_providers",
+        _fake_list_authenticated_providers,
+    )
+    monkeypatch.setattr(
+        shell,
+        "_open_model_picker",
+        lambda *args, **kwargs: captured.setdefault("opened", (args, kwargs)),
+    )
+
+    shell._handle_model_switch("/model")
+
+    assert captured["picker_providers"] == ["anthropic", "custom"]
+    assert "opened" in captured
+
+
 # ---------------------------------------------------------------------------
 # _auto_provider_name — unit tests
 # ---------------------------------------------------------------------------

@@ -514,6 +514,10 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
         current_base_url = str(runtime.get("base_url", "") or "")
         current_api_key = str(runtime.get("api_key", "") or "")
 
+    cfg = _load_cfg()
+    user_providers = cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {}
+    custom_providers = cfg.get("custom_providers") if isinstance(cfg.get("custom_providers"), list) else []
+
     result = switch_model(
         raw_input=model_input,
         current_provider=current_provider,
@@ -522,6 +526,8 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
         current_api_key=current_api_key,
         is_global=persist_global,
         explicit_provider=explicit_provider,
+        user_providers=user_providers,
+        custom_providers=custom_providers,
     )
     if not result.success:
         raise ValueError(result.error_message or "model switch failed")
@@ -2557,8 +2563,14 @@ def _(rid, params: dict) -> dict:
         session = _sessions.get(params.get("session_id", ""))
         agent = session.get("agent") if session else None
         cfg = _load_cfg()
+        model_cfg = cfg.get("model")
         current_provider = getattr(agent, "provider", "") or ""
         current_model = getattr(agent, "model", "") or _resolve_model()
+        picker_providers = None
+        if isinstance(model_cfg, dict):
+            raw_picker_providers = model_cfg.get("picker_providers")
+            if isinstance(raw_picker_providers, list):
+                picker_providers = raw_picker_providers
         # list_authenticated_providers already populates each provider's
         # "models" with the curated list (same source as `hermes model` and
         # classic CLI's /model picker). Do NOT overwrite with live
@@ -2569,6 +2581,7 @@ def _(rid, params: dict) -> dict:
             current_provider=current_provider,
             user_providers=cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {},
             custom_providers=cfg.get("custom_providers") if isinstance(cfg.get("custom_providers"), list) else [],
+            picker_providers=picker_providers,
             max_models=50,
         )
         return _ok(rid, {"providers": providers, "model": current_model, "provider": current_provider})

@@ -785,6 +785,7 @@ def list_authenticated_providers(
     user_providers: dict = None,
     custom_providers: list | None = None,
     max_models: int = 8,
+    picker_providers: list[str] | None = None,
 ) -> List[dict]:
     """Detect which providers have credentials and list their curated models.
 
@@ -1183,6 +1184,36 @@ def list_authenticated_providers(
                 "api_url": grp["api_url"],
             })
             seen_slugs.add(slug.lower())
+
+    if isinstance(picker_providers, list):
+        allowed_families = {
+            str(provider).strip().lower()
+            for provider in picker_providers
+            if isinstance(provider, str) and provider.strip()
+        }
+    else:
+        allowed_families = set()
+
+    if allowed_families:
+        known_families = {
+            "custom"
+            if row.get("is_user_defined")
+            else str(row.get("slug", "")).strip().lower()
+            for row in results
+        }
+        allowed_families &= known_families
+
+    if allowed_families:
+        results = [
+            row
+            for row in results
+            if (
+                "custom"
+                if row.get("is_user_defined")
+                else str(row.get("slug", "")).strip().lower()
+            )
+            in allowed_families
+        ]
 
     # Sort: current provider first, then by model count descending
     results.sort(key=lambda r: (not r["is_current"], -r["total_models"]))
