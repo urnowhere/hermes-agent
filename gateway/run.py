@@ -1529,6 +1529,10 @@ class GatewayRunner:
             return
         merge_pending_message_event(adapter._pending_messages, session_key, event)
 
+    def busy_input_mode(self) -> str:
+        """Return the current active busy-input mode for gateway sessions."""
+        return self._busy_input_mode
+
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
         # --- Draining case (gateway restarting/stopping) ---
         if self._draining:
@@ -1552,16 +1556,34 @@ class GatewayRunner:
             return True
 
         # --- Normal busy case (agent actively running a task) ---
-        # The user sent a message while the agent is working.  Interrupt the
-        # agent immediately so it stops the current tool-calling loop and
-        # processes the new message.  The pending message is stored in the
-        # adapter so the base adapter picks it up once the interrupted run
-        # returns.  A brief ack tells the user what's happening (debounced
-        # to avoid spam when they fire multiple messages quickly).
+        # Queue mode should preserve the current run and deliver the follow-up
+        # only after completion. Interrupt mode should stop the current run.
 
         adapter = self.adapters.get(event.source.platform)
         if not adapter:
             return False  # let default path handle it
+
+        if self._busy_input_mode == "queue":
+            from gateway.platforms.base import merge_pending_message_event
+
+            merge_pending_message_event(adapter._pending_messages, session_key, event)
+
+            _BUSY_ACK_COOLDOWN = 30
+            now = time.time()
+            last_ack = self._busy_ack_ts.get(session_key, 0)
+            if now - last_ack >= _BUSY_ACK_COOLDOWN:
+                self._busy_ack_ts[session_key] = now
+                thread_meta = {"thread_id": event.source.thread_id} if event.source.thread_id else None
+                try:
+                    await adapter._send_with_retry(
+                        chat_id=event.source.chat_id,
+                        content="⏳ Current task kept running. Your message is queued for the next turn.",
+                        reply_to=event.message_id,
+                        metadata=thread_meta,
+                    )
+                except Exception as e:
+                    logger.debug("Failed to send busy-queue ack: %s", e)
+            return True
 
         # Store the message so it's processed as the next turn after the
         # interrupt causes the current run to exit.
