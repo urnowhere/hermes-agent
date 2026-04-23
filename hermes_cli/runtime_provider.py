@@ -400,48 +400,64 @@ def _resolve_named_custom_runtime(
     explicit_base_url: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     custom_provider = _get_named_custom_provider(requested_provider)
-    if not custom_provider:
+
+    # If no named provider found but an explicit base_url is given for the
+    # "custom" provider slot, build a runtime directly from base_url.
+    # This handles ACP sessions that specify provider="custom" with a
+    # base_url (e.g. DashScope-compatible endpoint) without needing a
+    # named custom provider entry in config.yaml.
+    if not custom_provider and not explicit_base_url:
         return None
 
     base_url = (
         (explicit_base_url or "").strip()
-        or custom_provider.get("base_url", "")
+        or (custom_provider.get("base_url", "") if custom_provider else "")
     ).rstrip("/")
     if not base_url:
         return None
 
     # Check if a credential pool exists for this custom endpoint
-    pool_result = _try_resolve_from_custom_pool(base_url, "custom", custom_provider.get("api_mode"))
+    pool_result = _try_resolve_from_custom_pool(base_url, "custom", custom_provider.get("api_mode") if custom_provider else None)
     if pool_result:
         # Propagate the model name even when using pooled credentials —
         # the pool doesn't know about the custom_providers model field.
-        model_name = custom_provider.get("model")
+        model_name = custom_provider.get("model") if custom_provider else None
         if model_name:
             pool_result["model"] = model_name
         return pool_result
 
     api_key_candidates = [
         (explicit_api_key or "").strip(),
-        str(custom_provider.get("api_key", "") or "").strip(),
-        os.getenv(str(custom_provider.get("key_env", "") or "").strip(), "").strip(),
+    ]
+    if custom_provider:
+        api_key_candidates += [
+            str(custom_provider.get("api_key", "") or "").strip(),
+            os.getenv(str(custom_provider.get("key_env", "") or "").strip(), "").strip(),
+        ]
+    api_key_candidates += [
         os.getenv("OPENAI_API_KEY", "").strip(),
         os.getenv("OPENROUTER_API_KEY", "").strip(),
     ]
     api_key = next((candidate for candidate in api_key_candidates if has_usable_secret(candidate)), "")
 
-    result = {
+    result: Dict[str, Any] = {
         "provider": "custom",
-        "api_mode": custom_provider.get("api_mode")
-        or _detect_api_mode_for_url(base_url)
-        or "chat_completions",
+        "api_mode": (
+            (custom_provider.get("api_mode") if custom_provider else None)
+            or _detect_api_mode_for_url(base_url)
+            or "chat_completions"
+        ),
         "base_url": base_url,
         "api_key": api_key or "no-key-required",
-        "source": f"custom_provider:{custom_provider.get('name', requested_provider)}",
     }
-    # Propagate the model name so callers can override self.model when the
-    # provider name differs from the actual model string the API expects.
-    if custom_provider.get("model"):
-        result["model"] = custom_provider["model"]
+    if custom_provider:
+        result["source"] = f"custom_provider:{custom_provider.get('name', requested_provider)}"
+        if custom_provider.get("model"):
+            result["model"] = custom_provider["model"]
+    else:
+        result["source"] = f"explicit_base_url:{base_url}"
+        if explicit_api_key:
+            result["api_key"] = explicit_api_key
     return result
 
 

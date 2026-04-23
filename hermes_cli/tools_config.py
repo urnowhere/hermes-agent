@@ -80,12 +80,20 @@ def _get_effective_configurable_toolsets():
 
     Plugin toolsets are appended at the end so they appear after the
     built-in toolsets in the TUI checklist.
+    Duplicate keys (plugin toolsets whose key already exists in
+    CONFIGURABLE_TOOLSETS) are skipped so the built-in row is kept —
+    plugin-added tools are extensions of that toolset, not a second
+    top-level row (issue #13640).
     """
     result = list(CONFIGURABLE_TOOLSETS)
+    built_in_keys = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS}
     try:
         from hermes_cli.plugins import discover_plugins, get_plugin_toolsets
         discover_plugins()  # idempotent — ensures plugins are loaded
-        result.extend(get_plugin_toolsets())
+        plugin_toolsets = get_plugin_toolsets()
+        # Skip plugin toolsets whose key already exists in built-ins
+        plugin_toolsets = [(k, l, d) for k, l, d in plugin_toolsets if k not in built_in_keys]
+        result.extend(plugin_toolsets)
     except Exception:
         pass
     return result
