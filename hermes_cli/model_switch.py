@@ -1155,6 +1155,16 @@ def list_authenticated_providers(
                     _cp_has_creds = True
             except Exception:
                 pass
+        # Bedrock uses the AWS SDK credential chain (IAM instance roles,
+        # SSO, env vars, etc.) — not API keys or auth stores.  Detect it
+        # via has_aws_credentials() which probes boto3's credential chain.
+        if not _cp_has_creds and _cp.slug == "bedrock":
+            try:
+                from agent.bedrock_adapter import has_aws_credentials
+                if has_aws_credentials():
+                    _cp_has_creds = True
+            except Exception:
+                pass
 
         if not _cp_has_creds:
             continue

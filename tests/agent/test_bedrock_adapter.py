@@ -1230,3 +1230,133 @@ class TestEmptyTextBlockFix:
         from agent.bedrock_adapter import _convert_content_to_converse
         blocks = _convert_content_to_converse("Hello")
         assert blocks[0]["text"] == "Hello"
+
+
+# ---------------------------------------------------------------------------
+# Inference profile modality inheritance
+# ---------------------------------------------------------------------------
+
+class TestInferenceProfileModalityInheritance:
+    """Test that inference profiles inherit modalities from foundation models."""
+
+    def test_profile_inherits_image_input_from_foundation(self):
+        from agent.bedrock_adapter import discover_bedrock_models, reset_discovery_cache
+        reset_discovery_cache()
+
+        mock_client = MagicMock()
+        mock_client.list_foundation_models.return_value = {
+            "modelSummaries": [{
+                "modelId": "anthropic.claude-sonnet-4-6",
+                "modelName": "Claude Sonnet 4.6",
+                "providerName": "Anthropic",
+                "inputModalities": ["TEXT", "IMAGE"],
+                "outputModalities": ["TEXT"],
+                "responseStreamingSupported": True,
+                "modelLifecycle": {"status": "ACTIVE"},
+            }],
+        }
+        mock_client.list_inference_profiles.return_value = {
+            "inferenceProfileSummaries": [{
+                "inferenceProfileId": "us.anthropic.claude-sonnet-4-6",
+                "inferenceProfileName": "US Claude Sonnet 4.6",
+                "status": "ACTIVE",
+                "models": [{"modelArn": "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-6"}],
+            }],
+        }
+
+        with patch("agent.bedrock_adapter._get_bedrock_control_client", return_value=mock_client):
+            models = discover_bedrock_models("us-east-1")
+
+        profile = [m for m in models if m["id"] == "us.anthropic.claude-sonnet-4-6"]
+        assert len(profile) == 1
+        assert "IMAGE" in profile[0]["input_modalities"]
+        assert "TEXT" in profile[0]["input_modalities"]
+
+    def test_profile_defaults_to_text_when_no_foundation_match(self):
+        from agent.bedrock_adapter import discover_bedrock_models, reset_discovery_cache
+        reset_discovery_cache()
+
+        mock_client = MagicMock()
+        mock_client.list_foundation_models.return_value = {"modelSummaries": []}
+        mock_client.list_inference_profiles.return_value = {
+            "inferenceProfileSummaries": [{
+                "inferenceProfileId": "us.unknown.model-v1",
+                "inferenceProfileName": "Unknown Model",
+                "status": "ACTIVE",
+                "models": [],
+            }],
+        }
+
+        with patch("agent.bedrock_adapter._get_bedrock_control_client", return_value=mock_client):
+            models = discover_bedrock_models("us-east-1")
+
+        assert len(models) == 1
+        assert models[0]["input_modalities"] == ["TEXT"]
+
+
+class TestBedrockModelPickerDetection:
+    """Test that /model (no args) detects Bedrock via AWS credential chain."""
+
+    def test_bedrock_detected_when_aws_credentials_available(self):
+        """Bedrock should appear in list_authenticated_providers when AWS creds exist."""
+        from hermes_cli.model_switch import list_authenticated_providers
+
+        with patch("agent.bedrock_adapter.has_aws_credentials", return_value=True), \
+             patch("agent.models_dev.fetch_models_dev", return_value={}):
+            providers = list_authenticated_providers(current_provider="bedrock")
+
+        bedrock = next((p for p in providers if p["slug"] == "bedrock"), None)
+        assert bedrock is not None, "bedrock should appear when AWS credentials are available"
+
+    def test_bedrock_not_detected_without_aws_credentials(self):
+        """Bedrock should NOT appear when no AWS credentials exist."""
+        from hermes_cli.model_switch import list_authenticated_providers
+
+        with patch("agent.bedrock_adapter.has_aws_credentials", return_value=False), \
+             patch("agent.models_dev.fetch_models_dev", return_value={}), \
+             patch.dict(os.environ, {}, clear=True):
+            providers = list_authenticated_providers(current_provider="openrouter")
+
+        bedrock = next((p for p in providers if p["slug"] == "bedrock"), None)
+        assert bedrock is None, "bedrock should not appear without AWS credentials"
+
+
+class TestBedrockAuxiliaryClient:
+    """Test that Bedrock auxiliary client resolves correctly for context compression."""
+
+    def test_bedrock_auxiliary_client_resolves(self):
+        """resolve_provider_client('bedrock') should return an AnthropicAuxiliaryClient."""
+        from agent.auxiliary_client import resolve_provider_client, AnthropicAuxiliaryClient
+
+        mock_anthropic_client = MagicMock()
+        with patch("agent.anthropic_adapter.build_anthropic_bedrock_client", return_value=mock_anthropic_client), \
+             patch("agent.bedrock_adapter.resolve_bedrock_region", return_value="us-east-1"), \
+             patch("hermes_cli.config.load_config", return_value={"bedrock": {"region": "us-east-1"}}):
+            client, model = resolve_provider_client("bedrock")
+
+        assert client is not None, "bedrock auxiliary client should resolve"
+        assert isinstance(client, AnthropicAuxiliaryClient)
+        assert "claude-haiku" in model
+
+    def test_bedrock_auxiliary_preserves_dots_in_model_id(self):
+        """Bedrock auxiliary adapter must pass preserve_dots=True to avoid mangling model IDs."""
+        from agent.auxiliary_client import _AnthropicCompletionsAdapter
+
+        adapter = _AnthropicCompletionsAdapter(
+            MagicMock(), "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+            preserve_dots=True,
+        )
+        assert adapter._preserve_dots is True
+
+    def test_bedrock_auxiliary_fails_gracefully_without_boto3(self):
+        """resolve_provider_client('bedrock') should return (None, None) when boto3 is missing."""
+        from agent.auxiliary_client import resolve_provider_client
+
+        with patch("agent.anthropic_adapter.build_anthropic_bedrock_client",
+                   side_effect=ImportError("No module named 'anthropic'")), \
+             patch("agent.bedrock_adapter.resolve_bedrock_region", return_value="us-east-1"), \
+             patch("hermes_cli.config.load_config", return_value={"bedrock": {}}):
+            client, model = resolve_provider_client("bedrock")
+
+        assert client is None
+        assert model is None
