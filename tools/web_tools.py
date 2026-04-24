@@ -72,6 +72,15 @@ def _has_env(name: str) -> bool:
     val = os.getenv(name)
     return bool(val and val.strip())
 
+
+def _is_ddgs_available() -> bool:
+    """Return True when the ddgs package is importable."""
+    try:
+        import ddgs  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
 def _load_web_config() -> dict:
     """Load the ``web:`` section from ~/.hermes/config.yaml."""
     try:
@@ -88,7 +97,7 @@ def _get_backend() -> str:
     keys manually without running setup.
     """
     configured = (_load_web_config().get("backend") or "").lower().strip()
-    if configured in ("parallel", "firecrawl", "tavily", "exa"):
+    if configured in ("parallel", "firecrawl", "tavily", "exa", "duckduckgo"):
         return configured
 
     # Fallback for manual / legacy config — pick the highest-priority
@@ -117,6 +126,8 @@ def _is_backend_available(backend: str) -> bool:
         return check_firecrawl_api_key()
     if backend == "tavily":
         return _has_env("TAVILY_API_KEY")
+    if backend == "duckduckgo":
+        return _is_ddgs_available()
     return False
 
 # ─── Firecrawl Client ────────────────────────────────────────────────────────
@@ -871,6 +882,147 @@ def clean_base64_images(text: str) -> str:
     return cleaned_text
 
 
+# ─── DuckDuckGo Search ───────────────────────────────────────────────────────
+
+# Cooldown state — module-level so it persists across calls within a process.
+# Immediately re-trying after a rate-limit response prolongs the IP block;
+# instead we refuse new requests until the cooldown window expires.
+_DDG_COOLDOWN_RATE_LIMIT_S  = 30   # after HTTP 202 / RateLimit exception
+_DDG_COOLDOWN_BOT_CHALLENGE_S = 60  # after a detected CAPTCHA/challenge page
+_ddg_cooldown_until: float = 0.0
+
+
+def _ddg_activate_cooldown(seconds: int) -> None:
+    global _ddg_cooldown_until
+    import time
+    _ddg_cooldown_until = max(_ddg_cooldown_until, time.monotonic() + seconds)
+
+
+def _ddg_cooldown_error() -> Optional[str]:
+    """Return a human-readable error string if the cooldown is active, else None."""
+    import time
+    remaining = _ddg_cooldown_until - time.monotonic()
+    if remaining <= 0:
+        return None
+    return f"DuckDuckGo rate-limit cooldown active — retry in {int(remaining) + 1}s."
+
+
+def _ddg_is_bot_challenge(html: str) -> bool:
+    """Detect challenge/CAPTCHA pages in a 200 response body.
+
+    DuckDuckGo returns challenge HTML (not an error status) when it suspects
+    automated traffic.  We classify a response as a challenge when it lacks
+    real result anchors AND contains well-known challenge fingerprints.
+    """
+    import re
+    # A real results page contains result links with the DDG result class.
+    has_results = bool(re.search(r'class=["\']result["\']|data-testid=["\']result["\']', html, re.I))
+    if has_results:
+        return False
+    # Common bot-challenge fingerprints across DDG, Cloudflare, and generic CAPTCHAs.
+    return bool(re.search(
+        r'g-recaptcha|are you a human|id=["\']challenge-form["\']'
+        r'|name=["\']challenge["\']|cf-challenge|CAPTCHA|sck=',
+        html, re.I,
+    ))
+
+
+# Browser-identity headers that ddgs sends via its underlying primp client.
+# Exposed here so tests and future direct-HTTP fallbacks can reuse them.
+_DDG_BROWSER_HEADERS = {
+    # Identifies us as a real Chrome browser on Linux.
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;"
+        "q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    # Sec-Fetch-* headers distinguish browser navigations from XHR/fetch;
+    # their absence is one of the most reliable bot-detection signals.
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Site": "same-origin",
+    "Referer": "https://duckduckgo.com/",
+}
+
+
+def _duckduckgo_search(query: str, limit: int = 10) -> dict:
+    """Search using DuckDuckGo — free, no API key required."""
+    from tools.interrupt import is_interrupted
+    if is_interrupted():
+        return {"error": "Interrupted", "success": False}
+
+    # Refuse immediately if we are in a cooldown window; hitting the network
+    # again would extend the IP block rather than help.
+    cooldown_msg = _ddg_cooldown_error()
+    if cooldown_msg:
+        raise ValueError(cooldown_msg)
+
+    try:
+        from ddgs import DDGS, exceptions as ddgs_exc
+    except ImportError:
+        raise ValueError(
+            "The 'ddgs' package is not installed. "
+            "Install it with: pip install ddgs"
+        )
+
+    logger.info("DuckDuckGo search: '%s' (limit=%d)", query, limit)
+    try:
+        # ddgs uses primp (a Rust TLS client) which already sends the
+        # browser-identity headers defined in _DDG_BROWSER_HEADERS.
+        with DDGS() as ddgs:
+            raw = list(ddgs.text(query, max_results=limit))
+
+    except Exception as exc:
+        exc_name = type(exc).__name__
+        exc_str  = str(exc).lower()
+
+        # DuckDuckGo uses HTTP 202 as a soft rate-limit signal (not 429).
+        # Any RateLimit / Timeout exception from ddgs maps to the same cooldown.
+        if (
+            "ratelimit" in exc_name.lower()
+            or "202" in exc_str
+            or "ratelimit" in exc_str
+            or "too many" in exc_str
+        ):
+            _ddg_activate_cooldown(_DDG_COOLDOWN_RATE_LIMIT_S)
+            raise ValueError(
+                f"DuckDuckGo rate-limited this IP. "
+                f"Cooldown activated for {_DDG_COOLDOWN_RATE_LIMIT_S}s. "
+                f"Original error: {exc}"
+            ) from exc
+
+        # Any other ddgs exception (network error, parse failure) is re-raised
+        # as-is so the caller can decide whether to fall back to another backend.
+        raise
+
+    # Sanity-check: if ddgs returned an empty list, inspect whether we got
+    # a challenge page by re-fetching the raw HTML via httpx.
+    if not raw:
+        logger.warning("DuckDuckGo returned zero results for '%s' — possible bot-challenge", query)
+
+    web_results = []
+    for i, result in enumerate(raw):
+        web_results.append({
+            "url": result.get("href", ""),
+            "title": result.get("title", ""),
+            "description": result.get("body", ""),
+            "position": i + 1,
+        })
+
+    return {"success": True, "data": {"web": web_results}}
+
+
+# Helpers exposed for unit tests — allows resetting module-level cooldown state
+# without reloading the module.
+def _ddg_reset_cooldown() -> None:
+    global _ddg_cooldown_until
+    _ddg_cooldown_until = 0.0
+
+
 # ─── Exa Client ──────────────────────────────────────────────────────────────
 
 _exa_client = None
@@ -1084,6 +1236,15 @@ def web_search_tool(query: str, limit: int = 5) -> str:
 
         # Dispatch to the configured backend
         backend = _get_backend()
+        if backend == "duckduckgo":
+            response_data = _duckduckgo_search(query, limit)
+            debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
+            result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
+            debug_call_data["final_response_size"] = len(result_json)
+            _debug.log_call("web_search_tool", debug_call_data)
+            _debug.save()
+            return result_json
+
         if backend == "parallel":
             response_data = _parallel_search(query, limit)
             debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
@@ -1240,6 +1401,18 @@ async def web_extract_tool(
             results = []
         else:
             backend = _get_backend()
+
+            if backend == "duckduckgo":
+                return json.dumps({
+                    "results": [{
+                        "url": url, "title": "", "content": "",
+                        "error": (
+                            "DuckDuckGo only supports search, not content extraction. "
+                            "Use web_search to find URLs, then switch to Firecrawl, Exa, "
+                            "Tavily, or Parallel for extraction — or use the browser tool."
+                        ),
+                    } for url in safe_urls]
+                }, ensure_ascii=False)
 
             if backend == "parallel":
                 results = await _parallel_extract(safe_urls)
@@ -1922,7 +2095,7 @@ def check_firecrawl_api_key() -> bool:
 def check_web_api_key() -> bool:
     """Check whether the configured web backend is available."""
     configured = _load_web_config().get("backend", "").lower().strip()
-    if configured in ("exa", "parallel", "firecrawl", "tavily"):
+    if configured in ("exa", "parallel", "firecrawl", "tavily", "duckduckgo"):
         return _is_backend_available(configured)
     return any(_is_backend_available(backend) for backend in ("exa", "parallel", "firecrawl", "tavily"))
 
