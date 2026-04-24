@@ -389,6 +389,7 @@ DEFAULT_CONFIG = {
         # (60+ tool iterations with tiny output) before users assume the
         # bot is dead and /restart.
         "gateway_notify_interval": 180,
+        "prompt_cache_ttl": "5m",  # Default 5-minute TTL (1.25x write cost)
     },
     
     "terminal": {
@@ -988,8 +989,17 @@ DEFAULT_CONFIG = {
         "min_interval_hours": 24,
     },
 
+    # Image generation settings
+    "image_gen": {
+        "provider": "fal",
+        # Base URL for serving generated images via HTTP (e.g. http://localhost:8008).
+        # When set, absolute filesystem paths returned by image_generate are rewritten
+        # to {serve_base_url}/images/{filename}.
+        "serve_base_url": "",
+    },
+
     # Config schema version - bump this when adding new required fields
-    "_config_version": 22,
+    "_config_version": 24,
 }
 
 # =============================================================================
@@ -1485,6 +1495,11 @@ OPTIONAL_ENV_VARS = {
         "password": True,
         "category": "tool",
     },
+    "IMAGE_SERVE_BASE_URL": {
+        "description": "Base URL for serving generated images via HTTP (rewrites filesystem paths)",
+        "prompt": "Image serve base URL",
+        "category": "tool",
+    },
     "TINKER_API_KEY": {
         "description": "Tinker API key for RL training",
         "prompt": "Tinker API key",
@@ -1909,6 +1924,12 @@ OPTIONAL_ENV_VARS = {
         "prompt": "Ephemeral system prompt",
         "url": None,
         "password": False,
+        "category": "setting",
+    },
+    "ANTHROPIC_CACHE_TTL": {
+        "description": "TTL for Anthropic prompt caching (5m or 1h)",
+        "prompt": "Anthropic Cache TTL",
+        "url": "https://docs.anthropic.com/claude/docs/prompt-caching",
         "category": "setting",
     },
 }

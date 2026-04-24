@@ -687,6 +687,11 @@ def _save_platform_tools(config: dict, platform: str, enabled_toolset_keys: Set[
         config["known_plugin_toolsets"][platform] = sorted(plugin_keys)
 
     save_config(config)
+    try:
+        from agent.prompt_builder import clear_skills_system_prompt_cache
+        clear_skills_system_prompt_cache(clear_snapshot=True)
+    except Exception:
+        pass
 
 
 def _toolset_has_keys(ts_key: str, config: dict = None) -> bool:

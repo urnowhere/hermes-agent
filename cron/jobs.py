@@ -385,6 +385,7 @@ def create_job(
     base_url: Optional[str] = None,
     script: Optional[str] = None,
     enabled_toolsets: Optional[List[str]] = None,
+    session_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -471,6 +472,7 @@ def create_job(
         "deliver": deliver,
         "origin": origin,  # Tracks where job was created for "origin" delivery
         "enabled_toolsets": normalized_toolsets,
+        "session_name": session_name,
     }
 
     jobs = load_jobs()

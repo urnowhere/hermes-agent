@@ -1007,7 +1007,7 @@ class AIAgent:
         self._use_prompt_caching, self._use_native_cache_layout = (
             self._anthropic_prompt_cache_policy()
         )
-        self._cache_ttl = "5m"  # Default 5-minute TTL (1.25x write cost)
+        self._cache_ttl = self._resolve_cache_ttl()
         
         # Iteration budget: the LLM is only notified when it actually exhausts
         # the iteration budget (api_call_count >= max_iterations).  At that
@@ -2380,6 +2380,46 @@ class AIAgent:
     def _is_openrouter_url(self) -> bool:
         """Return True when the base URL targets OpenRouter."""
         return base_url_host_matches(self._base_url_lower, "openrouter.ai")
+
+    def _resolve_cache_ttl(self) -> str:
+        """Resolve Anthropic prompt cache TTL from config."""
+        try:
+            from hermes_cli.config import load_config
+            cfg = load_config()
+            
+            # Check agent.prompt_cache_ttl first (canonical location)
+            val = str(cfg.get("agent", {}).get("prompt_cache_ttl") or "").strip().lower()
+            if val in ("5m", "1h"):
+                return val
+            
+            # Fallback to model.prompt_cache_ttl (legacy/user-preferred)
+            model_section = cfg.get("model")
+            if isinstance(model_section, dict):
+                val = str(model_section.get("prompt_cache_ttl") or "").strip().lower()
+                if val in ("5m", "1h"):
+                    return val
+            
+            # Fallback to env var
+            env_val = os.getenv("ANTHROPIC_CACHE_TTL", "").strip().lower()
+            if env_val in ("5m", "1h"):
+                return env_val
+                
+        except Exception as exc:
+            logger.debug("[%s] Prompt cache TTL lookup failed: %s", self.session_id, exc)
+        return "5m"
+
+    def _should_bypass_proxy_for_url(self, url: str) -> bool:
+        """Check if the given URL should bypass the proxy (respecting NO_PROXY)."""
+        if not url:
+            return False
+        try:
+            from urllib.parse import urlparse
+            import urllib.request
+            host = urlparse(url).hostname or ""
+            # proxy_bypass_environment returns True if the host is in NO_PROXY
+            return urllib.request.proxy_bypass_environment(host)
+        except Exception:
+            return False
 
     def _anthropic_prompt_cache_policy(
         self,
@@ -4466,25 +4506,32 @@ class AIAgent:
         return False
 
     @staticmethod
-    def _build_keepalive_http_client() -> Any:
+    def _build_keepalive_http_client(proxy: str = None) -> Any:
         try:
             import httpx as _httpx
             import socket as _socket
+            import platform
 
             _sock_opts = [(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE, 1)]
-            if hasattr(_socket, "TCP_KEEPIDLE"):
-                _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPIDLE, 30))
-                _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPINTVL, 10))
-                _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPCNT, 3))
-            elif hasattr(_socket, "TCP_KEEPALIVE"):
-                _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPALIVE, 30))
+            
+            # WSL2 and Windows have known issues with TCP keepalive configurations causing 502s
+            is_wsl = "microsoft-standard" in platform.uname().release.lower()
+            is_windows = platform.system().lower() == "windows"
+            
+            if not (is_windows or is_wsl):
+                if hasattr(_socket, "TCP_KEEPIDLE"):
+                    _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPIDLE, 30))
+                    _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPINTVL, 10))
+                    _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPCNT, 3))
+                elif hasattr(_socket, "TCP_KEEPALIVE"):
+                    _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPALIVE, 30))
+            
             # When a custom transport is provided, httpx won't auto-read proxy
             # from env vars (allow_env_proxies = trust_env and transport is None).
-            # Explicitly read proxy settings to ensure HTTP_PROXY/HTTPS_PROXY work.
-            _proxy = _get_proxy_from_env()
+            # Explicitly use the provided proxy (if any).
             return _httpx.Client(
                 transport=_httpx.HTTPTransport(socket_options=_sock_opts),
-                proxy=_proxy,
+                proxy=proxy,
             )
         except Exception:
             return None
@@ -4539,7 +4586,8 @@ class AIAgent:
                     if k in {"api_key", "base_url", "default_headers", "timeout", "http_client"}
                 }
                 if "http_client" not in safe_kwargs:
-                    keepalive_http = self._build_keepalive_http_client()
+                    _proxy = None if self._should_bypass_proxy_for_url(base_url) else _get_proxy_from_env()
+                    keepalive_http = self._build_keepalive_http_client(proxy=_proxy)
                     if keepalive_http is not None:
                         safe_kwargs["http_client"] = keepalive_http
                 client = GeminiNativeClient(**safe_kwargs)
@@ -4568,7 +4616,9 @@ class AIAgent:
         # Tests in ``tests/run_agent/test_create_openai_client_reuse.py`` and
         # ``tests/run_agent/test_sequential_chats_live.py`` pin this invariant.
         if "http_client" not in client_kwargs:
-            keepalive_http = self._build_keepalive_http_client()
+            _base_url = str(client_kwargs.get("base_url", "") or "")
+            _proxy = None if self._should_bypass_proxy_for_url(_base_url) else _get_proxy_from_env()
+            keepalive_http = self._build_keepalive_http_client(proxy=_proxy)
             if keepalive_http is not None:
                 client_kwargs["http_client"] = keepalive_http
         client = OpenAI(**client_kwargs)
@@ -8421,6 +8471,15 @@ class AIAgent:
             }
             messages.append(tool_msg)
 
+            # ── Inject explicit non-terminal state for pending approvals ─────────
+            # Prevent the LLM from treating the empty output of a pending
+            # approval as a successful execution.
+            if '"status": "approval_required"' in function_result:
+                messages.append({
+                    "role": "system",
+                    "content": "The previous tool call is pending user approval. This is a non-terminal waiting state. Do NOT assume the command failed or succeeded yet. Await the user's decision."
+                })
+
             # ── Per-tool /steer drain ───────────────────────────────────
             # Drain pending steer BETWEEN individual tool calls so the
             # injection lands as soon as a tool finishes — not after the
@@ -11769,7 +11828,40 @@ class AIAgent:
         # Clean up VM and browser for this task after conversation completes
         self._cleanup_task_resources(effective_task_id)
 
-        # Persist session to both JSON log and SQLite
+        # Plugin hook: post_llm_call
+        # Fired once per turn after the tool-calling loop completes.
+        # Plugins can use this to persist conversation data (e.g. sync
+        # to an external memory system) or override the final response.
+        # IMPORTANT: runs BEFORE _persist_session so that any response
+        # overrides are captured in the persisted history (#14894).
+        if final_response and not interrupted:
+            try:
+                from hermes_cli.plugins import invoke_hook as _invoke_hook
+                _hook_results = _invoke_hook(
+                    "post_llm_call",
+                    session_id=self.session_id,
+                    user_message=original_user_message,
+                    assistant_response=final_response,
+                    conversation_history=list(messages),
+                    model=self.model,
+                    platform=getattr(self, "platform", None) or "",
+                )
+                # Apply response override if a plugin returned one
+                if isinstance(_hook_results, list):
+                    for _hr in _hook_results:
+                        if isinstance(_hr, dict) and _hr.get("override_response"):
+                            final_response = _hr["override_response"]
+                            # Update the last assistant message so the
+                            # persisted history matches the returned response.
+                            for _m in reversed(messages):
+                                if _m.get("role") == "assistant":
+                                    _m["content"] = final_response
+                                    break
+            except Exception as exc:
+                logger.warning("post_llm_call hook failed: %s", exc)
+
+        # Persist session to both JSON log and SQLite.
+        # Runs AFTER post_llm_call so plugin response overrides are captured.
         self._persist_session(messages, conversation_history)
 
         # ── Turn-exit diagnostic log ─────────────────────────────────────
@@ -11815,25 +11907,6 @@ class AIAgent:
             )
         else:
             logger.info(_diag_msg, *_diag_args)
-
-        # Plugin hook: post_llm_call
-        # Fired once per turn after the tool-calling loop completes.
-        # Plugins can use this to persist conversation data (e.g. sync
-        # to an external memory system).
-        if final_response and not interrupted:
-            try:
-                from hermes_cli.plugins import invoke_hook as _invoke_hook
-                _invoke_hook(
-                    "post_llm_call",
-                    session_id=self.session_id,
-                    user_message=original_user_message,
-                    assistant_response=final_response,
-                    conversation_history=list(messages),
-                    model=self.model,
-                    platform=getattr(self, "platform", None) or "",
-                )
-            except Exception as exc:
-                logger.warning("post_llm_call hook failed: %s", exc)
 
         # Extract reasoning from the last assistant message (if any)
         last_reasoning = None
