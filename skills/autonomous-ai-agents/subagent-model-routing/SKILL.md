@@ -85,17 +85,22 @@ Task Type                → Recommended Model              → Tier
 ──────────────────────────────────────────────────────────────────
 Text extraction/parsing  → gemini-2.0-flash-lite          → Budget
 Simple file scanning     → gemini-2.5-flash or gpt-5-nano → Budget
-Web research             → grok-4.1-fast or gemini-2.5-flash → Budget
-Translation / formatting → grok-4.1-fast                  → Budget
-Simple patches/renames   → grok-4.1-fast                  → Budget
+Web research             → gemini-2.5-flash                → Budget
+Translation / formatting → gemini-2.5-flash or haiku      → Budget
+Simple patches/renames   → devstral or gpt-5-nano         → Budget
 New script / feature     → gpt-5.1-codex-mini             → Standard
-Bulk code changes        → grok-code-fast-1 or devstral   → Standard
+Bulk code changes        → gpt-5.1-codex or devstral      → Standard
 Refactoring              → gpt-5.1-codex or claude-haiku  → Standard
 Code review              → gemini-2.5-pro or gpt-5.1-codex→ Standard
-Architecture / judgment  → grok-4.20 or o3                → Premium
-Trusted 2nd opinion      → grok-4.20                      → Premium
+Architecture / judgment  → o3 or deepseek-r1              → Standard/Premium
 Complex reasoning        → o4-mini or deepseek-r1         → Standard
+Intelligence synthesis   → grok-4.20                      → Premium  ← ONLY valid Grok use
 ```
+
+> ⚠️ **JORDAN RULE — GROK IS REASONING/INTELLIGENCE ONLY:**
+> Grok (ALL variants: grok-4.20, grok-4.1-fast, grok-code-fast-1) must ONLY be used for
+> reasoning and intelligence synthesis tasks. Never use any Grok model for code implementation,
+> code review, or general delegation. Violations waste budget and produce off-target results.
 
 ## Tier Reference
 
@@ -254,9 +259,9 @@ For automated background tasks (email scanning, file parsing, briefings), Budget
 
 **If `override_mismatches` is non-empty, proactively alert the user** — a model override was silently dropped and the task ran on the wrong model.
 
-**If `observability` is absent** (first run, log rotated, or plugin disabled): check that `~/.hermes/logs/model_usage.jsonl` exists and the plugin is enabled. The `model_metadata_for_task.py` fallback script depends on the same log.
+**If `observability` is absent:** both the inline field and the `model_metadata_for_task.py` fallback script depend on the same observability plugin. Without the plugin, neither method works. Note this explicitly rather than silently omitting the metadata.
 
-The `model_observability` plugin (`plugins/model_observability/`) is bundled with this repo. It logs every API call to `~/.hermes/logs/model_usage.jsonl`. Each entry includes `model_request` (what was sent) and `model_response` (what actually answered). Always check this log after a delegation where the model mattered — OpenRouter's auto-router may resolve `openrouter/auto` to a different model than expected.
+The `model_observability` plugin (if installed) logs every API call to `~/.hermes/logs/model_usage.jsonl`. Each entry includes `model_request` (what was sent) and `model_response` (what actually responded). Always check this log after a delegation where the model mattered — OpenRouter's auto-router may resolve `openrouter/auto` to a different model than expected.
 
 ## Mismatch Warnings
 
