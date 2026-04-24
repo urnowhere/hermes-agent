@@ -1,5 +1,7 @@
 """Tests for agent/context_compressor.py — compression logic, thresholds, truncation fallback."""
 
+import time
+
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -37,6 +39,47 @@ class TestShouldCompress:
         assert compressor.should_compress(prompt_tokens=90000) is True
         assert compressor.should_compress(prompt_tokens=50000) is False
 
+
+class TestAntiThrashingRecovery:
+    """Anti-thrashing protection should recover after a cooldown period (#14694)."""
+
+    def test_anti_thrash_blocks_after_two_ineffective(self, compressor):
+        """Two ineffective compressions should block further auto-compression."""
+        compressor._ineffective_compression_count = 2
+        compressor.last_prompt_tokens = 90000
+        assert compressor.should_compress() is False
+
+    def test_anti_thrash_recovers_after_cooldown(self, compressor):
+        """After 300s cooldown, the anti-thrashing counter resets and
+        compression is re-enabled.  This test fails without the fix."""
+        compressor._ineffective_compression_count = 2
+        compressor._last_compression_time = time.monotonic() - 301
+        compressor.last_prompt_tokens = 90000
+        assert compressor.should_compress() is True
+        assert compressor._ineffective_compression_count == 0
+
+    def test_anti_thrash_still_blocks_within_cooldown(self, compressor):
+        """Within 300s the block should remain active."""
+        compressor._ineffective_compression_count = 2
+        compressor._last_compression_time = time.monotonic() - 60
+        compressor.last_prompt_tokens = 90000
+        assert compressor.should_compress() is False
+
+    def test_anti_thrash_no_recovery_without_timestamp(self, compressor):
+        """If no compression has ever run (_last_compression_time == 0),
+        the time-based recovery should not trigger."""
+        compressor._ineffective_compression_count = 2
+        compressor._last_compression_time = 0.0
+        compressor.last_prompt_tokens = 90000
+        assert compressor.should_compress() is False
+
+    def test_session_reset_clears_compression_time(self, compressor):
+        """on_session_reset() should reset _last_compression_time."""
+        compressor._last_compression_time = 12345.0
+        compressor._ineffective_compression_count = 2
+        compressor.on_session_reset()
+        assert compressor._last_compression_time == 0.0
+        assert compressor._ineffective_compression_count == 0
 
 
 class TestUpdateFromResponse:
