@@ -279,11 +279,18 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     ],
     "fireworks": [
         "accounts/fireworks/models/kimi-k2p6",
+        "accounts/fireworks/routers/kimi-k2p5-turbo",
         "accounts/fireworks/models/minimax-m2p7",
         "accounts/fireworks/models/qwen3p6-plus",
         "accounts/fireworks/models/glm-5p1",
+        "accounts/fireworks/models/glm-5",
         "accounts/fireworks/models/kimi-k2p5",
         "accounts/fireworks/models/deepseek-v3p2",
+        "accounts/fireworks/models/deepseek-v3p1",
+        "accounts/fireworks/models/minimax-m2p5",
+    ],
+    "fireworks-pass": [
+        "accounts/fireworks/routers/kimi-k2p5-turbo",
     ],
     "arcee": [
         "trinity-large-thinking",
@@ -727,6 +734,7 @@ CANONICAL_PROVIDERS: list[ProviderEntry] = [
     ProviderEntry("openai-codex",   "OpenAI Codex",             "OpenAI Codex"),
     ProviderEntry("xiaomi",         "Xiaomi MiMo",              "Xiaomi MiMo (MiMo-V2.5 and V2 models — pro, omni, flash)"),
     ProviderEntry("fireworks",      "Fireworks AI",             "Fireworks AI (OpenAI-compatible serverless models — direct API)"),
+    ProviderEntry("fireworks-pass", "Fireworks Full Access Pass", "Fireworks Full Access Pass (Kimi K2.5 Turbo router — separate pass billing)"),
     ProviderEntry("nvidia",         "NVIDIA NIM",               "NVIDIA NIM (Nemotron models — build.nvidia.com or local NIM)"),
     ProviderEntry("qwen-oauth",     "Qwen OAuth (Portal)",      "Qwen OAuth (reuses local Qwen CLI login)"),
     ProviderEntry("copilot",        "GitHub Copilot",           "GitHub Copilot (uses GITHUB_TOKEN or gh auth token)"),

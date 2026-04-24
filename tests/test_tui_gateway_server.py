@@ -1656,13 +1656,25 @@ def test_model_options_includes_fireworks_curated_models(monkeypatch):
     assert fireworks["name"] == "Fireworks AI"
     assert fireworks["models"] == [
         "accounts/fireworks/models/kimi-k2p6",
+        "accounts/fireworks/routers/kimi-k2p5-turbo",
         "accounts/fireworks/models/minimax-m2p7",
         "accounts/fireworks/models/qwen3p6-plus",
         "accounts/fireworks/models/glm-5p1",
+        "accounts/fireworks/models/glm-5",
         "accounts/fireworks/models/kimi-k2p5",
         "accounts/fireworks/models/deepseek-v3p2",
+        "accounts/fireworks/models/deepseek-v3p1",
+        "accounts/fireworks/models/minimax-m2p5",
     ]
-    assert fireworks["total_models"] == 6
+    assert fireworks["total_models"] == 10
+
+    fireworks_pass = next((p for p in providers if p.get("slug") == "fireworks-pass"), None)
+    assert fireworks_pass is not None
+    assert fireworks_pass["name"] == "Fireworks Full Access Pass"
+    assert fireworks_pass["models"] == ["accounts/fireworks/routers/kimi-k2p5-turbo"]
+    assert fireworks_pass["total_models"] == 1
+    # Also manually verified in the TUI picker so the PR covers both the RPC
+    # path and the actual user-facing /model interaction.
 
 
 def test_model_options_propagates_list_exception(monkeypatch):
