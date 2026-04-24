@@ -422,3 +422,70 @@ class TestStatusBarWidthSource:
         mock_get_app.assert_not_called()
         mock_shutil.assert_not_called()
         assert len(text) > 0
+
+
+class TestStatusBarWorkspaceContext:
+    """Tests for workspace folder and git branch in the TUI status bar."""
+
+    def _make_cli_with_workspace(self, monkeypatch, tmp_path, *, branch=None):
+        import subprocess as sp
+        import cli as cli_mod
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        monkeypatch.setenv("TERMINAL_CWD", str(workspace))
+
+        def fake_run(cmd, cwd=None, capture_output=False, text=False, timeout=None, check=False):
+            if cmd == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+                if branch is None:
+                    return sp.CompletedProcess(cmd, 128, stdout="", stderr="fatal: not a git repo")
+                return sp.CompletedProcess(cmd, 0, stdout=f"{branch}\n", stderr="")
+            raise AssertionError(f"Unexpected command: {cmd}")
+
+        monkeypatch.setattr(cli_mod, "subprocess", sp)
+        monkeypatch.setattr(sp, "run", fake_run)
+
+        cli_obj = _make_cli()
+        return cli_obj, workspace
+
+    def test_snapshot_includes_workspace_folder(self, monkeypatch, tmp_path):
+        cli_obj, workspace = self._make_cli_with_workspace(monkeypatch, tmp_path, branch="feature/x")
+
+        snapshot = cli_obj._get_status_bar_snapshot()
+        assert "workspace_short" in snapshot
+        assert snapshot["workspace_short"] == workspace.name
+
+    def test_snapshot_includes_git_branch(self, monkeypatch, tmp_path):
+        cli_obj, _ = self._make_cli_with_workspace(monkeypatch, tmp_path, branch="main")
+
+        snapshot = cli_obj._get_status_bar_snapshot()
+        assert "git_branch" in snapshot
+        assert snapshot["git_branch"] == "main"
+
+    def test_snapshot_reports_none_git_branch_when_not_a_repo(self, monkeypatch, tmp_path):
+        cli_obj, _ = self._make_cli_with_workspace(monkeypatch, tmp_path, branch=None)
+
+        snapshot = cli_obj._get_status_bar_snapshot()
+        assert snapshot["git_branch"] is None
+
+    def test_status_bar_text_includes_workspace_and_branch_on_wide_terminal(self, monkeypatch, tmp_path):
+        cli_obj, workspace = self._make_cli_with_workspace(monkeypatch, tmp_path, branch="feature/auth")
+
+        text = cli_obj._build_status_bar_text(width=140)
+        assert workspace.name in text
+        assert "feature/auth" in text
+
+    def test_status_bar_text_prefers_workspace_only_on_tighter_width(self, monkeypatch, tmp_path):
+        cli_obj, workspace = self._make_cli_with_workspace(monkeypatch, tmp_path, branch="feature/auth")
+
+        text = cli_obj._build_status_bar_text(width=100)
+        assert workspace.name in text or "..." in text
+        assert "feature/auth" not in text
+
+    def test_status_bar_text_hides_workspace_and_branch_when_very_narrow(self, monkeypatch, tmp_path):
+        cli_obj, workspace = self._make_cli_with_workspace(monkeypatch, tmp_path, branch="feature/auth")
+
+        text = cli_obj._build_status_bar_text(width=88)
+        assert workspace.name not in text
+        assert "feature/auth" not in text
+

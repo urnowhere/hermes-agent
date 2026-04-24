@@ -79,6 +79,38 @@ def _effective_provider_label() -> str:
     return provider_label(effective)
 
 
+def _status_current_folder() -> str:
+    """Resolve the current terminal working folder shown in CLI status."""
+    cwd_value = os.getenv("TERMINAL_CWD") or os.getcwd()
+    try:
+        return str(Path(cwd_value).expanduser().resolve())
+    except Exception:
+        return str(Path(cwd_value).expanduser())
+
+
+def _status_git_branch(current_folder: str) -> str | None:
+    """Best-effort short git branch name for the current folder."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=current_folder,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    branch = (result.stdout or "").strip()
+    if not branch or branch == "HEAD":
+        return None
+    return branch
+
+
 from hermes_constants import is_termux as _is_termux
 
 
@@ -108,8 +140,13 @@ def show_status(args):
     except Exception:
         config = {}
 
+    current_folder = _status_current_folder()
+    git_branch = _status_git_branch(current_folder)
+
     print(f"  Model:        {_configured_model_label(config)}")
     print(f"  Provider:     {_effective_provider_label()}")
+    print(f"  Current Folder: {current_folder}")
+    print(f"  Git Branch:   {git_branch or '(not a git repo)'}")
     
     # =========================================================================
     # API Keys

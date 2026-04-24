@@ -16,6 +16,7 @@ Usage:
 import logging
 import os
 import shutil
+import subprocess
 import sys
 import json
 import re
@@ -765,6 +766,127 @@ def _run_cleanup():
 
 # Tracks the active worktree for cleanup on exit
 _active_worktree: Optional[Dict[str, str]] = None
+
+
+# Cache branch lookups briefly to keep the status bar fresh without
+# repeatedly spawning git subprocesses during rapid UI updates.
+_BRANCH_CACHE_TTL_SECONDS = 2.0
+# When trimming status-bar paths, we fall back to an all-dots string when the
+# available width is too small to fit the ellipsis marker ("...") plus a prefix.
+MIN_ELLIPSIS_WIDTH = 3
+_cached_workspace_branch: tuple[str, float, Optional[str]] | None = None
+
+
+def _shorten_status_path(path: Path, max_width: int = 34) -> str:
+    """Return a compact, user-facing path for status displays."""
+    try:
+        resolved = path.expanduser().resolve()
+    except Exception:
+        resolved = path.expanduser()
+
+    display = resolved.name or str(resolved)
+    if len(display) <= max_width:
+        return display
+
+    try:
+        home = Path.home().resolve()
+        rel = resolved.relative_to(home)
+        display = str(Path("~") / rel)
+        if len(display) <= max_width:
+            return display
+    except Exception:
+        pass
+
+    parts = resolved.parts
+    if len(parts) >= 2:
+        tail = Path(*parts[-2:])
+        tail_text = f".../{tail}"
+        if len(tail_text) <= max_width:
+            return tail_text
+    if max_width <= MIN_ELLIPSIS_WIDTH:
+        return "." * max_width
+    return f"{display[: max_width - MIN_ELLIPSIS_WIDTH]}..."
+
+
+def _resolve_git_branch(resolved: Path) -> Optional[str]:
+    """Best-effort short git branch name for a resolved workspace path."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=str(resolved),
+            capture_output=True,
+            text=True,
+            timeout=1,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    branch = (result.stdout or "").strip()
+    if not branch or branch == "HEAD":
+        return None
+    return branch
+
+
+def _get_cached_git_branch(resolved: Path) -> Optional[str]:
+    """Return a cached branch for the resolved workspace path."""
+    global _cached_workspace_branch
+
+    key = str(resolved)
+    now = time.monotonic()
+    if _cached_workspace_branch is not None:
+        cached_key, cached_at, cached_branch = _cached_workspace_branch
+        if cached_key == key and (now - cached_at) < _BRANCH_CACHE_TTL_SECONDS:
+            return cached_branch
+
+    branch = _resolve_git_branch(resolved)
+    _cached_workspace_branch = (key, now, branch)
+    return branch
+
+
+def _select_status_context_labels(
+    width: int,
+    workspace_label: Optional[str],
+    branch_label: Optional[str],
+) -> list[str]:
+    """Choose workspace/branch labels that fit the available status-bar space."""
+    workspace = (workspace_label or "").strip()
+    branch = (branch_label or "").strip()
+    if width >= 120:
+        labels = []
+        if workspace:
+            labels.append(workspace)
+        if branch:
+            labels.append(branch)
+        return labels
+    if width >= 90:
+        if workspace and branch:
+            return [workspace if len(workspace) <= len(branch) else branch]
+        if workspace:
+            return [workspace]
+        if branch:
+            return [branch]
+    return []
+
+
+def _inject_workspace_context(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Best-effort workspace folder and git branch for the status bar.
+
+    Called on every status-bar snapshot — must not fail or block.
+    """
+    workspace = os.getenv("TERMINAL_CWD") or os.getcwd()
+    try:
+        resolved = Path(workspace).expanduser().resolve()
+    except Exception:
+        resolved = Path(workspace).expanduser()
+
+    snapshot["workspace_short"] = _shorten_status_path(resolved)
+    snapshot["git_branch"] = _get_cached_git_branch(resolved)
+
+    return snapshot
 
 
 def _git_repo_root() -> Optional[str]:
@@ -2202,10 +2324,12 @@ class HermesCLI:
             "session_total_tokens": 0,
             "session_api_calls": 0,
             "compressions": 0,
+            "workspace_short": None,
+            "git_branch": None,
         }
 
         if not agent:
-            return snapshot
+            return _inject_workspace_context(snapshot)
 
         snapshot["session_input_tokens"] = getattr(agent, "session_input_tokens", 0) or 0
         snapshot["session_output_tokens"] = getattr(agent, "session_output_tokens", 0) or 0
@@ -2226,7 +2350,7 @@ class HermesCLI:
             if context_length:
                 snapshot["context_percent"] = max(0, min(100, round((context_tokens / context_length) * 100)))
 
-        return snapshot
+        return _inject_workspace_context(snapshot)
 
     @staticmethod
     def _status_bar_display_width(text: str) -> int:
@@ -2354,7 +2478,12 @@ class HermesCLI:
         return [("class:voice-status", f" 🎤 Voice mode{tts}{cont}  —  Ctrl+B to record ")]
 
     def _build_status_bar_text(self, width: Optional[int] = None) -> str:
-        """Return a compact one-line session status string for the TUI footer."""
+        """Return the full status bar text for width-sensitive layouts.
+
+        The TUI status bar is rendered as a single line. To avoid wrapping or
+        duplicate rows on narrow terminals, this helper mirrors the fragment
+        logic and trims the assembled text to fit the current width.
+        """
         try:
             snapshot = self._get_status_bar_snapshot()
             if width is None:
@@ -2379,6 +2508,10 @@ class HermesCLI:
                 context_label = "ctx --"
 
             parts = [f"⚕ {snapshot['model_short']}", context_label, percent_label]
+            ws = snapshot.get("workspace_short")
+            br = snapshot.get("git_branch")
+            status_labels = _select_status_context_labels(width, ws, br)
+            parts.extend(status_labels)
             parts.append(duration_label)
             prompt_elapsed = snapshot.get("prompt_elapsed")
             if prompt_elapsed:
@@ -2430,11 +2563,17 @@ class HermesCLI:
                         context_label = "ctx --"
 
                     bar_style = self._status_bar_context_style(percent)
+                    workspace_label = snapshot.get("workspace_short") or ""
+                    branch_label = snapshot.get("git_branch") or ""
+                    context_parts = [f"⚕ {snapshot['model_short']}", context_label]
+                    if workspace_label:
+                        context_parts.append(workspace_label)
+                    if branch_label:
+                        context_parts.append(branch_label)
+                    context_line = " │ ".join(context_parts)
                     frags = [
-                        ("class:status-bar", " ⚕ "),
-                        ("class:status-bar-strong", snapshot["model_short"]),
-                        ("class:status-bar-dim", " │ "),
-                        ("class:status-bar-dim", context_label),
+                        ("class:status-bar", " "),
+                        ("class:status-bar-strong", context_line),
                         ("class:status-bar-dim", " │ "),
                         (bar_style, self._build_context_bar(percent)),
                         ("class:status-bar-dim", " "),
