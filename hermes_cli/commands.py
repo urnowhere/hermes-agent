@@ -117,7 +117,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("yolo", "Toggle YOLO mode (skip all dangerous command approvals)",
                "Configuration"),
     CommandDef("reasoning", "Manage reasoning effort and display", "Configuration",
-               args_hint="[level|show|hide]",
+               args_hint="[level|show|hide] [--global]",
                subcommands=("none", "minimal", "low", "medium", "high", "xhigh", "show", "hide", "on", "off")),
     CommandDef("fast", "Toggle fast mode — OpenAI Priority Processing / Anthropic Fast Mode (Normal/Fast)", "Configuration",
                args_hint="[normal|fast|status]",

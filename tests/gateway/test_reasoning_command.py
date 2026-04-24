@@ -37,6 +37,7 @@ def _make_runner():
     runner._provider_routing = {}
     runner._fallback_model = None
     runner._running_agents = {}
+    runner._session_reasoning_overrides = {}
     runner.hooks = MagicMock()
     runner.hooks.emit = AsyncMock()
     runner.hooks.loaded_hooks = []
@@ -111,12 +112,34 @@ class TestReasoningCommand:
         runner = _make_runner()
         runner._reasoning_config = {"enabled": True, "effort": "medium"}
 
-        result = await runner._handle_reasoning_command(_make_event("/reasoning low"))
+        result = await runner._handle_reasoning_command(_make_event("/reasoning low --global"))
 
         saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert saved["agent"]["reasoning_effort"] == "low"
         assert runner._reasoning_config == {"enabled": True, "effort": "low"}
         assert "takes effect on next message" in result
+
+    @pytest.mark.asyncio
+    async def test_handle_reasoning_command_defaults_to_session_only(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text("agent:\n  reasoning_effort: medium\n", encoding="utf-8")
+
+        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+
+        runner = _make_runner()
+        runner._reasoning_config = {"enabled": True, "effort": "medium"}
+
+        event = _make_event("/reasoning low")
+        result = await runner._handle_reasoning_command(event)
+
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        session_key = runner._session_key_for_source(event.source)
+        assert saved["agent"]["reasoning_effort"] == "medium"
+        assert runner._reasoning_config == {"enabled": True, "effort": "low"}
+        assert runner._session_reasoning_overrides[session_key] == {"enabled": True, "effort": "low"}
+        assert "session only" in result
 
     def test_run_agent_reloads_reasoning_config_per_message(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / "hermes"
@@ -166,6 +189,56 @@ class TestReasoningCommand:
         assert result["final_response"] == "ok"
         assert _CapturingAgent.last_init is not None
         assert _CapturingAgent.last_init["reasoning_config"] == {"enabled": True, "effort": "low"}
+
+    def test_run_agent_prefers_session_reasoning_override(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text("agent:\n  reasoning_effort: low\n", encoding="utf-8")
+
+        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+        monkeypatch.setattr(gateway_run, "_env_path", hermes_home / ".env")
+        monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            gateway_run,
+            "_resolve_runtime_agent_kwargs",
+            lambda: {
+                "provider": "openrouter",
+                "api_mode": "chat_completions",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": "***",
+            },
+        )
+        fake_run_agent = types.ModuleType("run_agent")
+        fake_run_agent.AIAgent = _CapturingAgent
+        monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+        _CapturingAgent.last_init = None
+        runner = _make_runner()
+        session_key = "agent:main:local:dm"
+        runner._session_reasoning_overrides[session_key] = {"enabled": True, "effort": "high"}
+
+        source = SessionSource(
+            platform=Platform.LOCAL,
+            chat_id="cli",
+            chat_name="CLI",
+            chat_type="dm",
+            user_id="user-1",
+        )
+
+        result = asyncio.run(
+            runner._run_agent(
+                message="ping",
+                context_prompt="",
+                history=[],
+                source=source,
+                session_id="session-1",
+                session_key=session_key,
+            )
+        )
+
+        assert result["final_response"] == "ok"
+        assert _CapturingAgent.last_init is not None
+        assert _CapturingAgent.last_init["reasoning_config"] == {"enabled": True, "effort": "high"}
 
     def test_run_agent_includes_enabled_mcp_servers_in_gateway_toolsets(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / "hermes"

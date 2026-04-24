@@ -155,6 +155,38 @@ class TestHandleReasoningCommand(unittest.TestCase):
         level = rc.get("effort", "medium")
         self.assertEqual(level, "xhigh")
 
+    def test_handler_defaults_to_session_only(self):
+        from cli import HermesCLI
+
+        stub = self._make_cli(reasoning_config={"enabled": True, "effort": "medium"}, show_reasoning=False)
+        stub._current_reasoning_callback = lambda: None
+        stub.agent = MagicMock()
+
+        with patch("cli._cprint") as mock_print, patch("cli.save_config_value") as mock_save:
+            HermesCLI._handle_reasoning_command(stub, "/reasoning high")
+
+        self.assertEqual(stub.reasoning_config, {"enabled": True, "effort": "high"})
+        self.assertIsNone(stub.agent)
+        mock_save.assert_not_called()
+        rendered = " ".join(str(arg) for call in mock_print.call_args_list for arg in call.args)
+        self.assertIn("session only", rendered)
+
+    def test_handler_persists_when_global_flag_present(self):
+        from cli import HermesCLI
+
+        stub = self._make_cli(reasoning_config={"enabled": True, "effort": "medium"}, show_reasoning=False)
+        stub._current_reasoning_callback = lambda: None
+        stub.agent = MagicMock()
+
+        with patch("cli._cprint") as mock_print, patch("cli.save_config_value", return_value=True) as mock_save:
+            HermesCLI._handle_reasoning_command(stub, "/reasoning high --global")
+
+        self.assertEqual(stub.reasoning_config, {"enabled": True, "effort": "high"})
+        self.assertIsNone(stub.agent)
+        mock_save.assert_called_once_with("agent.reasoning_effort", "high")
+        rendered = " ".join(str(arg) for call in mock_print.call_args_list for arg in call.args)
+        self.assertIn("saved to config", rendered)
+
 
 # ---------------------------------------------------------------------------
 # Reasoning extraction and result dict

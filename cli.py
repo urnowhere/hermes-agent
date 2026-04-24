@@ -6844,11 +6844,14 @@ class HermesCLI:
         """Handle /reasoning — manage effort level and display toggle.
 
         Usage:
-            /reasoning              Show current effort level and display state
-            /reasoning <level>      Set reasoning effort (none, minimal, low, medium, high, xhigh)
-            /reasoning show|on      Show model thinking/reasoning in output
-            /reasoning hide|off     Hide model thinking/reasoning from output
+            /reasoning                       Show current effort level and display state
+            /reasoning <level>               Set reasoning effort for this session only
+            /reasoning <level> --global      Set reasoning effort and persist to config
+            /reasoning show|on               Show model thinking/reasoning in output
+            /reasoning hide|off              Hide model thinking/reasoning from output
         """
+        from hermes_constants import parse_reasoning_command_value
+
         parts = cmd.strip().split(maxsplit=1)
 
         if len(parts) < 2:
@@ -6863,10 +6866,10 @@ class HermesCLI:
             display_state = "on ✓" if self.show_reasoning else "off"
             _cprint(f"  {_ACCENT}Reasoning effort:  {level}{_RST}")
             _cprint(f"  {_ACCENT}Reasoning display: {display_state}{_RST}")
-            _cprint(f"  {_DIM}Usage: /reasoning <none|minimal|low|medium|high|xhigh|show|hide>{_RST}")
+            _cprint(f"  {_DIM}Usage: /reasoning <none|minimal|low|medium|high|xhigh> [--global]{_RST}")
             return
 
-        arg = parts[1].strip().lower()
+        arg, persist_global = parse_reasoning_command_value(parts[1])
 
         # Display toggle
         if arg in ("show", "on"):
@@ -6888,18 +6891,19 @@ class HermesCLI:
         # Effort level change
         parsed = _parse_reasoning_config(arg)
         if parsed is None:
-            _cprint(f"  {_DIM}(._.) Unknown argument: {arg}{_RST}")
+            _cprint(f"  {_DIM}(._.) Unknown argument: {arg or parts[1].strip().lower()}{_RST}")
             _cprint(f"  {_DIM}Valid levels: none, minimal, low, medium, high, xhigh{_RST}")
             _cprint(f"  {_DIM}Display:      show, hide{_RST}")
+            _cprint(f"  {_DIM}Persist:      add --global to save beyond this session{_RST}")
             return
 
         self.reasoning_config = parsed
         self.agent = None  # Force agent re-init with new reasoning config
 
-        if save_config_value("agent.reasoning_effort", arg):
+        if persist_global and save_config_value("agent.reasoning_effort", arg):
             _cprint(f"  {_ACCENT}✓ Reasoning effort set to '{arg}' (saved to config){_RST}")
         else:
-            _cprint(f"  {_ACCENT}✓ Reasoning effort set to '{arg}' (session only){_RST}")
+            _cprint(f"  {_ACCENT}✓ Reasoning effort set to '{arg}' (session only — add --global to persist){_RST}")
 
     def _handle_fast_command(self, cmd: str):
         """Handle /fast — toggle fast mode (OpenAI Priority Processing / Anthropic Fast Mode)."""

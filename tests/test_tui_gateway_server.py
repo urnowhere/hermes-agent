@@ -246,6 +246,10 @@ def test_setup_status_reports_provider_config(monkeypatch):
 
 
 def test_config_set_reasoning_updates_live_session_and_agent(tmp_path, monkeypatch):
+    import yaml
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump({"agent": {"reasoning_effort": "medium"}}))
     monkeypatch.setattr(server, "_hermes_home", tmp_path)
     agent = types.SimpleNamespace(reasoning_config=None)
     server._sessions["sid"] = _session(agent=agent)
@@ -259,6 +263,9 @@ def test_config_set_reasoning_updates_live_session_and_agent(tmp_path, monkeypat
     )
     assert resp_effort["result"]["value"] == "low"
     assert agent.reasoning_config == {"enabled": True, "effort": "low"}
+    assert server._sessions["sid"]["reasoning_config_override"] == {"enabled": True, "effort": "low"}
+    saved = yaml.safe_load(cfg_path.read_text())
+    assert saved["agent"]["reasoning_effort"] == "medium"
 
     resp_show = server.handle_request(
         {
@@ -269,6 +276,34 @@ def test_config_set_reasoning_updates_live_session_and_agent(tmp_path, monkeypat
     )
     assert resp_show["result"]["value"] == "show"
     assert server._sessions["sid"]["show_reasoning"] is True
+
+    resp_get = server.handle_request(
+        {"id": "3", "method": "config.get", "params": {"session_id": "sid", "key": "reasoning"}}
+    )
+    assert resp_get["result"]["value"] == "low"
+
+
+def test_config_set_reasoning_global_persists(tmp_path, monkeypatch):
+    import yaml
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump({"agent": {"reasoning_effort": "medium"}}))
+    monkeypatch.setattr(server, "_hermes_home", tmp_path)
+    agent = types.SimpleNamespace(reasoning_config=None)
+    server._sessions["sid"] = _session(agent=agent)
+
+    resp = server.handle_request(
+        {
+            "id": "1",
+            "method": "config.set",
+            "params": {"session_id": "sid", "key": "reasoning", "value": "high --global"},
+        }
+    )
+
+    assert resp["result"]["value"] == "high"
+    saved = yaml.safe_load(cfg_path.read_text())
+    assert saved["agent"]["reasoning_effort"] == "high"
+    assert agent.reasoning_config == {"enabled": True, "effort": "high"}
 
 
 def test_config_set_verbose_updates_session_mode_and_agent(tmp_path, monkeypatch):

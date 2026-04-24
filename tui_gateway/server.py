@@ -1199,6 +1199,8 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
     finally:
         _clear_session_context(tokens)
     session["agent"] = new_agent
+    if session.get("reasoning_config_override") is not None:
+        new_agent.reasoning_config = dict(session["reasoning_config_override"])
     session["attached_images"] = []
     session["edit_snapshots"] = {}
     session["image_counter"] = 0
@@ -1259,6 +1261,7 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
         "cols": cols,
         "slash_worker": None,
         "show_reasoning": _load_show_reasoning(),
+        "reasoning_config_override": None,
         "tool_progress_mode": _load_tool_progress_mode(),
         "edit_snapshots": {},
         "tool_started_at": {},
@@ -1401,6 +1404,7 @@ def _(rid, params: dict) -> dict:
         "running": False,
         "session_key": key,
         "show_reasoning": _load_show_reasoning(),
+        "reasoning_config_override": None,
         "slash_worker": None,
         "tool_progress_mode": _load_tool_progress_mode(),
         "tool_started_at": {},
@@ -2616,9 +2620,10 @@ def _(rid, params: dict) -> dict:
 
     if key == "reasoning":
         try:
-            from hermes_constants import parse_reasoning_effort
+            from hermes_constants import parse_reasoning_command_value, parse_reasoning_effort
 
-            arg = str(value or "").strip().lower()
+            raw_value = str(value or "")
+            arg, persist_global = parse_reasoning_command_value(raw_value)
             if arg in ("show", "on"):
                 _write_config_key("display.show_reasoning", True)
                 if session:
@@ -2633,9 +2638,12 @@ def _(rid, params: dict) -> dict:
             parsed = parse_reasoning_effort(arg)
             if parsed is None:
                 return _err(rid, 4002, f"unknown reasoning value: {value}")
-            _write_config_key("agent.reasoning_effort", arg)
-            if session and session.get("agent") is not None:
-                session["agent"].reasoning_config = parsed
+            if persist_global:
+                _write_config_key("agent.reasoning_effort", arg)
+            if session:
+                session["reasoning_config_override"] = dict(parsed)
+                if session.get("agent") is not None:
+                    session["agent"].reasoning_config = parsed
             return _ok(rid, {"key": key, "value": arg})
         except Exception as e:
             return _err(rid, 5001, str(e))
@@ -2805,7 +2813,17 @@ def _(rid, params: dict) -> dict:
         )
     if key == "reasoning":
         cfg = _load_cfg()
-        effort = str(cfg.get("agent", {}).get("reasoning_effort", "medium") or "medium")
+        session = _sessions.get(params.get("session_id", ""))
+        override = None
+        if session:
+            override = session.get("reasoning_config_override")
+        if override:
+            if override.get("enabled") is False:
+                effort = "none"
+            else:
+                effort = str(override.get("effort", "medium") or "medium")
+        else:
+            effort = str(cfg.get("agent", {}).get("reasoning_effort", "medium") or "medium")
         display = (
             "show"
             if bool(cfg.get("display", {}).get("show_reasoning", False))

@@ -141,6 +141,34 @@ def get_subprocess_home() -> str | None:
 VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 
 
+def parse_reasoning_command_value(raw_value: str) -> tuple[str, bool]:
+    """Parse `/reasoning` arguments into `(value, persist_global)`.
+
+    Supports an optional ``--global`` flag in any position. The remaining
+    tokens are re-joined and lower-cased for downstream parsing.
+    """
+    import shlex
+
+    text = str(raw_value or "").strip()
+    if not text:
+        return "", False
+
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        tokens = text.split()
+
+    persist_global = False
+    value_tokens: list[str] = []
+    for token in tokens:
+        if token == "--global":
+            persist_global = True
+            continue
+        value_tokens.append(token)
+
+    return " ".join(value_tokens).strip().lower(), persist_global
+
+
 def parse_reasoning_effort(effort: str) -> dict | None:
     """Parse a reasoning effort level into a config dict.
 
