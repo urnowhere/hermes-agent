@@ -1007,7 +1007,7 @@ class AIAgent:
         self._use_prompt_caching, self._use_native_cache_layout = (
             self._anthropic_prompt_cache_policy()
         )
-        self._cache_ttl = "5m"  # Default 5-minute TTL (1.25x write cost)
+        self._cache_ttl = self._resolve_cache_ttl()
         
         # Iteration budget: the LLM is only notified when it actually exhausts
         # the iteration budget (api_call_count >= max_iterations).  At that
@@ -2380,6 +2380,46 @@ class AIAgent:
     def _is_openrouter_url(self) -> bool:
         """Return True when the base URL targets OpenRouter."""
         return base_url_host_matches(self._base_url_lower, "openrouter.ai")
+
+    def _resolve_cache_ttl(self) -> str:
+        """Resolve Anthropic prompt cache TTL from config."""
+        try:
+            from hermes_cli.config import load_config
+            cfg = load_config()
+            
+            # Check agent.prompt_cache_ttl first (canonical location)
+            val = str(cfg.get("agent", {}).get("prompt_cache_ttl") or "").strip().lower()
+            if val in ("5m", "1h"):
+                return val
+            
+            # Fallback to model.prompt_cache_ttl (legacy/user-preferred)
+            model_section = cfg.get("model")
+            if isinstance(model_section, dict):
+                val = str(model_section.get("prompt_cache_ttl") or "").strip().lower()
+                if val in ("5m", "1h"):
+                    return val
+            
+            # Fallback to env var
+            env_val = os.getenv("ANTHROPIC_CACHE_TTL", "").strip().lower()
+            if env_val in ("5m", "1h"):
+                return env_val
+                
+        except Exception as exc:
+            logger.debug("[%s] Prompt cache TTL lookup failed: %s", self.session_id, exc)
+        return "5m"
+
+    def _should_bypass_proxy_for_url(self, url: str) -> bool:
+        """Check if the given URL should bypass the proxy (respecting NO_PROXY)."""
+        if not url:
+            return False
+        try:
+            from urllib.parse import urlparse
+            import urllib.request
+            host = urlparse(url).hostname or ""
+            # proxy_bypass_environment returns True if the host is in NO_PROXY
+            return urllib.request.proxy_bypass_environment(host)
+        except Exception:
+            return False
 
     def _anthropic_prompt_cache_policy(
         self,
@@ -4466,7 +4506,7 @@ class AIAgent:
         return False
 
     @staticmethod
-    def _build_keepalive_http_client() -> Any:
+    def _build_keepalive_http_client(proxy: str = None) -> Any:
         try:
             import httpx as _httpx
             import socket as _socket
@@ -4488,11 +4528,10 @@ class AIAgent:
             
             # When a custom transport is provided, httpx won't auto-read proxy
             # from env vars (allow_env_proxies = trust_env and transport is None).
-            # Explicitly read proxy settings to ensure HTTP_PROXY/HTTPS_PROXY work.
-            _proxy = _get_proxy_from_env()
+            # Explicitly use the provided proxy (if any).
             return _httpx.Client(
                 transport=_httpx.HTTPTransport(socket_options=_sock_opts),
-                proxy=_proxy,
+                proxy=proxy,
             )
         except Exception:
             return None
@@ -4547,7 +4586,8 @@ class AIAgent:
                     if k in {"api_key", "base_url", "default_headers", "timeout", "http_client"}
                 }
                 if "http_client" not in safe_kwargs:
-                    keepalive_http = self._build_keepalive_http_client()
+                    _proxy = None if self._should_bypass_proxy_for_url(base_url) else _get_proxy_from_env()
+                    keepalive_http = self._build_keepalive_http_client(proxy=_proxy)
                     if keepalive_http is not None:
                         safe_kwargs["http_client"] = keepalive_http
                 client = GeminiNativeClient(**safe_kwargs)
@@ -4576,7 +4616,9 @@ class AIAgent:
         # Tests in ``tests/run_agent/test_create_openai_client_reuse.py`` and
         # ``tests/run_agent/test_sequential_chats_live.py`` pin this invariant.
         if "http_client" not in client_kwargs:
-            keepalive_http = self._build_keepalive_http_client()
+            _base_url = str(client_kwargs.get("base_url", "") or "")
+            _proxy = None if self._should_bypass_proxy_for_url(_base_url) else _get_proxy_from_env()
+            keepalive_http = self._build_keepalive_http_client(proxy=_proxy)
             if keepalive_http is not None:
                 client_kwargs["http_client"] = keepalive_http
         client = OpenAI(**client_kwargs)

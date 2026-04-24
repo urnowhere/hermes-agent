@@ -384,7 +384,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
                         cwd=str(bridge_dir),
                         capture_output=True,
                         text=True,
-                        timeout=60,
+                        timeout=300,
                     )
                     if install_result.returncode != 0:
                         print(f"[{self.name}] npm install failed: {install_result.stderr}")
