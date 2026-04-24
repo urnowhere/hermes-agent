@@ -1638,6 +1638,7 @@ def select_provider_and_model(args=None):
         "alibaba",
         "huggingface",
         "xiaomi",
+        "fireworks",
         "arcee",
         "nvidia",
         "ollama-cloud",
@@ -4122,7 +4123,12 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
         except Exception:
             pass
 
-        if mdev_models:
+        if provider_id == "fireworks" and curated:
+            model_list = curated
+            print(
+                f'  Showing {len(model_list)} curated models — use "Enter custom model name" for others.'
+            )
+        elif mdev_models:
             # Merge models.dev with curated list so newly added models
             # (not yet in models.dev) still appear in the picker.
             if curated:

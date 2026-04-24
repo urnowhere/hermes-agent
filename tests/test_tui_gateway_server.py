@@ -1638,6 +1638,33 @@ def test_model_options_does_not_overwrite_curated_models(monkeypatch):
     assert listing.call_count == 1
 
 
+def test_model_options_includes_fireworks_curated_models(monkeypatch):
+    """The TUI /model picker gets Fireworks from the shared provider registry."""
+    monkeypatch.setenv("FIREWORKS_API_KEY", "test-key")
+    monkeypatch.setattr(
+        server,
+        "_load_cfg",
+        lambda: {"providers": {}, "custom_providers": []},
+    )
+
+    resp = server._methods["model.options"](100, {"session_id": ""})
+
+    assert "result" in resp, resp
+    providers = resp["result"]["providers"]
+    fireworks = next((p for p in providers if p.get("slug") == "fireworks"), None)
+    assert fireworks is not None
+    assert fireworks["name"] == "Fireworks AI"
+    assert fireworks["models"] == [
+        "accounts/fireworks/models/kimi-k2p6",
+        "accounts/fireworks/models/minimax-m2p7",
+        "accounts/fireworks/models/qwen3p6-plus",
+        "accounts/fireworks/models/glm-5p1",
+        "accounts/fireworks/models/kimi-k2p5",
+        "accounts/fireworks/models/deepseek-v3p2",
+    ]
+    assert fireworks["total_models"] == 6
+
+
 def test_model_options_propagates_list_exception(monkeypatch):
     """If list_authenticated_providers itself raises, surface as an RPC
     error rather than swallowing to a blank picker."""

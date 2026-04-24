@@ -340,6 +340,14 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=("XIAOMI_API_KEY",),
         base_url_env_var="XIAOMI_BASE_URL",
     ),
+    "fireworks": ProviderConfig(
+        id="fireworks",
+        name="Fireworks AI",
+        auth_type="api_key",
+        inference_base_url="https://api.fireworks.ai/inference/v1",
+        api_key_env_vars=("FIREWORKS_API_KEY",),
+        base_url_env_var="FIREWORKS_BASE_URL",
+    ),
     "ollama-cloud": ProviderConfig(
         id="ollama-cloud",
         name="Ollama Cloud",

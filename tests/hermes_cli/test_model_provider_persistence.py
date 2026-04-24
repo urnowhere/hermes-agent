@@ -233,6 +233,51 @@ class TestProviderPersistsAfterModelSave:
         assert model.get("default") == "kimi-k2.5"
         assert model.get("api_mode") == "chat_completions"
 
+    def test_fireworks_provider_saved_with_curated_model(self, config_home, monkeypatch, capsys):
+        """Fireworks uses the generic API-key flow but shows curated models only."""
+        from hermes_cli.auth import PROVIDER_REGISTRY
+        from hermes_cli.main import _model_flow_api_key_provider
+        from hermes_cli.config import load_config
+
+        pconfig = PROVIDER_REGISTRY.get("fireworks")
+        assert pconfig is not None
+        assert pconfig.name == "Fireworks AI"
+        assert pconfig.inference_base_url == "https://api.fireworks.ai/inference/v1"
+        assert pconfig.api_key_env_vars == ("FIREWORKS_API_KEY",)
+        assert pconfig.base_url_env_var == "FIREWORKS_BASE_URL"
+
+        selected = "accounts/fireworks/models/minimax-m2p7"
+        monkeypatch.setenv("FIREWORKS_API_KEY", "test-key")
+
+        with patch("agent.models_dev.list_agentic_models", return_value=[
+            "accounts/fireworks/models/not-in-curated",
+        ]), patch("hermes_cli.models.fetch_api_models", return_value=[
+            "accounts/fireworks/models/not-in-curated-live",
+        ]), patch("hermes_cli.auth._prompt_model_selection", return_value=selected) as prompt, \
+             patch("hermes_cli.auth.deactivate_provider"), \
+             patch("builtins.input", return_value=""):
+            _model_flow_api_key_provider(load_config(), "fireworks", "old-model")
+
+        import yaml
+        config = yaml.safe_load((config_home / "config.yaml").read_text()) or {}
+        model = config.get("model")
+        assert isinstance(model, dict)
+        assert model.get("provider") == "fireworks"
+        assert model.get("base_url") == "https://api.fireworks.ai/inference/v1"
+        assert model.get("default") == selected
+        assert "api_mode" not in model
+
+        model_list = prompt.call_args.args[0]
+        assert model_list == [
+            "accounts/fireworks/models/kimi-k2p6",
+            "accounts/fireworks/models/minimax-m2p7",
+            "accounts/fireworks/models/qwen3p6-plus",
+            "accounts/fireworks/models/glm-5p1",
+            "accounts/fireworks/models/kimi-k2p5",
+            "accounts/fireworks/models/deepseek-v3p2",
+        ]
+        assert "Showing 6 curated models" in capsys.readouterr().out
+
     def test_opencode_go_same_provider_switch_recomputes_api_mode(self, config_home, monkeypatch):
         from hermes_cli.main import _model_flow_api_key_provider
         from hermes_cli.config import load_config
