@@ -44,6 +44,10 @@ class TestSystemdServiceRefresh:
 
         monkeypatch.setattr(gateway_cli, "get_systemd_unit_path", lambda system=False: unit_path)
         monkeypatch.setattr(gateway_cli, "generate_systemd_unit", lambda system=False, run_as_user=None: "new unit\n")
+        # Bypass systemd availability checks — this test targets unit-file
+        # refresh logic, not D-Bus reachability (fails on macOS/WSL/Docker).
+        monkeypatch.setattr(gateway_cli, "_preflight_user_systemd", lambda **kw: None)
+        monkeypatch.setattr(gateway_cli, "_select_systemd_scope", lambda system=False: False)
 
         calls = []
 
@@ -67,6 +71,10 @@ class TestSystemdServiceRefresh:
 
         monkeypatch.setattr(gateway_cli, "get_systemd_unit_path", lambda system=False: unit_path)
         monkeypatch.setattr(gateway_cli, "generate_systemd_unit", lambda system=False, run_as_user=None: "new unit\n")
+        # Bypass systemd availability checks — this test targets unit-file
+        # refresh logic, not D-Bus reachability (fails on macOS/WSL/Docker).
+        monkeypatch.setattr(gateway_cli, "_preflight_user_systemd", lambda **kw: None)
+        monkeypatch.setattr(gateway_cli, "_select_systemd_scope", lambda system=False: False)
 
         calls = []
 
