@@ -2560,14 +2560,29 @@ class AIAgent:
                 pass
         return AIAgent._model_requires_responses_api(model)
 
+    # Models that require max_completion_tokens instead of max_tokens.
+    # These are OpenAI models that reject the legacy max_tokens parameter.
+    _MAX_COMPLETION_TOKENS_PREFIXES = (
+        "gpt-4o", "gpt-4.1", "gpt-5", "o1", "o3", "o4",
+    )
+
     def _max_tokens_param(self, value: int) -> dict:
         """Return the correct max tokens kwarg for the current provider.
-        
+
         OpenAI's newer models (gpt-4o, o-series, gpt-5+) require
         'max_completion_tokens'. OpenRouter, local models, and older
         OpenAI models use 'max_tokens'.
+
+        Custom OpenAI-compatible endpoints serving these model families
+        also need max_completion_tokens — checking the URL alone misses
+        them (#13901).
         """
         if self._is_direct_openai_url():
+            return {"max_completion_tokens": value}
+        # Check model name for known families that require max_completion_tokens,
+        # even on custom endpoints (#13901).
+        model_lower = (self.model or "").lower()
+        if any(model_lower.startswith(p) for p in self._MAX_COMPLETION_TOKENS_PREFIXES):
             return {"max_completion_tokens": value}
         return {"max_tokens": value}
 
