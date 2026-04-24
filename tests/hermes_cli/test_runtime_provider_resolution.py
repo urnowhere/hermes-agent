@@ -653,6 +653,138 @@ def test_named_custom_provider_uses_key_env_from_providers_dict(monkeypatch):
     assert resolved["model"] == "acme-large"
 
 
+def test_named_custom_provider_preserves_transport_for_non_openai_url(monkeypatch):
+    """Regression test for NousResearch/hermes-agent#14065.
+
+    When a providers-dict entry targets a non-OpenAI base_url (so the URL-based
+    ``_detect_api_mode_for_url`` heuristic yields nothing) with an explicit
+    ``transport: codex_responses`` (or ``api_mode``), the resolved runtime
+    provider MUST honour that value rather than silently falling back to
+    ``chat_completions``. The previous inline ``providers`` dict handler
+    dropped ``api_mode``/``transport`` entirely, which forced Codex-style
+    gateways (e.g. LiteLLM-fronted GPT-5) into the wrong API surface.
+    """
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "providers": {
+                "gpt5-proxy": {
+                    "api": "https://llm.internal.corp/v1",
+                    "api_key": "proxy-key",
+                    "default_model": "gpt-5",
+                    "name": "Internal GPT-5 Proxy",
+                    "transport": "codex_responses",
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(
+        rp,
+        "resolve_provider",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError(
+                "resolve_provider should not be called for named custom providers"
+            )
+        ),
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="gpt5-proxy")
+
+    assert resolved["provider"] == "custom"
+    assert resolved["api_mode"] == "codex_responses"
+    assert resolved["base_url"] == "https://llm.internal.corp/v1"
+    assert resolved["api_key"] == "proxy-key"
+    assert resolved["model"] == "gpt-5"
+    assert resolved["source"] == "custom_provider:Internal GPT-5 Proxy"
+
+
+def test_named_custom_provider_key_env_overrides_inline_api_key(monkeypatch):
+    """providers-dict entries with both ``key_env`` and inline ``api_key``
+    should resolve via ``_resolve_named_custom_runtime``'s documented
+    candidate order (inline api_key first, then ``os.getenv(key_env)``),
+    and should carry BOTH fields through from the normalizer so the runtime
+    resolver can choose — the previous inline ``providers`` handler returned
+    only one of them, hiding misconfigurations (#14065).
+    """
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("CORP_API_KEY", "env-value")
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "providers": {
+                "dual-auth": {
+                    "base_url": "https://api.example.com/v1",
+                    "api_key": "inline-value",
+                    "key_env": "CORP_API_KEY",
+                    "default_model": "example-large",
+                    "name": "Dual Auth",
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(
+        rp,
+        "resolve_provider",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError(
+                "resolve_provider should not be called for named custom providers"
+            )
+        ),
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="dual-auth")
+
+    # Inline api_key wins per the current candidate order, but key_env must
+    # still have been preserved by the normalizer (otherwise the env-only
+    # fallback would be unreachable when the inline value is blank).
+    assert resolved["api_key"] == "inline-value"
+    assert resolved["base_url"] == "https://api.example.com/v1"
+    assert resolved["model"] == "example-large"
+
+
+def test_named_custom_provider_uses_key_env_when_inline_api_key_absent(monkeypatch):
+    """When only ``key_env`` is set on a providers-dict entry, the env var
+    must be resolved — previously the inline handler returned an empty
+    api_key field because the normalizer's ``key_env`` was dropped (#14065)."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("ONLY_ENV_API_KEY", "env-only-secret")
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "providers": {
+                "env-only": {
+                    "base_url": "https://only-env.example.com/v1",
+                    "key_env": "ONLY_ENV_API_KEY",
+                    "default_model": "only-model",
+                    "name": "Env Only",
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(
+        rp,
+        "resolve_provider",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError(
+                "resolve_provider should not be called for named custom providers"
+            )
+        ),
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="env-only")
+
+    assert resolved["api_key"] == "env-only-secret"
+    assert resolved["base_url"] == "https://only-env.example.com/v1"
+    assert resolved["model"] == "only-model"
+
+
 def test_named_custom_provider_falls_back_to_openai_api_key(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "env-openai-key")
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)

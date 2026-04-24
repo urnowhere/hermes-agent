@@ -303,50 +303,11 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
             return None
 
     config = load_config()
-    
-    # First check providers: dict (new-style user-defined providers)
-    providers = config.get("providers")
-    if isinstance(providers, dict):
-        for ep_name, entry in providers.items():
-            if not isinstance(entry, dict):
-                continue
-            # Match exact name or normalized name
-            name_norm = _normalize_custom_provider_name(ep_name)
-            # Resolve the API key from the env var name stored in key_env
-            key_env = str(entry.get("key_env", "") or "").strip()
-            resolved_api_key = os.getenv(key_env, "").strip() if key_env else ""
-            # Fall back to inline api_key when key_env is absent or unresolvable
-            if not resolved_api_key:
-                resolved_api_key = str(entry.get("api_key", "") or "").strip()
 
-            if requested_norm in {ep_name, name_norm, f"custom:{name_norm}"}:
-                # Found match by provider key
-                base_url = entry.get("api") or entry.get("url") or entry.get("base_url") or ""
-                if base_url:
-                    return {
-                        "name": entry.get("name", ep_name),
-                        "base_url": base_url.strip(),
-                        "api_key": resolved_api_key,
-                        "model": entry.get("default_model", ""),
-                    }
-            # Also check the 'name' field if present
-            display_name = entry.get("name", "")
-            if display_name:
-                display_norm = _normalize_custom_provider_name(display_name)
-                if requested_norm in {display_name, display_norm, f"custom:{display_norm}"}:
-                    # Found match by display name
-                    base_url = entry.get("api") or entry.get("url") or entry.get("base_url") or ""
-                    if base_url:
-                        return {
-                            "name": display_name,
-                            "base_url": base_url.strip(),
-                            "api_key": resolved_api_key,
-                            "model": entry.get("default_model", ""),
-                        }
-
-    # Fall back to custom_providers: list (legacy format)
-    custom_providers = config.get("custom_providers")
-    if isinstance(custom_providers, dict):
+    # Warn about the common misconfiguration where ``custom_providers`` is a
+    # dict instead of a YAML list. Entries in that shape cannot be resolved.
+    custom_providers_raw = config.get("custom_providers")
+    if isinstance(custom_providers_raw, dict):
         logger.warning(
             "custom_providers in config.yaml is a dict, not a list. "
             "Each entry must be prefixed with '-' in YAML. "
@@ -354,6 +315,11 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
         )
         return None
 
+    # Use the compatibility view which merges the legacy ``custom_providers``
+    # list and the v12+ ``providers`` dict into a single normalized list.
+    # ``providers_dict_to_custom_providers`` preserves ``api_mode`` / ``key_env``
+    # / ``provider_key`` / ``model`` that the old inline handler dropped
+    # (see NousResearch/hermes-agent#14065).
     custom_providers = get_compatible_custom_providers(config)
     if not custom_providers:
         return None
