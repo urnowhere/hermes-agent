@@ -26,6 +26,8 @@ from acp.schema import (
     SetSessionModeResponse,
     SessionInfo,
     TextContentBlock,
+    ToolCallProgress,
+    ToolCallStart,
     Usage,
 )
 from acp_adapter.server import HermesACPAgent, HERMES_VERSION
@@ -228,6 +230,204 @@ class TestSessionOps:
     async def test_resume_session_creates_new_if_missing(self, agent):
         resume_resp = await agent.resume_session(cwd="/tmp", session_id="nonexistent")
         assert isinstance(resume_resp, ResumeSessionResponse)
+
+
+# ---------------------------------------------------------------------------
+# load_session conversation history replay (per ACP spec)
+# ---------------------------------------------------------------------------
+
+
+def _notification_types(mock_conn) -> list[str]:
+    """Return the type names of every session_update payload the mock saw."""
+    types: list[str] = []
+    for call in mock_conn.session_update.await_args_list:
+        update = call.kwargs.get("update")
+        if update is None and len(call.args) >= 2:
+            update = call.args[1]
+        if update is not None:
+            types.append(type(update).__name__)
+    return types
+
+
+class TestLoadSessionReplay:
+    @pytest.mark.asyncio
+    async def test_load_session_replays_text_messages(self, agent):
+        new_resp = await agent.new_session(cwd="/tmp")
+        state = agent.session_manager.get_session(new_resp.session_id)
+        state.history = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi there"},
+            {"role": "user", "content": "what's 2+2?"},
+            {"role": "assistant", "content": "4"},
+        ]
+
+        mock_conn = MagicMock(spec=acp.Client)
+        mock_conn.session_update = AsyncMock()
+        agent._conn = mock_conn
+
+        resp = await agent.load_session(cwd="/tmp", session_id=new_resp.session_id)
+        assert isinstance(resp, LoadSessionResponse)
+
+        types = _notification_types(mock_conn)
+        # UserMessageChunk + AgentMessageChunk must appear in interleaved order,
+        # and all four must precede any AvailableCommandsUpdate (per ACP spec
+        # ordering — history before live state).
+        history_types = [
+            t for t in types
+            if t in ("UserMessageChunk", "AgentMessageChunk")
+        ]
+        assert history_types == [
+            "UserMessageChunk",
+            "AgentMessageChunk",
+            "UserMessageChunk",
+            "AgentMessageChunk",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_load_session_replays_tool_calls(self, agent):
+        new_resp = await agent.new_session(cwd="/tmp")
+        state = agent.session_manager.get_session(new_resp.session_id)
+        state.history = [
+            {"role": "user", "content": "show pwd"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "terminal",
+                        "arguments": '{"command": "pwd"}',
+                    },
+                }],
+            },
+            {
+                "role": "tool",
+                "content": "/home/user",
+                "tool_call_id": "call_1",
+                "tool_name": "terminal",
+            },
+            {"role": "assistant", "content": "You are in /home/user."},
+        ]
+
+        mock_conn = MagicMock(spec=acp.Client)
+        mock_conn.session_update = AsyncMock()
+        agent._conn = mock_conn
+
+        await agent.load_session(cwd="/tmp", session_id=new_resp.session_id)
+
+        # Extract the actual update objects so we can correlate IDs.
+        updates = []
+        for call in mock_conn.session_update.await_args_list:
+            update = call.kwargs.get("update") or (
+                call.args[1] if len(call.args) >= 2 else None
+            )
+            if update is not None:
+                updates.append(update)
+
+        tool_starts = [u for u in updates if isinstance(u, ToolCallStart)]
+        tool_progress = [u for u in updates if isinstance(u, ToolCallProgress)]
+
+        assert len(tool_starts) == 1
+        assert len(tool_progress) == 1
+        assert tool_starts[0].tool_call_id == "call_1"
+        assert tool_progress[0].tool_call_id == "call_1"
+
+    @pytest.mark.asyncio
+    async def test_load_session_replays_reasoning(self, agent):
+        new_resp = await agent.new_session(cwd="/tmp")
+        state = agent.session_manager.get_session(new_resp.session_id)
+        state.history = [
+            {"role": "user", "content": "solve it"},
+            {
+                "role": "assistant",
+                "content": "The answer is 42.",
+                "reasoning": "After careful deliberation...",
+            },
+        ]
+
+        mock_conn = MagicMock(spec=acp.Client)
+        mock_conn.session_update = AsyncMock()
+        agent._conn = mock_conn
+
+        await agent.load_session(cwd="/tmp", session_id=new_resp.session_id)
+
+        types = _notification_types(mock_conn)
+        # Reasoning must come before the visible answer.
+        thought_idx = types.index("AgentThoughtChunk")
+        message_idx = types.index("AgentMessageChunk")
+        assert thought_idx < message_idx
+
+    @pytest.mark.asyncio
+    async def test_load_session_empty_history_emits_no_history_chunks(self, agent):
+        new_resp = await agent.new_session(cwd="/tmp")
+        # state.history is already an empty list from create_session.
+
+        mock_conn = MagicMock(spec=acp.Client)
+        mock_conn.session_update = AsyncMock()
+        agent._conn = mock_conn
+
+        resp = await agent.load_session(cwd="/tmp", session_id=new_resp.session_id)
+        assert isinstance(resp, LoadSessionResponse)
+
+        types = _notification_types(mock_conn)
+        # No user/agent/tool chunks — only the commands update (which may or
+        # may not have fired synchronously) is acceptable.
+        assert not any(
+            t in ("UserMessageChunk", "AgentMessageChunk", "AgentThoughtChunk",
+                  "ToolCallStart", "ToolCallProgress")
+            for t in types
+        )
+
+    @pytest.mark.asyncio
+    async def test_load_session_not_found_emits_no_replay(self, agent):
+        mock_conn = MagicMock(spec=acp.Client)
+        mock_conn.session_update = AsyncMock()
+        agent._conn = mock_conn
+
+        resp = await agent.load_session(cwd="/tmp", session_id="does-not-exist")
+        assert resp is None
+        # No notifications emitted for an unknown session.
+        mock_conn.session_update.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_load_session_replay_survives_notification_failure(self, agent):
+        new_resp = await agent.new_session(cwd="/tmp")
+        state = agent.session_manager.get_session(new_resp.session_id)
+        state.history = [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "second"},
+            {"role": "user", "content": "third"},
+        ]
+
+        # First call raises; subsequent calls must still fire.
+        calls_seen: list = []
+
+        async def flaky(**kwargs):
+            calls_seen.append(kwargs.get("update"))
+            if len(calls_seen) == 1:
+                raise RuntimeError("transient client error")
+            return None
+
+        mock_conn = MagicMock(spec=acp.Client)
+        mock_conn.session_update = AsyncMock(side_effect=flaky)
+        agent._conn = mock_conn
+
+        resp = await agent.load_session(cwd="/tmp", session_id=new_resp.session_id)
+        # load_session must still resolve even though one replay step failed.
+        assert isinstance(resp, LoadSessionResponse)
+        # And subsequent messages after the failure were still emitted.
+        assert len(calls_seen) >= 3
+
+    @pytest.mark.asyncio
+    async def test_load_session_without_conn_does_not_crash(self, agent):
+        new_resp = await agent.new_session(cwd="/tmp")
+        state = agent.session_manager.get_session(new_resp.session_id)
+        state.history = [{"role": "user", "content": "hello"}]
+
+        agent._conn = None
+        resp = await agent.load_session(cwd="/tmp", session_id=new_resp.session_id)
+        assert isinstance(resp, LoadSessionResponse)
 
 
 # ---------------------------------------------------------------------------

@@ -60,6 +60,7 @@ from acp_adapter.events import (
     make_tool_progress_cb,
 )
 from acp_adapter.permissions import make_approval_callback
+from acp_adapter.replay import build_replay_notifications
 from acp_adapter.session import SessionManager, SessionState
 
 logger = logging.getLogger(__name__)
@@ -399,9 +400,37 @@ class HermesACPAgent(acp.Agent):
             logger.warning("load_session: session %s not found", session_id)
             return None
         await self._register_session_mcp_servers(state, mcp_servers)
-        logger.info("Loaded session %s", session_id)
+        logger.info(
+            "Loaded session %s (%d persisted messages)",
+            session_id,
+            len(state.history),
+        )
+        # Per ACP spec, session/load must stream the stored conversation back
+        # to the client via session_update notifications before resolving so
+        # editors (Zed, etc.) can rebuild the thread on reconnect.
+        await self._replay_session_history(session_id, state.history)
         self._schedule_available_commands_update(session_id)
         return LoadSessionResponse(models=self._build_model_state(state))
+
+    async def _replay_session_history(
+        self,
+        session_id: str,
+        history: list[dict[str, Any]],
+    ) -> None:
+        """Emit session_update notifications mirroring a persisted history."""
+        if not self._conn or not history:
+            return
+        for update in build_replay_notifications(history):
+            try:
+                await self._conn.session_update(
+                    session_id=session_id, update=update
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to emit replay notification for session %s",
+                    session_id,
+                    exc_info=True,
+                )
 
     async def resume_session(
         self,
