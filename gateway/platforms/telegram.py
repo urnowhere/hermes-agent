@@ -2989,8 +2989,12 @@ class TelegramAdapter(BasePlatformAdapter):
         # Resolve DM topic name and skill binding
         thread_id_raw = message.message_thread_id
         thread_id_str = str(thread_id_raw) if thread_id_raw is not None else None
-        if chat_type == "group" and thread_id_str is None and getattr(chat, "is_forum", False):
+        if chat_type in ("group", "supergroup") and thread_id_str is None and getattr(chat, "is_forum", False):
             thread_id_str = self._GENERAL_TOPIC_THREAD_ID
+            logger.debug(
+                "Forum %s message without thread_id — routing to General topic (thread=%s)",
+                chat_type, thread_id_str,
+            )
         chat_topic = None
         topic_skill = None
 
