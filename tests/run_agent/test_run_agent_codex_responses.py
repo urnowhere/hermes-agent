@@ -157,9 +157,10 @@ def _codex_ack_message_response(text: str):
 
 
 class _FakeResponsesStream:
-    def __init__(self, *, final_response=None, final_error=None):
+    def __init__(self, *, final_response=None, final_error=None, events=None):
         self._final_response = final_response
         self._final_error = final_error
+        self._events = list(events or [])
 
     def __enter__(self):
         return self
@@ -168,7 +169,7 @@ class _FakeResponsesStream:
         return False
 
     def __iter__(self):
-        return iter(())
+        return iter(self._events)
 
     def get_final_response(self):
         if self._final_error is not None:
@@ -447,6 +448,40 @@ def test_run_codex_stream_falls_back_to_create_after_stream_completion_error(mon
     assert calls["stream"] == 2
     assert calls["create"] == 1
     assert response.output[0].content[0].text == "create fallback ok"
+
+
+def test_run_codex_stream_completed_output_none_backfills_output_items(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    tool_item = SimpleNamespace(
+        type="function_call",
+        id="fc_1",
+        call_id="call_1",
+        name="terminal",
+        arguments="{}",
+    )
+    terminal = SimpleNamespace(
+        status="completed",
+        output=None,
+        usage=SimpleNamespace(input_tokens=5, output_tokens=2, total_tokens=7),
+        model="gpt-5-codex",
+    )
+    stream = _FakeResponsesStream(
+        events=[
+            SimpleNamespace(type="response.output_item.done", item=tool_item),
+            SimpleNamespace(type="response.completed", response=terminal),
+        ],
+        final_error=TypeError("'NoneType' object is not iterable"),
+    )
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            stream=lambda **kwargs: stream,
+            create=lambda **kwargs: _codex_message_response("fallback should not run"),
+        )
+    )
+
+    response = agent._run_codex_stream(_codex_request_kwargs())
+
+    assert response.output == [tool_item]
 
 
 def test_run_codex_stream_fallback_parses_create_stream_events(monkeypatch):

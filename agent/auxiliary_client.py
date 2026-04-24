@@ -345,6 +345,55 @@ def _convert_content_for_responses(content: Any) -> Any:
     return converted or ""
 
 
+def _backfill_responses_output(
+    final: Any,
+    collected_output_items: List[Any],
+    collected_text_deltas: List[str],
+    *,
+    has_function_calls: bool,
+    label: str,
+) -> Any:
+    """Repair Responses stream finals whose output is missing or empty."""
+    if final is None:
+        final = SimpleNamespace(status="completed", output=[])
+
+    if isinstance(final, dict):
+        output = final.get("output")
+    else:
+        output = getattr(final, "output", None)
+
+    if isinstance(output, list) and output:
+        return final
+
+    def _set_output(value: List[Any]) -> None:
+        if isinstance(final, dict):
+            final["output"] = value
+        else:
+            final.output = value
+
+    if collected_output_items:
+        _set_output(list(collected_output_items))
+        logger.debug(
+            "%s: backfilled %d output items from stream events",
+            label,
+            len(collected_output_items),
+        )
+    elif collected_text_deltas and not has_function_calls:
+        assembled = "".join(collected_text_deltas)
+        _set_output([
+            SimpleNamespace(
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[SimpleNamespace(type="output_text", text=assembled)],
+            )
+        ])
+        logger.debug("%s: synthesized from %d deltas (%d chars)", label, len(collected_text_deltas), len(assembled))
+    elif not isinstance(output, list):
+        _set_output([])
+    return final
+
+
 class _CodexCompletionsAdapter:
     """Drop-in shim that accepts chat.completions.create() kwargs and
     routes them through the Codex Responses streaming API."""
@@ -407,12 +456,14 @@ class _CodexCompletionsAdapter:
         usage = None
 
         try:
-            # Collect output items and text deltas during streaming —
-            # the Codex backend can return empty response.output from
-            # get_final_response() even when items were streamed.
+            # Collect output items and text deltas during streaming. Some
+            # OpenAI-compatible providers return output=null on the terminal
+            # response, which makes the SDK final parser raise before existing
+            # empty-output recovery can run.
             collected_output_items: List[Any] = []
             collected_text_deltas: List[str] = []
             has_function_calls = False
+            final = None
             with self._client.responses.stream(**resp_kwargs) as stream:
                 for _event in stream:
                     _etype = getattr(_event, "type", "")
@@ -426,30 +477,33 @@ class _CodexCompletionsAdapter:
                             collected_text_deltas.append(_delta)
                     elif "function_call" in _etype:
                         has_function_calls = True
-                final = stream.get_final_response()
+                    elif _etype in {"response.completed", "response.incomplete", "response.failed"}:
+                        final = getattr(_event, "response", None)
+                        if final is not None:
+                            break
 
-            # Backfill empty output from collected stream events
-            _output = getattr(final, "output", None)
-            if isinstance(_output, list) and not _output:
-                if collected_output_items:
-                    final.output = list(collected_output_items)
-                    logger.debug(
-                        "Codex auxiliary: backfilled %d output items from stream events",
-                        len(collected_output_items),
-                    )
-                elif collected_text_deltas and not has_function_calls:
-                    # Only synthesize text when no tool calls were streamed —
-                    # a function_call response with incidental text should not
-                    # be collapsed into a plain-text message.
-                    assembled = "".join(collected_text_deltas)
-                    final.output = [SimpleNamespace(
-                        type="message", role="assistant", status="completed",
-                        content=[SimpleNamespace(type="output_text", text=assembled)],
-                    )]
-                    logger.debug(
-                        "Codex auxiliary: synthesized from %d deltas (%d chars)",
-                        len(collected_text_deltas), len(assembled),
-                    )
+                if final is None:
+                    try:
+                        final = stream.get_final_response()
+                    except TypeError as exc:
+                        err_text = str(exc)
+                        if "NoneType" not in err_text or "not iterable" not in err_text:
+                            raise
+                        if not (collected_output_items or collected_text_deltas):
+                            raise
+                        logger.warning(
+                            "Codex auxiliary: final Responses payload had output=None; "
+                            "recovering from streamed output events"
+                        )
+                        final = SimpleNamespace(status="completed", output=[])
+
+            final = _backfill_responses_output(
+                final,
+                collected_output_items,
+                collected_text_deltas,
+                has_function_calls=has_function_calls,
+                label="Codex auxiliary",
+            )
 
             # Extract text and tool calls from the Responses output.
             # Items may be SDK objects (attrs) or dicts (raw/fallback paths),

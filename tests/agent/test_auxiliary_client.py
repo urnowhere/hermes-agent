@@ -4,11 +4,13 @@ import json
 import logging
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
 
 from agent.auxiliary_client import (
+    CodexAuxiliaryClient,
     get_text_auxiliary_client,
     get_available_vision_backends,
     resolve_vision_provider_client,
@@ -52,6 +54,56 @@ def codex_auth_dir(tmp_path, monkeypatch):
         lambda: "codex-test-token-abc123",
     )
     return codex_dir
+
+
+class _FakeResponsesStream:
+    def __init__(self, events, *, final_error=None):
+        self._events = list(events)
+        self._final_error = final_error
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def __iter__(self):
+        return iter(self._events)
+
+    def get_final_response(self):
+        if self._final_error is not None:
+            raise self._final_error
+        raise AssertionError("terminal event should be used before final parsing")
+
+
+class TestCodexAuxiliaryClientStreamRecovery:
+    def test_stream_completed_output_none_backfills_output_items(self):
+        tool_item = SimpleNamespace(
+            type="function_call",
+            call_id="call_1",
+            name="memory",
+            arguments='{"action":"add","target":"notes","content":"ok"}',
+        )
+        terminal = SimpleNamespace(status="completed", output=None, model="gpt-5.2-codex")
+        real_client = MagicMock()
+        real_client.api_key = "token"
+        real_client.base_url = "https://chatgpt.com/backend-api/codex"
+        real_client.responses.stream.return_value = _FakeResponsesStream(
+            [
+                SimpleNamespace(type="response.output_item.done", item=tool_item),
+                SimpleNamespace(type="response.completed", response=terminal),
+            ],
+            final_error=TypeError("'NoneType' object is not iterable"),
+        )
+
+        client = CodexAuxiliaryClient(real_client, "gpt-5.2-codex")
+        response = client.chat.completions.create(
+            messages=[{"role": "user", "content": "save memory"}],
+            tools=[{"type": "function", "function": {"name": "memory", "parameters": {}}}],
+        )
+
+        assert response.choices[0].message.tool_calls[0].function.name == "memory"
+        real_client.responses.stream.assert_called_once()
 
 
 class TestReadCodexAccessToken:
