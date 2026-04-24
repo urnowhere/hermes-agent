@@ -115,7 +115,7 @@ from agent.trajectory import (
     convert_scratchpad_to_think, has_incomplete_scratchpad,
     save_trajectory as _save_trajectory_to_file,
 )
-from utils import atomic_json_write, base_url_host_matches, base_url_hostname, env_var_enabled, normalize_proxy_url
+from utils import atomic_json_write, base_url_host_matches, base_url_hostname, env_var_enabled, model_forces_max_completion_tokens, normalize_proxy_url
 
 
 
@@ -2559,12 +2559,16 @@ class AIAgent:
 
     def _max_tokens_param(self, value: int) -> dict:
         """Return the correct max tokens kwarg for the current provider.
-        
-        OpenAI's newer models (gpt-4o, o-series, gpt-5+) require
-        'max_completion_tokens'. OpenRouter, local models, and older
-        OpenAI models use 'max_tokens'.
+
+        OpenAI's newer models (gpt-4o, gpt-4.1, gpt-5+, o-series) require
+        'max_completion_tokens'. OpenRouter, local models, and older OpenAI
+        models use 'max_tokens'. The check is URL-first so any request
+        targeting api.openai.com uses the new kwarg, then falls back to a
+        model-name check so third-party OpenAI-compatible endpoints fronting
+        those models are recognised — URL-only detection misses that case
+        and silently sends the wrong kwarg.
         """
-        if self._is_direct_openai_url():
+        if self._is_direct_openai_url() or model_forces_max_completion_tokens(self.model):
             return {"max_completion_tokens": value}
         return {"max_tokens": value}
 
