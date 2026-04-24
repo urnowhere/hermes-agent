@@ -3037,6 +3037,7 @@ class GatewayRunner:
             Platform.QQBOT: "QQ_ALLOWED_USERS",
         }
         platform_group_env_map = {
+            Platform.TELEGRAM: "TELEGRAM_ALLOWED_GROUP_CHATS",
             Platform.QQBOT: "QQ_GROUP_ALLOWED_USERS",
         }
         platform_allow_all_map = {
@@ -3518,6 +3519,10 @@ class GatewayRunner:
             if _cmd_def_inner and _cmd_def_inner.name == "agents":
                 return await self._handle_agents_command(event)
 
+            # /swarm is query/control only and must not interrupt the run.
+            if _cmd_def_inner and _cmd_def_inner.name == "swarm":
+                return await self._handle_swarm_command(event)
+
             # /background must bypass the running-agent guard — it starts a
             # parallel task and must never interrupt the active conversation.
             if _cmd_def_inner and _cmd_def_inner.name == "background":
@@ -3718,6 +3723,9 @@ class GatewayRunner:
 
         if canonical == "agents":
             return await self._handle_agents_command(event)
+
+        if canonical == "swarm":
+            return await self._handle_swarm_command(event)
 
         if canonical == "restart":
             return await self._handle_restart_command(event)
@@ -5295,6 +5303,72 @@ class GatewayRunner:
             lines.append("No active agents or running tasks.")
 
         return "\n".join(lines)
+
+    async def _handle_swarm_command(self, event: MessageEvent) -> str:
+        """Handle /swarm command - show or control delegation swarm state."""
+        from tools.delegate_tool import (
+            _get_max_concurrent_children,
+            _get_max_spawn_depth,
+            is_spawn_paused,
+            list_active_subagents,
+            set_spawn_paused,
+        )
+
+        args = (event.get_command_args() or "").strip()
+        subcommand = args.split(None, 1)[0].lower() if args else "status"
+
+        if subcommand in ("", "status"):
+            rows = list_active_subagents()
+            rows.sort(
+                key=lambda row: (
+                    int(row.get("depth", 0) or 0),
+                    str(row.get("subagent_id") or ""),
+                )
+            )
+
+            lines = [
+                "**Swarm Status**",
+                "",
+                f"**Paused:** {'Yes' if is_spawn_paused() else 'No'}",
+                f"**Max depth:** {_get_max_spawn_depth()}",
+                f"**Max concurrency:** {_get_max_concurrent_children()}",
+                f"**Active subagents:** {len(rows)}",
+            ]
+
+            if rows:
+                for row in rows[:12]:
+                    sid = str(row.get("subagent_id") or "?")
+                    depth = int(row.get("depth", 0) or 0)
+                    status = str(row.get("status") or "running")
+                    stalled = "yes" if row.get("stalled") else "no"
+                    idle = max(0, int(float(row.get("idle_seconds", 0) or 0)))
+                    model = str(row.get("model") or "-")
+                    goal = " ".join(str(row.get("goal") or "").split())
+                    if len(model) > 40:
+                        model = model[:37] + "..."
+                    if len(goal) > 72:
+                        goal = goal[:69] + "..."
+                    lines.append(
+                        f"- `{sid}` · d{depth} · {status} · stalled={stalled} "
+                        f"· idle={idle}s · `{model}` · {goal or '-'}"
+                    )
+                if len(rows) > 12:
+                    lines.append(f"... and {len(rows) - 12} more")
+
+            return "\n".join(lines)
+
+        if subcommand == "pause":
+            set_spawn_paused(True)
+            return (
+                "Swarm paused. Active subagents keep running; "
+                "new delegation spawns are blocked."
+            )
+
+        if subcommand == "resume":
+            set_spawn_paused(False)
+            return "Swarm resumed. New delegation spawns are allowed."
+
+        return "Usage: /swarm [status|pause|resume]"
     
     async def _handle_stop_command(self, event: MessageEvent) -> str:
         """Handle /stop command - interrupt a running agent.

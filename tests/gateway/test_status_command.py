@@ -183,6 +183,74 @@ async def test_tasks_alias_routes_to_agents_command(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_swarm_status_reports_pause_caps_and_active_subagents(monkeypatch):
+    session_entry = SessionEntry(
+        session_key=build_session_key(_make_source()),
+        session_id="sess-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        total_tokens=0,
+    )
+    runner = _make_runner(session_entry)
+
+    monkeypatch.setattr("tools.delegate_tool.is_spawn_paused", lambda: True)
+    monkeypatch.setattr("tools.delegate_tool._get_max_spawn_depth", lambda: 2)
+    monkeypatch.setattr("tools.delegate_tool._get_max_concurrent_children", lambda: 4)
+    monkeypatch.setattr(
+        "tools.delegate_tool.list_active_subagents",
+        lambda: [
+            {
+                "subagent_id": "sa-0-abcd1234",
+                "depth": 0,
+                "status": "running",
+                "stalled": True,
+                "idle_seconds": 312.4,
+                "model": "openai/orch-model",
+                "goal": "Coordinate backend and tests",
+            }
+        ],
+    )
+
+    result = await runner._handle_message(_make_event("/swarm"))
+
+    assert "Swarm Status" in result
+    assert "**Paused:** Yes" in result
+    assert "**Max depth:** 2" in result
+    assert "**Max concurrency:** 4" in result
+    assert "**Active subagents:** 1" in result
+    assert "sa-0-abcd1234" in result
+    assert "d0" in result
+    assert "stalled=yes" in result
+    assert "idle=312s" in result
+    assert "Coordinate backend and tests" in result
+
+
+@pytest.mark.asyncio
+async def test_swarm_pause_bypasses_running_agent_and_does_not_interrupt(monkeypatch):
+    session_entry = SessionEntry(
+        session_key=build_session_key(_make_source()),
+        session_id="sess-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        total_tokens=0,
+    )
+    runner = _make_runner(session_entry)
+    running_agent = MagicMock()
+    runner._running_agents[build_session_key(_make_source())] = running_agent
+
+    monkeypatch.setattr("tools.delegate_tool.set_spawn_paused", lambda paused: bool(paused))
+
+    result = await runner._handle_message(_make_event("/swarm pause"))
+
+    assert "Swarm paused" in result
+    running_agent.interrupt.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_handle_message_persists_agent_token_counts(monkeypatch):
     import gateway.run as gateway_run
 
