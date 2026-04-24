@@ -237,6 +237,7 @@ def cronjob(
     reason: Optional[str] = None,
     script: Optional[str] = None,
     enabled_toolsets: Optional[List[str]] = None,
+    session_name: Optional[str] = None,
     task_id: str = None,
 ) -> str:
     """Unified cron job management tool."""
@@ -275,6 +276,7 @@ def cronjob(
                 base_url=_normalize_optional_job_value(base_url, strip_trailing_slash=True),
                 script=_normalize_optional_job_value(script),
                 enabled_toolsets=enabled_toolsets or None,
+                session_name=session_name,
             )
             return json.dumps(
                 {
@@ -366,6 +368,8 @@ def cronjob(
                 updates["script"] = _normalize_optional_job_value(script) if script else None
             if enabled_toolsets is not None:
                 updates["enabled_toolsets"] = enabled_toolsets or None
+            if session_name is not None:
+                updates["session_name"] = session_name
             if repeat is not None:
                 # Normalize: treat 0 or negative as None (infinite)
                 normalized_repeat = None if repeat <= 0 else repeat
@@ -470,6 +474,10 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
                 "items": {"type": "string"},
                 "description": "Optional list of toolset names to restrict the job's agent to (e.g. [\"web\", \"terminal\", \"file\", \"delegation\"]). When set, only tools from these toolsets are loaded, significantly reducing input token overhead. When omitted, all default tools are loaded. Infer from the job's prompt — e.g. use \"web\" if it calls web_search, \"terminal\" if it runs scripts, \"file\" if it reads files, \"delegation\" if it calls delegate_task. On update, pass an empty array to clear."
             },
+            "session_name": {
+                "type": "string",
+                "description": "Optional named session to run the job in, making it resumable across runs."
+            }
         },
         "required": ["action"]
     }
@@ -515,6 +523,7 @@ registry.register(
         reason=args.get("reason"),
         script=args.get("script"),
         enabled_toolsets=args.get("enabled_toolsets"),
+        session_name=args.get("session_name"),
         task_id=kw.get("task_id"),
     ))(),
     check_fn=check_cronjob_requirements,

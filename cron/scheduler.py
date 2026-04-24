@@ -775,7 +775,9 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
 
     prompt = _build_job_prompt(job, prerun_script=prerun_script)
     origin = _resolve_origin(job)
-    _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
+    # Use a named session if configured, otherwise generate a timestamped one.
+    # Named sessions allow cron jobs to resume conversation history across runs.
+    _cron_session_id = job.get("session_name") or f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
 
     logger.info("Running job '%s' (ID: %s)", job_name, job_id)
     logger.info("Prompt: %s", prompt[:100])

@@ -4470,14 +4470,22 @@ class AIAgent:
         try:
             import httpx as _httpx
             import socket as _socket
+            import platform
 
             _sock_opts = [(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE, 1)]
-            if hasattr(_socket, "TCP_KEEPIDLE"):
-                _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPIDLE, 30))
-                _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPINTVL, 10))
-                _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPCNT, 3))
-            elif hasattr(_socket, "TCP_KEEPALIVE"):
-                _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPALIVE, 30))
+            
+            # WSL2 and Windows have known issues with TCP keepalive configurations causing 502s
+            is_wsl = "microsoft-standard" in platform.uname().release.lower()
+            is_windows = platform.system().lower() == "windows"
+            
+            if not (is_windows or is_wsl):
+                if hasattr(_socket, "TCP_KEEPIDLE"):
+                    _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPIDLE, 30))
+                    _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPINTVL, 10))
+                    _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPCNT, 3))
+                elif hasattr(_socket, "TCP_KEEPALIVE"):
+                    _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPALIVE, 30))
+            
             # When a custom transport is provided, httpx won't auto-read proxy
             # from env vars (allow_env_proxies = trust_env and transport is None).
             # Explicitly read proxy settings to ensure HTTP_PROXY/HTTPS_PROXY work.
@@ -8421,6 +8429,15 @@ class AIAgent:
             }
             messages.append(tool_msg)
 
+            # ── Inject explicit non-terminal state for pending approvals ─────────
+            # Prevent the LLM from treating the empty output of a pending
+            # approval as a successful execution.
+            if '"status": "approval_required"' in function_result:
+                messages.append({
+                    "role": "system",
+                    "content": "The previous tool call is pending user approval. This is a non-terminal waiting state. Do NOT assume the command failed or succeeded yet. Await the user's decision."
+                })
+
             # ── Per-tool /steer drain ───────────────────────────────────
             # Drain pending steer BETWEEN individual tool calls so the
             # injection lands as soon as a tool finishes — not after the
@@ -11769,7 +11786,40 @@ class AIAgent:
         # Clean up VM and browser for this task after conversation completes
         self._cleanup_task_resources(effective_task_id)
 
-        # Persist session to both JSON log and SQLite
+        # Plugin hook: post_llm_call
+        # Fired once per turn after the tool-calling loop completes.
+        # Plugins can use this to persist conversation data (e.g. sync
+        # to an external memory system) or override the final response.
+        # IMPORTANT: runs BEFORE _persist_session so that any response
+        # overrides are captured in the persisted history (#14894).
+        if final_response and not interrupted:
+            try:
+                from hermes_cli.plugins import invoke_hook as _invoke_hook
+                _hook_results = _invoke_hook(
+                    "post_llm_call",
+                    session_id=self.session_id,
+                    user_message=original_user_message,
+                    assistant_response=final_response,
+                    conversation_history=list(messages),
+                    model=self.model,
+                    platform=getattr(self, "platform", None) or "",
+                )
+                # Apply response override if a plugin returned one
+                if isinstance(_hook_results, list):
+                    for _hr in _hook_results:
+                        if isinstance(_hr, dict) and _hr.get("override_response"):
+                            final_response = _hr["override_response"]
+                            # Update the last assistant message so the
+                            # persisted history matches the returned response.
+                            for _m in reversed(messages):
+                                if _m.get("role") == "assistant":
+                                    _m["content"] = final_response
+                                    break
+            except Exception as exc:
+                logger.warning("post_llm_call hook failed: %s", exc)
+
+        # Persist session to both JSON log and SQLite.
+        # Runs AFTER post_llm_call so plugin response overrides are captured.
         self._persist_session(messages, conversation_history)
 
         # ── Turn-exit diagnostic log ─────────────────────────────────────
@@ -11815,25 +11865,6 @@ class AIAgent:
             )
         else:
             logger.info(_diag_msg, *_diag_args)
-
-        # Plugin hook: post_llm_call
-        # Fired once per turn after the tool-calling loop completes.
-        # Plugins can use this to persist conversation data (e.g. sync
-        # to an external memory system).
-        if final_response and not interrupted:
-            try:
-                from hermes_cli.plugins import invoke_hook as _invoke_hook
-                _invoke_hook(
-                    "post_llm_call",
-                    session_id=self.session_id,
-                    user_message=original_user_message,
-                    assistant_response=final_response,
-                    conversation_history=list(messages),
-                    model=self.model,
-                    platform=getattr(self, "platform", None) or "",
-                )
-            except Exception as exc:
-                logger.warning("post_llm_call hook failed: %s", exc)
 
         # Extract reasoning from the last assistant message (if any)
         last_reasoning = None
