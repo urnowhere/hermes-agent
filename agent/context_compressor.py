@@ -318,6 +318,12 @@ class ContextCompressor(ContextEngine):
             int(context_length * self.threshold_percent),
             MINIMUM_CONTEXT_LENGTH,
         )
+        # Clamp: threshold must stay below context_length so compression can
+        # actually trigger before the API rejects the request.  The 95% cap
+        # gives 5% headroom — enough to catch the threshold in time.
+        self.threshold_tokens = min(
+            self.threshold_tokens, int(context_length * 0.95)
+        )
 
     def __init__(
         self,
@@ -357,6 +363,12 @@ class ContextCompressor(ContextEngine):
         self.threshold_tokens = max(
             int(self.context_length * threshold_percent),
             MINIMUM_CONTEXT_LENGTH,
+        )
+        # Clamp: threshold must stay below context_length so compression can
+        # actually trigger before the API rejects the request.  The 95% cap
+        # gives 5% headroom — enough to catch the threshold in time.
+        self.threshold_tokens = min(
+            self.threshold_tokens, int(self.context_length * 0.95)
         )
         self.compression_count = 0
 
