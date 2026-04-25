@@ -531,8 +531,8 @@ def test_model_flow_custom_saves_verified_v1_base_url(monkeypatch, capsys):
 
     # After the probe detects a single model ("llm"), the flow asks
     # "Use this model? [Y/n]:" — confirm with Enter, then context length,
-    # then display name.
-    answers = iter(["http://localhost:8000", "local-key", "", "", "", ""])
+    # display name, and API mode.
+    answers = iter(["http://localhost:8000", "local-key", "", "", "", "", ""])
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
     monkeypatch.setattr("getpass.getpass", lambda _prompt="": next(answers))
 
@@ -544,6 +544,140 @@ def test_model_flow_custom_saves_verified_v1_base_url(monkeypatch, capsys):
     # OPENAI_BASE_URL is no longer saved to .env — config.yaml is authoritative
     assert "OPENAI_BASE_URL" not in saved_env
     assert saved_env["MODEL"] == "llm"
+
+
+def test_model_flow_custom_persists_explicit_codex_responses_api_mode(tmp_path, monkeypatch):
+    import yaml
+
+    home = tmp_path / "hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text("model: old-model\ncustom_providers: []\n")
+    (home / ".env").write_text("")
+
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "hermes_cli.models.probe_api_models",
+        lambda api_key, base_url: {
+            "models": ["gpt-5.4"],
+            "probed_url": f"{base_url.rstrip('/')}/models",
+            "resolved_base_url": base_url.rstrip("/"),
+            "suggested_base_url": base_url.rstrip("/"),
+            "used_fallback": False,
+        },
+    )
+    monkeypatch.setattr("hermes_cli.auth.deactivate_provider", lambda: None)
+
+    answers = iter(
+        [
+            "https://cch.example.com/v1",
+            "",
+            "",
+            "Claude Code Hub",
+            "codex_responses",
+        ]
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    monkeypatch.setattr("getpass.getpass", lambda _prompt="": "sk-cch")
+
+    hermes_main._model_flow_custom({})
+
+    config = yaml.safe_load((home / "config.yaml").read_text()) or {}
+    model = config.get("model")
+    assert isinstance(model, dict)
+    assert model["provider"] == "custom"
+    assert model["base_url"] == "https://cch.example.com/v1"
+    assert model["default"] == "gpt-5.4"
+    assert model["api_mode"] == "codex_responses"
+
+    providers = config.get("custom_providers")
+    assert isinstance(providers, list)
+    assert providers == [
+        {
+            "name": "Claude Code Hub",
+            "base_url": "https://cch.example.com/v1",
+            "api_key": "sk-cch",
+            "api_mode": "codex_responses",
+            "model": "gpt-5.4",
+        }
+    ]
+
+
+def test_model_flow_custom_auto_api_mode_clears_stale_entry(tmp_path, monkeypatch):
+    import yaml
+
+    home = tmp_path / "hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "model": {
+                    "provider": "custom",
+                    "base_url": "https://cch.example.com/v1",
+                    "default": "gpt-5.4",
+                    "api_mode": "codex_responses",
+                },
+                "custom_providers": [
+                    {
+                        "name": "Claude Code Hub",
+                        "base_url": "https://cch.example.com/v1",
+                        "api_key": "sk-cch",
+                        "api_mode": "codex_responses",
+                        "model": "gpt-5.4",
+                    }
+                ],
+            }
+        )
+    )
+    (home / ".env").write_text("")
+
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "hermes_cli.models.probe_api_models",
+        lambda api_key, base_url: {
+            "models": ["gpt-5.4"],
+            "probed_url": f"{base_url.rstrip('/')}/models",
+            "resolved_base_url": base_url.rstrip("/"),
+            "suggested_base_url": base_url.rstrip("/"),
+            "used_fallback": False,
+        },
+    )
+    monkeypatch.setattr("hermes_cli.auth.deactivate_provider", lambda: None)
+
+    answers = iter(
+        [
+            "https://cch.example.com/v1",
+            "",
+            "",
+            "Claude Code Hub",
+            "auto",
+        ]
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    monkeypatch.setattr("getpass.getpass", lambda _prompt="": "sk-cch")
+
+    hermes_main._model_flow_custom({})
+
+    config = yaml.safe_load((home / "config.yaml").read_text()) or {}
+    model = config.get("model")
+    assert isinstance(model, dict)
+    assert "api_mode" not in model
+
+    providers = config.get("custom_providers")
+    assert isinstance(providers, list)
+    assert providers == [
+        {
+            "name": "Claude Code Hub",
+            "base_url": "https://cch.example.com/v1",
+            "api_key": "sk-cch",
+            "model": "gpt-5.4",
+        }
+    ]
 
 
 def test_cmd_model_forwards_nous_login_tls_options(monkeypatch):
@@ -639,3 +773,53 @@ def test_save_custom_provider_uses_provided_name(monkeypatch, tmp_path):
     entries = saved.get("custom_providers", [])
     assert len(entries) == 1
     assert entries[0]["name"] == "Ollama"
+
+
+def test_save_custom_provider_updates_existing_api_mode(monkeypatch, tmp_path):
+    """Saving the same endpoint should update or clear persisted api_mode."""
+    import yaml
+    from hermes_cli.main import _save_custom_provider
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        yaml.safe_dump(
+            {
+                "custom_providers": [
+                    {
+                        "name": "Claude Code Hub",
+                        "base_url": "https://cch.example.com/v1",
+                        "api_key": "sk-old",
+                        "api_mode": "chat_completions",
+                        "model": "gpt-5.4",
+                    }
+                ]
+            }
+        )
+    )
+
+    def _load():
+        return yaml.safe_load(cfg_path.read_text()) or {}
+
+    def _save(cfg):
+        cfg_path.write_text(yaml.safe_dump(cfg))
+
+    monkeypatch.setattr("hermes_cli.config.load_config", _load)
+    monkeypatch.setattr("hermes_cli.config.save_config", _save)
+
+    _save_custom_provider(
+        "https://cch.example.com/v1",
+        api_key="sk-old",
+        model="gpt-5.4",
+        api_mode="codex_responses",
+    )
+    config = yaml.safe_load(cfg_path.read_text()) or {}
+    assert config["custom_providers"][0]["api_mode"] == "codex_responses"
+
+    _save_custom_provider(
+        "https://cch.example.com/v1",
+        api_key="sk-old",
+        model="gpt-5.4",
+        api_mode=None,
+    )
+    config = yaml.safe_load(cfg_path.read_text()) or {}
+    assert "api_mode" not in config["custom_providers"][0]
