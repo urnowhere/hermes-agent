@@ -308,6 +308,60 @@ def test_run_doctor_accepts_named_provider_from_providers_section(monkeypatch, t
     assert "model.provider 'volcengine-plan' is not a recognised provider" not in out
 
 
+@pytest.mark.parametrize(
+    ("provider_name", "model_config"),
+    [
+        (
+            "custom",
+            {
+                "provider": "custom",
+                "default": "gpt-5.4",
+                "base_url": "https://api.openai.com/v1",
+            },
+        ),
+        (
+            "ai-gateway",
+            {
+                "provider": "ai-gateway",
+                "default": "gpt-5.4",
+            },
+        ),
+    ],
+)
+def test_run_doctor_accepts_builtin_and_alias_providers(monkeypatch, tmp_path, provider_name, model_config):
+    home = tmp_path / ".hermes"
+    home.mkdir(parents=True, exist_ok=True)
+
+    import yaml
+
+    (home / "config.yaml").write_text(yaml.dump({"model": model_config}))
+
+    monkeypatch.setattr(doctor_mod, "HERMES_HOME", home)
+    monkeypatch.setattr(doctor_mod, "PROJECT_ROOT", tmp_path / "project")
+    monkeypatch.setattr(doctor_mod, "_DHH", str(home))
+    (tmp_path / "project").mkdir(exist_ok=True)
+
+    fake_model_tools = types.SimpleNamespace(
+        check_tool_availability=lambda *a, **kw: ([], []),
+        TOOLSET_REQUIREMENTS={},
+    )
+    monkeypatch.setitem(sys.modules, "model_tools", fake_model_tools)
+
+    try:
+        from hermes_cli import auth as _auth_mod
+        monkeypatch.setattr(_auth_mod, "get_nous_auth_status", lambda: {})
+        monkeypatch.setattr(_auth_mod, "get_codex_auth_status", lambda: {})
+    except Exception:
+        pass
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        doctor_mod.run_doctor(Namespace(fix=False))
+
+    out = buf.getvalue()
+    assert f"model.provider '{provider_name}' is not a recognised provider" not in out
+
+
 def test_run_doctor_termux_does_not_mark_browser_available_without_agent_browser(monkeypatch, tmp_path):
     home = tmp_path / ".hermes"
     home.mkdir(parents=True, exist_ok=True)

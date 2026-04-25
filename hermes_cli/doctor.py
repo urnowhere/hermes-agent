@@ -320,12 +320,17 @@ def run_doctor(args):
                     known_providers.add("custom:" + name.lower().replace(" ", "-"))
 
             canonical_provider = provider
-            if provider and _resolve_provider_full is not None and provider != "auto":
+            provider_is_known = bool(provider and provider in known_providers)
+            if provider and _resolve_provider_full is not None and provider not in {"auto", "custom"}:
                 provider_def = _resolve_provider_full(provider, user_providers, custom_providers)
-                canonical_provider = provider_def.id if provider_def is not None else None
+                if provider_def is not None:
+                    canonical_provider = provider_def.id
+                    provider_is_known = True
+                else:
+                    canonical_provider = None
 
             if provider and provider != "auto":
-                if canonical_provider is None or (known_providers and canonical_provider not in known_providers):
+                if not provider_is_known and (canonical_provider is None or (known_providers and canonical_provider not in known_providers)):
                     known_list = ", ".join(sorted(known_providers)) if known_providers else "(unavailable)"
                     check_fail(
                         f"model.provider '{provider_raw}' is not a recognised provider",
