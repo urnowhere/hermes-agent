@@ -8080,6 +8080,33 @@ class AIAgent:
             parent_agent=self,
         )
 
+    def _fire_post_tool_call_hook(self, function_name: str, function_args: dict,
+                                   result: str, tool_call_id: Optional[str] = None,
+                                   task_id: Optional[str] = None) -> None:
+        """Invoke the ``post_tool_call`` plugin hook for built-in tools.
+
+        Tools dispatched via ``model_tools.handle_function_call`` already fire
+        this hook themselves; this helper covers the inline branches in
+        ``_invoke_tool`` and ``_execute_tool_calls`` (memory/todo/session_search/
+        clarify/delegate_task and memory-provider tools) so plugins observing
+        ``post_tool_call`` see every tool, not just registry-routed ones.
+
+        Best-effort — never raises.
+        """
+        try:
+            from hermes_cli.plugins import invoke_hook
+            invoke_hook(
+                "post_tool_call",
+                tool_name=function_name,
+                args=function_args,
+                result=result,
+                task_id=task_id or "",
+                session_id=self.session_id or "",
+                tool_call_id=tool_call_id or "",
+            )
+        except Exception:
+            pass
+
     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str,
                      tool_call_id: Optional[str] = None, messages: list = None) -> str:
         """Invoke a single tool and return the result string. No display logic.
@@ -8102,22 +8129,27 @@ class AIAgent:
 
         if function_name == "todo":
             from tools.todo_tool import todo_tool as _todo_tool
-            return _todo_tool(
+            _result = _todo_tool(
                 todos=function_args.get("todos"),
                 merge=function_args.get("merge", False),
                 store=self._todo_store,
             )
+            self._fire_post_tool_call_hook(function_name, function_args, _result, tool_call_id, effective_task_id)
+            return _result
         elif function_name == "session_search":
             if not self._session_db:
-                return json.dumps({"success": False, "error": "Session database not available."})
-            from tools.session_search_tool import session_search as _session_search
-            return _session_search(
-                query=function_args.get("query", ""),
-                role_filter=function_args.get("role_filter"),
-                limit=function_args.get("limit", 3),
-                db=self._session_db,
-                current_session_id=self.session_id,
-            )
+                _result = json.dumps({"success": False, "error": "Session database not available."})
+            else:
+                from tools.session_search_tool import session_search as _session_search
+                _result = _session_search(
+                    query=function_args.get("query", ""),
+                    role_filter=function_args.get("role_filter"),
+                    limit=function_args.get("limit", 3),
+                    db=self._session_db,
+                    current_session_id=self.session_id,
+                )
+            self._fire_post_tool_call_hook(function_name, function_args, _result, tool_call_id, effective_task_id)
+            return _result
         elif function_name == "memory":
             target = function_args.get("target", "memory")
             from tools.memory_tool import memory_tool as _memory_tool
@@ -8142,18 +8174,25 @@ class AIAgent:
                     )
                 except Exception:
                     pass
+            self._fire_post_tool_call_hook(function_name, function_args, result, tool_call_id, effective_task_id)
             return result
         elif self._memory_manager and self._memory_manager.has_tool(function_name):
-            return self._memory_manager.handle_tool_call(function_name, function_args)
+            _result = self._memory_manager.handle_tool_call(function_name, function_args)
+            self._fire_post_tool_call_hook(function_name, function_args, _result, tool_call_id, effective_task_id)
+            return _result
         elif function_name == "clarify":
             from tools.clarify_tool import clarify_tool as _clarify_tool
-            return _clarify_tool(
+            _result = _clarify_tool(
                 question=function_args.get("question", ""),
                 choices=function_args.get("choices"),
                 callback=self.clarify_callback,
             )
+            self._fire_post_tool_call_hook(function_name, function_args, _result, tool_call_id, effective_task_id)
+            return _result
         elif function_name == "delegate_task":
-            return self._dispatch_delegate_task(function_args)
+            _result = self._dispatch_delegate_task(function_args)
+            self._fire_post_tool_call_hook(function_name, function_args, _result, tool_call_id, effective_task_id)
+            return _result
         else:
             return handle_function_call(
                 function_name, function_args, effective_task_id,
@@ -8615,6 +8654,7 @@ class AIAgent:
                     merge=function_args.get("merge", False),
                     store=self._todo_store,
                 )
+                self._fire_post_tool_call_hook(function_name, function_args, function_result, tool_call.id, effective_task_id)
                 tool_duration = time.time() - tool_start_time
                 if self._should_emit_quiet_tool_messages():
                     self._vprint(f"  {_get_cute_tool_message_impl('todo', function_args, tool_duration, result=function_result)}")
@@ -8630,6 +8670,7 @@ class AIAgent:
                         db=self._session_db,
                         current_session_id=self.session_id,
                     )
+                self._fire_post_tool_call_hook(function_name, function_args, function_result, tool_call.id, effective_task_id)
                 tool_duration = time.time() - tool_start_time
                 if self._should_emit_quiet_tool_messages():
                     self._vprint(f"  {_get_cute_tool_message_impl('session_search', function_args, tool_duration, result=function_result)}")
@@ -8657,6 +8698,7 @@ class AIAgent:
                         )
                     except Exception:
                         pass
+                self._fire_post_tool_call_hook(function_name, function_args, function_result, tool_call.id, effective_task_id)
                 tool_duration = time.time() - tool_start_time
                 if self._should_emit_quiet_tool_messages():
                     self._vprint(f"  {_get_cute_tool_message_impl('memory', function_args, tool_duration, result=function_result)}")
@@ -8667,6 +8709,7 @@ class AIAgent:
                     choices=function_args.get("choices"),
                     callback=self.clarify_callback,
                 )
+                self._fire_post_tool_call_hook(function_name, function_args, function_result, tool_call.id, effective_task_id)
                 tool_duration = time.time() - tool_start_time
                 if self._should_emit_quiet_tool_messages():
                     self._vprint(f"  {_get_cute_tool_message_impl('clarify', function_args, tool_duration, result=function_result)}")
@@ -8689,6 +8732,7 @@ class AIAgent:
                     _delegate_result = function_result
                 finally:
                     self._delegate_spinner = None
+                    self._fire_post_tool_call_hook(function_name, function_args, _delegate_result or "", tool_call.id, effective_task_id)
                     tool_duration = time.time() - tool_start_time
                     cute_msg = _get_cute_tool_message_impl('delegate_task', function_args, tool_duration, result=_delegate_result)
                     if spinner:
@@ -8736,6 +8780,7 @@ class AIAgent:
                     function_result = json.dumps({"error": f"Memory tool '{function_name}' failed: {tool_error}"})
                     logger.error("memory_manager.handle_tool_call raised for %s: %s", function_name, tool_error, exc_info=True)
                 finally:
+                    self._fire_post_tool_call_hook(function_name, function_args, function_result, tool_call.id, effective_task_id)
                     tool_duration = time.time() - tool_start_time
                     cute_msg = _get_cute_tool_message_impl(function_name, function_args, tool_duration, result=_mem_result)
                     if spinner:
