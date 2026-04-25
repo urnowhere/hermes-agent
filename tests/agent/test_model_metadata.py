@@ -429,6 +429,20 @@ class TestGetModelContextLength:
         mock_fetch.return_value = {}
         assert get_model_context_length("anthropic/claude-sonnet-4") == 200000
 
+    @patch("agent.models_dev.lookup_models_dev_context")
+    @patch("agent.model_metadata.fetch_model_metadata")
+    @patch("agent.model_metadata.fetch_endpoint_model_metadata")
+    def test_known_provider_skips_custom_endpoint_fallback(self, mock_endpoint, mock_fetch, mock_lookup):
+        mock_fetch.return_value = {}
+        mock_endpoint.return_value = {}
+        mock_lookup.return_value = 654321
+        assert get_model_context_length(
+            "provider-only-test-model",
+            base_url="claude-cli://local",
+            provider="claude-cli",
+        ) == 654321
+        mock_lookup.assert_called_once_with("claude-cli", "provider-only-test-model")
+
     @patch("agent.model_metadata.fetch_model_metadata")
     def test_unknown_model_returns_first_probe_tier(self, mock_fetch):
         mock_fetch.return_value = {}

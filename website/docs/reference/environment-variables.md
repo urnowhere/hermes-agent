@@ -86,7 +86,7 @@ For native Anthropic auth, Hermes prefers Claude Code's own credential files whe
 
 | Variable | Description |
 |----------|-------------|
-| `HERMES_INFERENCE_PROVIDER` | Override provider selection: `auto`, `openrouter`, `nous`, `openai-codex`, `copilot`, `copilot-acp`, `anthropic`, `huggingface`, `zai`, `kimi-coding`, `kimi-coding-cn`, `minimax`, `minimax-cn`, `kilocode`, `xiaomi`, `arcee`, `alibaba`, `deepseek`, `nvidia`, `ollama-cloud`, `xai` (alias `grok`), `google-gemini-cli`, `qwen-oauth`, `bedrock`, `opencode-zen`, `opencode-go`, `ai-gateway` (default: `auto`) |
+| `HERMES_INFERENCE_PROVIDER` | Override provider selection: `auto`, `openrouter`, `nous`, `openai-codex`, `claude-cli`, `copilot`, `copilot-acp`, `anthropic`, `huggingface`, `zai`, `kimi-coding`, `kimi-coding-cn`, `minimax`, `minimax-cn`, `kilocode`, `xiaomi`, `arcee`, `alibaba`, `deepseek`, `nvidia`, `ollama-cloud`, `xai` (alias `grok`), `google-gemini-cli`, `qwen-oauth`, `bedrock`, `opencode-zen`, `opencode-go`, `ai-gateway` (default: `auto`) |
 | `HERMES_PORTAL_BASE_URL` | Override Nous Portal URL (for development/testing) |
 | `NOUS_INFERENCE_BASE_URL` | Override Nous inference API URL |
 | `HERMES_NOUS_MIN_KEY_TTL_SECONDS` | Min agent key TTL before re-mint (default: 1800 = 30min) |
@@ -94,6 +94,18 @@ For native Anthropic auth, Hermes prefers Claude Code's own credential files whe
 | `HERMES_DUMP_REQUESTS` | Dump API request payloads to log files (`true`/`false`) |
 | `HERMES_PREFILL_MESSAGES_FILE` | Path to a JSON file of ephemeral prefill messages injected at API-call time |
 | `HERMES_TIMEZONE` | IANA timezone override (for example `America/New_York`) |
+| `HERMES_CLAUDE_CLI_COMMAND` | Override the Claude Code CLI binary used by `claude-cli` (default: `claude`) |
+| `HERMES_CLAUDE_CLI_ARGS` | Extra arguments prepended to every `claude-cli` invocation |
+| `HERMES_CLAUDE_CLI_CWD` | Working directory for Claude Code subprocess calls (default: neutral runtime dir) |
+| `HERMES_CLAUDE_CLI_RESUME` | Enable or disable Claude session reuse for `claude-cli` (`true`/`false`, default: `true`) |
+| `HERMES_CLAUDE_CLI_STRIP_RUNTIME` | Force stripped runtime behavior for `claude-cli` (`true`/`false`) |
+| `HERMES_CLAUDE_CLI_USE_PROCESS_CWD` | Use the current process cwd instead of Hermes' neutral Claude runtime dir |
+| `HERMES_CLAUDE_CLI_PERSISTENT` | Enable the in-process persistent Claude CLI worker (`true`/`false`, default: `false`) |
+| `HERMES_CLAUDE_CLI_BROKER` | Enable the shared Claude CLI broker daemon (`true`/`false`, default: `false`) |
+| `HERMES_CLAUDE_CLI_BROKER_SOCKET` | Override the Unix socket path for the shared broker |
+| `HERMES_CLAUDE_CLI_BROKER_IDLE_SECONDS` | Seconds before idle broker workers are closed (default: 1800) |
+| `HERMES_CLAUDE_CLI_BROKER_SERVER_IDLE_SECONDS` | Seconds before an empty broker daemon exits (default: worker idle timeout) |
+| `HERMES_CLAUDE_CLI_DEBUG_LOG` | Write verbose Claude CLI transport logs to the given file path |
 
 ## Tool APIs
 

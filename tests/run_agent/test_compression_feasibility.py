@@ -184,6 +184,7 @@ def test_feasibility_check_passes_config_context_length(mock_get_client, mock_ct
         base_url="http://custom-endpoint:8080/v1",
         api_key="sk-custom",
         config_context_length=1_000_000,
+        provider="openrouter",
     )
 
 
@@ -206,6 +207,7 @@ def test_feasibility_check_ignores_invalid_context_length(mock_get_client, mock_
         base_url="http://custom:8080/v1",
         api_key="sk-test",
         config_context_length=None,
+        provider="openrouter",
     )
 
 
@@ -258,6 +260,37 @@ def test_init_feasibility_check_uses_aux_context_override_from_config():
         base_url="http://custom-endpoint:8080/v1",
         api_key="sk-custom",
         config_context_length=1_000_000,
+        provider="auto",
+    )
+
+
+
+
+@patch("agent.model_metadata.get_model_context_length", return_value=1_000_000)
+@patch("agent.auxiliary_client.get_text_auxiliary_client")
+def test_feasibility_check_passes_main_provider_for_auto_aux(mock_get_client, mock_ctx_len):
+    """Auto auxiliary compression should reuse the live main provider for context lookup."""
+    agent = _make_agent(main_context=1_000_000, threshold_percent=0.75)
+    agent.model = "claude-opus-4-7"
+    agent.provider = "claude-cli"
+    agent.base_url = "claude-cli://local"
+    agent.api_key = "claude-cli"
+    agent.api_mode = "chat_completions"
+
+    mock_client = MagicMock()
+    mock_client.base_url = "claude-cli://local"
+    mock_client.api_key = "claude-cli"
+    mock_get_client.return_value = (mock_client, "claude-opus-4-7")
+
+    agent._emit_status = lambda msg: None
+    agent._check_compression_model_feasibility()
+
+    mock_ctx_len.assert_called_once_with(
+        "claude-opus-4-7",
+        base_url="claude-cli://local",
+        api_key="claude-cli",
+        config_context_length=None,
+        provider="claude-cli",
     )
 
 

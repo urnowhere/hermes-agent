@@ -140,6 +140,7 @@ class TestMaybeAutoTitle:
         """Should fire a background thread for the first exchange."""
         db = MagicMock()
         db.get_session_title.return_value = None
+        db.get_session.return_value = {"billing_provider": "anthropic"}
         history = [
             {"role": "user", "content": "hello"},
             {"role": "assistant", "content": "hi there"},
@@ -151,6 +152,41 @@ class TestMaybeAutoTitle:
             import time
             time.sleep(0.3)
             mock_auto.assert_called_once_with(db, "sess-1", "hello", "hi there")
+
+    def test_delays_first_exchange_for_claude_cli(self):
+        """claude-cli should wait one visible turn before auto-titling."""
+        db = MagicMock()
+        db.get_session.return_value = {
+            "billing_provider": "claude-cli",
+            "billing_base_url": "claude-cli://local",
+        }
+        history = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi there"},
+        ]
+
+        with patch("agent.title_generator.auto_title_session") as mock_auto:
+            maybe_auto_title(db, "sess-1", "hello", "hi there", history)
+            import time
+            time.sleep(0.1)
+            mock_auto.assert_not_called()
+
+    def test_fires_on_second_exchange_for_claude_cli(self):
+        """claude-cli should title from the second visible exchange."""
+        db = MagicMock()
+        db.get_session.return_value = {"billing_provider": "claude-cli"}
+        history = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi there"},
+            {"role": "user", "content": "who are you?"},
+            {"role": "assistant", "content": "Hermes."},
+        ]
+
+        with patch("agent.title_generator.auto_title_session") as mock_auto:
+            maybe_auto_title(db, "sess-1", "who are you?", "Hermes.", history)
+            import time
+            time.sleep(0.3)
+            mock_auto.assert_called_once_with(db, "sess-1", "who are you?", "Hermes.")
 
     def test_skips_if_no_response(self):
         db = MagicMock()

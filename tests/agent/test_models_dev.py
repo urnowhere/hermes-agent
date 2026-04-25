@@ -81,6 +81,7 @@ class TestProviderMapping:
 
     def test_known_providers_mapped(self):
         assert PROVIDER_TO_MODELS_DEV["anthropic"] == "anthropic"
+        assert PROVIDER_TO_MODELS_DEV["claude-cli"] == "anthropic"
         assert PROVIDER_TO_MODELS_DEV["copilot"] == "github-copilot"
         assert PROVIDER_TO_MODELS_DEV["stepfun"] == "stepfun"
         assert PROVIDER_TO_MODELS_DEV["kilocode"] == "kilo"
@@ -143,6 +144,12 @@ class TestLookupModelsDevContext:
         assert lookup_models_dev_context("anthropic", "claude-opus-4-6") == 1000000
         # GitHub Copilot: only 128K for same model
         assert lookup_models_dev_context("copilot", "claude-opus-4.6") == 128000
+
+    @patch("agent.models_dev.fetch_models_dev")
+    def test_claude_cli_uses_anthropic_metadata(self, mock_fetch):
+        """claude-cli should inherit Anthropic model context lengths."""
+        mock_fetch.return_value = SAMPLE_REGISTRY
+        assert lookup_models_dev_context("claude-cli", "claude-opus-4-6") == 1000000
 
     @patch("agent.models_dev.fetch_models_dev")
     def test_zero_context_filtered(self, mock_fetch):

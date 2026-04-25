@@ -250,6 +250,28 @@ model:
 | `HERMES_COPILOT_ACP_COMMAND` | Override the Copilot CLI binary path (default: `copilot`) |
 | `HERMES_COPILOT_ACP_ARGS` | Override ACP args (default: `--acp --stdio`) |
 
+**`claude-cli` — Claude Code CLI subprocess backend**. Runs the local `claude` binary as an external process while keeping Hermes orchestration, tools, MCP, and session storage:
+
+```bash
+hermes chat --provider claude-cli --model claude-opus-4-7
+# Requires the Claude Code CLI in PATH and an existing `claude auth login` session
+```
+
+**Runtime modes:**
+- `standard` keeps Claude Code's default runtime behavior.
+- `stripped` disables extra Claude Code runtime helpers where possible and bootstraps the Hermes system prompt into the Claude session before the first real turn.
+
+Use `hermes model` to choose the runtime mode, or set it directly:
+
+```yaml
+model:
+  provider: "claude-cli"
+  default: "claude-opus-4-7"
+  claude_cli_runtime: "stripped"   # or "standard"
+```
+
+Hermes tool calls are marshalled through Claude's text output, so this provider is best treated like an external-process transport rather than a native API. For lower process-start latency, enable the opt-in persistent worker or shared broker with `HERMES_CLAUDE_CLI_PERSISTENT=true` or `HERMES_CLAUDE_CLI_BROKER=true`.
+
 ### First-Class Chinese AI Providers
 
 These providers have built-in support with dedicated provider IDs. Set the API key and use `--provider` to select:
@@ -1172,7 +1194,7 @@ fallback_model:
 
 When activated, the fallback swaps the model and provider mid-session without losing your conversation. It fires **at most once** per session.
 
-Supported providers: `openrouter`, `nous`, `openai-codex`, `copilot`, `copilot-acp`, `anthropic`, `gemini`, `google-gemini-cli`, `qwen-oauth`, `huggingface`, `zai`, `kimi-coding`, `kimi-coding-cn`, `minimax`, `minimax-cn`, `deepseek`, `nvidia`, `xai`, `ollama-cloud`, `bedrock`, `ai-gateway`, `opencode-zen`, `opencode-go`, `kilocode`, `xiaomi`, `arcee`, `alibaba`, `custom`.
+Supported providers: `openrouter`, `nous`, `openai-codex`, `claude-cli`, `copilot`, `copilot-acp`, `anthropic`, `gemini`, `google-gemini-cli`, `qwen-oauth`, `huggingface`, `zai`, `kimi-coding`, `kimi-coding-cn`, `minimax`, `minimax-cn`, `deepseek`, `nvidia`, `xai`, `ollama-cloud`, `bedrock`, `ai-gateway`, `opencode-zen`, `opencode-go`, `kilocode`, `xiaomi`, `arcee`, `alibaba`, `custom`.
 
 :::tip
 Fallback is configured exclusively through `config.yaml` — there are no environment variables for it. For full details on when it triggers, supported providers, and how it interacts with auxiliary tasks and delegation, see [Fallback Providers](/docs/user-guide/features/fallback-providers).

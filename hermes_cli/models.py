@@ -155,6 +155,11 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "gpt-4o-mini",
     ],
     "openai-codex": _codex_curated_models(),
+    "claude-cli": [
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+    ],
     "copilot-acp": [
         "copilot-acp",
     ],
@@ -717,6 +722,7 @@ CANONICAL_PROVIDERS: list[ProviderEntry] = [
     ProviderEntry("ai-gateway",     "Vercel AI Gateway",        "Vercel AI Gateway (200+ models, $5 free credit, no markup)"),
     ProviderEntry("anthropic",      "Anthropic",                "Anthropic (Claude models — API key or Claude Code)"),
     ProviderEntry("openai-codex",   "OpenAI Codex",             "OpenAI Codex"),
+    ProviderEntry("claude-cli",     "Claude Code CLI",          "Claude Code CLI (spawns `claude -p` using your local Claude subscription login)"),
     ProviderEntry("xiaomi",         "Xiaomi MiMo",              "Xiaomi MiMo (MiMo-V2.5 and V2 models — pro, omni, flash)"),
     ProviderEntry("nvidia",         "NVIDIA NIM",               "NVIDIA NIM (Nemotron models — build.nvidia.com or local NIM)"),
     ProviderEntry("qwen-oauth",     "Qwen OAuth (Portal)",      "Qwen OAuth (reuses local Qwen CLI login)"),
@@ -758,6 +764,8 @@ _PROVIDER_ALIASES = {
     "github-model": "copilot",
     "github-copilot-acp": "copilot-acp",
     "copilot-acp-agent": "copilot-acp",
+    "claude-cli": "claude-cli",
+    "claude-code-cli": "claude-cli",
     "google": "gemini",
     "google-gemini": "gemini",
     "google-ai-studio": "gemini",
@@ -1715,14 +1723,14 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
         except Exception:
             access_token = None
         return get_codex_model_ids(access_token=access_token)
-    if normalized in {"copilot", "copilot-acp"}:
+    if normalized in {"copilot", "copilot-acp", "claude-cli"}:
         try:
             live = _fetch_github_models(_resolve_copilot_catalog_api_key())
             if live:
                 return live
         except Exception:
             pass
-        if normalized == "copilot-acp":
+        if normalized in {"copilot-acp", "claude-cli"}:
             return list(_PROVIDER_MODELS.get("copilot", []))
     if normalized == "nous":
         # Try live Nous Portal /models endpoint

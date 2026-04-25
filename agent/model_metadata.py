@@ -1259,11 +1259,12 @@ def get_model_context_length(
             pass  # boto3 not installed — fall through to generic resolution
 
     # 2. Active endpoint metadata for truly custom/unknown endpoints.
-    # Known providers (Copilot, OpenAI, Anthropic, etc.) skip this — their
-    # /models endpoint may report a provider-imposed limit (e.g. Copilot
-    # returns 128k) instead of the model's full context (400k).  models.dev
-    # has the correct per-provider values and is checked at step 5+.
-    if _is_custom_endpoint(base_url) and not _is_known_provider_base_url(base_url):
+    # Known providers (Copilot, OpenAI, Anthropic, Claude CLI, etc.) skip this —
+    # their /models endpoint may report a transport-imposed limit or may not be
+    # queryable at all. models.dev has the correct per-provider values and is
+    # checked at step 5+.
+    skip_custom_endpoint_probe = bool(provider) and provider not in ("openrouter", "custom")
+    if _is_custom_endpoint(base_url) and not _is_known_provider_base_url(base_url) and not skip_custom_endpoint_probe:
         endpoint_metadata = fetch_endpoint_model_metadata(base_url, api_key=api_key)
         matched = endpoint_metadata.get(model)
         if not matched:

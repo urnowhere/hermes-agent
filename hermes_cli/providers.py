@@ -71,6 +71,11 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         auth_type="oauth_external",
         base_url_override="cloudcode-pa://google",
     ),
+    "claude-cli": HermesOverlay(
+        transport="openai_chat",
+        auth_type="external_process",
+        base_url_override="claude-cli://local",
+    ),
     "copilot-acp": HermesOverlay(
         transport="codex_responses",
         auth_type="external_process",
@@ -231,6 +236,8 @@ ALIASES: Dict[str, str] = {
     # anthropic
     "claude": "anthropic",
     "claude-code": "anthropic",
+    "claude-cli": "claude-cli",
+    "claude-code-cli": "claude-cli",
 
     # github-copilot (models.dev ID)
     "copilot": "github-copilot",
@@ -311,6 +318,7 @@ _LABEL_OVERRIDES: Dict[str, str] = {
     "nous": "Nous Portal",
     "openai-codex": "OpenAI Codex",
     "copilot-acp": "GitHub Copilot ACP",
+    "claude-cli": "Claude Code CLI",
     "stepfun": "StepFun Step Plan",
     "xiaomi": "Xiaomi MiMo",
     "local": "Local endpoint",

@@ -92,6 +92,28 @@ def auto_title_session(
         logger.debug("Failed to set auto-generated title: %s", e)
 
 
+def _session_uses_claude_cli(session_db, session_id: str) -> bool:
+    """Return True when the session is using the Claude CLI transport.
+
+    We only special-case auto-titling for the claude-cli workaround path.
+    Other providers keep the existing first-exchange behavior.
+    """
+    try:
+        session = session_db.get_session(session_id)
+    except Exception:
+        return False
+
+    if not isinstance(session, dict):
+        return False
+
+    billing_provider = str(session.get("billing_provider") or "").strip().lower()
+    if billing_provider == "claude-cli":
+        return True
+
+    billing_base_url = str(session.get("billing_base_url") or "").strip().lower()
+    return billing_base_url.startswith("claude-cli://")
+
+
 def maybe_auto_title(
     session_db,
     session_id: str,
@@ -101,19 +123,23 @@ def maybe_auto_title(
 ) -> None:
     """Fire-and-forget title generation after the first exchange.
 
-    Only generates a title when:
-    - This appears to be the first user→assistant exchange
-    - No title is already set
+    Only generates a title during the first two visible user turns.
+    For claude-cli sessions, we intentionally delay auto-titling until the
+    second visible turn because the first turn is often a lightweight warm-up
+    that produces low-value session titles.
     """
     if not session_db or not session_id or not user_message or not assistant_response:
         return
 
-    # Count user messages in history to detect first exchange.
-    # conversation_history includes the exchange that just happened,
-    # so for a first exchange we expect exactly 1 user message
-    # (or 2 counting system). Be generous: generate on first 2 exchanges.
     user_msg_count = sum(1 for m in (conversation_history or []) if m.get("role") == "user")
     if user_msg_count > 2:
+        return
+
+    if _session_uses_claude_cli(session_db, session_id) and user_msg_count < 2:
+        logger.debug(
+            "Delaying auto-title for claude-cli session %s until the second visible turn",
+            session_id,
+        )
         return
 
     thread = threading.Thread(
