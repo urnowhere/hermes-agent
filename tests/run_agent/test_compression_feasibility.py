@@ -48,6 +48,7 @@ def _make_agent(
     compressor = MagicMock(spec=ContextCompressor)
     compressor.context_length = main_context
     compressor.threshold_tokens = int(main_context * threshold_percent)
+    compressor.threshold_percent = threshold_percent
     agent.context_compressor = compressor
 
     return agent
@@ -56,7 +57,7 @@ def _make_agent(
 # ── Core warning logic ──────────────────────────────────────────────
 
 
-@patch("agent.model_metadata.get_model_context_length", return_value=80_000)
+@patch("agent.model_metadata.get_model_context_length")
 @patch("agent.auxiliary_client.get_text_auxiliary_client")
 def test_auto_corrects_threshold_when_aux_context_below_threshold(mock_get_client, mock_ctx_len):
     """Auto-correction: aux >= 64K floor but < threshold → lower threshold
@@ -67,6 +68,10 @@ def test_auto_corrects_threshold_when_aux_context_below_threshold(mock_get_clien
     mock_client.base_url = "https://openrouter.ai/api/v1"
     mock_client.api_key = "sk-aux"
     mock_get_client.return_value = (mock_client, "google/gemini-3-flash-preview")
+
+    # First call: aux model context_length; second call: main model context_length
+    # (threshold is re-derived from main model after aux is fetched)
+    mock_ctx_len.side_effect = [80_000, 200_000]
 
     messages = []
     agent._emit_status = lambda msg: messages.append(msg)
@@ -163,7 +168,7 @@ def test_feasibility_check_passes_live_main_runtime():
     )
 
 
-@patch("agent.model_metadata.get_model_context_length", return_value=1_000_000)
+@patch("agent.model_metadata.get_model_context_length")
 @patch("agent.auxiliary_client.get_text_auxiliary_client")
 def test_feasibility_check_passes_config_context_length(mock_get_client, mock_ctx_len):
     """auxiliary.compression.context_length from config is forwarded to
@@ -176,18 +181,19 @@ def test_feasibility_check_passes_config_context_length(mock_get_client, mock_ct
     mock_client.api_key = "sk-custom"
     mock_get_client.return_value = (mock_client, "custom/big-model")
 
+    # First call: aux model context_length; second call: main model context_length
+    mock_ctx_len.side_effect = [1_000_000, 200_000]
+
     agent._emit_status = lambda msg: None
     agent._check_compression_model_feasibility()
 
-    mock_ctx_len.assert_called_once_with(
-        "custom/big-model",
-        base_url="http://custom-endpoint:8080/v1",
-        api_key="sk-custom",
-        config_context_length=1_000_000,
-    )
+    # Verify the AUX model call (first) has the config_context_length override
+    aux_call = mock_ctx_len.call_args_list[0]
+    assert aux_call.kwargs["config_context_length"] == 1_000_000
+    assert aux_call.args[0] == "custom/big-model"
 
 
-@patch("agent.model_metadata.get_model_context_length", return_value=128_000)
+@patch("agent.model_metadata.get_model_context_length")
 @patch("agent.auxiliary_client.get_text_auxiliary_client")
 def test_feasibility_check_ignores_invalid_context_length(mock_get_client, mock_ctx_len):
     """Non-integer context_length in config is silently ignored."""
@@ -198,15 +204,16 @@ def test_feasibility_check_ignores_invalid_context_length(mock_get_client, mock_
     mock_client.api_key = "sk-test"
     mock_get_client.return_value = (mock_client, "custom/model")
 
+    # First call: aux model context_length; second call: main model context_length
+    mock_ctx_len.side_effect = [128_000, 200_000]
+
     agent._emit_status = lambda msg: None
     agent._check_compression_model_feasibility()
 
-    mock_ctx_len.assert_called_once_with(
-        "custom/model",
-        base_url="http://custom:8080/v1",
-        api_key="sk-test",
-        config_context_length=None,
-    )
+    # Verify the AUX model call (first) was made with config_context_length=None
+    aux_call = mock_ctx_len.call_args_list[0]
+    assert aux_call.kwargs["config_context_length"] is None
+    assert aux_call.args[0] == "custom/model"
 
 
 def test_init_feasibility_check_uses_aux_context_override_from_config():
@@ -242,8 +249,27 @@ def test_init_feasibility_check_uses_aux_context_override_from_config():
         patch("run_agent.OpenAI"),
         patch("run_agent.ContextCompressor", new=_StubCompressor),
         patch("agent.auxiliary_client.get_text_auxiliary_client", return_value=(mock_client, "custom/big-model")),
-        patch("agent.model_metadata.get_model_context_length", return_value=1_000_000) as mock_ctx_len,
+        patch("agent.model_metadata.get_model_context_length") as mock_ctx_len,
     ):
+        # AIAgent.__init__ calls get_model_context_length multiple times:
+        # 1. ContextCompressor.__init__ (main model) → returns 200_000
+        # 2. _check_compression_model_feasibility: aux call → returns 1_000_000
+        # 3. _check_compression_model_feasibility: main call → returns 200_000
+        # We use a lambda to handle any number of calls gracefully.
+        call_count = {"n": 0}
+        def _side_effect(*args, **kwargs):
+            call_count["n"] += 1
+            n = call_count["n"]
+            # First call: ContextCompressor init — main model, no override
+            if n == 1:
+                return ""
+            # Second call: aux model (in _check_compression_model_feasibility)
+            if n == 2:
+                return 1_000_000
+            # Third call: main model (re-derived threshold)
+            return 200_000
+
+        mock_ctx_len.side_effect = _side_effect
         agent = AIAgent(
             api_key="test-key-1234567890",
             base_url="https://openrouter.ai/api/v1",
@@ -253,12 +279,14 @@ def test_init_feasibility_check_uses_aux_context_override_from_config():
         )
 
     assert agent._aux_compression_context_length_config == 1_000_000
-    mock_ctx_len.assert_called_once_with(
-        "custom/big-model",
-        base_url="http://custom-endpoint:8080/v1",
-        api_key="sk-custom",
-        config_context_length=1_000_000,
-    )
+    # Find the aux model call — it should have config_context_length=1_000_000
+    # and first positional arg "custom/big-model"
+    aux_calls = [
+        c for c in mock_ctx_len.call_args_list
+        if c.args and c.args[0] == "custom/big-model"
+    ]
+    assert len(aux_calls) >= 1
+    assert aux_calls[0].kwargs["config_context_length"] == 1_000_000
 
 
 @patch("agent.auxiliary_client.get_text_auxiliary_client")
@@ -324,7 +352,7 @@ def test_exact_threshold_boundary_no_warning(mock_get_client, mock_ctx_len):
     assert len(messages) == 0
 
 
-@patch("agent.model_metadata.get_model_context_length", return_value=99_999)
+@patch("agent.model_metadata.get_model_context_length")
 @patch("agent.auxiliary_client.get_text_auxiliary_client")
 def test_just_below_threshold_auto_corrects(mock_get_client, mock_ctx_len):
     """Auto-correct fires when aux context is one token below the threshold
@@ -334,6 +362,9 @@ def test_just_below_threshold_auto_corrects(mock_get_client, mock_ctx_len):
     mock_client.base_url = "https://openrouter.ai/api/v1"
     mock_client.api_key = "sk-aux"
     mock_get_client.return_value = (mock_client, "small-model")
+
+    # First call: aux model context_length; second call: main model context_length
+    mock_ctx_len.side_effect = [99_999, 200_000]
 
     messages = []
     agent._emit_status = lambda msg: messages.append(msg)
@@ -435,7 +466,7 @@ def test_headroom_floors_at_minimum_context(mock_get_client, mock_ctx_len):
 # ── Two-phase: __init__ + run_conversation replay ───────────────────
 
 
-@patch("agent.model_metadata.get_model_context_length", return_value=80_000)
+@patch("agent.model_metadata.get_model_context_length")
 @patch("agent.auxiliary_client.get_text_auxiliary_client")
 def test_warning_stored_for_gateway_replay(mock_get_client, mock_ctx_len):
     """__init__ stores the warning; _replay sends it through status_callback."""
@@ -444,6 +475,9 @@ def test_warning_stored_for_gateway_replay(mock_get_client, mock_ctx_len):
     mock_client.base_url = "https://openrouter.ai/api/v1"
     mock_client.api_key = "sk-aux"
     mock_get_client.return_value = (mock_client, "google/gemini-3-flash-preview")
+
+    # First call: aux model context_length; second call: main model context_length
+    mock_ctx_len.side_effect = [80_000, 200_000]
 
     # Phase 1: __init__ — _emit_status prints (CLI) but callback is None
     vprint_messages = []
@@ -496,7 +530,7 @@ def test_replay_without_callback_is_noop():
     agent._replay_compression_warning()
 
 
-@patch("agent.model_metadata.get_model_context_length", return_value=80_000)
+@patch("agent.model_metadata.get_model_context_length")
 @patch("agent.auxiliary_client.get_text_auxiliary_client")
 def test_run_conversation_clears_warning_after_replay(mock_get_client, mock_ctx_len):
     """After replay in run_conversation, _compression_warning is cleared
@@ -506,6 +540,9 @@ def test_run_conversation_clears_warning_after_replay(mock_get_client, mock_ctx_
     mock_client.base_url = "https://openrouter.ai/api/v1"
     mock_client.api_key = "sk-aux"
     mock_get_client.return_value = (mock_client, "small-model")
+
+    # First call: aux model context_length; second call: main model context_length
+    mock_ctx_len.side_effect = [80_000, 200_000]
 
     agent._emit_status = lambda msg: None
     agent._check_compression_model_feasibility()
@@ -528,3 +565,176 @@ def test_run_conversation_clears_warning_after_replay(mock_get_client, mock_ctx_
         agent._compression_warning = None
 
     assert len(callback_events) == 0
+
+
+# ── Bug #12977: custom_providers context_length not propagated ──────
+#
+# The bug: when custom_providers provides a context_length for the main model,
+# _check_compression_model_feasibility did not propagate it to the aux model's
+# get_model_context_length call when the aux model is the same as the main model
+# (fallback scenario).  Additionally, self._config_context_length was never
+# updated with the custom_providers value, so the threshold re-derivation
+# (added in the fix) would also compute the wrong threshold.
+#
+# Three-part fix:
+#   1. Update self._config_context_length after custom_providers resolution
+#      (run_agent.py __init__ line ~1622)
+#   2. When aux model matches main model (same name + base_url), fall back to
+#      self._config_context_length for the aux get_model_context_length call
+#      (run_agent.py _check_compression_model_feasibility)
+#   3. Re-derive threshold from get_model_context_length instead of reading
+#      the potentially-stale threshold_tokens from the compressor
+
+
+@patch("agent.model_metadata.get_model_context_length")
+@patch("agent.auxiliary_client.get_text_auxiliary_client")
+def test_aux_gets_custom_provider_context_when_aux_matches_main(
+    mock_get_client, mock_ctx_len,
+):
+    """When the aux compression model is the same as the main model and
+    custom_providers provides a context_length override, the feasibility check
+    must propagate that override to the aux model's context query.
+
+    Scenario (from issue #12977):
+      - custom_providers.models.glm-5.1.context_length: 200000
+      - No separate aux compression model → falls back to main model
+      - compression threshold: 0.65 → correct threshold = 130_000
+      - Built-in default for the model would be 128_000
+
+    Without fix: aux_context = 128_000 (config_context_length=None)
+                 threshold = 130_000 (correctly from compressor)
+                 128_000 < 130_000 → false warning + auto-lower
+
+    With fix:    aux_context = 200_000 (config_context_length propagated)
+                 threshold = 130_000 (re-derived correctly)
+                 200_000 >= 130_000 → no warning (correct)
+    """
+    # Compressor was correctly initialised with 200K from custom_providers
+    agent = _make_agent(main_context=200_000, threshold_percent=0.65)
+    agent._config_context_length = 200_000
+
+    # Aux model = main model (the fallback scenario from the issue)
+    mock_client = MagicMock()
+    mock_client.base_url = "https://openrouter.ai/api/v1"
+    mock_client.api_key = "sk-test"
+    mock_get_client.return_value = (mock_client, "test-main-model")
+
+    # Mock behaviour: return the override when config_context_length is given,
+    # otherwise return the built-in default (128K) — simulates what
+    # get_model_context_length does without the fix.
+    def _ctx_len(model, base_url="", api_key="", config_context_length=None, provider=""):
+        if config_context_length is not None:
+            return config_context_length
+        return 128_000  # built-in default (wrong for this custom_provider model)
+
+    mock_ctx_len.side_effect = _ctx_len
+
+    messages = []
+    agent._emit_status = lambda msg: messages.append(msg)
+
+    agent._check_compression_model_feasibility()
+
+    assert len(messages) == 0, (
+        f"Expected no warning with custom_providers context_length=200K and "
+        f"threshold=130K, but got: {messages}"
+    )
+    assert agent._compression_warning is None
+
+
+@patch("agent.model_metadata.get_model_context_length")
+@patch("agent.auxiliary_client.get_text_auxiliary_client")
+def test_different_aux_model_does_not_get_main_config_override(
+    mock_get_client, mock_ctx_len,
+):
+    """When the aux compression model is DIFFERENT from the main model,
+    the main model's config_context_length must NOT be applied to the aux
+    call.  Only when aux_model == self.model AND base_urls match should
+    the fallback activate.
+    """
+    agent = _make_agent(main_context=200_000, threshold_percent=0.50)
+    agent._config_context_length = 1_000_000  # main model's custom override
+
+    # Aux model is DIFFERENT from main model
+    mock_client = MagicMock()
+    mock_client.base_url = "https://openrouter.ai/api/v1"
+    mock_client.api_key = "sk-aux"
+    mock_get_client.return_value = (mock_client, "different-aux-model")
+
+    # The mock should be called with config_context_length=None for the aux
+    # call (since the models differ) and config_context_length=1_000_000 for
+    # the main model call.
+    call_log = []
+
+    def _ctx_len(model, base_url="", api_key="", config_context_length=None, provider=""):
+        call_log.append({"model": model, "config_context_length": config_context_length})
+        if config_context_length is not None:
+            return config_context_length
+        return 200_000  # aux model's own real context
+
+    mock_ctx_len.side_effect = _ctx_len
+
+    messages = []
+    agent._emit_status = lambda msg: messages.append(msg)
+
+    agent._check_compression_model_feasibility()
+
+    # First call: aux model — should NOT get the main model's override
+    aux_call = call_log[0]
+    assert aux_call["model"] == "different-aux-model"
+    assert aux_call["config_context_length"] is None, (
+        "Aux model should NOT receive main model's config_context_length "
+        "when models differ"
+    )
+
+    # Second call: main model — should get the override for threshold derivation
+    main_call = call_log[1]
+    assert main_call["config_context_length"] == 1_000_000, (
+        "Main model threshold derivation should use config_context_length"
+    )
+
+
+@patch("agent.model_metadata.get_model_context_length")
+@patch("agent.auxiliary_client.get_text_auxiliary_client")
+def test_false_positive_warning_eliminated_by_custom_provider_propagation(
+    mock_get_client, mock_ctx_len,
+):
+    """Regression test for the exact false-positive scenario from issue #12977.
+
+    User configured custom_providers with context_length: 200000, compression
+    threshold 0.65.  The old code queried the aux model (which IS the main
+    model) with config_context_length=None, getting 128_000 back.  The
+    compressor's threshold_tokens was correctly 130_000 (200K * 0.65), so
+    128_000 < 130_000 triggered a false warning and unnecessary auto-lowering.
+
+    The fix propagates the custom_providers context_length to the aux call
+    when the aux model matches the main model, so aux_context = 200_000.
+    """
+    agent = _make_agent(main_context=200_000, threshold_percent=0.65)
+    agent._config_context_length = 200_000
+
+    mock_client = MagicMock()
+    mock_client.base_url = "https://openrouter.ai/api/v1"
+    mock_client.api_key = "sk-test"
+    mock_get_client.return_value = (mock_client, "test-main-model")
+
+    def _ctx_len(model, base_url="", api_key="", config_context_length=None, provider=""):
+        if config_context_length is not None:
+            return config_context_length
+        return 128_000  # built-in default — the WRONG value
+
+    mock_ctx_len.side_effect = _ctx_len
+
+    messages = []
+    agent._emit_status = lambda msg: messages.append(msg)
+
+    agent._check_compression_model_feasibility()
+
+    # The compressor's threshold_tokens was NOT auto-lowered
+    assert agent.context_compressor.threshold_tokens == 130_000, (
+        f"threshold_tokens should remain 130K (200K*0.65), "
+        f"got {agent.context_compressor.threshold_tokens}"
+    )
+    assert agent._compression_warning is None, (
+        f"Should not warn: aux has 200K >= threshold 130K, "
+        f"but got: {agent._compression_warning}"
+    )

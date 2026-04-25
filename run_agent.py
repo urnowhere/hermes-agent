@@ -1804,7 +1804,11 @@ class AIAgent:
                                         file=sys.stderr,
                                     )
                     break
-        
+            # Propagate resolved custom_providers context_length to the instance
+            # attribute so downstream code (switch_model, compression feasibility
+            # check) sees the correct value, not the stale one from line 1581.
+            self._config_context_length = _config_context_length
+
         # Select context engine: config-driven (like memory providers).
         # 1. Check config.yaml context.engine setting
         # 2. Check plugins/context_engine/<name>/ directory (repo-shipped)
@@ -2394,11 +2398,24 @@ class AIAgent:
             aux_base_url = str(getattr(client, "base_url", ""))
             aux_api_key = str(getattr(client, "api_key", ""))
 
+            # Resolve config override for the auxiliary model.
+            # 1. Explicit auxiliary.compression.context_length from config
+            # 2. When the aux model matches the main model (same name & base_url),
+            #    fall back to the main model's resolved context_length (which
+            #    includes custom_providers overrides — see __init__ lines 1584-1622).
+            _aux_ctx_cfg = getattr(self, "_aux_compression_context_length_config", None)
+            if _aux_ctx_cfg is None:
+                _main_base = str(getattr(self, "base_url", "")).rstrip("/")
+                if (
+                    aux_base_url.rstrip("/") == _main_base
+                    and aux_model == self.model
+                ):
+                    _aux_ctx_cfg = getattr(self, "_config_context_length", None)
             aux_context = get_model_context_length(
                 aux_model,
                 base_url=aux_base_url,
                 api_key=aux_api_key,
-                config_context_length=getattr(self, "_aux_compression_context_length_config", None),
+                config_context_length=_aux_ctx_cfg,
             )
 
             # Hard floor: the auxiliary compression model must have at least
@@ -2419,7 +2436,24 @@ class AIAgent:
                     f"detected value if it is wrong."
                 )
 
-            threshold = self.context_compressor.threshold_tokens
+            # Re-derive the main model's compression threshold using the same
+            # logic as ContextCompressor.__init__ / update_model:
+            #   threshold = max(int(context_length * threshold_percent), 64K)
+            # This ensures the threshold reflects any custom_providers context_length
+            # that was loaded after self._config_context_length was first stored
+            # (switch_model reads stale self._config_context_length but the
+            # compressor was initialized with the correct derived value).
+            main_ctx = get_model_context_length(
+                self.model,
+                base_url=self.base_url,
+                api_key=self.api_key,
+                config_context_length=getattr(self, "_config_context_length", None),
+                provider=self.provider,
+            )
+            threshold = max(
+                int(main_ctx * self.context_compressor.threshold_percent),
+                MINIMUM_CONTEXT_LENGTH,
+            )
             if aux_context < threshold:
                 # Auto-correct: lower the live session threshold so
                 # compression actually works this session.  The hard floor
