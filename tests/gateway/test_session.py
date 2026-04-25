@@ -1232,3 +1232,87 @@ class TestRewriteTranscriptPreservesReasoning:
         assert after[0].get("reasoning_content") == "provider scratchpad"
         assert after[0].get("reasoning_details") == [{"type": "summary", "text": "step by step"}]
         assert after[0].get("codex_reasoning_items") == [{"id": "r1", "type": "reasoning"}]
+
+
+class TestAtomicRewrite:
+    """rewrite_transcript must be atomic — no partial state on failure.  (#8029)"""
+
+    def test_rewrite_messages_is_atomic_on_success(self, tmp_path):
+        """rewrite_messages produces the same result as clear + append sequence."""
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "test.db")
+        session_id = "atomic-test"
+        db.create_session(session_id=session_id, source="cli")
+
+        db.append_message(session_id=session_id, role="user", content="old msg 1")
+        db.append_message(session_id=session_id, role="assistant", content="old msg 2")
+
+        new_messages = [
+            {"role": "user", "content": "new msg 1"},
+            {"role": "assistant", "content": "new msg 2", "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "search", "arguments": "{}"}},
+            ]},
+            {"role": "tool", "content": "result", "tool_call_id": "c1"},
+        ]
+        db.rewrite_messages(session_id, new_messages)
+
+        result = db.get_messages_as_conversation(session_id)
+        assert len(result) == 3
+        assert result[0]["content"] == "new msg 1"
+        assert result[1]["content"] == "new msg 2"
+        assert result[2]["content"] == "result"
+
+    def test_rewrite_messages_counts_tool_calls_correctly(self, tmp_path):
+        """tool_call_count must match append_message behavior."""
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "test.db")
+        session_id = "count-test"
+        db.create_session(session_id=session_id, source="cli")
+
+        messages = [
+            {"role": "user", "content": "do it"},
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "t", "arguments": "{}"}},
+                {"id": "c2", "type": "function", "function": {"name": "t", "arguments": "{}"}},
+            ]},
+            {"role": "tool", "content": "r1", "tool_call_id": "c1"},
+            {"role": "tool", "content": "r2", "tool_call_id": "c2"},
+        ]
+        db.rewrite_messages(session_id, messages)
+
+        session = db.get_session(session_id)
+        assert session["message_count"] == 4
+        # 2 from tool_calls list + 2 from role="tool" messages
+        assert session["tool_call_count"] == 4
+
+    def test_jsonl_atomic_write(self, tmp_path):
+        """JSONL rewrite uses tempfile + os.replace for atomicity."""
+        config = GatewayConfig()
+        with patch("gateway.session.SessionStore._ensure_loaded"):
+            store = SessionStore(sessions_dir=tmp_path, config=config)
+        store._db = None
+        store._loaded = True
+
+        session_id = "jsonl-atomic"
+        transcript_path = store.get_transcript_path(session_id)
+        transcript_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Write initial content
+        transcript_path.write_text('{"role": "user", "content": "old"}\n')
+
+        # Rewrite
+        store.rewrite_transcript(session_id, [
+            {"role": "user", "content": "new msg"},
+            {"role": "assistant", "content": "reply"},
+        ])
+
+        lines = transcript_path.read_text().strip().split("\n")
+        assert len(lines) == 2
+        assert '"new msg"' in lines[0]
+        assert '"reply"' in lines[1]
+
+        # No temp files left behind
+        tmp_files = list(transcript_path.parent.glob("*.tmp"))
+        assert tmp_files == []

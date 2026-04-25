@@ -1477,6 +1477,63 @@ class SessionDB:
             )
         self._execute_write(_do)
 
+    def rewrite_messages(self, session_id: str, messages: list) -> None:
+        """Atomically replace all messages for a session.
+
+        Runs the delete + re-insert inside a single write transaction so a
+        crash mid-rewrite cannot leave the session with a partially written
+        or empty transcript.  Used by /retry, /undo, and /compress.
+        """
+        # Pre-serialize structured fields outside the transaction.
+        prepared = []
+        for msg in messages:
+            role = msg.get("role", "unknown")
+            tool_calls = msg.get("tool_calls")
+            tool_calls_json = json.dumps(tool_calls) if tool_calls else None
+            reasoning_details = msg.get("reasoning_details") if role == "assistant" else None
+            reasoning_details_json = (
+                json.dumps(reasoning_details) if reasoning_details else None
+            )
+            codex_items = msg.get("codex_reasoning_items") if role == "assistant" else None
+            codex_items_json = json.dumps(codex_items) if codex_items else None
+            num_tool_calls = 0
+            if tool_calls is not None:
+                num_tool_calls = len(tool_calls) if isinstance(tool_calls, list) else 1
+            elif role == "tool":
+                num_tool_calls = 1
+            prepared.append((
+                role, msg.get("content"), msg.get("tool_call_id"),
+                tool_calls_json, msg.get("tool_name"), time.time(),
+                None,  # token_count
+                None,  # finish_reason
+                msg.get("reasoning") if role == "assistant" else None,
+                msg.get("reasoning_content") if role == "assistant" else None,
+                reasoning_details_json, codex_items_json, num_tool_calls,
+            ))
+
+        def _do(conn):
+            conn.execute(
+                "DELETE FROM messages WHERE session_id = ?", (session_id,)
+            )
+            total_tool_calls = 0
+            for row in prepared:
+                *values, num_tc = row
+                conn.execute(
+                    """INSERT INTO messages (session_id, role, content, tool_call_id,
+                       tool_calls, tool_name, timestamp, token_count, finish_reason,
+                       reasoning, reasoning_content, reasoning_details,
+                       codex_reasoning_items)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (session_id, *values),
+                )
+                total_tool_calls += num_tc
+            conn.execute(
+                "UPDATE sessions SET message_count = ?, tool_call_count = ? WHERE id = ?",
+                (len(prepared), total_tool_calls, session_id),
+            )
+
+        self._execute_write(_do)
+
     def delete_session(self, session_id: str) -> bool:
         """Delete a session and all its messages.
 
