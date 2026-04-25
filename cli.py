@@ -15,6 +15,7 @@ Usage:
 
 import logging
 import os
+import selectors
 import shutil
 import sys
 import json
@@ -71,6 +72,83 @@ from agent.account_usage import fetch_account_usage, render_account_usage_lines
 from hermes_cli.banner import _format_context_length, format_banner_version_label
 
 _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+
+def _stdin_usable_for_prompt_toolkit() -> bool:
+    """Return whether fd 0 can back prompt_toolkit's interactive input.
+
+    ``os.fstat(0)`` only proves that fd 0 exists.  On macOS/kqueue,
+    prompt_toolkit also needs fd 0 to be a terminal that the asyncio selector
+    can register.  When Hermes is launched from a piped installer or another
+    wrapper, fd 0 can be a pipe/file at EOF; in some uv-managed macOS Python
+    builds selector registration then raises ``OSError(EINVAL)`` from
+    ``loop.add_reader(0, ...)``.
+    """
+    try:
+        os.fstat(0)
+        if not sys.stdin.isatty():
+            return False
+        selector = selectors.DefaultSelector()
+        try:
+            selector.register(0, selectors.EVENT_READ)
+        finally:
+            selector.close()
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+@contextmanager
+def _interactive_stdin():
+    """Ensure interactive prompt_toolkit uses the controlling terminal.
+
+    ``curl ... | bash`` leaves child commands with stdin connected to the
+    installer pipe, not the terminal.  That is especially fragile on macOS,
+    where registering fd 0 with kqueue can fail with ``OSError: [Errno 22]
+    Invalid argument``.  For interactive chat mode, prefer the controlling
+    terminal when fd 0 is missing, non-TTY, or not selector-registerable.
+    """
+    if _stdin_usable_for_prompt_toolkit():
+        yield
+        return
+
+    restore_fd = None
+    tty_fd = None
+    rebound = False
+    try:
+        if not (os.path.exists("/dev/tty") and os.access("/dev/tty", os.R_OK | os.W_OK)):
+            raise RuntimeError(
+                "stdin is not an interactive terminal and /dev/tty is not available"
+            )
+
+        try:
+            restore_fd = os.dup(0)
+        except OSError:
+            restore_fd = None
+        tty_fd = os.open("/dev/tty", os.O_RDWR)
+        os.dup2(tty_fd, 0)
+        rebound = True
+
+        if not _stdin_usable_for_prompt_toolkit():
+            raise RuntimeError("/dev/tty is not usable by prompt_toolkit")
+
+        yield
+    finally:
+        if rebound and restore_fd is not None:
+            try:
+                os.dup2(restore_fd, 0)
+            except OSError:
+                pass
+        if restore_fd is not None:
+            try:
+                os.close(restore_fd)
+            except OSError:
+                pass
+        if tty_fd is not None:
+            try:
+                os.close(tty_fd)
+            except OSError:
+                pass
 
 
 # Load .env from ~/.hermes/.env first, then project root as dev fallback.
@@ -10734,24 +10812,13 @@ class HermesCLI:
             # Fall back to default handler for everything else
             loop.default_exception_handler(context)
 
-        # Validate stdin before launching prompt_toolkit — on macOS with
-        # uv-managed Python, fd 0 can be invalid or unregisterable with the
-        # asyncio selector, causing "KeyError: '0 is not registered'" (#6393).
+        # Run the application with patch_stdout for proper output handling.
+        # _interactive_stdin() redirects fd 0 to /dev/tty when Hermes was
+        # launched from a pipe or wrapper.  This avoids macOS/kqueue failures
+        # from prompt_toolkit's loop.add_reader(0, ...), notably
+        # ``OSError: [Errno 22] Invalid argument``.
         try:
-            os.fstat(0)
-        except OSError:
-            print(
-                "Error: stdin (fd 0) is not available.\n"
-                "This can happen with certain Python installations (e.g. uv-managed cPython on macOS).\n"
-                "Try reinstalling Python via pyenv or Homebrew, then re-run: hermes setup"
-            )
-            _run_cleanup()
-            self._print_exit_summary()
-            return
-
-        # Run the application with patch_stdout for proper output handling
-        try:
-            with patch_stdout():
+            with _interactive_stdin(), patch_stdout():
                 # Set the custom handler on prompt_toolkit's event loop
                 try:
                     import asyncio as _aio
@@ -10762,14 +10829,21 @@ class HermesCLI:
                 app.run()
         except (EOFError, KeyboardInterrupt, BrokenPipeError):
             pass
-        except (KeyError, OSError) as _stdin_err:
+        except (KeyError, OSError, RuntimeError) as _stdin_err:
             # Catch selector registration failures from broken stdin (#6393).
-            # This is the fallback for cases that slip past the fstat() guard.
-            if "is not registered" in str(_stdin_err) or "Bad file descriptor" in str(_stdin_err):
+            # This is the fallback for cases that slip past the /dev/tty guard.
+            _msg = str(_stdin_err)
+            if (
+                "is not registered" in _msg
+                or "Bad file descriptor" in _msg
+                or "Invalid argument" in _msg
+                or "not an interactive terminal" in _msg
+                or "/dev/tty is not usable" in _msg
+            ):
                 print(
                     f"\nError: stdin is not usable ({_stdin_err}).\n"
-                    "This can happen with certain Python installations (e.g. uv-managed cPython on macOS).\n"
-                    "Try reinstalling Python via pyenv or Homebrew, then re-run: hermes setup"
+                    "Hermes interactive mode needs a terminal. If you launched it from a pipe, "
+                    "run `hermes` again directly from your shell."
                 )
             else:
                 raise
