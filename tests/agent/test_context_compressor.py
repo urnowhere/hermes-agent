@@ -4,6 +4,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 from agent.context_compressor import ContextCompressor, SUMMARY_PREFIX
+from agent.model_metadata import MINIMUM_CONTEXT_LENGTH
 
 
 @pytest.fixture()
@@ -969,3 +970,59 @@ class TestTruncateToolCallArgsJson:
         parsed = _json.loads(shrunk)
         assert parsed["path"] == "~/.hermes/skills/shopping/browser-setup-notes.md"
         assert parsed["content"].endswith("...[truncated]")
+
+class TestThresholdClampAtMinimumContext:
+    """Regression test for #14690: when context_length == MINIMUM_CONTEXT_LENGTH,
+    the max() floor pushed threshold_tokens to 100% of the context window,
+    making auto-compression impossible (API errors before threshold is reached).
+    The fix clamps threshold_tokens to at most 95% of context_length."""
+
+    def test_init_threshold_below_context_length(self):
+        """__init__ must produce a threshold strictly below context_length."""
+        with patch(
+            "agent.context_compressor.get_model_context_length",
+            return_value=MINIMUM_CONTEXT_LENGTH,
+        ):
+            c = ContextCompressor(model="test", quiet_mode=True)
+        assert c.threshold_tokens < c.context_length
+        assert c.threshold_tokens == int(MINIMUM_CONTEXT_LENGTH * 0.95)
+
+    def test_should_compress_at_threshold(self):
+        """should_compress returns True at the threshold and False just below."""
+        with patch(
+            "agent.context_compressor.get_model_context_length",
+            return_value=MINIMUM_CONTEXT_LENGTH,
+        ):
+            c = ContextCompressor(model="test", quiet_mode=True)
+        assert c.should_compress(c.threshold_tokens - 1) is False
+        assert c.should_compress(c.threshold_tokens) is True
+
+    def test_update_model_threshold_below_context_length(self):
+        """update_model() must also rebuild all derived budgets."""
+        with patch(
+            "agent.context_compressor.get_model_context_length",
+            return_value=200_000,
+        ):
+            c = ContextCompressor(model="test", quiet_mode=True)
+        c.update_model(
+            model="small/model",
+            context_length=MINIMUM_CONTEXT_LENGTH,
+        )
+        assert c.threshold_tokens < MINIMUM_CONTEXT_LENGTH
+        assert c.threshold_tokens == int(MINIMUM_CONTEXT_LENGTH * 0.95)
+        assert c.tail_token_budget == int(c.threshold_tokens * c.summary_target_ratio)
+        assert c.max_summary_tokens == int(MINIMUM_CONTEXT_LENGTH * 0.05)
+        assert c.should_compress(c.threshold_tokens - 1) is False
+        assert c.should_compress(c.threshold_tokens) is True
+
+    def test_large_context_unaffected_by_clamp(self):
+        """For large models the 95% cap does not change the threshold."""
+        with patch(
+            "agent.context_compressor.get_model_context_length",
+            return_value=200_000,
+        ):
+            c = ContextCompressor(model="test", quiet_mode=True)
+        # 50% of 200K = 100K, 95% of 200K = 190K => min(100K, 190K) = 100K
+        assert c.threshold_tokens == 100_000
+        assert c.tail_token_budget == int(100_000 * c.summary_target_ratio)
+        assert c.max_summary_tokens == 10_000

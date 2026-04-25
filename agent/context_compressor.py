@@ -288,6 +288,23 @@ class ContextCompressor(ContextEngine):
     def name(self) -> str:
         return "compressor"
 
+    def _recompute_thresholds_and_budgets(self) -> None:
+        """Rebuild derived token thresholds after a context/model change."""
+        self.threshold_tokens = max(
+            int(self.context_length * self.threshold_percent),
+            MINIMUM_CONTEXT_LENGTH,
+        )
+        # Threshold must stay below context_length so compression can trigger
+        # before the provider rejects the request outright.
+        self.threshold_tokens = min(
+            self.threshold_tokens, int(self.context_length * 0.95)
+        )
+        target_tokens = int(self.threshold_tokens * self.summary_target_ratio)
+        self.tail_token_budget = target_tokens
+        self.max_summary_tokens = min(
+            int(self.context_length * 0.05), _SUMMARY_TOKENS_CEILING,
+        )
+
     def on_session_reset(self) -> None:
         """Reset all per-session state for /new or /reset."""
         super().on_session_reset()
@@ -314,10 +331,7 @@ class ContextCompressor(ContextEngine):
         self.provider = provider
         self.api_mode = api_mode
         self.context_length = context_length
-        self.threshold_tokens = max(
-            int(context_length * self.threshold_percent),
-            MINIMUM_CONTEXT_LENGTH,
-        )
+        self._recompute_thresholds_and_budgets()
 
     def __init__(
         self,
@@ -354,18 +368,8 @@ class ContextCompressor(ContextEngine):
         # the percentage would suggest a lower value.  This prevents premature
         # compression on large-context models at 50% while keeping the % sane
         # for models right at the minimum.
-        self.threshold_tokens = max(
-            int(self.context_length * threshold_percent),
-            MINIMUM_CONTEXT_LENGTH,
-        )
+        self._recompute_thresholds_and_budgets()
         self.compression_count = 0
-
-        # Derive token budgets: ratio is relative to the threshold, not total context
-        target_tokens = int(self.threshold_tokens * self.summary_target_ratio)
-        self.tail_token_budget = target_tokens
-        self.max_summary_tokens = min(
-            int(self.context_length * 0.05), _SUMMARY_TOKENS_CEILING,
-        )
 
         if not quiet_mode:
             logger.info(
