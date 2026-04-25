@@ -65,20 +65,39 @@ class TestAntiThrashingRecovery:
         compressor.last_prompt_tokens = 90000
         assert compressor.should_compress() is False
 
+    def test_anti_thrash_recovers_after_meaningful_prompt_growth(self, compressor):
+        """Large prompt growth should re-enable compression even before cooldown."""
+        compressor._ineffective_compression_count = 2
+        compressor._last_compression_time = time.monotonic() - 60
+        compressor._last_compression_prompt_tokens = 90_000
+        compressor.last_prompt_tokens = 105_000
+        assert compressor.should_compress() is True
+        assert compressor._ineffective_compression_count == 0
+
+    def test_anti_thrash_small_growth_does_not_reset(self, compressor):
+        """Minor growth should not immediately re-enable compression."""
+        compressor._ineffective_compression_count = 2
+        compressor._last_compression_time = time.monotonic() - 60
+        compressor._last_compression_prompt_tokens = 90_000
+        compressor.last_prompt_tokens = 94_000
+        assert compressor.should_compress() is False
+
     def test_anti_thrash_no_recovery_without_timestamp(self, compressor):
-        """If no compression has ever run (_last_compression_time == 0),
-        the time-based recovery should not trigger."""
+        """Without time or growth metadata, recovery should not trigger."""
         compressor._ineffective_compression_count = 2
         compressor._last_compression_time = 0.0
+        compressor._last_compression_prompt_tokens = 0
         compressor.last_prompt_tokens = 90000
         assert compressor.should_compress() is False
 
     def test_session_reset_clears_compression_time(self, compressor):
-        """on_session_reset() should reset _last_compression_time."""
+        """on_session_reset() should reset anti-thrash recovery metadata."""
         compressor._last_compression_time = 12345.0
+        compressor._last_compression_prompt_tokens = 90000
         compressor._ineffective_compression_count = 2
         compressor.on_session_reset()
         assert compressor._last_compression_time == 0.0
+        assert compressor._last_compression_prompt_tokens == 0
         assert compressor._ineffective_compression_count == 0
 
 
