@@ -1209,6 +1209,28 @@ class TelegramAdapter(BasePlatformAdapter):
             )
             return SendResult(success=False, error=str(e))
 
+    async def delete_message(self, chat_id: str, message_id: str) -> bool:
+        """Delete a previously sent Telegram message.
+
+        Only the final progress message is deleted (the one that was
+        last edited), not intermediate progress messages for each tool
+        call.  Returns True on success, False on failure.
+        """
+        if not self._bot:
+            return False
+        try:
+            await self._bot.delete_message(
+                chat_id=int(chat_id),
+                message_id=int(message_id),
+            )
+            return True
+        except Exception as exc:
+            logger.warning(
+                "Failed to delete progress message %s in chat %s: %s",
+                message_id, chat_id, exc,
+            )
+            return False
+
     async def send_update_prompt(
         self, chat_id: str, prompt: str, default: str = "",
         session_key: str = "",

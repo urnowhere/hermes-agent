@@ -4590,6 +4590,20 @@ class GatewayRunner:
             except Exception:
                 pass
 
+            # Auto-delete progress message after agent finishes (if enabled).
+            # Only the final progress message (the one that was last edited)
+            # is deleted, not intermediate per-tool messages.
+            if progress_msg_id_holder[0]:
+                try:
+                    display_cfg = (self.config.extra.get("display") if self.config.extra else None)
+                    if display_cfg and display_cfg.get("delete_progress_messages", False):
+                        del_adapter = self.adapters.get(source.platform)
+                        if del_adapter and hasattr(del_adapter, "delete_message"):
+                            await del_adapter.delete_message(
+                                source.chat_id, progress_msg_id_holder[0],
+                            )
+                except Exception as exc:
+                    logger.warning("Failed to delete progress message: %s", exc)
             if not self._is_session_run_current(_quick_key, run_generation):
                 logger.info(
                     "Discarding stale agent result for %s — generation %d is no longer current",
@@ -9397,6 +9411,7 @@ class GatewayRunner:
         last_tool = [None]  # Mutable container for tracking in closure
         last_progress_msg = [None]  # Track last message for dedup
         repeat_count = [0]  # How many times the same message repeated
+        progress_msg_id_holder = [None]  # Mutable holder for delete after response
         
         def progress_callback(event_type: str, tool_name: str = None, preview: str = None, args: dict = None, **kwargs):
             """Callback invoked by agent on tool lifecycle events."""
@@ -9569,6 +9584,7 @@ class GatewayRunner:
                             result = await adapter.send(chat_id=source.chat_id, content=msg, metadata=_progress_metadata)
                         if result.success and result.message_id:
                             progress_msg_id = result.message_id
+                            progress_msg_id_holder[0] = progress_msg_id
 
                     _last_edit_ts = time.monotonic()
 
