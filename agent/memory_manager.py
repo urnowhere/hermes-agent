@@ -146,6 +146,11 @@ class MemoryManager:
         """All registered providers in order."""
         return list(self._providers)
 
+    @property
+    def provider_names(self) -> List[str]:
+        """Backward-compatible provider name list for older tests/callers."""
+        return [provider.name for provider in self._providers]
+
     def get_provider(self, name: str) -> Optional[MemoryProvider]:
         """Get a provider by name, or None if not registered."""
         for p in self._providers:

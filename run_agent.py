@@ -8123,6 +8123,7 @@ class AIAgent:
                             content=args.get("content"),
                             old_text=args.get("old_text"),
                             store=self._memory_store,
+                            session_id=self.session_id,
                         )
                         if self._memory_manager and args.get("action") in ("add", "replace"):
                             try:
@@ -8360,6 +8361,7 @@ class AIAgent:
                 content=function_args.get("content"),
                 old_text=function_args.get("old_text"),
                 store=self._memory_store,
+                session_id=self.session_id,
             )
             # Bridge: notify external memory provider of built-in memory writes
             if self._memory_manager and function_args.get("action") in ("add", "replace"):
@@ -8875,6 +8877,7 @@ class AIAgent:
                     content=function_args.get("content"),
                     old_text=function_args.get("old_text"),
                     store=self._memory_store,
+                    session_id=self.session_id,
                 )
                 # Bridge: notify external memory provider of built-in memory writes
                 if self._memory_manager and function_args.get("action") in ("add", "replace"):
@@ -9638,6 +9641,14 @@ class AIAgent:
         # prefetch_all() on each tool call (10 tool calls = 10x latency + cost).
         # Use original_user_message (clean input) — user_message may contain
         # injected skill content that bloats / breaks provider queries.
+        _builtin_prefetch_cache = ""
+        if self._memory_store:
+            try:
+                _query = original_user_message if isinstance(original_user_message, str) else ""
+                _builtin_prefetch_cache = self._memory_store.search_for_recall(_query) or ""
+            except Exception:
+                pass
+
         _ext_prefetch_cache = ""
         if self._memory_manager:
             try:
@@ -9780,12 +9791,15 @@ class AIAgent:
                 api_msg = msg.copy()
 
                 # Inject ephemeral context into the current turn's user message.
-                # Sources: memory manager prefetch + plugin pre_llm_call hooks
-                # with target="user_message" (the default).  Both are
-                # API-call-time only — the original message in `messages` is
-                # never mutated, so nothing leaks into session persistence.
+                # Sources: built-in recall, memory manager prefetch, and plugin
+                # pre_llm_call hooks with target="user_message" (the default).
+                # All are API-call-time only — the original message in
+                # `messages` is never mutated, so nothing leaks into session
+                # persistence.
                 if idx == current_turn_user_idx and msg.get("role") == "user":
                     _injections = []
+                    if _builtin_prefetch_cache:
+                        _injections.append(_builtin_prefetch_cache)
                     if _ext_prefetch_cache:
                         _fenced = build_memory_context_block(_ext_prefetch_cache)
                         if _fenced:
