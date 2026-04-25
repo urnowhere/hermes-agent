@@ -9397,6 +9397,7 @@ class GatewayRunner:
         last_tool = [None]  # Mutable container for tracking in closure
         last_progress_msg = [None]  # Track last message for dedup
         repeat_count = [0]  # How many times the same message repeated
+        progress_msg_id_holder = [None]  # Track progress message ID for deletion
         
         def progress_callback(event_type: str, tool_name: str = None, preview: str = None, args: dict = None, **kwargs):
             """Callback invoked by agent on tool lifecycle events."""
@@ -9474,7 +9475,12 @@ class GatewayRunner:
             _progress_thread_id = source.thread_id or event_message_id
         else:
             _progress_thread_id = source.thread_id
-        _progress_metadata = {"thread_id": _progress_thread_id} if _progress_thread_id else None
+        # Silent mode: tool progress messages are sent without notification
+        # so the user isn't spammed with sounds/vibrations for every tool call.
+        # Link preview disabled to keep progress messages compact.
+        _progress_metadata = {"silent": True, "no_preview": True}
+        if _progress_thread_id:
+            _progress_metadata["thread_id"] = _progress_thread_id
 
         async def send_progress_messages():
             if not progress_queue:
@@ -9569,6 +9575,7 @@ class GatewayRunner:
                             result = await adapter.send(chat_id=source.chat_id, content=msg, metadata=_progress_metadata)
                         if result.success and result.message_id:
                             progress_msg_id = result.message_id
+                            progress_msg_id_holder[0] = progress_msg_id
 
                     _last_edit_ts = time.monotonic()
 
@@ -10817,6 +10824,25 @@ class GatewayRunner:
             # Stop progress sender, interrupt monitor, and notification task
             if progress_task:
                 progress_task.cancel()
+
+            # Auto-delete progress message after agent finishes (if enabled)
+            _delete_progress = False
+            try:
+                _display_cfg = user_config.get("display", {})
+                if isinstance(_display_cfg, dict):
+                    _delete_progress = _display_cfg.get("delete_progress_messages", False)
+            except Exception:
+                pass
+            if _delete_progress and progress_msg_id_holder[0]:
+                try:
+                    adapter = self.adapters.get(source.platform)
+                    if adapter:
+                        await adapter.delete_message(
+                            chat_id=source.chat_id,
+                            message_id=progress_msg_id_holder[0],
+                        )
+                except Exception:
+                    pass
             interrupt_monitor.cancel()
             _notify_task.cancel()
 

@@ -998,7 +998,9 @@ class TelegramAdapter(BasePlatformAdapter):
                 ]
             
             message_ids = []
-            thread_id = self._metadata_thread_id(metadata)
+            thread_id = metadata.get("thread_id") if metadata else None
+            silent = metadata.get("silent", False) if metadata else False
+            no_preview = metadata.get("no_preview", False) if metadata else False
             
             try:
                 from telegram.error import NetworkError as _NetErr
@@ -1031,6 +1033,8 @@ class TelegramAdapter(BasePlatformAdapter):
                                 parse_mode=ParseMode.MARKDOWN_V2,
                                 reply_to_message_id=reply_to_id,
                                 message_thread_id=effective_thread_id,
+                                disable_notification=silent,
+                                disable_web_page_preview=no_preview,
                                 **self._link_preview_kwargs(),
                             )
                         except Exception as md_error:
@@ -1044,6 +1048,8 @@ class TelegramAdapter(BasePlatformAdapter):
                                     parse_mode=None,
                                     reply_to_message_id=reply_to_id,
                                     message_thread_id=effective_thread_id,
+                                    disable_notification=silent,
+                                    disable_web_page_preview=no_preview,
                                     **self._link_preview_kwargs(),
                                 )
                             else:
@@ -1208,6 +1214,24 @@ class TelegramAdapter(BasePlatformAdapter):
                 exc_info=True,
             )
             return SendResult(success=False, error=str(e))
+
+    async def delete_message(
+        self,
+        chat_id: str,
+        message_id: str,
+    ) -> bool:
+        """Delete a previously sent Telegram message."""
+        if not self._bot:
+            return False
+        try:
+            await self._bot.delete_message(
+                chat_id=int(chat_id),
+                message_id=int(message_id),
+            )
+            return True
+        except Exception as e:
+            logger.debug("[%s] Failed to delete message %s: %s", self.name, message_id, e)
+            return False
 
     async def send_update_prompt(
         self, chat_id: str, prompt: str, default: str = "",
