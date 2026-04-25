@@ -998,7 +998,7 @@ class TestThresholdClampAtMinimumContext:
         assert c.should_compress(c.threshold_tokens) is True
 
     def test_update_model_threshold_below_context_length(self):
-        """update_model() must also clamp the threshold."""
+        """update_model() must also rebuild all derived budgets."""
         with patch(
             "agent.context_compressor.get_model_context_length",
             return_value=200_000,
@@ -1010,6 +1010,8 @@ class TestThresholdClampAtMinimumContext:
         )
         assert c.threshold_tokens < MINIMUM_CONTEXT_LENGTH
         assert c.threshold_tokens == int(MINIMUM_CONTEXT_LENGTH * 0.95)
+        assert c.tail_token_budget == int(c.threshold_tokens * c.summary_target_ratio)
+        assert c.max_summary_tokens == int(MINIMUM_CONTEXT_LENGTH * 0.05)
         assert c.should_compress(c.threshold_tokens - 1) is False
         assert c.should_compress(c.threshold_tokens) is True
 
@@ -1022,3 +1024,5 @@ class TestThresholdClampAtMinimumContext:
             c = ContextCompressor(model="test", quiet_mode=True)
         # 50% of 200K = 100K, 95% of 200K = 190K => min(100K, 190K) = 100K
         assert c.threshold_tokens == 100_000
+        assert c.tail_token_budget == int(100_000 * c.summary_target_ratio)
+        assert c.max_summary_tokens == 10_000
