@@ -10470,7 +10470,39 @@ class HermesCLI:
             'voice-status-recording': 'bg:#1a1a2e #FF4444 bold',
         }
         style = PTStyle.from_dict(self._build_tui_style_dict())
-        
+
+        # Detect whether stdin is directly usable by the asyncio selector.
+        # On macOS with uv-managed Python or inside IDE terminals (e.g. Kiro),
+        # fstat(0) passes but kqueue raises OSError EINVAL when trying to watch
+        # fd 0.  In that case we use a PipeInput so prompt_toolkit never touches
+        # fd 0 directly, and a feeder thread bridges real stdin → the pipe.
+        _pipe_input_ctx = None
+        _pipe_input_obj = None
+        _stdin_selector_ok = True
+        try:
+            import selectors as _sel_check
+            _ts = _sel_check.DefaultSelector()
+            try:
+                _ts.register(0, _sel_check.EVENT_READ)
+                _ts.unregister(0)
+            except (OSError, KeyError):
+                _stdin_selector_ok = False
+            finally:
+                _ts.close()
+        except Exception:
+            pass
+
+        _app_extra_kwargs: dict = {}
+        if not _stdin_selector_ok:
+            try:
+                from prompt_toolkit.input import create_pipe_input
+                _pipe_input_ctx = create_pipe_input()
+                _pipe_input_obj = _pipe_input_ctx.__enter__()
+                _app_extra_kwargs["input"] = _pipe_input_obj
+            except Exception:
+                _pipe_input_ctx = None
+                _pipe_input_obj = None
+
         # Create the application
         app = Application(
             layout=layout,
@@ -10479,6 +10511,7 @@ class HermesCLI:
             full_screen=False,
             mouse_support=False,
             **({'cursor': _STEADY_CURSOR} if _STEADY_CURSOR is not None else {}),
+            **_app_extra_kwargs,
         )
         self._app = app  # Store reference for clarify_callback
 
@@ -10737,17 +10770,50 @@ class HermesCLI:
         # Validate stdin before launching prompt_toolkit — on macOS with
         # uv-managed Python, fd 0 can be invalid or unregisterable with the
         # asyncio selector, causing "KeyError: '0 is not registered'" (#6393).
+        # Also catches environments (e.g. IDE terminals) where fstat() passes
+        # but the kqueue/epoll selector raises OSError EINVAL (#6393 follow-up).
+        # When _pipe_input_obj is set we already have a working fallback, so
+        # only bail out if stdin is completely unavailable (fstat fails).
+        _stdin_usable = True
         try:
             os.fstat(0)
         except OSError:
+            _stdin_usable = False
+
+        if not _stdin_usable and _pipe_input_obj is None:
             print(
-                "Error: stdin (fd 0) is not available.\n"
-                "This can happen with certain Python installations (e.g. uv-managed cPython on macOS).\n"
+                "Error: stdin (fd 0) is not usable by the asyncio selector.\n"
+                "This can happen with certain Python installations (e.g. uv-managed cPython on macOS)\n"
+                "or when running inside an IDE terminal that doesn't provide a real PTY.\n"
                 "Try reinstalling Python via pyenv or Homebrew, then re-run: hermes setup"
             )
             _run_cleanup()
             self._print_exit_summary()
             return
+
+        # If using pipe input fallback, start a feeder thread that reads real
+        # stdin and forwards each line into the pipe so prompt_toolkit receives
+        # keystrokes without needing to watch fd 0 via the asyncio selector.
+        _stdin_feeder_thread = None
+        if _pipe_input_obj is not None:
+            import sys as _sys
+
+            def _stdin_feeder():
+                try:
+                    for _line in _sys.stdin:
+                        if self._should_exit:
+                            break
+                        try:
+                            _pipe_input_obj.send_text(_line)
+                        except Exception:
+                            break
+                except Exception:
+                    pass
+
+            _stdin_feeder_thread = threading.Thread(
+                target=_stdin_feeder, daemon=True, name="stdin-feeder"
+            )
+            _stdin_feeder_thread.start()
 
         # Run the application with patch_stdout for proper output handling
         try:
@@ -10765,7 +10831,7 @@ class HermesCLI:
         except (KeyError, OSError) as _stdin_err:
             # Catch selector registration failures from broken stdin (#6393).
             # This is the fallback for cases that slip past the fstat() guard.
-            if "is not registered" in str(_stdin_err) or "Bad file descriptor" in str(_stdin_err):
+            if "is not registered" in str(_stdin_err) or "Bad file descriptor" in str(_stdin_err) or "Invalid argument" in str(_stdin_err):
                 print(
                     f"\nError: stdin is not usable ({_stdin_err}).\n"
                     "This can happen with certain Python installations (e.g. uv-managed cPython on macOS).\n"
@@ -10775,6 +10841,12 @@ class HermesCLI:
                 raise
         finally:
             self._should_exit = True
+            # Clean up pipe input context manager if we used the fallback
+            if _pipe_input_ctx is not None:
+                try:
+                    _pipe_input_ctx.__exit__(None, None, None)
+                except Exception:
+                    pass
             # Interrupt the agent immediately so its daemon thread stops making
             # API calls and exits promptly (agent_thread is daemon, so the
             # process will exit once the main thread finishes, but interrupting
