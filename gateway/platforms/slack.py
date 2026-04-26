@@ -1576,7 +1576,9 @@ class SlackAdapter(BasePlatformAdapter):
         from hermes_cli.commands import slack_subcommand_map
         subcommand_map = slack_subcommand_map()
         subcommand_map["compact"] = "/compress"
-        first_word = text.split()[0] if text else ""
+        # FIX: guard against whitespace-only text that splits to an empty list
+        parts = text.split() if text else []
+        first_word = parts[0] if parts else ""
         if first_word in subcommand_map:
             # Preserve arguments after the subcommand
             rest = text[len(first_word):].strip()

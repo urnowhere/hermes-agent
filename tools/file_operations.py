@@ -869,7 +869,11 @@ class ShellFileOperations(FileOperations):
         # Check if linter command is available
         linter_cmd = LINTERS[ext]
         # Extract the base command (first word)
-        base_cmd = linter_cmd.split()[0]
+        # FIX: guard against empty linter_cmd to prevent IndexError
+        parts = linter_cmd.split()
+        if not parts:
+            return LintResult(skipped=True, message="Empty linter command")
+        base_cmd = parts[0]
         
         if not self._has_command(base_cmd):
             return LintResult(skipped=True, message=f"{base_cmd} not available")

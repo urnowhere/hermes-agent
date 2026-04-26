@@ -253,7 +253,9 @@ def _detect_claude_code_version() -> str:
             )
             if result.returncode == 0 and result.stdout.strip():
                 # Output is like "2.1.74 (Claude Code)" or just "2.1.74"
-                version = result.stdout.strip().split()[0]
+                # FIX: guard split() — stdout could be empty or whitespace-only
+                parts = result.stdout.strip().split()
+                version = parts[0] if parts else ""
                 if version and version[0].isdigit():
                     return version
         except Exception:
