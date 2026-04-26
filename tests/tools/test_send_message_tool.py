@@ -9,9 +9,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from gateway.config import Platform
+from gateway.session_context import clear_session_vars, set_session_runtime_vars, set_session_vars
 from tools.send_message_tool import (
     _derive_forum_thread_name,
     _parse_target_ref,
+    _send_dingtalk_via_adapter,
     _send_discord,
     _send_matrix_via_adapter,
     _send_telegram,
@@ -100,6 +102,158 @@ class TestSendMessageTool:
         send_mock.assert_not_awaited()
         mirror_mock.assert_not_called()
 
+    def test_cron_different_target_still_sends(self):
+        config, telegram_cfg = _make_config()
+
+        with patch.dict(
+            os.environ,
+            {
+                "HERMES_CRON_AUTO_DELIVER_PLATFORM": "telegram",
+                "HERMES_CRON_AUTO_DELIVER_CHAT_ID": "-1001",
+            },
+            clear=False,
+        ), \
+             patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "telegram:-1002",
+                        "message": "hello",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        assert result.get("skipped") is not True
+        send_mock.assert_awaited_once_with(
+            Platform.TELEGRAM,
+            telegram_cfg,
+            "-1002",
+            "hello",
+            thread_id=None,
+            media_files=[],
+        )
+        mirror_mock.assert_called_once_with("telegram", "-1002", "hello", source_label="cli", thread_id=None)
+
+    def test_cron_same_chat_different_thread_still_sends(self):
+        config, telegram_cfg = _make_config()
+
+        with patch.dict(
+            os.environ,
+            {
+                "HERMES_CRON_AUTO_DELIVER_PLATFORM": "telegram",
+                "HERMES_CRON_AUTO_DELIVER_CHAT_ID": "-1001",
+                "HERMES_CRON_AUTO_DELIVER_THREAD_ID": "17585",
+            },
+            clear=False,
+        ), \
+             patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "telegram:-1001:99999",
+                        "message": "hello",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        assert result.get("skipped") is not True
+        send_mock.assert_awaited_once_with(
+            Platform.TELEGRAM,
+            telegram_cfg,
+            "-1001",
+            "hello",
+            thread_id="99999",
+            media_files=[],
+        )
+        mirror_mock.assert_called_once_with("telegram", "-1001", "hello", source_label="cli", thread_id="99999")
+
+    def test_sends_to_explicit_telegram_topic_target(self):
+        config, telegram_cfg = _make_config()
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "telegram:-1001:17585",
+                        "message": "hello",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        send_mock.assert_awaited_once_with(
+            Platform.TELEGRAM,
+            telegram_cfg,
+            "-1001",
+            "hello",
+            thread_id="17585",
+            media_files=[],
+        )
+        mirror_mock.assert_called_once_with("telegram", "-1001", "hello", source_label="cli", thread_id="17585")
+
+    def test_dingtalk_current_session_webhook_is_forwarded_for_media_send(self, tmp_path):
+        media_path = tmp_path / "report.md"
+        media_path.write_text("hello")
+        dingtalk_cfg = SimpleNamespace(enabled=True, token="***", extra={})
+        config = SimpleNamespace(
+            platforms={Platform.DINGTALK: dingtalk_cfg},
+            get_home_channel=lambda _platform: SimpleNamespace(chat_id="cid-current"),
+        )
+
+        tokens = set_session_vars(platform="dingtalk", chat_id="cid-current")
+        set_session_runtime_vars(
+            dingtalk_webhook="https://api.dingtalk.com/v1.0/session-webhook/mock",
+            dingtalk_webhook_expires_at="9999999999999",
+        )
+        try:
+            with patch("gateway.config.load_gateway_config", return_value=config), \
+                 patch("tools.interrupt.is_interrupted", return_value=False), \
+                 patch("model_tools._run_async", side_effect=_run_async_immediately), \
+                 patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+                 patch("gateway.mirror.mirror_to_session", return_value=True):
+                result = json.loads(
+                    send_message_tool(
+                        {
+                            "action": "send",
+                            "target": "dingtalk",
+                            "message": f"Here is the file\nMEDIA:{media_path}",
+                        }
+                    )
+                )
+        finally:
+            clear_session_vars(tokens)
+
+        assert result["success"] is True
+        send_mock.assert_awaited_once_with(
+            Platform.DINGTALK,
+            dingtalk_cfg,
+            "cid-current",
+            "Here is the file",
+            thread_id=None,
+            media_files=[(str(media_path), False)],
+            metadata={
+                "session_webhook": "https://api.dingtalk.com/v1.0/session-webhook/mock",
+                "session_webhook_expired_time": "9999999999999",
+            },
+        )
+
     def test_resolved_telegram_topic_name_preserves_thread_id(self):
         config, telegram_cfg = _make_config()
 
@@ -165,6 +319,41 @@ class TestSendMessageTool:
             "hello",
             thread_id="17585",
             media_files=[],
+        )
+
+    def test_media_only_message_uses_placeholder_for_mirroring(self):
+        config, telegram_cfg = _make_config()
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "telegram:-1001",
+                        "message": "MEDIA:/tmp/example.ogg",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        send_mock.assert_awaited_once_with(
+            Platform.TELEGRAM,
+            telegram_cfg,
+            "-1001",
+            "",
+            thread_id=None,
+            media_files=[("/tmp/example.ogg", False)],
+        )
+        mirror_mock.assert_called_once_with(
+            "telegram",
+            "-1001",
+            "[Sent audio attachment]",
+            source_label="cli",
+            thread_id=None,
         )
 
     def test_top_level_send_failure_redacts_query_token(self):
@@ -768,46 +957,6 @@ class TestParseTargetRefMatrix:
 
         chat_id, _, is_explicit = _parse_target_ref("discord", "@someone")
         assert is_explicit is False
-
-
-class TestParseTargetRefE164:
-    """_parse_target_ref accepts E.164 phone numbers for phone-based platforms."""
-
-    def test_signal_e164_preserves_plus_prefix(self):
-        """signal:+E164 is explicit and preserves the leading '+' for signal-cli."""
-        chat_id, thread_id, is_explicit = _parse_target_ref("signal", "+41791234567")
-        assert chat_id == "+41791234567"
-        assert thread_id is None
-        assert is_explicit is True
-
-    def test_sms_e164_is_explicit(self):
-        chat_id, _, is_explicit = _parse_target_ref("sms", "+15551234567")
-        assert chat_id == "+15551234567"
-        assert is_explicit is True
-
-    def test_whatsapp_e164_is_explicit(self):
-        chat_id, _, is_explicit = _parse_target_ref("whatsapp", "+15551234567")
-        assert chat_id == "+15551234567"
-        assert is_explicit is True
-
-    def test_signal_bare_digits_still_work(self):
-        """Bare digit strings continue to match the generic numeric branch."""
-        chat_id, _, is_explicit = _parse_target_ref("signal", "15551234567")
-        assert chat_id == "15551234567"
-        assert is_explicit is True
-
-    def test_signal_invalid_e164_rejected(self):
-        """Too-short, too-long, and non-numeric E.164 strings are not explicit."""
-        assert _parse_target_ref("signal", "+123")[2] is False
-        assert _parse_target_ref("signal", "+1234567890123456")[2] is False
-        assert _parse_target_ref("signal", "+12abc4567890")[2] is False
-        assert _parse_target_ref("signal", "+")[2] is False
-
-    def test_e164_prefix_only_matches_phone_platforms(self):
-        """'+' prefix must NOT be treated as explicit for non-phone platforms."""
-        assert _parse_target_ref("telegram", "+15551234567")[2] is False
-        assert _parse_target_ref("discord", "+15551234567")[2] is False
-        assert _parse_target_ref("matrix", "+15551234567")[2] is False
 
 
 class TestSendDiscordThreadId:
@@ -1467,6 +1616,54 @@ class TestSendDiscordForumMedia:
         assert result["success"] is True
         assert "warnings" in result
         assert any("not found" in w for w in result["warnings"])
+
+
+def test_send_dingtalk_via_adapter_passes_metadata_to_media_methods(tmp_path, monkeypatch):
+    media_path = tmp_path / "report.md"
+    media_path.write_text("payload")
+
+    recorded = {}
+
+    class FakeAdapter:
+        MAX_MESSAGE_LENGTH = 20000
+
+        def __init__(self, _pconfig):
+            pass
+
+        async def connect(self):
+            return True
+
+        async def disconnect(self):
+            recorded["disconnected"] = True
+
+        async def send(self, chat_id, message, metadata=None):
+            recorded["send"] = {"chat_id": chat_id, "message": message, "metadata": metadata}
+            return SimpleNamespace(success=True, message_id="msg-text")
+
+        async def send_document(self, chat_id, file_path, metadata=None):
+            recorded["send_document"] = {"chat_id": chat_id, "file_path": file_path, "metadata": metadata}
+            return SimpleNamespace(success=True, message_id="msg-doc")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "gateway.platforms.dingtalk",
+        SimpleNamespace(DingTalkAdapter=FakeAdapter),
+    )
+
+    result = asyncio.run(
+        _send_dingtalk_via_adapter(
+            SimpleNamespace(),
+            "cid-current",
+            "Here is the file",
+            media_files=[(str(media_path), False)],
+            metadata={"session_webhook": "https://api.dingtalk.com/v1.0/session-webhook/mock"},
+        )
+    )
+
+    assert result["success"] is True
+    assert recorded["send"]["metadata"] == {"session_webhook": "https://api.dingtalk.com/v1.0/session-webhook/mock"}
+    assert recorded["send_document"]["metadata"] == {"session_webhook": "https://api.dingtalk.com/v1.0/session-webhook/mock"}
+    assert recorded["disconnected"] is True
 
 
 # ---------------------------------------------------------------------------

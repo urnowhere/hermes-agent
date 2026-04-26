@@ -29,11 +29,15 @@ Configuration in config.yaml:
 import asyncio
 import json
 import logging
+import mimetypes
 import os
 import re
+import struct
+import tempfile
 import traceback
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 try:
@@ -586,6 +590,20 @@ class DingTalkAdapter(BasePlatformAdapter):
                 session_webhook_expired_time,
             )
 
+        # Make the current session webhook available to tool calls running in
+        # this message's async context. Child tasks created from here inherit
+        # these contextvars, which lets send_message() reply with media back to
+        # the active DingTalk chat without requiring a global adapter cache.
+        try:
+            from gateway.session_context import set_session_runtime_vars
+
+            set_session_runtime_vars(
+                dingtalk_webhook=session_webhook,
+                dingtalk_webhook_expires_at=str(session_webhook_expired_time or ""),
+            )
+        except Exception:
+            logger.debug("[%s] Failed to set DingTalk runtime session vars", self.name, exc_info=True)
+
         # Resolve media download codes to URLs so vision tools can use them
         await self._resolve_media_codes(message)
 
@@ -594,6 +612,15 @@ class DingTalkAdapter(BasePlatformAdapter):
 
         # Determine message type and build media list
         msg_type, media_urls, media_types = self._extract_media(message)
+
+        logger.info(
+            "[%s] Parsed inbound: sdk_msgtype=%s text_len=%d media_count=%d media_types=%s",
+            self.name,
+            getattr(message, "message_type", "") or "",
+            len(text or ""),
+            len(media_urls),
+            media_types,
+        )
 
         if not text and not media_urls:
             logger.debug("[%s] Empty message, skipping", self.name)
@@ -734,6 +761,28 @@ class DingTalkAdapter(BasePlatformAdapter):
                                 if msg_type == MessageType.TEXT:
                                     msg_type = MessageType.DOCUMENT
 
+        # File / audio / video / voice message types from stream SDK (download codes)
+        for attr_name, mtype, type_str in [
+            ("file_content", MessageType.DOCUMENT, "file"),
+            ("audio_content", MessageType.AUDIO, "audio"),
+            ("video_content", MessageType.VIDEO, "video"),
+            ("voice_content", MessageType.AUDIO, "voice"),
+        ]:
+            content_obj = getattr(message, attr_name, None)
+            if content_obj:
+                local_path = getattr(content_obj, "local_path", None) or (
+                    content_obj.get("local_path") if isinstance(content_obj, dict) else None
+                )
+                dl_code = getattr(content_obj, "download_code", None) or (
+                    content_obj.get("downloadCode") if isinstance(content_obj, dict) else None
+                )
+                media_ref = local_path or dl_code
+                if media_ref:
+                    media_urls.append(media_ref)
+                    media_types.append(self._infer_media_type(content_obj, default_kind=type_str))
+                    if msg_type == MessageType.TEXT:
+                        msg_type = mtype
+
         msg_type_str = getattr(message, "message_type", "") or ""
         if msg_type_str == "picture" and not media_urls:
             msg_type = MessageType.PHOTO
@@ -859,6 +908,368 @@ class DingTalkAdapter(BasePlatformAdapter):
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         """DingTalk does not support typing indicators."""
         pass
+
+    @staticmethod
+    def _get_video_duration_ms(video_path: str) -> Optional[int]:
+        """Parse video duration from MP4 moov/mvhd atom.
+
+        Returns duration in milliseconds, or None if it cannot be determined.
+        Does not require external libraries — reads the MP4 container directly.
+        """
+        try:
+            with open(video_path, "rb") as f:
+                data = f.read()
+            # Find moov atom
+            moov_pos = data.find(b"moov")
+            if moov_pos == -1:
+                return None
+            moov_data = data[moov_pos:]
+            # Find mvhd inside moov
+            mvhd_pos = moov_data.find(b"mvhd")
+            if mvhd_pos == -1:
+                return None
+            mvhd_payload = moov_data[mvhd_pos + 4:]  # skip size(4) + 'mvhd'(4)
+            version = mvhd_payload[0]
+            if version == 0:
+                # 32-bit: timescale at offset 12, duration at offset 16
+                timescale = struct.unpack(">I", mvhd_payload[12:16])[0]
+                duration = struct.unpack(">I", mvhd_payload[16:20])[0]
+            else:
+                # 64-bit: timescale at offset 20, duration at offset 24
+                # (creation_time and modification_time are 8 bytes each in v1)
+                timescale = struct.unpack(">I", mvhd_payload[20:24])[0]
+                duration = struct.unpack(">Q", mvhd_payload[24:32])[0]
+            if timescale == 0:
+                return None
+            return int(duration / timescale * 1000)
+        except Exception:
+            return None
+
+    async def _upload_media(
+        self, file_path: str, file_type: str = "file"
+    ) -> Optional[str]:
+        """Upload a file to DingTalk and return the media_id.
+
+        Uses the stream client's built-in upload_to_dingtalk method,
+        which handles access token acquisition automatically.
+        """
+        if not self._stream_client:
+            return None
+        try:
+            with open(file_path, "rb") as f:
+                file_bytes = f.read()
+            ext = os.path.splitext(file_path)[1].lower()
+            mime_map = {
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".png": "image/png",
+                ".gif": "image/gif",
+                ".mp4": "video/mp4",
+                ".mov": "video/quicktime",
+                ".avi": "video/x-msvideo",
+                ".mp3": "audio/mpeg",
+                ".m4a": "audio/mp4",
+                ".wav": "audio/wav",
+                ".pdf": "application/pdf",
+                ".doc": "application/msword",
+                ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ".xls": "application/vnd.ms-excel",
+                ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                ".zip": "application/zip",
+            }
+            mime_type = mime_map.get(ext, "application/octet-stream")
+            media_id = await asyncio.to_thread(
+                self._stream_client.upload_to_dingtalk,
+                file_bytes,
+                filetype=file_type,
+                filename=os.path.basename(file_path),
+                mimetype=mime_type,
+            )
+            return media_id
+        except Exception as e:
+            logger.error("[%s] Media upload failed: %s", self.name, e)
+            return None
+
+    async def _send_file_message(
+        self,
+        session_webhook: str,
+        media_id: str,
+        file_name: str,
+        msg_type: str = "file",
+        video_duration_ms: Optional[int] = None,
+    ) -> SendResult:
+        """Send a file/media message via session webhook.
+
+        Args:
+            video_duration_ms: Required for video messages. Duration in milliseconds.
+        """
+        payload = {
+            "msgtype": msg_type,
+            msg_type: {"media_id": media_id},
+        }
+        if msg_type == "file":
+            payload["file"] = {"media_id": media_id, "file_name": file_name}
+        elif msg_type == "video":
+            video_data: Dict[str, Any] = {"media_id": media_id}
+            if video_duration_ms is not None:
+                video_data["duration"] = video_duration_ms // 1000  # DingTalk expects seconds
+            payload["video"] = video_data
+
+        try:
+            resp = await self._http_client.post(
+                session_webhook, json=payload, timeout=30.0
+            )
+            if resp.status_code < 300:
+                return SendResult(success=True, message_id=uuid.uuid4().hex[:12])
+            body = resp.text
+            logger.warning(
+                "[%s] File send failed HTTP %d: %s",
+                self.name, resp.status_code, body[:200],
+            )
+            return SendResult(success=False, error=f"HTTP {resp.status_code}: {body[:200]}")
+        except httpx.TimeoutException:
+            return SendResult(success=False, error="Timeout sending file to DingTalk")
+        except Exception as e:
+            logger.error("[%s] File send error: %s", self.name, e)
+            return SendResult(success=False, error=str(e))
+
+    async def send_document(
+        self,
+        chat_id: str,
+        file_path: str,
+        caption: Optional[str] = None,
+        file_name: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Send a document/file attachment via DingTalk session webhook."""
+        metadata = metadata or {}
+        session_webhook = metadata.get("session_webhook")
+        if not session_webhook:
+            webhook_info = self._get_valid_webhook(chat_id)
+            if not webhook_info:
+                return SendResult(
+                    success=False,
+                    error="No valid session_webhook available. File send must follow an incoming message.",
+                )
+            session_webhook, _ = webhook_info
+
+        display_name = file_name or os.path.basename(file_path)
+        media_id = await self._upload_media(file_path, file_type="file")
+        if not media_id:
+            return SendResult(success=False, error="File upload to DingTalk failed")
+
+        result = await self._send_file_message(
+            session_webhook, media_id, display_name, msg_type="file"
+        )
+
+        # If caption is provided, send it as a follow-up text message
+        caption_failed = None
+        if caption and result.success:
+            text_payload = {
+                "msgtype": "text",
+                "text": {"content": caption},
+            }
+            try:
+                await self._http_client.post(
+                    session_webhook, json=text_payload, timeout=15.0
+                )
+            except Exception as e:
+                caption_failed = str(e)
+                logger.warning("[%s] Caption send failed: %s", self.name, e)
+        if caption_failed and result.success:
+            result.error = f"[caption_failed] {caption_failed}"
+        return result
+
+    async def send_image_file(
+        self,
+        chat_id: str,
+        image_path: str,
+        caption: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Send an image file via DingTalk session webhook."""
+        metadata = metadata or {}
+        session_webhook = metadata.get("session_webhook")
+        if not session_webhook:
+            webhook_info = self._get_valid_webhook(chat_id)
+            if not webhook_info:
+                return SendResult(
+                    success=False,
+                    error="No valid session_webhook available. Image send must follow an incoming message.",
+                )
+            session_webhook, _ = webhook_info
+
+        media_id = await self._upload_media(image_path, file_type="image")
+        if not media_id:
+            return SendResult(success=False, error="Image upload to DingTalk failed")
+
+        payload = {
+            "msgtype": "image",
+            "image": {"media_id": media_id},
+        }
+        result: SendResult
+        try:
+            resp = await self._http_client.post(
+                session_webhook, json=payload, timeout=30.0
+            )
+            if resp.status_code < 300:
+                result = SendResult(success=True, message_id=uuid.uuid4().hex[:12])
+            else:
+                body = resp.text
+                logger.warning(
+                    "[%s] Image send failed HTTP %d: %s",
+                    self.name, resp.status_code, body[:200],
+                )
+                return SendResult(success=False, error=f"HTTP {resp.status_code}: {body[:200]}")
+        except httpx.TimeoutException:
+            return SendResult(success=False, error="Timeout sending image to DingTalk")
+        except Exception as e:
+            logger.error("[%s] Image send error: %s", self.name, e)
+            return SendResult(success=False, error=str(e))
+
+        # If caption is provided, send it as a follow-up text message
+        caption_failed = None
+        if caption and result.success:
+            text_payload = {
+                "msgtype": "text",
+                "text": {"content": caption},
+            }
+            try:
+                await self._http_client.post(
+                    session_webhook, json=text_payload, timeout=15.0
+                )
+            except Exception as e:
+                caption_failed = str(e)
+                logger.warning("[%s] Caption send failed: %s", self.name, e)
+        if caption_failed and result.success:
+            result.error = f"[caption_failed] {caption_failed}"
+        return result
+
+    async def send_video(
+        self,
+        chat_id: str,
+        video_path: str,
+        caption: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Send a video file via DingTalk session webhook."""
+        metadata = metadata or {}
+        session_webhook = metadata.get("session_webhook")
+        if not session_webhook:
+            webhook_info = self._get_valid_webhook(chat_id)
+            if not webhook_info:
+                return SendResult(
+                    success=False,
+                    error="No valid session_webhook available. Video send must follow an incoming message.",
+                )
+            session_webhook, _ = webhook_info
+
+        media_id = await self._upload_media(video_path, file_type="video")
+        if not media_id:
+            return SendResult(success=False, error="Video upload to DingTalk failed")
+
+        # Get video duration (before upload so we can fail fast if missing)
+        duration_ms = self._get_video_duration_ms(video_path)
+        if duration_ms is None:
+            logger.warning("[%s] Could not determine video duration for %s", self.name, video_path)
+
+        result = await self._send_file_message(
+            session_webhook,
+            media_id,
+            os.path.basename(video_path),
+            msg_type="video",
+            video_duration_ms=duration_ms,
+        )
+
+        # If caption is provided, send it as a follow-up text message
+        caption_failed = None
+        if caption and result.success:
+            text_payload = {
+                "msgtype": "text",
+                "text": {"content": caption},
+            }
+            try:
+                await self._http_client.post(
+                    session_webhook, json=text_payload, timeout=15.0
+                )
+            except Exception as e:
+                caption_failed = str(e)
+                logger.warning("[%s] Caption send failed: %s", self.name, e)
+        if caption_failed and result.success:
+            result.error = f"[caption_failed] {caption_failed}"
+        return result
+
+    async def send_voice(
+        self,
+        chat_id: str,
+        audio_path: str,
+        caption: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Send a voice/audio file via DingTalk session webhook.
+
+        Note: DingTalk voice messages use the same upload mechanism as files.
+        The file is sent as an 'audio' type message.
+        """
+        metadata = metadata or {}
+        session_webhook = metadata.get("session_webhook")
+        if not session_webhook:
+            webhook_info = self._get_valid_webhook(chat_id)
+            if not webhook_info:
+                return SendResult(
+                    success=False,
+                    error="No valid session_webhook available. Voice send must follow an incoming message.",
+                )
+            session_webhook, _ = webhook_info
+
+        media_id = await self._upload_media(audio_path, file_type="voice")
+        if not media_id:
+            return SendResult(success=False, error="Audio upload to DingTalk failed")
+
+        payload = {
+            "msgtype": "voice",
+            "voice": {"media_id": media_id},
+        }
+        try:
+            resp = await self._http_client.post(
+                session_webhook, json=payload, timeout=30.0
+            )
+            if resp.status_code < 300:
+                result = SendResult(success=True, message_id=uuid.uuid4().hex[:12])
+            else:
+                body = resp.text
+                logger.warning(
+                    "[%s] Voice send failed HTTP %d: %s",
+                    self.name, resp.status_code, body[:200],
+                )
+                return SendResult(success=False, error=f"HTTP {resp.status_code}: {body[:200]}")
+        except httpx.TimeoutException:
+            return SendResult(success=False, error="Timeout sending voice to DingTalk")
+        except Exception as e:
+            logger.error("[%s] Voice send error: %s", self.name, e)
+            return SendResult(success=False, error=str(e))
+
+        # If caption is provided, send it as a follow-up text message
+        caption_failed = None
+        if caption and result.success:
+            text_payload = {
+                "msgtype": "text",
+                "text": {"content": caption},
+            }
+            try:
+                await self._http_client.post(
+                    session_webhook, json=text_payload, timeout=15.0
+                )
+            except Exception as e:
+                caption_failed = str(e)
+                logger.warning("[%s] Caption send failed: %s", self.name, e)
+        if caption_failed and result.success:
+            result.error = f"[caption_failed] {caption_failed}"
+        return result
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         """Return basic info about a DingTalk conversation."""
@@ -1058,6 +1469,9 @@ class DingTalkAdapter(BasePlatformAdapter):
         finalize: bool = False,
     ) -> None:
         """Stream content to an existing AI Card."""
+        if not self._card_sdk:
+            logger.warning("[%s] Card SDK not initialized, skipping stream update", self.name)
+            return
         stream_request = dingtalk_card_models.StreamingUpdateRequest(
             out_track_id=out_track_id,
             guid=str(uuid.uuid4()),
@@ -1185,6 +1599,16 @@ class DingTalkAdapter(BasePlatformAdapter):
                         if item.get(key):
                             codes_to_resolve.append((item, key))
 
+        # 3. File / audio / video / voice content
+        for attr_name in ("file_content", "audio_content", "video_content", "voice_content"):
+            content_obj = getattr(message, attr_name, None)
+            if content_obj:
+                for key in ("downloadCode", "download_code"):
+                    code = getattr(content_obj, key, None) if hasattr(content_obj, key) else content_obj.get(key) if isinstance(content_obj, dict) else None
+                    if code:
+                        codes_to_resolve.append((content_obj, key))
+                        break
+
         if not codes_to_resolve:
             return
 
@@ -1199,44 +1623,200 @@ class DingTalkAdapter(BasePlatformAdapter):
 
         await asyncio.gather(*tasks, return_exceptions=True)
 
+        # Convert file-like download URLs into local cached files so downstream
+        # document handling receives a real filesystem path instead of a remote URL.
+        for attr_name, media_kind in (
+            ("file_content", "file"),
+            ("audio_content", "audio"),
+            ("video_content", "video"),
+            ("voice_content", "voice"),
+        ):
+            content_obj = getattr(message, attr_name, None)
+            if not content_obj:
+                continue
+            current_value = getattr(content_obj, "download_code", None) or (
+                content_obj.get("downloadCode") if isinstance(content_obj, dict) else None
+            )
+            if not current_value or not str(current_value).startswith("http"):
+                continue
+
+            original_name = (
+                getattr(content_obj, "filename", None)
+                or getattr(content_obj, "file_name", None)
+                or (content_obj.get("filename") if isinstance(content_obj, dict) else None)
+                or (content_obj.get("fileName") if isinstance(content_obj, dict) else None)
+            )
+            local_path = await self._download_media_file(
+                current_value,
+                token,
+                file_name=original_name or "",
+                media_kind=media_kind,
+            )
+            if local_path:
+                if hasattr(content_obj, "download_code"):
+                    content_obj.download_code = local_path
+                elif isinstance(content_obj, dict):
+                    content_obj["downloadCode"] = local_path
+
     async def _fetch_download_url(
         self, code: str, robot_code: str, token: str, obj, key: str
-    ) -> None:
-        """Fetch download URL for a single code using the robot SDK."""
-        if not self._robot_sdk:
-            logger.warning(
-                "[%s] Robot SDK not initialized, cannot resolve media code",
-                self.name,
-            )
-            return
+    ) -> Optional[str]:
+        """Fetch download URL for a single code via direct DingTalk Open API.
+
+        Uses the DingTalk robot message file download endpoint directly with
+        httpx, avoiding the alibabacloud_dingtalk SDK dependency.
+
+        Returns the download URL on success, None on failure.
+        """
+        if not HTTPX_AVAILABLE or not self._http_client:
+            logger.warning("[%s] httpx not available, cannot resolve media code", self.name)
+            return None
         try:
-            request = dingtalk_robot_models.RobotMessageFileDownloadRequest(
-                download_code=code,
-                robot_code=robot_code,
+            # DingTalk Open API: get file download URL
+            # Endpoint: https://api.dingtalk.com/v1.0/robot/messageFiles/download
+            # Note: the "getFileDownloadUrl" path is wrong (404); the correct one is "messageFiles/download"
+            endpoint = "https://api.dingtalk.com/v1.0/robot/messageFiles/download"
+            headers = {
+                "Content-Type": "application/json",
+                "x-acs-dingtalk-access-token": token,
+            }
+            payload = {
+                "downloadCode": code,
+                "robotCode": robot_code,
+            }
+            response = await self._http_client.post(endpoint, json=payload, headers=headers, timeout=15.0)
+            response.raise_for_status()
+            result = response.json()
+            url = result.get("data", {}).get("downloadUrl") or result.get("downloadUrl")
+            if url:
+                # Store URL back into the object so callers can read it
+                if hasattr(obj, key):
+                    setattr(obj, key, url)
+                elif isinstance(obj, dict):
+                    obj[key] = url
+                return url
+            logger.warning(
+                "[%s] Failed to get download URL: empty response for code %s, body=%s",
+                self.name, code, str(result)[:200],
             )
-            headers = dingtalk_robot_models.RobotMessageFileDownloadHeaders(
-                x_acs_dingtalk_access_token=token,
-            )
-            runtime = tea_util_models.RuntimeOptions()
-            response = await self._robot_sdk.robot_message_file_download_with_options_async(
-                request, headers, runtime
-            )
-            body = response.body if response else None
-            if body:
-                url = getattr(body, "download_url", None)
-                if url:
-                    if hasattr(obj, key):
-                        setattr(obj, key, url)
-                    elif isinstance(obj, dict):
-                        obj[key] = url
-            else:
-                logger.warning(
-                    "[%s] Failed to download media: empty response for code %s",
-                    self.name,
-                    code,
-                )
         except Exception as e:
             logger.error("[%s] Error resolving media code %s: %s", self.name, code, e)
+        return None
+
+    async def _download_media_file(
+        self,
+        download_url: str,
+        token: str,
+        file_extension: str = "",
+        file_name: str = "",
+        media_kind: str = "file",
+    ) -> Optional[str]:
+        """Download a DingTalk media file to a local cached path.
+
+        Args:
+            download_url: The CDN URL returned by the DingTalk file download API.
+            token: The current DingTalk access token (used as Bearer auth).
+            file_extension: Optional file extension hint (e.g. '.pdf', '.mp4').
+            file_name: Original human-readable filename when available.
+            media_kind: file/audio/video/voice.
+
+        Returns:
+            Local file path on success, None on failure.
+        """
+        if not HTTPX_AVAILABLE or not self._http_client:
+            logger.warning("[%s] httpx not available, cannot download media file", self.name)
+            return None
+
+        try:
+            headers = {
+                "Authorization": f"Bearer {token}",
+            }
+            response = await self._http_client.get(download_url, headers=headers, timeout=30.0)
+            response.raise_for_status()
+            raw_bytes = await response.aread()
+
+            ext = (
+                file_extension
+                or self._guess_extension_from_filename(file_name)
+                or self._guess_extension_from_url(download_url)
+            )
+            safe_name = Path(file_name).name if file_name else ""
+            if not safe_name:
+                default_base = "audio" if media_kind in ("audio", "voice") else "download"
+                safe_name = f"{default_base}{ext or '.bin'}"
+            elif not Path(safe_name).suffix and ext:
+                safe_name = f"{safe_name}{ext}"
+
+            suffix = f"_{safe_name}" if safe_name else (Path(safe_name).suffix or ext or ".bin")
+            with tempfile.NamedTemporaryFile(
+                prefix="dingtalk_",
+                suffix=suffix,
+                delete=False,
+            ) as tmp:
+                tmp.write(raw_bytes)
+                local_path = tmp.name
+
+            logger.info("[%s] Downloaded media to: %s", self.name, local_path)
+            return local_path
+        except Exception as e:
+            logger.error("[%s] Failed to download media from %s: %s", self.name, download_url, e)
+            return None
+
+    @staticmethod
+    def _guess_extension_from_filename(filename: str) -> str:
+        """Guess file extension from original filename."""
+        if not filename:
+            return ""
+        return Path(filename).suffix.lower()
+
+    @staticmethod
+    def _guess_extension_from_url(url: str) -> str:
+        """Guess file extension from URL path."""
+        path = url.split("?")[0]
+        _, ext = os.path.splitext(path)
+        # Normalize common extensions
+        ext_map = {
+            ".jpg": ".jpg",
+            ".jpeg": ".jpg",
+            ".png": ".png",
+            ".gif": ".gif",
+            ".mp4": ".mp4",
+            ".mp3": ".mp3",
+            ".wav": ".wav",
+            ".pdf": ".pdf",
+            ".doc": ".doc",
+            ".docx": ".docx",
+            ".xls": ".xls",
+            ".xlsx": ".xlsx",
+            ".ppt": ".ppt",
+            ".pptx": ".pptx",
+            ".txt": ".txt",
+        }
+        return ext_map.get(ext.lower(), ".bin")
+
+    @staticmethod
+    def _infer_media_type(content_obj, default_kind: str = "file") -> str:
+        """Infer a concrete media type from filename/path instead of generic labels."""
+        name = (
+            getattr(content_obj, "filename", None)
+            or getattr(content_obj, "file_name", None)
+            or getattr(content_obj, "download_code", None)
+        )
+        if isinstance(content_obj, dict):
+            name = (
+                name
+                or content_obj.get("filename")
+                or content_obj.get("fileName")
+                or content_obj.get("downloadCode")
+            )
+        guessed, _ = mimetypes.guess_type(str(name or ""))
+        if guessed:
+            return guessed
+        if default_kind in ("audio", "voice"):
+            return "audio/ogg"
+        if default_kind == "video":
+            return "video/mp4"
+        return "application/octet-stream"
 
     @staticmethod
     def _normalize_markdown(text: str) -> str:
@@ -1301,8 +1881,41 @@ class _IncomingHandler(
             if isinstance(data, str):
                 data = json.loads(data)
 
+            if isinstance(data, dict):
+                raw_msgtype = data.get("msgtype") or data.get("msgType") or ""
+                raw_content = data.get("content")
+                logger.info(
+                    "[%s] Raw callback: msgtype=%s msgId=%s conv=%s top_keys=%s content_keys=%s",
+                    self._adapter.name,
+                    raw_msgtype,
+                    data.get("msgId") or data.get("messageId") or "",
+                    data.get("conversationId") or "",
+                    sorted(list(data.keys()))[:20],
+                    sorted(list(raw_content.keys()))[:20] if isinstance(raw_content, dict) else type(raw_content).__name__,
+                )
+
             # Parse dict into ChatbotMessage using SDK's from_dict
             chatbot_msg = ChatbotMessage.from_dict(data)
+
+            # Preserve original filenames from raw content for file-like messages.
+            # The SDK maps `filename` but DingTalk callbacks often send `fileName`.
+            if isinstance(data, dict):
+                raw_content = data.get("content") if isinstance(data.get("content"), dict) else {}
+                raw_filename = raw_content.get("fileName") or raw_content.get("filename")
+                raw_msgtype = data.get("msgtype") or data.get("msgType") or ""
+                content_attr = {
+                    "file": "file_content",
+                    "audio": "audio_content",
+                    "video": "video_content",
+                    "voice": "voice_content",
+                }.get(str(raw_msgtype))
+                if content_attr and raw_filename:
+                    content_obj = getattr(chatbot_msg, content_attr, None)
+                    if content_obj is not None and not getattr(content_obj, "filename", None):
+                        try:
+                            content_obj.filename = raw_filename
+                        except Exception:
+                            pass
 
             # Ensure session_webhook is populated even if the SDK's
             # from_dict() did not map it (field name mismatch across
