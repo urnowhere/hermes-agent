@@ -984,13 +984,54 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
 
     # Use ContextVars for per-job session/delivery state so parallel jobs
     # don't clobber each other's targets (os.environ is process-global).
-    from gateway.session_context import set_session_vars, clear_session_vars, _VAR_MAP
+    from gateway.session_context import set_session_vars, clear_session_vars
 
     _ctx_tokens = set_session_vars(
         platform=origin["platform"] if origin else "",
         chat_id=str(origin["chat_id"]) if origin else "",
         chat_name=origin.get("chat_name", "") if origin else "",
     )
+    _fallback_cron_env: dict[str, Optional[str]] = {}
+
+    def _set_job_context_env(name: str, value: str) -> None:
+        """Set a per-job context var, falling back to env for hot-upgrade safety.
+
+        The parallel scheduler originally reached into session_context._VAR_MAP
+        directly.  A long-lived gateway can already have imported an older
+        gateway.session_context module whose _VAR_MAP lacks the newer cron
+        auto-delivery keys, while cron.scheduler has been updated on disk.  In
+        that mixed state direct indexing raises KeyError and every affected job
+        fails before the agent starts.  Prefer ContextVars when present; if the
+        running module is older, temporarily use os.environ and restore it in
+        finally so the job works instead of crashing.
+        """
+        from gateway import session_context as _session_context
+
+        var = getattr(_session_context, "_VAR_MAP", {}).get(name)
+        if var is not None:
+            var.set(value)
+            return
+
+        if name not in _fallback_cron_env:
+            _fallback_cron_env[name] = os.environ.get(name)
+        os.environ[name] = value
+
+    def _clear_job_context_envs(*names: str) -> None:
+        from gateway import session_context as _session_context
+
+        for name in names:
+            var = getattr(_session_context, "_VAR_MAP", {}).get(name)
+            if var is not None:
+                var.set("")
+                continue
+            if name in _fallback_cron_env:
+                previous = _fallback_cron_env[name]
+                if previous is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = previous
+            else:
+                os.environ.pop(name, None)
 
     # Per-job working directory.  When set (and validated at create/update
     # time), we point TERMINAL_CWD at it so:
@@ -1025,12 +1066,21 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         except UnicodeDecodeError:
             load_dotenv(str(_hermes_home / ".env"), override=True, encoding="latin-1")
 
+        _cron_delivery_env_names = (
+            "HERMES_CRON_AUTO_DELIVER_PLATFORM",
+            "HERMES_CRON_AUTO_DELIVER_CHAT_ID",
+            "HERMES_CRON_AUTO_DELIVER_THREAD_ID",
+        )
+        _clear_job_context_envs(*_cron_delivery_env_names)
+
         delivery_target = _resolve_delivery_target(job)
         if delivery_target:
-            _VAR_MAP["HERMES_CRON_AUTO_DELIVER_PLATFORM"].set(delivery_target["platform"])
-            _VAR_MAP["HERMES_CRON_AUTO_DELIVER_CHAT_ID"].set(str(delivery_target["chat_id"]))
-            if delivery_target.get("thread_id") is not None:
-                _VAR_MAP["HERMES_CRON_AUTO_DELIVER_THREAD_ID"].set(str(delivery_target["thread_id"]))
+            _set_job_context_env("HERMES_CRON_AUTO_DELIVER_PLATFORM", delivery_target["platform"])
+            _set_job_context_env("HERMES_CRON_AUTO_DELIVER_CHAT_ID", str(delivery_target["chat_id"]))
+            _set_job_context_env(
+                "HERMES_CRON_AUTO_DELIVER_THREAD_ID",
+                str(delivery_target["thread_id"]) if delivery_target.get("thread_id") is not None else "",
+            )
 
         model = job.get("model") or os.getenv("HERMES_MODEL") or ""
 
@@ -1315,6 +1365,11 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             else:
                 os.environ["TERMINAL_CWD"] = _prior_terminal_cwd
         # Clean up ContextVar session/delivery state for this job.
+        _clear_job_context_envs(
+            "HERMES_CRON_AUTO_DELIVER_PLATFORM",
+            "HERMES_CRON_AUTO_DELIVER_CHAT_ID",
+            "HERMES_CRON_AUTO_DELIVER_THREAD_ID",
+        )
         clear_session_vars(_ctx_tokens)
         if _session_db:
             try:
