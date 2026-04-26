@@ -1056,7 +1056,13 @@ def remove_job(job_id: str) -> bool:
 
 
 def recover_stale_inflight(now: Optional[datetime] = None) -> int:
-    """Recover timed-out or clearly orphaned in-flight runs."""
+    """Recover timed-out or clearly orphaned in-flight runs.
+
+    Recovery is intentionally recorded as a failed run attempt: it clears the
+    in-flight claim, stores an error status, and increments repeat accounting.
+    This is conservative for operators because a claimed job may have performed
+    partial side effects before the owner wedged or disappeared.
+    """
     now_dt = now or _hermes_now()
     now_iso = now_dt.isoformat()
     with _jobs_file_lock:

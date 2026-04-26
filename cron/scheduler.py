@@ -111,8 +111,6 @@ _LEGACY_HOME_TARGET_ENV_VARS = {
 }
 
 from cron.jobs import (
-    _boot_fingerprint,
-    _process_start_fingerprint,
     claim_due_jobs,
     clear_inflight_if_owned,
     finalize_job_run,
@@ -147,8 +145,6 @@ def _current_owner_metadata() -> dict:
     return {
         "owner_instance_id": _INSTANCE_ID,
         "owner_pid": pid,
-        "owner_boot_id": _boot_fingerprint(),
-        "owner_process_start": _process_start_fingerprint(pid),
     }
 
 

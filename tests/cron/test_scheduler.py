@@ -48,16 +48,12 @@ def _noop_scheduler_lock(*, non_blocking: bool):
 
 
 class TestSchedulerOwnershipMetadata:
-    def test_current_owner_metadata_uses_generic_fingerprints(self, monkeypatch):
+    def test_current_owner_metadata_passes_only_stable_identity(self, monkeypatch):
         monkeypatch.setattr("cron.scheduler.os.getpid", lambda: 4242)
-        monkeypatch.setattr("cron.scheduler._boot_fingerprint", lambda: "boot-generic")
-        monkeypatch.setattr("cron.scheduler._process_start_fingerprint", lambda pid: f"start-{pid}")
 
         assert scheduler._current_owner_metadata() == {
             "owner_instance_id": scheduler._INSTANCE_ID,
             "owner_pid": 4242,
-            "owner_boot_id": "boot-generic",
-            "owner_process_start": "start-4242",
         }
 
     def test_get_executor_none_uses_default_pool_size(self, cron_runtime):
