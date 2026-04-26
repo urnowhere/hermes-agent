@@ -485,6 +485,37 @@ def test_run_codex_stream_fallback_parses_create_stream_events(monkeypatch):
     assert response.output[0].content[0].text == "streamed create ok"
 
 
+def test_run_conversation_codex_injects_current_time_into_user_message(monkeypatch):
+    """Current time must be injected into the user message for codex_responses
+    mode too, so the agent knows 'now'. The instructions (system prompt equivalent)
+    must NOT contain 'Current time:' — it belongs in the input (user messages)."""
+    agent = _build_agent(monkeypatch)
+    agent._cached_system_prompt = "You are Hermes."
+    captured = {}
+
+    def _capture_api_call(api_kwargs):
+        captured["api_kwargs"] = api_kwargs
+        return _codex_message_response("OK")
+
+    monkeypatch.setattr(agent, "_interruptible_api_call", _capture_api_call)
+
+    result = agent.run_conversation("Say OK")
+
+    assert result["completed"] is True
+    assert result["final_response"] == "OK"
+    # The instructions (system prompt) must NOT contain dynamic Current time
+    assert "Current time:" not in captured["api_kwargs"].get("instructions", "")
+    # But the input (messages) should contain Current time in a user message
+    # In codex_responses mode, user messages become input items with role="user"
+    input_items = captured["api_kwargs"].get("input", [])
+    user_contents = [
+        item.get("content", "") for item in input_items
+        if item.get("role") == "user"
+    ]
+    assert any("Current time:" in str(c) for c in user_contents), \
+        "Current time should be injected into a user message in codex_responses mode"
+    # The cached system prompt must remain untouched
+    assert "Current time:" not in (agent._cached_system_prompt or "")
 def test_run_conversation_codex_plain_text(monkeypatch):
     agent = _build_agent(monkeypatch)
     monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: _codex_message_response("OK"))
