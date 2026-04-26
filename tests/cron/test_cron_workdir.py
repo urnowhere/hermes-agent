@@ -207,41 +207,66 @@ class TestTickWorkdirPartition:
 
     def test_workdir_jobs_run_sequentially(self, tmp_path, monkeypatch):
         import cron.scheduler as sched
-
-        # Two "jobs" — one with workdir, one without.  get_due_jobs returns both.
-        workdir_job = {"id": "a", "name": "A", "workdir": str(tmp_path)}
-        parallel_job = {"id": "b", "name": "B", "workdir": None}
-
-        monkeypatch.setattr(sched, "get_due_jobs", lambda: [workdir_job, parallel_job])
-        monkeypatch.setattr(sched, "advance_next_run", lambda *_a, **_kw: None)
-
-        # Record call order / thread context.
+        import concurrent.futures
         import threading
-        calls: list[tuple[str, bool]] = []
+        from contextlib import contextmanager
+
+        @contextmanager
+        def noop_scheduler_lock(*, non_blocking: bool):
+            yield object()
+
+        workdir_job = {"id": "a", "name": "A", "workdir": str(tmp_path), "in_flight": {"run_id": "run-a"}}
+        parallel_job = {"id": "b", "name": "B", "workdir": None, "in_flight": {"run_id": "run-b"}}
+
+        monkeypatch.setattr(sched, "_scheduler_lock", noop_scheduler_lock)
+        monkeypatch.setattr(sched, "recover_stale_inflight", lambda now=None: 0)
+        monkeypatch.setattr(sched, "claim_due_jobs", lambda **_kw: [workdir_job, parallel_job])
+        monkeypatch.setattr(sched, "_active_worker_count", lambda: 0)
+        monkeypatch.setattr(sched, "_resolve_max_parallel_jobs", lambda: 2)
+        monkeypatch.setattr(sched, "_current_owner_metadata", lambda: {})
+        monkeypatch.setattr(sched, "mark_job_started", lambda *a, **kw: True)
+        monkeypatch.setattr(sched, "finalize_job_run", lambda *a, **kw: True)
+        monkeypatch.setattr(sched, "save_job_output", lambda _jid, _o: None)
+        monkeypatch.setattr(sched, "update_delivery_error_if_latest", lambda *a, **kw: True)
+        monkeypatch.setattr(sched, "_deliver_result", lambda *_a, **_kw: None)
+        monkeypatch.setattr(sched, "_try_acquire_job_lock", lambda _job_id: object())
+        monkeypatch.setattr(sched, "_release_lock_file", lambda _fd: None)
+        monkeypatch.setattr(sched, "_register_future", lambda _future: None)
+
+        calls: list[tuple[str, str]] = []
 
         def fake_run_job(job):
-            # Return a minimal tuple matching run_job's signature.
             calls.append((job["id"], threading.current_thread().name))
             return True, "output", "response", None
 
         monkeypatch.setattr(sched, "run_job", fake_run_job)
-        monkeypatch.setattr(sched, "save_job_output", lambda _jid, _o: None)
-        monkeypatch.setattr(sched, "mark_job_run", lambda *_a, **_kw: None)
-        monkeypatch.setattr(
-            sched, "_deliver_result", lambda *_a, **_kw: None
-        )
+
+        class ImmediateExecutor:
+            def submit(self, fn, *args, **kwargs):
+                fut = concurrent.futures.Future()
+                def runner():
+                    try:
+                        fut.set_result(fn(*args, **kwargs))
+                    except BaseException as exc:
+                        fut.set_exception(exc)
+                t = threading.Thread(target=runner, name="parallel-worker")
+                t.start()
+                t.join(timeout=1.0)
+                return fut
+
+        monkeypatch.setattr(sched, "_get_executor", lambda _max_workers: ImmediateExecutor())
 
         n = sched.tick(verbose=False)
         assert n == 2
 
         ids = [c[0] for c in calls]
-        # Workdir jobs always come before parallel jobs.
         assert ids.index("a") < ids.index("b")
 
-        # The workdir job must run on the main thread (sequential pass).
         main_thread_name = threading.current_thread().name
         workdir_thread_name = next(t for jid, t in calls if jid == "a")
+        parallel_thread_name = next(t for jid, t in calls if jid == "b")
         assert workdir_thread_name == main_thread_name
+        assert parallel_thread_name != main_thread_name
 
 
 # ---------------------------------------------------------------------------
