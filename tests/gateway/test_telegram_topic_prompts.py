@@ -98,3 +98,119 @@ class TestResolveTopicPrompt:
             ]
         }
         assert resolve_topic_prompt(extra, "-1003742888118", "5") == "Ops prompt"
+
+    def test_returns_none_when_no_thread_id(self):
+        # DM or non-forum group: no thread_id → no per-topic lookup applies.
+        extra = {
+            "group_topics": [
+                {
+                    "chat_id": "-1003742888118",
+                    "topics": [{"name": "ops", "thread_id": "5", "prompt": "Ops"}],
+                },
+            ]
+        }
+        assert resolve_topic_prompt(extra, "-1003742888118", None) is None
+
+    def test_returns_none_when_chat_id_misses(self):
+        extra = {
+            "group_topics": [
+                {
+                    "chat_id": "-1003742888118",
+                    "topics": [{"name": "ops", "thread_id": "5", "prompt": "Ops"}],
+                },
+            ]
+        }
+        assert resolve_topic_prompt(extra, "-9999999999999", "5") is None
+
+    def test_returns_none_when_thread_id_misses_in_matching_group(self):
+        extra = {
+            "group_topics": [
+                {
+                    "chat_id": "-1003742888118",
+                    "topics": [{"name": "ops", "thread_id": "5", "prompt": "Ops"}],
+                },
+            ]
+        }
+        assert resolve_topic_prompt(extra, "-1003742888118", "999") is None
+
+    def test_handles_int_typed_yaml_keys(self):
+        # YAML loader may produce int chat_id and int thread_id inside
+        # nested list-of-dicts (config.py:589-594 only normalises flat
+        # channel_prompts keys, not group_topics).
+        extra = {
+            "group_topics": [
+                {
+                    "chat_id": -1003742888118,
+                    "topics": [{"name": "ops", "thread_id": 5, "prompt": "Ops"}],
+                },
+            ]
+        }
+        assert resolve_topic_prompt(extra, "-1003742888118", "5") == "Ops"
+
+    def test_returns_none_for_missing_group_topics(self):
+        assert resolve_topic_prompt({}, "-1001", "5") is None
+        assert resolve_topic_prompt({"group_topics": None}, "-1001", "5") is None
+        assert resolve_topic_prompt({"group_topics": "not-a-list"}, "-1001", "5") is None
+
+    def test_returns_none_for_malformed_group_entry(self):
+        # Skip-and-continue: malformed entries do not crash the resolver.
+        extra = {
+            "group_topics": [
+                None,
+                "not-a-dict",
+                {"chat_id": "-1001"},  # missing topics
+                {"chat_id": "-1002", "topics": "not-a-list"},
+                {
+                    "chat_id": "-1003",
+                    "topics": [
+                        None,
+                        "not-a-dict",
+                        {"thread_id": "5", "prompt": "Match"},
+                    ],
+                },
+            ]
+        }
+        assert resolve_topic_prompt(extra, "-1003", "5") == "Match"
+
+    def test_returns_none_for_blank_prompt(self):
+        # Whitespace-only prompts fall through, matching resolve_channel_prompt's convention.
+        extra = {
+            "group_topics": [
+                {
+                    "chat_id": "-1001",
+                    "topics": [{"thread_id": "5", "prompt": "   "}],
+                },
+            ]
+        }
+        assert resolve_topic_prompt(extra, "-1001", "5") is None
+
+    def test_disambiguates_colliding_thread_ids(self):
+        # Proves #13256's collision shape cannot occur via this path:
+        # same thread_id in two different supergroups returns distinct prompts.
+        extra = {
+            "group_topics": [
+                {
+                    "chat_id": "-1003742888118",
+                    "topics": [{"thread_id": "5", "prompt": "Group A invoices"}],
+                },
+                {
+                    "chat_id": "-1003953149701",
+                    "topics": [{"thread_id": "5", "prompt": "Group B design"}],
+                },
+            ]
+        }
+        assert resolve_topic_prompt(extra, "-1003742888118", "5") == "Group A invoices"
+        assert resolve_topic_prompt(extra, "-1003953149701", "5") == "Group B design"
+
+    def test_multiline_prompt_preserved(self):
+        # YAML literal-block prompts arrive with embedded newlines.
+        multiline = "Line one.\nLine two.\nLine three."
+        extra = {
+            "group_topics": [
+                {
+                    "chat_id": "-1001",
+                    "topics": [{"thread_id": "5", "prompt": multiline}],
+                },
+            ]
+        }
+        assert resolve_topic_prompt(extra, "-1001", "5") == multiline
