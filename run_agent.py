@@ -10175,7 +10175,21 @@ class AIAgent:
             "Please provide a final response summarizing what you've found and accomplished so far, "
             "without calling any more tools."
         )
-        messages.append({"role": "user", "content": summary_request})
+        # Append current time to the summary request so the agent has an
+        # accurate sense of "now" even in this recovery path (mirrors the
+        # per-turn time injection in run_conversation's main loop).
+        _time_prefix = ""
+        try:
+            from hermes_time import now as _ht_now, get_timezone_name as _get_tz
+            _current = _ht_now()
+            _time_prefix = f"[Current time: {_current.strftime('%A, %B %d, %Y %I:%M %p')}"
+            _tz = _get_tz()
+            if _tz:
+                _time_prefix += f" ({_tz})"
+            _time_prefix += "]\n\n"
+        except Exception:
+            pass
+        messages.append({"role": "user", "content": _time_prefix + summary_request})
 
         try:
             # Build API messages, stripping internal-only fields

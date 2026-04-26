@@ -900,8 +900,14 @@ class TestBuildSystemPrompt:
 
     def test_includes_datetime(self, agent):
         prompt = agent._build_system_prompt()
-        # Should contain current date info like "Conversation started:"
-        assert "Conversation started:" in prompt
+        # Should contain session-start timestamp (renamed from "Conversation started")
+        assert "Session started:" in prompt
+
+    def test_excludes_current_time_from_cached_prompt(self, agent):
+        """The cached system prompt must not contain 'Current time:' — that
+        belongs in the per-turn user message to preserve prompt cache."""
+        prompt = agent._build_system_prompt()
+        assert "Current time:" not in prompt
 
     def test_includes_nous_subscription_prompt(self, agent, monkeypatch):
         monkeypatch.setattr(run_agent, "build_nous_subscription_prompt", lambda tool_names: "NOUS SUBSCRIPTION BLOCK")
@@ -2248,6 +2254,26 @@ class TestHandleMaxIterations:
             "call_123"
         ]
 
+    def test_summary_injects_current_time_into_user_message(self, agent):
+        """The max-iterations summary path should also include current time
+        in the user message so the agent knows 'now' even when recovering."""
+        resp = _mock_response(content="Summary")
+        agent.client.chat.completions.create.return_value = resp
+        agent._cached_system_prompt = "You are helpful."
+        messages = [{"role": "user", "content": "do stuff"}]
+
+        result = agent._handle_max_iterations(messages, 60)
+
+        assert result == "Summary"
+        kwargs = agent.client.chat.completions.create.call_args.kwargs
+        # The appended summary-request user message should contain current time
+        user_msgs = [m for m in kwargs["messages"] if m["role"] == "user"]
+        assert any("Current time:" in m.get("content", "") for m in user_msgs), \
+            "Current time should be injected into the summary user message"
+        # System prompt must NOT contain Current time
+        system_msgs = [m for m in kwargs["messages"] if m["role"] == "system"]
+        assert all("Current time:" not in m.get("content", "") for m in system_msgs)
+
 
 class TestRunConversation:
     """Tests for the main run_conversation method.
@@ -2276,6 +2302,36 @@ class TestRunConversation:
             result = agent.run_conversation("hello")
         assert result["final_response"] == "Final answer"
         assert result["completed"] is True
+
+    def test_turn_level_time_injected_into_user_message(self, agent, monkeypatch):
+        """Current time must be injected into the user message, not the
+        system prompt, to preserve the prompt cache prefix."""
+        self._setup_agent(agent)
+        captured = {}
+
+        def _capture_api_call(api_kwargs):
+            captured["api_kwargs"] = api_kwargs
+            return _mock_response(content="Done", finish_reason="stop")
+
+        with (
+            patch.object(agent, "_interruptible_api_call", side_effect=_capture_api_call),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello")
+
+        assert result["completed"] is True
+        # Current time should appear in a user message, NOT the system prompt
+        system_msg = captured["api_kwargs"]["messages"][0]
+        assert system_msg["role"] == "system"
+        assert "Current time:" not in system_msg["content"]
+        # Find the user message with the injection
+        user_msgs = [m for m in captured["api_kwargs"]["messages"] if m["role"] == "user"]
+        assert any("Current time:" in m.get("content", "") for m in user_msgs), \
+            "Current time should be injected into a user message"
+        # The cached system prompt must remain untouched
+        assert "Current time:" not in (agent._cached_system_prompt or "")
 
     def test_tool_calls_then_stop(self, agent):
         self._setup_agent(agent)
