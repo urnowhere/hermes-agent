@@ -348,6 +348,22 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=("OLLAMA_API_KEY",),
         base_url_env_var="OLLAMA_BASE_URL",
     ),
+    "astraflow": ProviderConfig(
+        id="astraflow",
+        name="Astraflow",
+        auth_type="api_key",
+        inference_base_url="https://api-us-ca.umodelverse.ai/v1",
+        api_key_env_vars=("ASTRAFLOW_API_KEY",),
+        base_url_env_var="ASTRAFLOW_BASE_URL",
+    ),
+    "astraflow-cn": ProviderConfig(
+        id="astraflow-cn",
+        name="Astraflow (China)",
+        auth_type="api_key",
+        inference_base_url="https://api.modelverse.cn/v1",
+        api_key_env_vars=("ASTRAFLOW_CN_API_KEY",),
+        base_url_env_var="ASTRAFLOW_CN_BASE_URL",
+    ),
     "bedrock": ProviderConfig(
         id="bedrock",
         name="AWS Bedrock",

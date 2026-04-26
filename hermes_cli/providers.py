@@ -167,6 +167,18 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         transport="openai_chat",
         base_url_env_var="OLLAMA_BASE_URL",
     ),
+    "astraflow": HermesOverlay(
+        transport="openai_chat",
+        is_aggregator=True,
+        base_url_override="https://api-us-ca.umodelverse.ai/v1",
+        base_url_env_var="ASTRAFLOW_BASE_URL",
+    ),
+    "astraflow-cn": HermesOverlay(
+        transport="openai_chat",
+        is_aggregator=True,
+        base_url_override="https://api.modelverse.cn/v1",
+        base_url_env_var="ASTRAFLOW_CN_BASE_URL",
+    ),
 }
 
 
@@ -287,6 +299,14 @@ ALIASES: Dict[str, str] = {
     "amazon-bedrock": "bedrock",
     "amazon": "bedrock",
 
+    # astraflow
+    "ucloud": "astraflow",
+    "modelverse": "astraflow",
+    "umodelverse": "astraflow",
+    "astraflow-global": "astraflow",
+    "astraflow-china": "astraflow-cn",
+    "astraflow_cn": "astraflow-cn",
+
     # arcee
     "arcee-ai": "arcee",
     "arceeai": "arcee",
@@ -316,6 +336,8 @@ _LABEL_OVERRIDES: Dict[str, str] = {
     "local": "Local endpoint",
     "bedrock": "AWS Bedrock",
     "ollama-cloud": "Ollama Cloud",
+    "astraflow": "Astraflow",
+    "astraflow-cn": "Astraflow (China)",
 }
 
 
