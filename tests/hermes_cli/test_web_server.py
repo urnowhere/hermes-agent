@@ -406,6 +406,32 @@ class TestBuildSchemaFromConfig:
         for cat, count in cats.items():
             assert count >= 2, f"Category '{cat}' has only {count} field(s) — should be merged"
 
+    def test_compression_section_reachable_in_config_ui(self):
+        """Regression for #15677 — context-pressure warnings link users to the
+        Compression section of the Config page (e.g. /config?category=compression).
+        The schema and category-order contract must keep that section populated:
+
+          1. `compression` appears in `_CATEGORY_ORDER` (sidebar nav slot).
+          2. `compression.enabled` and `compression.threshold` are in CONFIG_SCHEMA
+             with `category == "compression"` so the deep link lands on a real,
+             editable section — not a phantom tab.
+
+        If any of these break, surfaces that point users at "Config →
+        Compression" (modals, docs, /compact warnings) become misleading.
+        """
+        from hermes_cli.web_server import CONFIG_SCHEMA, _CATEGORY_ORDER
+
+        assert "compression" in _CATEGORY_ORDER, (
+            "compression must be in _CATEGORY_ORDER so the Config sidebar "
+            "renders the section as a navigable tab"
+        )
+        for key in ("compression.enabled", "compression.threshold"):
+            assert key in CONFIG_SCHEMA, f"{key} missing from auto-derived schema"
+            assert CONFIG_SCHEMA[key]["category"] == "compression", (
+                f"{key} must resolve to category 'compression' so it renders "
+                "under the Compression tab the warning links to"
+            )
+
 
 # ---------------------------------------------------------------------------
 # Config round-trip tests
