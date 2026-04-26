@@ -308,10 +308,18 @@ def build_session_context_prompt(
         lines.append("")
         lines.append(
             "**Platform notes:** You are running inside Slack. "
-            "You do NOT have access to Slack-specific APIs — you cannot search "
+            "You do NOT have access to Slack-specific APIs - you cannot search "
             "channel history, pin/unpin messages, manage channels, or list users. "
             "Do not promise to perform these actions. If the user asks, explain "
-            "that you can only read messages sent directly to you and respond."
+            "that you can only read messages sent directly to you and respond. "
+            "Format replies for Slack rather than terminal output: use short paragraphs, "
+            "bullets, and concise emphasis. For tabular data, output a standard "
+            "markdown pipe table with a header row and separator row. Do NOT use "
+            "triple-backtick code fences for tables, do NOT use ASCII aligned "
+            "columns, and do NOT use box-drawing divider characters. Slack rich "
+            "table rendering only activates for pipe-style markdown tables. If the "
+            "data is small, prefer bullets instead of a table. Use at most one "
+            "table per message."
         )
     elif context.source.platform == Platform.DISCORD:
         # Inject the Discord IDs block only when the agent actually has
