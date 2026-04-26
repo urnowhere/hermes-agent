@@ -6328,6 +6328,10 @@ class HermesCLI:
                     provider_require_parameters=self._provider_require_params,
                     provider_data_collection=self._provider_data_collection,
                     fallback_model=self._fallback_model,
+                    # /background runs concurrently with the foreground CLI
+                    # session, which owns the user-visible escalation
+                    # channel.  Don't clobber it.  See issue #15775.
+                    install_auxiliary_notifier=False,
                 )
                 # Silence raw spinner; route thinking through TUI widget when no foreground agent is active.
                 bg_agent._print_fn = lambda *_a, **_kw: None
@@ -6467,6 +6471,10 @@ class HermesCLI:
                     skip_memory=True,
                     skip_context_files=True,
                     persist_session=False,
+                    # /btw is an ephemeral side question that runs alongside
+                    # the live CLI session.  Do not clobber the parent's
+                    # auxiliary-health notifier.  See issue #15775.
+                    install_auxiliary_notifier=False,
                 )
 
                 btw_prompt = (

@@ -893,6 +893,7 @@ class AIAgent:
         checkpoint_max_snapshots: int = 50,
         pass_session_id: bool = False,
         persist_session: bool = True,
+        install_auxiliary_notifier: bool = True,
     ):
         """
         Initialize the AI Agent.
@@ -965,6 +966,22 @@ class AIAgent:
         self.skip_context_files = skip_context_files
         self.pass_session_id = pass_session_id
         self.persist_session = persist_session
+        # ``install_auxiliary_notifier`` controls whether this agent
+        # registers itself as the process-wide auxiliary-health notifier
+        # owner.  Default True — top-level / gateway agents OWN the active
+        # user-visible output channel and must install (and clobber any
+        # prior owner that has gone dormant).  Set False for in-process
+        # helper agents that run alongside or inside a live top-level
+        # session: delegation children built by
+        # ``delegate_tool._build_child_agent``, the background memory /
+        # skill reviewer (``_spawn_background_review``), /btw side
+        # questions, compression helpers, and other ephemeral fork-and-
+        # forget agents.  Their ``_emit_warning`` would route into a
+        # discarded channel after they finish, silently swallowing
+        # escalations — and worse, their install would clobber the live
+        # parent's notifier on the way in.  See
+        # ``_install_auxiliary_health_notifier`` and issue #15775.
+        self._install_auxiliary_notifier = install_auxiliary_notifier
         self._credential_pool = credential_pool
         self.log_prefix_chars = log_prefix_chars
         self.log_prefix = f"{log_prefix} " if log_prefix else ""
@@ -2015,6 +2032,11 @@ class AIAgent:
         self._compression_warning = None
         self._check_compression_model_feasibility()
 
+        # Subscribe to auxiliary task health escalations so repeated provider
+        # failures (issue #15775) surface to the user instead of being lost
+        # in the log.  See agent/auxiliary_health.py.
+        self._install_auxiliary_health_notifier()
+
         # Snapshot primary runtime for per-turn restoration.  When fallback
         # activates during a turn, the next turn restores these values so the
         # preferred model gets a fresh attempt each time.  Uses a single dict
@@ -2390,6 +2412,94 @@ class AIAgent:
         if len(detail) > 220:
             detail = detail[:217].rstrip() + "..."
         self._emit_warning(f"⚠ Auxiliary {task} failed: {detail}")
+
+    def _install_auxiliary_health_notifier(self) -> None:
+        """Wire AuxiliaryHealthTracker escalations into the user-visible
+        warning channel.
+
+        The tracker invokes our notifier only when consecutive failures for
+        a task cross the configured threshold (default 3) — so this fires
+        once for sustained outages, not for every flaky retry.  See
+        :mod:`agent.auxiliary_health` and issue #15775.
+
+        Owner-aware install (replaces the old first-agent-wins guard)
+        --------------------------------------------------------------
+        The tracker is a process singleton, but ``AIAgent.__init__`` runs
+        for every in-process agent constructed during a session — both
+        delegation children (``delegate_tool._build_child_agent``), the
+        background memory/skill reviewer
+        (``_spawn_background_review``), /btw side-question helpers,
+        compression helpers, AND the gateway's per-message AIAgent.  Two
+        requirements pull in opposite directions:
+
+        1. Helper / fork-and-forget agents (delegation children,
+           background reviewer, /btw, compression, etc.) must NOT
+           clobber the parent's notifier; after they finish the helper
+           is dormant and its ``_emit_warning`` would route into a
+           discarded channel — silently swallowing escalations for the
+           rest of the parent's session.
+
+        2. The gateway constructs a fresh AIAgent for every inbound
+           message.  Each successive top-level agent owns the active
+           user-visible output channel and MUST install its own notifier;
+           a permanent first-wins guard would route warnings into the
+           first agent's stale closure (wrong session, possibly wrong
+           platform target).
+
+        Resolution: opt out of installing via the constructor flag
+        ``install_auxiliary_notifier=False`` for every helper construction
+        site.  Top-level user-facing agents leave the flag at its default
+        (True) and register, clobbering any prior registration.  The
+        prior owner's ``cleanup`` then uses
+        :meth:`AuxiliaryHealthTracker.clear_notifier_if_owner` so it can
+        release ITS registration without dropping ours.
+        """
+        if not getattr(self, "_install_auxiliary_notifier", True):
+            return
+
+        try:
+            from agent.auxiliary_health import get_tracker, TaskHealth
+        except Exception:
+            logger.debug("Auxiliary health tracker unavailable", exc_info=True)
+            return
+
+        try:
+            tracker = get_tracker()
+        except Exception:
+            logger.debug("Could not access auxiliary health tracker", exc_info=True)
+            return
+
+        agent_ref = self  # captured for the notifier closure
+
+        def _notify(task: str, health: "TaskHealth") -> None:
+            count = health.consecutive_failures
+            err_class = health.last_error_class or "Error"
+            err_msg = (health.last_error or "").strip().splitlines()[0] if health.last_error else ""
+            if len(err_msg) > 200:
+                err_msg = err_msg[:197].rstrip() + "..."
+            detail_parts = [f"{count} consecutive failures", err_class]
+            if err_msg:
+                detail_parts.append(err_msg)
+            detail = " · ".join(detail_parts)
+            try:
+                agent_ref._emit_warning(
+                    f"⚠ Auxiliary {task} failing: {detail}. "
+                    "Run `hermes doctor` for details."
+                )
+            except Exception:
+                logger.warning(
+                    "Auxiliary %s failing (%d consecutive): %s",
+                    task, count, err_msg or err_class,
+                )
+
+        try:
+            # Pass ``self`` as the owner so a later ``cleanup`` /
+            # ``close`` call can release this registration cleanly via
+            # ``clear_notifier_if_owner`` without affecting a successor
+            # top-level agent that may have already taken over.
+            tracker.set_notifier(_notify, owner=self)
+        except Exception:
+            logger.debug("Could not register auxiliary health notifier", exc_info=True)
 
     def _current_main_runtime(self) -> Dict[str, str]:
         """Return the live main runtime for session-scoped auxiliary routing."""
@@ -3232,6 +3342,16 @@ class AIAgent:
                         platform=self.platform,
                         provider=self.provider,
                         parent_session_id=self.session_id,
+                        # Background reviewer is an in-process helper that
+                        # runs alongside the live parent session. It must
+                        # NOT take ownership of the auxiliary-health
+                        # notifier — doing so would clobber the parent's
+                        # user-visible escalation channel and, after this
+                        # helper's close() releases the registration, leave
+                        # the tracker with no notifier at all (silently
+                        # disabling escalations for the rest of the
+                        # parent's session). See issue #15775 P1 review.
+                        install_auxiliary_notifier=False,
                     )
                     review_agent._memory_write_origin = "background_review"
                     review_agent._memory_write_context = "background_review"
@@ -3267,9 +3387,37 @@ class AIAgent:
                         except Exception:
                             pass
 
+                # Record success against the tracker so a transient failure
+                # blip does not leave the counter armed forever.  Without
+                # this, three failures across weeks could accidentally cross
+                # the threshold even though most runs succeeded.  See
+                # issue #15775 review notes (Option A).
+                try:
+                    from agent.auxiliary_health import get_tracker
+                    get_tracker().record_success("background_review")
+                except Exception:
+                    logger.debug(
+                        "Could not record background_review success",
+                        exc_info=True,
+                    )
+
             except Exception as e:
                 logger.warning("Background memory/skill review failed: %s", e)
-                self._emit_auxiliary_failure("background review", e)
+                # Route through the AuxiliaryHealthTracker so background-review
+                # failures use the same threshold-gated escalation as every
+                # other auxiliary task (title_generation, compression, etc.).
+                # Direct _emit_auxiliary_failure() would warn on every single
+                # exception — even one transient blip — which is inconsistent
+                # with the gated paths and surfaces noise to the user.
+                # See issue #15775 review notes.
+                try:
+                    from agent.auxiliary_health import get_tracker
+                    get_tracker().record_failure("background_review", e)
+                except Exception:
+                    logger.debug(
+                        "Could not record background_review failure",
+                        exc_info=True,
+                    )
             finally:
                 # Close all resources (httpx client, subprocesses, etc.) so
                 # GC doesn't try to clean them up on a dead asyncio event
@@ -4381,6 +4529,17 @@ class AIAgent:
             if client is not None:
                 self._close_openai_client(client, reason="agent_close", shared=True)
                 self.client = None
+        except Exception:
+            pass
+
+        # 6. Release this agent's auxiliary-health notifier registration
+        #    if (and only if) it still owns it.  The gateway constructs a
+        #    fresh AIAgent per message, so a successor agent may have
+        #    already taken over the registration; ``clear_notifier_if_owner``
+        #    is a no-op in that case.  See issue #15775 review notes.
+        try:
+            from agent.auxiliary_health import get_tracker
+            get_tracker().clear_notifier_if_owner(self)
         except Exception:
             pass
 

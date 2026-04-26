@@ -1298,6 +1298,10 @@ def _background_agent_kwargs(agent, task_id: str) -> dict:
         "platform": "tui",
         "session_db": _get_db(),
         "fallback_model": getattr(agent, "_fallback_model", None),
+        # TUI background.start runs alongside the live foreground TUI
+        # session.  Do not clobber the foreground agent's auxiliary-health
+        # notifier ownership.  See issue #15775.
+        "install_auxiliary_notifier": False,
     }
 
 
@@ -2571,6 +2575,10 @@ def _(rid, params: dict) -> dict:
                 platform="tui",
                 max_iterations=8,
                 enabled_toolsets=[],
+                # TUI /btw side question — runs alongside the live TUI
+                # session.  Do not clobber the parent's auxiliary-health
+                # notifier.  See issue #15775.
+                install_auxiliary_notifier=False,
             ).run_conversation(text, conversation_history=snapshot)
             _emit(
                 "btw.complete",

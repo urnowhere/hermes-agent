@@ -130,6 +130,59 @@ def check_info(text: str):
     print(f"    {color('→', Colors.CYAN)} {text}")
 
 
+def _check_auxiliary_task_health(issues: list[str]) -> None:
+    """Surface auxiliary task health from the in-process tracker.
+
+    Reads :class:`agent.auxiliary_health.AuxiliaryHealthTracker` and prints
+    a section *only* when there is something to report (recorded outcomes
+    or active failures).  Tasks past the failure threshold register as
+    issues so the summary picks them up.  See issue #15775.
+    """
+    try:
+        from agent.auxiliary_health import get_tracker
+    except Exception:
+        return
+
+    tracker = get_tracker()
+    status = tracker.get_status()
+    if not status:
+        return  # silent when no auxiliary calls have been recorded
+
+    print()
+    print(color("◆ Auxiliary Task Health", Colors.CYAN, Colors.BOLD))
+
+    threshold = tracker.threshold
+    failing = []
+    for task in sorted(status):
+        health = status[task]
+        if health.consecutive_failures >= threshold:
+            failing.append((task, health))
+            err = health.last_error_class or "Error"
+            err_msg = (health.last_error or "").strip().splitlines()[0] if health.last_error else ""
+            if len(err_msg) > 120:
+                err_msg = err_msg[:117].rstrip() + "..."
+            detail = f"({health.consecutive_failures} consecutive · {err}"
+            if err_msg:
+                detail += f": {err_msg}"
+            detail += ")"
+            check_fail(f"{task}", detail)
+            issues.append(
+                f"Auxiliary task '{task}' failing ({health.consecutive_failures} consecutive failures, "
+                f"last error: {err}). Check provider credentials / network — "
+                f"see ~/.hermes/logs/agent.log for full traces."
+            )
+        elif health.consecutive_failures > 0:
+            check_warn(
+                f"{task}",
+                f"({health.consecutive_failures}/{threshold} consecutive failures)",
+            )
+        else:
+            ok_detail = f"({health.total_successes} ok)" if health.total_successes else ""
+            check_ok(task, ok_detail)
+    if not failing:
+        check_info(f"Threshold: {threshold} consecutive failures triggers a user-visible warning.")
+
+
 def _check_gateway_service_linger(issues: list[str]) -> None:
     """Warn when a systemd user gateway service will stop after logout."""
     try:
@@ -1190,6 +1243,17 @@ def run_doctor(args):
                 check_warn(f"{_active_memory_provider} plugin not found", "run: hermes memory setup")
         except Exception as _e:
             check_warn(f"{_active_memory_provider} check failed", str(_e))
+
+    # =========================================================================
+    # Auxiliary Task Health
+    # =========================================================================
+    # In-process counters from agent.auxiliary_health.AuxiliaryHealthTracker.
+    # When run from a separate `hermes doctor` invocation the tracker has no
+    # state (it lives in the long-running agent process), so the check stays
+    # silent. Inside a live session (`/doctor` from the CLI, or doctor invoked
+    # from an embedded subcommand) any task with consecutive failures past the
+    # configured threshold surfaces here. Issue #15775.
+    _check_auxiliary_task_health(issues)
 
     # =========================================================================
     # Profiles

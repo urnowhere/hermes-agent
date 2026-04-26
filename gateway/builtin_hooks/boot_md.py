@@ -53,6 +53,11 @@ def _run_boot_agent(content: str) -> None:
             skip_context_files=True,
             skip_memory=True,
             max_iterations=20,
+            # BOOT.md is a fork-and-forget startup helper.  Don't take
+            # auxiliary-notifier ownership — the helper is dormant after
+            # the boot routine returns and would silently swallow any
+            # escalation arriving after that.  See issue #15775.
+            install_auxiliary_notifier=False,
         )
         result = agent.run_conversation(prompt)
         response = result.get("final_response", "")

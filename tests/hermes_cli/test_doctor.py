@@ -487,3 +487,63 @@ def test_run_doctor_opencode_go_skips_invalid_models_probe(monkeypatch, tmp_path
     )
     assert not any(url == "https://opencode.ai/zen/go/v1/models" for url, _, _ in calls)
     assert not any("opencode" in url.lower() and "models" in url.lower() for url, _, _ in calls)
+
+
+# ── Auxiliary task health wiring ─────────────────────────────────────────
+
+
+class TestAuxiliaryHealthCheckWiring:
+    """Smoke tests confirming the auxiliary task health check is wired into
+    ``run_doctor``.  The full behavior tests live in
+    ``tests/agent/test_auxiliary_health.py::TestDoctorCheck`` because that
+    is the module they exercise.  These tests catch a future refactor of
+    ``doctor.py`` that drops the wiring entirely.  See issue #15775
+    review notes."""
+
+    def test_auxiliary_check_is_registered_in_doctor_module(self):
+        """The doctor module must expose the auxiliary health check."""
+        assert hasattr(doctor, "_check_auxiliary_task_health")
+        assert callable(doctor._check_auxiliary_task_health)
+
+    def test_run_doctor_calls_the_auxiliary_check(self, monkeypatch, tmp_path):
+        """A ``run_doctor`` invocation must reach
+        ``_check_auxiliary_task_health``.  Asserting the call without
+        booting every other check lets a future refactor surface the
+        missing wiring early."""
+        from agent.auxiliary_health import reset_tracker_for_tests
+
+        reset_tracker_for_tests()
+
+        called = {"count": 0}
+
+        def fake_check(issues):
+            called["count"] += 1
+
+        monkeypatch.setattr(doctor, "_check_auxiliary_task_health", fake_check)
+
+        # Avoid touching the real ~/.hermes; we only care about whether
+        # the auxiliary check was invoked, so suppress every other check
+        # that may make network/filesystem assumptions.
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        monkeypatch.setattr(doctor, "HERMES_HOME", home)
+        monkeypatch.setattr(doctor, "_DHH", str(home))
+
+        # Run with output redirected; if any other check raises we still
+        # want to know whether the auxiliary check fired before then.
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            try:
+                doctor.run_doctor(Namespace(fix=False))
+            except SystemExit:
+                pass
+            except Exception:
+                # Other doctor checks may fail in the bare test env — but
+                # the auxiliary check fires before assert below proves it
+                # is wired in.
+                pass
+
+        assert called["count"] == 1, (
+            "_check_auxiliary_task_health was not invoked by run_doctor — "
+            "wiring may have been dropped during a refactor."
+        )

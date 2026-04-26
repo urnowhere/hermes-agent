@@ -1048,6 +1048,11 @@ def _build_child_agent(
         provider_sort=parent_agent.provider_sort,
         tool_progress_callback=child_progress_cb,
         iteration_budget=None,  # fresh budget per subagent
+        # Delegation children must NOT clobber the parent's auxiliary-health
+        # notifier (issue #15775 review).  After delegation completes the
+        # child is dormant and its ``_emit_warning`` would route into a
+        # discarded output channel — silently swallowing escalations.
+        install_auxiliary_notifier=False,
     )
     child._print_fn = getattr(parent_agent, "_print_fn", None)
     # Set delegation depth so children can't spawn grandchildren

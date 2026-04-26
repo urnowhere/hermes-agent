@@ -2906,6 +2906,54 @@ def call_llm(
 ) -> Any:
     """Centralized synchronous LLM call.
 
+    Thin wrapper over :func:`_call_llm_inner` that records every outcome
+    against the :class:`agent.auxiliary_health.AuxiliaryHealthTracker` so
+    repeated auxiliary failures (issue #15775) escalate to the user instead
+    of silently dropping into the log.
+
+    See :func:`_call_llm_inner` for the full provider-resolution behaviour.
+    """
+    from agent.auxiliary_health import get_tracker
+    tracker = get_tracker()
+    try:
+        result = _call_llm_inner(
+            task=task,
+            provider=provider,
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            main_runtime=main_runtime,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            timeout=timeout,
+            extra_body=extra_body,
+        )
+    except Exception as exc:
+        tracker.record_failure(task or "call", exc)
+        raise
+    tracker.record_success(task or "call")
+    return result
+
+
+def _call_llm_inner(
+    task: str = None,
+    *,
+    provider: str = None,
+    model: str = None,
+    base_url: str = None,
+    api_key: str = None,
+    main_runtime: Optional[Dict[str, Any]] = None,
+    messages: list,
+    temperature: float = None,
+    max_tokens: int = None,
+    tools: list = None,
+    timeout: float = None,
+    extra_body: dict = None,
+) -> Any:
+    """Centralized synchronous LLM call (untracked inner implementation).
+
     Resolves provider + model (from task config, explicit args, or auto-detect),
     handles auth, request formatting, and model-specific arg adjustments.
 
@@ -3238,7 +3286,55 @@ async def async_call_llm(
 ) -> Any:
     """Centralized asynchronous LLM call.
 
-    Same as call_llm() but async. See call_llm() for full documentation.
+    Thin wrapper over :func:`_async_call_llm_inner` that records every
+    outcome against the
+    :class:`agent.auxiliary_health.AuxiliaryHealthTracker` so repeated
+    auxiliary failures (issue #15775) escalate to the user instead of
+    silently dropping into the log.
+
+    Same provider-resolution behaviour as :func:`call_llm`.
+    """
+    from agent.auxiliary_health import get_tracker
+    tracker = get_tracker()
+    try:
+        result = await _async_call_llm_inner(
+            task=task,
+            provider=provider,
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            timeout=timeout,
+            extra_body=extra_body,
+        )
+    except Exception as exc:
+        tracker.record_failure(task or "call", exc)
+        raise
+    tracker.record_success(task or "call")
+    return result
+
+
+async def _async_call_llm_inner(
+    task: str = None,
+    *,
+    provider: str = None,
+    model: str = None,
+    base_url: str = None,
+    api_key: str = None,
+    messages: list,
+    temperature: float = None,
+    max_tokens: int = None,
+    tools: list = None,
+    timeout: float = None,
+    extra_body: dict = None,
+) -> Any:
+    """Centralized asynchronous LLM call (untracked inner implementation).
+
+    Same as :func:`_call_llm_inner` but async. See :func:`call_llm` for full
+    documentation.
     """
     resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)

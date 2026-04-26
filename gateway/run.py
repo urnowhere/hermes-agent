@@ -4379,6 +4379,10 @@ class GatewayRunner:
                                     skip_memory=True,
                                     enabled_toolsets=["memory"],
                                     session_id=session_entry.session_id,
+                                    # Compression helper — do not clobber
+                                    # the live session's auxiliary-health
+                                    # notifier.  See issue #15775.
+                                    install_auxiliary_notifier=False,
                                 )
                                 try:
                                     _hyg_agent._print_fn = lambda *a, **kw: None
@@ -6713,6 +6717,10 @@ class GatewayRunner:
                     skip_memory=True,
                     skip_context_files=True,
                     persist_session=False,
+                    # Gateway /btw is an ephemeral side question; don't
+                    # clobber the live session's auxiliary-health notifier.
+                    # See issue #15775.
+                    install_auxiliary_notifier=False,
                 )
                 try:
                     return agent.run_conversation(
@@ -7075,6 +7083,9 @@ class GatewayRunner:
                 skip_memory=True,
                 enabled_toolsets=["memory"],
                 session_id=session_entry.session_id,
+                # Manual /compress helper — do not clobber the live
+                # session's auxiliary-health notifier.  See issue #15775.
+                install_auxiliary_notifier=False,
             )
             try:
                 tmp_agent._print_fn = lambda *a, **kw: None
