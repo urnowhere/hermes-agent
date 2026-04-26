@@ -43,6 +43,7 @@ import yaml
 
 from hermes_cli.config import get_hermes_home, get_config_path, read_raw_config
 from hermes_constants import OPENROUTER_BASE_URL
+from utils import chown_to_match_parent
 
 logger = logging.getLogger(__name__)
 
@@ -751,6 +752,30 @@ def _load_auth_store(auth_file: Optional[Path] = None) -> Dict[str, Any]:
 
     try:
         raw = json.loads(auth_file.read_text())
+    except PermissionError as exc:
+        # Distinguish "credentials missing" from "credentials present but
+        # unreadable due to file ownership" — the original generic exception
+        # handler below silently returned an empty store, which surfaced as
+        # a misleading "no credentials stored" error downstream (issue
+        # #15718).  Surface the real cause so the user can fix ownership
+        # instead of re-running login in a loop.
+        running_uid = os.geteuid() if hasattr(os, "geteuid") else "unknown"
+        try:
+            file_stat = auth_file.stat()
+            owner_info = (
+                f" (file owned by uid={file_stat.st_uid} gid={file_stat.st_gid}, "
+                f"mode={oct(stat.S_IMODE(file_stat.st_mode))}, "
+                f"running as uid={running_uid})"
+            )
+        except OSError:
+            owner_info = f" (running as uid={running_uid})"
+        raise PermissionError(
+            f"Cannot read {auth_file}: {exc}.{owner_info} "
+            "Credentials are present but unreadable by the current user. "
+            "Fix ownership to match the runtime user, e.g. inside a "
+            "container: `chown <runtime-uid>:<runtime-gid> "
+            f"{auth_file}` (see issue #15718)."
+        ) from exc
     except Exception as exc:
         corrupt_path = auth_file.with_suffix(".json.corrupt")
         try:
@@ -817,6 +842,12 @@ def _save_auth_store(auth_store: Dict[str, Any]) -> Path:
         auth_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
     except OSError:
         pass
+    # If a privileged write (e.g. `docker exec` as root) just produced a
+    # file that the runtime user (Hermes container UID) can't read, rewrite
+    # the owner to match the parent directory.  Otherwise the gateway —
+    # and every messaging adapter — would see "no credentials stored"
+    # despite auth.json being present and valid.  See issue #15718.
+    chown_to_match_parent(auth_file)
     return auth_file
 
 
@@ -1291,6 +1322,9 @@ def _save_qwen_cli_tokens(tokens: Dict[str, Any]) -> Path:
     tmp_path.write_text(json.dumps(tokens, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)
     tmp_path.replace(auth_path)
+    # Match parent-directory ownership when running as root so a non-root
+    # Hermes runtime can still read the file (issue #15718).
+    chown_to_match_parent(auth_path)
     return auth_path
 
 
