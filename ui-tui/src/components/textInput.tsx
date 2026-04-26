@@ -167,6 +167,62 @@ export function lineNav(s: string, p: number, dir: -1 | 1): null | number {
   return snapPos(s, Math.min(nextBreak + 1 + col, lineEnd))
 }
 
+/**
+ * Return the visual row index of the start of the logical (hard-newline-
+ * delimited) line that contains string offset `pos`. This tells us how many
+ * soft-wrap rows precede `pos` within its logical line.
+ */
+function logicalLineStartRow(s: string, pos: number, w: number): number {
+  const lineStart = s.lastIndexOf('\n', pos - 1) + 1 // 0 if no prior \n
+  return cursorLayout(s, lineStart, w).line
+}
+
+/**
+ * Move cursor one visual row up or down, taking into account both hard newlines
+ * and softwrap boundaries at the given column width. Uses cursorLayout()
+ * to find the cursor's current visual row/col, then offsetFromPosition()
+ * to land on the same column in the adjacent row.
+ *
+ * Returns null when the cursor is already on the first visual row (up) or
+ * last visual row (down). This tells the caller to fall through to history navigation.
+ */
+export function visualRowNav(s: string, p: number, dir: -1 | 1, cols: number): null | number {
+  const w = Math.max(1, cols)
+  const pos = snapPos(s, p)
+  const { line: curRow, column: curCol } = cursorLayout(s, pos, w)
+
+  // Compute total visual rows by measuring the layout position at the end of
+  // the string. The trailing-cursor overflow in cursorLayout means that if the
+  // last character exactly fills the row, the cursor sits on a new empty row,
+  // which is correct — that empty row is navigable.
+  const { line: lastRow } = cursorLayout(s, s.length, w)
+
+  const targetRow = curRow + dir
+
+  if (targetRow < 0 || targetRow > lastRow) {
+    return null
+  }
+
+  // The Ink rendering pipeline introduces a cumulative visual drift on soft-
+  // wrapped rows: visual row N within a logical line is shifted by N columns
+  // relative to the data model. When crossing between rows we must compensate
+  // for the difference in accumulated drift between the source and destination.
+  //
+  // srcDrift = curRow - (visual row of source logical line start)
+  // dstDrift = targetRow - (visual row of destination logical line start)
+  // compensation = dstDrift - srcDrift
+  const rawNext = offsetFromPosition(s, targetRow, curCol, w)
+  const srcDrift = curRow - logicalLineStartRow(s, pos, w)
+  const dstDrift = targetRow - logicalLineStartRow(s, Math.min(rawNext, s.length), w)
+  const compensation = dstDrift - srcDrift
+  const adjustedCol = Math.min(w - 1, Math.max(0, curCol + compensation))
+  const next = compensation !== 0
+    ? offsetFromPosition(s, targetRow, adjustedCol, w)
+    : rawNext
+
+  return snapPos(s, next)
+}
+
 // mirrors wrap-ansi(..., { wordWrap: false, hard: true }) so the declared
 // cursor lines up with what <Text wrap="wrap-char"> actually renders
 export function cursorLayout(value: string, cursor: number, cols: number) {
@@ -610,9 +666,10 @@ export function TextInput({
       }
 
       if (k.upArrow || k.downArrow) {
-        const next = lineNav(vRef.current, curRef.current, k.upArrow ? -1 : 1)
+        const next = visualRowNav(vRef.current, curRef.current, k.upArrow ? -1 : 1, columns)
 
         if (next !== null) {
+          ;(event as unknown as { stopImmediatePropagation: () => void }).stopImmediatePropagation()
           clearSel()
           setCur(next)
           curRef.current = next
