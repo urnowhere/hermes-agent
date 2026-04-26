@@ -4849,7 +4849,8 @@ class AIAgent:
         #   3. Persistent memory (frozen snapshot)
         #   4. Skills guidance (if skills tools are loaded)
         #   5. Context files (AGENTS.md, .cursorrules — SOUL.md excluded here when used as identity)
-        #   6. Current date & time (frozen at build time)
+        #   6. Session start time (frozen at build time; current time is
+        #      injected per-turn into the user message via pre_llm_call)
         #   7. Platform-specific formatting hint
 
         # Try SOUL.md as primary identity unless the caller explicitly skipped it.
@@ -4978,9 +4979,12 @@ class AIAgent:
             if context_files_prompt:
                 prompt_parts.append(context_files_prompt)
 
-        from hermes_time import now as _hermes_now
+        from hermes_time import now as _hermes_now, get_timezone_name as _get_tz
         now = _hermes_now()
-        timestamp_line = f"Conversation started: {now.strftime('%A, %B %d, %Y %I:%M %p')}"
+        _tz_name = _get_tz()
+        timestamp_line = f"Session started: {now.strftime('%A, %B %d, %Y %I:%M %p')}"
+        if _tz_name:
+            timestamp_line += f" ({_tz_name})"
         if self.pass_session_id and self.session_id:
             timestamp_line += f"\nSession ID: {self.session_id}"
         if self.model:
@@ -10672,6 +10676,32 @@ class AIAgent:
                 _plugin_user_context = "\n\n".join(_ctx_parts)
         except Exception as exc:
             logger.warning("pre_llm_call hook failed: %s", exc)
+
+        # ── Built-in current-time injection ──
+        # The system prompt contains the *session start* time (frozen for
+        # cache stability).  To prevent the agent from treating a stale
+        # timestamp as "now", we inject the actual current time into the
+        # user message on every turn — same mechanism that plugins use,
+        # so the system prompt cache prefix is preserved.
+        _time_ctx_parts: list[str] = []
+        try:
+            from hermes_time import now as _ht_now, get_timezone_name as _get_tz
+            _current = _ht_now()
+            _time_ctx_parts.append(
+                f"Current time: {_current.strftime('%A, %B %d, %Y %I:%M %p')}"
+            )
+            _tz = _get_tz()
+            if _tz:
+                _time_ctx_parts.append(f"Timezone: {_tz}")
+        except Exception:
+            pass  # non-critical; agent can fall back to ``date`` command
+        if _time_ctx_parts:
+            _time_block = "\n".join(_time_ctx_parts)
+            _plugin_user_context = (
+                f"{_time_block}\n\n{_plugin_user_context}"
+                if _plugin_user_context
+                else _time_block
+            )
 
         # Main conversation loop
         api_call_count = 0

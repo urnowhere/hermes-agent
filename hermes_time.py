@@ -88,6 +88,17 @@ def get_timezone() -> Optional[ZoneInfo]:
     return _cached_tz
 
 
+def get_timezone_name() -> Optional[str]:
+    """Return the configured IANA timezone name (e.g. ``'Asia/Hong_Kong'``).
+
+    Returns ``None`` when no timezone is explicitly configured (server-local
+    mode).  Useful for including in prompts so the agent knows *which* zone
+    the timestamps refer to.
+    """
+    get_timezone()  # ensure cache is populated
+    return _cached_tz_name or None
+
+
 def now() -> datetime:
     """
     Return the current time as a timezone-aware datetime.
