@@ -407,7 +407,8 @@ class TestSessionSearch:
         assert result["success"] is True
 
     def test_current_root_session_excludes_child_lineage(self):
-        """Delegation child hits should be excluded when they resolve to the current root session."""
+        """When the current session is the root, child sessions in the same
+        lineage should be excluded from search results."""
         from unittest.mock import MagicMock
         from tools.session_search_tool import session_search
 
@@ -434,3 +435,274 @@ class TestSessionSearch:
         assert result["count"] == 0
         assert result["results"] == []
         assert result["sessions_searched"] == 0
+
+    def test_compaction_chain_search_uses_matched_session(self):
+        """FTS match in a compacted child session should load content from the
+        child (where messages live), not the empty root."""
+        from unittest.mock import MagicMock, AsyncMock, patch as _patch
+        from tools.session_search_tool import session_search
+
+        mock_db = MagicMock()
+        # FTS finds a match in the leaf session of a compaction chain
+        mock_db.search_messages.return_value = [
+            {"session_id": "leaf_sid", "content": "Infomoris migration",
+             "source": "cli", "session_started": 1709500000, "model": "test"},
+        ]
+
+        def _get_session(session_id):
+            # 3-level compaction chain: root -> mid -> leaf
+            if session_id == "root_sid":
+                return {"parent_session_id": None, "end_reason": None}
+            if session_id == "mid_sid":
+                return {"parent_session_id": "root_sid", "end_reason": "compression"}
+            if session_id == "leaf_sid":
+                return {"parent_session_id": "mid_sid", "end_reason": "cli_close"}
+            return None
+
+        mock_db.get_session.side_effect = _get_session
+        mock_db.get_messages_as_conversation.return_value = [
+            {"role": "user", "content": "Let's work on Infomoris"},
+            {"role": "assistant", "content": "Sure, let me help with that."},
+        ]
+
+        with _patch("tools.session_search_tool.async_call_llm",
+                     new_callable=AsyncMock,
+                     side_effect=RuntimeError("no provider")):
+            result = json.loads(session_search(
+                query="Infomoris", db=mock_db, current_session_id="other_session",
+            ))
+
+        assert result["success"] is True
+        assert result["count"] == 1
+        # Verify that get_messages_as_conversation was called with the LEAF
+        # session (where FTS found the match), NOT the root
+        mock_db.get_messages_as_conversation.assert_called_once_with("leaf_sid")
+
+    def test_compaction_chain_deduplicates_same_lineage(self):
+        """Multiple FTS hits in different fragments of the same compaction chain
+        should produce only one result."""
+        from unittest.mock import MagicMock, AsyncMock, patch as _patch
+        from tools.session_search_tool import session_search
+
+        mock_db = MagicMock()
+        # FTS finds matches in TWO different sessions of the same chain
+        mock_db.search_messages.return_value = [
+            {"session_id": "leaf_sid", "content": "Infomoris leaf",
+             "source": "cli", "session_started": 1709500000, "model": "test"},
+            {"session_id": "mid_sid", "content": "Infomoris mid",
+             "source": "cli", "session_started": 1709400000, "model": "test"},
+        ]
+
+        def _get_session(session_id):
+            if session_id == "root_sid":
+                return {"parent_session_id": None, "end_reason": None}
+            if session_id == "mid_sid":
+                return {"parent_session_id": "root_sid", "end_reason": "compression"}
+            if session_id == "leaf_sid":
+                return {"parent_session_id": "mid_sid", "end_reason": "cli_close"}
+            if session_id == "other_session":
+                return {"parent_session_id": None}
+            return None
+
+        mock_db.get_session.side_effect = _get_session
+        mock_db.get_messages_as_conversation.return_value = [
+            {"role": "user", "content": "test"},
+        ]
+
+        with _patch("tools.session_search_tool.async_call_llm",
+                     new_callable=AsyncMock,
+                     side_effect=RuntimeError("no provider")):
+            result = json.loads(session_search(
+                query="Infomoris", db=mock_db, current_session_id="other_session",
+            ))
+
+        assert result["success"] is True
+        # Should deduplicate: only 1 result for the whole chain
+        assert result["sessions_searched"] == 1
+
+
+class TestRecentSessionsCompaction:
+    """Tests for _list_recent_sessions with compaction chains."""
+
+    def _make_mock_db(self, sessions, session_map, children_map=None):
+        """Create a MagicMock DB with list_sessions_rich, get_session, and
+        proper _lock/_conn for the BFS child query in _get_lineage_ids."""
+        from unittest.mock import MagicMock
+        import threading
+
+        mock_db = MagicMock()
+        mock_db.list_sessions_rich.return_value = sessions
+
+        def _get_session(sid):
+            return session_map.get(sid)
+        mock_db.get_session.side_effect = _get_session
+
+        # For _get_lineage_ids BFS child query: db._lock + db._conn.execute
+        mock_db._lock = threading.Lock()
+        _children_map = children_map or {}
+
+        def _execute(query, params):
+            """Mock cursor for child-session queries."""
+            cursor = MagicMock()
+            parent_id = params[0] if params else None
+            children = _children_map.get(parent_id, [])
+            cursor.fetchall.return_value = [(cid,) for cid in children]
+            return cursor
+        mock_db._conn.execute.side_effect = _execute
+
+        return mock_db
+
+    def test_leaf_shown_intermediates_hidden(self):
+        """Compaction chain leaf should appear; intermediates (end_reason=compression)
+        should be hidden. Root with end_reason=compression should also be hidden."""
+        from tools.session_search_tool import session_search
+
+        sessions = [
+            # Leaf (most recent, has parent, active session)
+            {"id": "leaf", "title": "My Conversation", "source": "cli",
+             "started_at": "2026-04-06T10:00:00", "last_active": "2026-04-06T11:00:00",
+             "message_count": 50, "preview": "Hello world",
+             "parent_session_id": "mid", "end_reason": "cli_close"},
+            # Intermediate compaction node (should be hidden)
+            {"id": "mid", "title": None, "source": "cli",
+             "started_at": "2026-04-06T09:30:00", "last_active": "2026-04-06T09:45:00",
+             "message_count": 0, "preview": "",
+             "parent_session_id": "root", "end_reason": "compression"},
+            # Root compaction node (should be hidden - end_reason=compression)
+            {"id": "root", "title": None, "source": "cli",
+             "started_at": "2026-04-06T09:00:00", "last_active": "2026-04-06T09:10:00",
+             "message_count": 0, "preview": "",
+             "parent_session_id": None, "end_reason": "compression"},
+        ]
+        session_map = {
+            "root": {"parent_session_id": None, "end_reason": "compression"},
+            "mid": {"parent_session_id": "root", "end_reason": "compression"},
+            "leaf": {"parent_session_id": "mid", "end_reason": "cli_close"},
+        }
+        children_map = {
+            "root": ["mid"],
+            "mid": ["leaf"],
+        }
+        mock_db = self._make_mock_db(sessions, session_map, children_map)
+
+        result = json.loads(session_search(
+            query="", db=mock_db, current_session_id="other_session",
+        ))
+
+        assert result["success"] is True
+        assert result["mode"] == "recent"
+        # Only the leaf should appear
+        assert len(result["results"]) == 1
+        assert result["results"][0]["session_id"] == "leaf"
+
+    def test_dedup_same_chain(self):
+        """Multiple non-compression sessions in the same chain should be
+        deduplicated to show only the first one encountered."""
+        from tools.session_search_tool import session_search
+
+        sessions = [
+            # Two leaf-like sessions from the same chain
+            {"id": "leaf2", "title": "Continued", "source": "cli",
+             "started_at": "2026-04-06T12:00:00", "last_active": "2026-04-06T13:00:00",
+             "message_count": 30, "preview": "continuing work",
+             "parent_session_id": "leaf1", "end_reason": "cli_close"},
+            {"id": "leaf1", "title": "Started", "source": "cli",
+             "started_at": "2026-04-06T11:00:00", "last_active": "2026-04-06T11:30:00",
+             "message_count": 20, "preview": "starting work",
+             "parent_session_id": "root", "end_reason": None},
+            # Root - has compression end_reason so it's hidden
+            {"id": "root", "title": None, "source": "cli",
+             "started_at": "2026-04-06T10:00:00", "last_active": "2026-04-06T10:10:00",
+             "message_count": 0, "preview": "",
+             "parent_session_id": None, "end_reason": "compression"},
+        ]
+        session_map = {
+            "root": {"parent_session_id": None, "end_reason": "compression"},
+            "leaf1": {"parent_session_id": "root", "end_reason": None},
+            "leaf2": {"parent_session_id": "leaf1", "end_reason": "cli_close"},
+        }
+        children_map = {
+            "root": ["leaf1"],
+            "leaf1": ["leaf2"],
+        }
+        mock_db = self._make_mock_db(sessions, session_map, children_map)
+
+        result = json.loads(session_search(
+            query="", db=mock_db, current_session_id="other_session",
+        ))
+
+        assert result["success"] is True
+        assert result["mode"] == "recent"
+        # Only ONE session from the chain should appear (first encountered = leaf2)
+        assert len(result["results"]) == 1
+        assert result["results"][0]["session_id"] == "leaf2"
+
+    def test_current_session_lineage_excluded(self):
+        """When the current session is in a compaction chain, ALL fragments
+        of that chain should be excluded from recent listing."""
+        from tools.session_search_tool import session_search
+
+        sessions = [
+            # Current session's leaf
+            {"id": "current_leaf", "title": "Current", "source": "cli",
+             "started_at": "2026-04-06T12:00:00", "last_active": "2026-04-06T13:00:00",
+             "message_count": 10, "preview": "current work",
+             "parent_session_id": "current_root", "end_reason": None},
+            # An unrelated session
+            {"id": "other", "title": "Other Work", "source": "cli",
+             "started_at": "2026-04-06T10:00:00", "last_active": "2026-04-06T10:30:00",
+             "message_count": 5, "preview": "other work",
+             "parent_session_id": None, "end_reason": "cli_close"},
+            # Current session's root (compression)
+            {"id": "current_root", "title": None, "source": "cli",
+             "started_at": "2026-04-06T11:00:00", "last_active": "2026-04-06T11:10:00",
+             "message_count": 0, "preview": "",
+             "parent_session_id": None, "end_reason": "compression"},
+        ]
+        session_map = {
+            "current_root": {"parent_session_id": None, "end_reason": "compression"},
+            "current_leaf": {"parent_session_id": "current_root", "end_reason": None},
+            "other": {"parent_session_id": None, "end_reason": "cli_close"},
+        }
+        children_map = {
+            "current_root": ["current_leaf"],
+        }
+        mock_db = self._make_mock_db(sessions, session_map, children_map)
+
+        result = json.loads(session_search(
+            query="", db=mock_db, current_session_id="current_leaf",
+        ))
+
+        assert result["success"] is True
+        assert result["mode"] == "recent"
+        # Only the unrelated session should appear
+        assert len(result["results"]) == 1
+        assert result["results"][0]["session_id"] == "other"
+
+    def test_normal_sessions_unaffected(self):
+        """Sessions without compaction chains should appear normally."""
+        from tools.session_search_tool import session_search
+
+        sessions = [
+            {"id": "s1", "title": "Session 1", "source": "cli",
+             "started_at": "2026-04-06T12:00:00", "last_active": "2026-04-06T13:00:00",
+             "message_count": 10, "preview": "hello",
+             "parent_session_id": None, "end_reason": "cli_close"},
+            {"id": "s2", "title": "Session 2", "source": "telegram",
+             "started_at": "2026-04-06T11:00:00", "last_active": "2026-04-06T11:30:00",
+             "message_count": 5, "preview": "world",
+             "parent_session_id": None, "end_reason": "cli_close"},
+        ]
+        session_map = {
+            "s1": {"parent_session_id": None},
+            "s2": {"parent_session_id": None},
+        }
+        mock_db = self._make_mock_db(sessions, session_map)
+
+        result = json.loads(session_search(
+            query="", db=mock_db, current_session_id="other_session",
+        ))
+
+        assert result["success"] is True
+        assert result["mode"] == "recent"
+        assert len(result["results"]) == 2
