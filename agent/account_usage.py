@@ -150,6 +150,7 @@ def _fetch_codex_account_usage(
     *,
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
+    timeout: float = 15.0,
 ) -> Optional[AccountUsageSnapshot]:
     access_token = str(api_key or "").strip()
     account_id = _codex_account_id_from_access_token(access_token)
@@ -175,7 +176,7 @@ def _fetch_codex_account_usage(
     }
     if account_id:
         headers["ChatGPT-Account-Id"] = account_id
-    with httpx.Client(timeout=15.0) as client:
+    with httpx.Client(timeout=timeout) as client:
         response = client.get(_resolve_codex_usage_url(resolved_base_url), headers=headers)
         response.raise_for_status()
     payload = response.json() or {}
@@ -211,7 +212,7 @@ def _fetch_codex_account_usage(
     )
 
 
-def _fetch_anthropic_account_usage() -> Optional[AccountUsageSnapshot]:
+def _fetch_anthropic_account_usage(timeout: float = 15.0) -> Optional[AccountUsageSnapshot]:
     token = (resolve_anthropic_token() or "").strip()
     if not token:
         return None
@@ -229,7 +230,7 @@ def _fetch_anthropic_account_usage() -> Optional[AccountUsageSnapshot]:
         "anthropic-beta": "oauth-2025-04-20",
         "User-Agent": "claude-code/2.1.0",
     }
-    with httpx.Client(timeout=15.0) as client:
+    with httpx.Client(timeout=timeout) as client:
         response = client.get("https://api.anthropic.com/api/oauth/usage", headers=headers)
         response.raise_for_status()
     payload = response.json() or {}
@@ -272,7 +273,11 @@ def _fetch_anthropic_account_usage() -> Optional[AccountUsageSnapshot]:
     )
 
 
-def _fetch_openrouter_account_usage(base_url: Optional[str], api_key: Optional[str]) -> Optional[AccountUsageSnapshot]:
+def _fetch_openrouter_account_usage(
+    base_url: Optional[str],
+    api_key: Optional[str],
+    timeout: float = 10.0,
+) -> Optional[AccountUsageSnapshot]:
     runtime = resolve_runtime_provider(
         requested="openrouter",
         explicit_base_url=base_url,
@@ -288,7 +293,7 @@ def _fetch_openrouter_account_usage(base_url: Optional[str], api_key: Optional[s
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
     }
-    with httpx.Client(timeout=10.0) as client:
+    with httpx.Client(timeout=timeout) as client:
         credits_resp = client.get(credits_url, headers=headers)
         credits_resp.raise_for_status()
         credits = (credits_resp.json() or {}).get("data") or {}
@@ -349,17 +354,18 @@ def fetch_account_usage(
     *,
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
+    timeout: float = 15.0,
 ) -> Optional[AccountUsageSnapshot]:
     normalized = str(provider or "").strip().lower()
     if normalized in {"", "auto", "custom"}:
         return None
     try:
         if normalized == "openai-codex":
-            return _fetch_codex_account_usage(base_url=base_url, api_key=api_key)
+            return _fetch_codex_account_usage(base_url=base_url, api_key=api_key, timeout=timeout)
         if normalized == "anthropic":
-            return _fetch_anthropic_account_usage()
+            return _fetch_anthropic_account_usage(timeout=timeout)
         if normalized == "openrouter":
-            return _fetch_openrouter_account_usage(base_url, api_key)
+            return _fetch_openrouter_account_usage(base_url, api_key, timeout=timeout)
     except Exception:
         return None
     return None

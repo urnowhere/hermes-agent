@@ -140,7 +140,27 @@ export interface McpServerStatus {
   transport: string
 }
 
+export type AccountLimitLevel = 'critical' | 'ok' | 'warn'
+
+export interface AccountLimitWindow {
+  full_label?: string
+  label: string
+  level?: AccountLimitLevel
+  remaining_percent: number
+  reset_at?: string
+  used_percent: number
+}
+
+export interface AccountLimitStatus {
+  credential_label?: string
+  label: string
+  level?: AccountLimitLevel
+  provider: string
+  windows: AccountLimitWindow[]
+}
+
 export interface SessionInfo {
+  account_limits?: AccountLimitStatus | null
   cwd?: string
   fast?: boolean
   lazy?: boolean
