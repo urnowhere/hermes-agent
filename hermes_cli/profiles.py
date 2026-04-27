@@ -424,8 +424,23 @@ def create_profile(
             )
 
     if clone_all and source_dir:
-        # Full copy of source profile
-        shutil.copytree(source_dir, profile_dir)
+        # Full copy of source profile, excluding infrastructure but keeping credentials
+        def _clone_all_ignore(directory: str, contents: list) -> set:
+            ignored = set()
+            for entry in contents:
+                if entry == "__pycache__" or entry.endswith((".sock", ".tmp")):
+                    ignored.add(entry)
+                elif entry in ("package.json", "package-lock.json"):
+                    ignored.add(entry)
+            
+            # Root-level exclusions: use export list but KEEP .env and auth.json
+            if Path(directory) == source_dir:
+                exclude_root = set(_DEFAULT_EXPORT_EXCLUDE_ROOT) - {".env", "auth.json"}
+                ignored.update(c for c in contents if c in exclude_root)
+            return ignored
+
+        shutil.copytree(source_dir, profile_dir, ignore=_clone_all_ignore)
+        
         # Strip runtime files
         for stale in _CLONE_ALL_STRIP:
             (profile_dir / stale).unlink(missing_ok=True)
