@@ -787,6 +787,17 @@ DEFAULT_CONFIG = {
         "orchestrator_enabled": True,  # kill switch for role="orchestrator"
     },
 
+    # Detached swarm foreman mode — a background duplicate that can orchestrate
+    # Hermes subagents plus CLI workers while the main chat stays free.
+    "swarm": {
+        "default_mode": "detached_foreman",
+        "max_workers": 10,
+        "max_iterations": 120,
+        "enable_hermes_workers": True,
+        "enable_claude_workers": True,
+        "enable_codex_workers": True,
+    },
+
     # Ephemeral prefill messages file — JSON list of {role, content} dicts
     # injected at the start of every API call for few-shot priming.
     # Never saved to sessions, logs, or trajectories.
@@ -2227,7 +2238,7 @@ def check_config_version() -> Tuple[int, int]:
 _KNOWN_ROOT_KEYS = {
     "_config_version", "model", "providers", "fallback_model",
     "fallback_providers", "credential_pool_strategies", "toolsets",
-    "agent", "terminal", "display", "compression", "delegation",
+    "agent", "terminal", "display", "compression", "delegation", "swarm",
     "auxiliary", "custom_providers", "context", "memory", "gateway",
     "sessions",
 }

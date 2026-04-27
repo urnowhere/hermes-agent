@@ -11,7 +11,7 @@ Tests are parametrized over platforms via the ``platform`` fixture in conftest.
 """
 
 import asyncio
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -105,6 +105,37 @@ class TestSlashCommands:
         send.assert_called_once()
         response_text = send.call_args[1].get("content") or send.call_args[0][1]
         assert "compress" in response_text.lower() or "context" in response_text.lower()
+
+    @pytest.mark.asyncio
+    async def test_swarm_start_runs_through_full_gateway_pipeline(self, adapter, runner, platform):
+        runner._background_tasks = set()
+        runner._run_swarm_task = AsyncMock(return_value=None)
+
+        with patch("gateway.run._load_gateway_config", return_value={"swarm": {"max_workers": 5}}), \
+             patch("tools.delegate_tool.list_active_subagents", return_value=[]):
+            send = await send_and_capture(adapter, "/swarm start investigate auth regressions", platform)
+
+        send.assert_called_once()
+        response_text = send.call_args[1].get("content") or send.call_args[0][1]
+        assert "Detached swarm started" in response_text
+        assert "Main Sub is running in the background" in response_text
+        assert "Worker budget: up to 5" in response_text
+        runner._run_swarm_task.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_swarm_stop_multiword_arg_returns_usage_through_full_pipeline(self, adapter, runner, platform):
+        runner._background_tasks = set()
+        runner._run_swarm_task = AsyncMock(return_value=None)
+
+        with patch("gateway.run._load_gateway_config", return_value={"swarm": {"max_workers": 5}}), \
+             patch("tools.delegate_tool.list_active_subagents", return_value=[]):
+            send = await send_and_capture(adapter, "/swarm stop the bleeding in auth", platform)
+
+        send.assert_called_once()
+        response_text = send.call_args[1].get("content") or send.call_args[0][1]
+        assert "Usage: /swarm stop <id>" in response_text
+        assert "use `/swarm start <prompt>`" in response_text
+        runner._run_swarm_task.assert_not_awaited()
 
 
 class TestSessionLifecycle:

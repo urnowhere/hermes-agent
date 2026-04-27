@@ -218,8 +218,8 @@ async def test_swarm_status_reports_pause_caps_and_active_subagents(monkeypatch)
     assert "Swarm Status" in result
     assert "**Paused:** Yes" in result
     assert "**Max depth:** 2" in result
-    assert "**Max concurrency:** 4" in result
-    assert "**Active subagents:** 1" in result
+    assert "**Delegate batch max concurrency:** 4" in result
+    assert "**Active swarm agents:** 1" in result
     assert "sa-0-abcd1234" in result
     assert "d0" in result
     assert "stalled=yes" in result

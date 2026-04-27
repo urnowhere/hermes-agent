@@ -1605,6 +1605,26 @@ class TestConcurrencyDefaults(unittest.TestCase):
         with patch.dict(os.environ, {"DELEGATION_MAX_CONCURRENT_CHILDREN": "12"}):
             self.assertEqual(_get_max_concurrent_children(), 12)
 
+    @patch("tools.delegate_tool._load_config", return_value={})
+    def test_parent_override_honored(self, mock_cfg):
+        parent = MagicMock()
+        parent._delegate_max_concurrent_children_override = 9
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(_get_max_concurrent_children(parent), 9)
+
+    @patch("tools.delegate_tool._load_config", return_value={"max_concurrent_children": 6})
+    def test_parent_override_beats_config(self, mock_cfg):
+        parent = MagicMock()
+        parent._delegate_max_concurrent_children_override = 8
+        self.assertEqual(_get_max_concurrent_children(parent), 8)
+
+    @patch("tools.delegate_tool._load_config", return_value={})
+    def test_invalid_parent_override_falls_back(self, mock_cfg):
+        parent = MagicMock()
+        parent._delegate_max_concurrent_children_override = "bad"
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(_get_max_concurrent_children(parent), 3)
+
     @patch("tools.delegate_tool._load_config",
            return_value={"max_concurrent_children": 6})
     def test_configured_value_returned(self, mock_cfg):

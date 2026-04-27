@@ -310,15 +310,34 @@ def _normalize_role(r: Optional[str]) -> str:
     return "leaf"
 
 
-def _get_max_concurrent_children() -> int:
-    """Read delegation.max_concurrent_children from config, falling back to
-    DELEGATION_MAX_CONCURRENT_CHILDREN env var, then the default (3).
+def _get_max_concurrent_children(parent_agent=None) -> int:
+    """Read the effective parallel child budget.
+
+    Precedence:
+    1. Parent-agent override (`_delegate_max_concurrent_children_override`) when set.
+    2. delegation.max_concurrent_children in config.yaml.
+    3. DELEGATION_MAX_CONCURRENT_CHILDREN env var.
+    4. Default (3).
 
     Users can raise this as high as they want; only the floor (1) is enforced.
-
-    Uses the same ``_load_config()`` path that the rest of ``delegate_task``
-    uses, keeping config priority consistent (config.yaml > env > default).
     """
+    if parent_agent is not None:
+        override = None
+        try:
+            parent_dict = object.__getattribute__(parent_agent, "__dict__")
+        except Exception:
+            parent_dict = None
+        if isinstance(parent_dict, dict) and "_delegate_max_concurrent_children_override" in parent_dict:
+            override = parent_dict.get("_delegate_max_concurrent_children_override")
+        if override is not None:
+            try:
+                return max(1, int(override))
+            except (TypeError, ValueError):
+                logger.warning(
+                    "parent override _delegate_max_concurrent_children_override=%r is not a valid integer; ignoring",
+                    override,
+                )
+
     cfg = _load_config()
     val = cfg.get("max_concurrent_children")
     if val is not None:
@@ -1061,6 +1080,12 @@ def _build_child_agent(
     child._subagent_id = subagent_id
     child._parent_subagent_id = parent_subagent_id
     child._subagent_goal = goal
+    try:
+        parent_dict = object.__getattribute__(parent_agent, "__dict__")
+    except Exception:
+        parent_dict = None
+    if isinstance(parent_dict, dict) and "_delegate_max_concurrent_children_override" in parent_dict:
+        child._delegate_max_concurrent_children_override = parent_dict["_delegate_max_concurrent_children_override"]
 
     # Share a credential pool with the child when possible so subagents can
     # rotate credentials on rate limits instead of getting pinned to one key.
@@ -1854,7 +1879,7 @@ def delegate_task(
         return tool_error(str(exc))
 
     # Normalize to task list
-    max_children = _get_max_concurrent_children()
+    max_children = _get_max_concurrent_children(parent_agent)
     if tasks and isinstance(tasks, list):
         if len(tasks) > max_children:
             return tool_error(
