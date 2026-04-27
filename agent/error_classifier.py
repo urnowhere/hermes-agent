@@ -323,6 +323,33 @@ _SSL_TRANSIENT_PATTERNS = [
 ]
 
 
+def is_transient_transport_error(error: Exception) -> bool:
+    """Cheap predicate for "should this be retried at the transport layer?"
+
+    Used by callers like the auxiliary compressor that don't need the full
+    ``classify_api_error`` failover machinery — they just need to know
+    whether ``RemoteProtocolError("incomplete chunked read")`` and friends
+    are worth a quick retry before giving up. Returns False for typed
+    errors that carry an explicit HTTP status, since those are server-side
+    decisions, not transport hiccups.
+    """
+    if error is None:
+        return False
+    if _extract_status_code(error) is not None:
+        return False
+    if isinstance(error, (TimeoutError, ConnectionError)):
+        return True
+    error_type = type(error).__name__
+    if error_type in _TRANSPORT_ERROR_TYPES:
+        return True
+    msg = str(error).lower()
+    if any(pat in msg for pat in _SERVER_DISCONNECT_PATTERNS):
+        return True
+    if any(pat in msg for pat in _SSL_TRANSIENT_PATTERNS):
+        return True
+    return False
+
+
 # ── Classification pipeline ─────────────────────────────────────────────
 
 def classify_api_error(

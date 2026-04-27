@@ -1128,3 +1128,41 @@ class TestRateLimitErrorWithoutStatusCode:
         e.status_code = None
         result = classify_api_error(e, provider="copilot", model="gpt-4o")
         assert result.reason != FailoverReason.rate_limit
+
+
+class TestIsTransientTransportError:
+    """Coverage for the helper used by callers (e.g. context_compressor)
+    that retry network hiccups before giving up. (#16670)"""
+
+    def test_incomplete_chunked_read_is_transient(self):
+        from agent.error_classifier import is_transient_transport_error
+        assert is_transient_transport_error(
+            Exception("peer closed connection without sending complete message body (incomplete chunked read)")
+        )
+
+    def test_remote_protocol_error_class_name_matches_registry(self):
+        from agent.error_classifier import is_transient_transport_error
+        assert is_transient_transport_error(RemoteProtocolError("server disconnected"))
+
+    def test_connection_error_is_transient(self):
+        from agent.error_classifier import is_transient_transport_error
+        assert is_transient_transport_error(ConnectionError("refused"))
+
+    def test_typed_http_error_is_not_transient(self):
+        """4xx/5xx are server-side decisions, not transport hiccups —
+        retrying them at this layer just amplifies user-visible errors."""
+        from agent.error_classifier import is_transient_transport_error
+        assert not is_transient_transport_error(
+            MockAPIError("forbidden", status_code=403)
+        )
+        assert not is_transient_transport_error(
+            MockAPIError("rate limited", status_code=429)
+        )
+
+    def test_unrelated_runtime_error_is_not_transient(self):
+        from agent.error_classifier import is_transient_transport_error
+        assert not is_transient_transport_error(ValueError("bad config"))
+
+    def test_none_is_not_transient(self):
+        from agent.error_classifier import is_transient_transport_error
+        assert not is_transient_transport_error(None)  # type: ignore[arg-type]
