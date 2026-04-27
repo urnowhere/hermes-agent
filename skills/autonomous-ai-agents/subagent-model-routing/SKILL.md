@@ -1,6 +1,6 @@
 ---
 name: subagent-model-routing
-description: Model selection guide for delegate_task and cron jobs — use openrouter/auto with a named whitelist. Updated with live OpenRouter pricing.
+description: Model selection guide for delegate_task and cron jobs. Tiers are LLM decision guides (not API constraints). Updated with live OpenRouter pricing.
 version: 2
 tags: [delegation, cost, models, routing, auto-router]
 ---
@@ -10,7 +10,7 @@ tags: [delegation, cost, models, routing, auto-router]
 > **MAINTENANCE NOTICE**
 > The whitelist tables and tier pricing in this skill are maintained by an automated weekly refresh cron job.
 > **Canonical source:** `scripts/refresh_openrouter_models.py` (`WHITELISTS` dict)
-> **Last updated:** 220426
+> **Last updated:** 260426-3
 > **Staleness warning:** If today's date is more than 10 days after the "Last updated" date above, treat the whitelist tables and pricing data as a starting point — verify against live OpenRouter pricing before making high-stakes routing decisions.
 > **Changes:** Never edit whitelist/tier sections manually. When changes are approved from the weekly cron report, patch BOTH this skill AND `scripts/refresh_openrouter_models.py → WHITELISTS` atomically in the same session, then update the "Last updated" date above.
 
@@ -35,7 +35,7 @@ delegate_task(goal="...", toolsets=["file", "terminal"])
 # Top-level override — all tasks use this model
 delegate_task(
     goal="...",
-    model="anthropic/claude-haiku-4-5",
+    model="anthropic/claude-haiku-4.5",
     provider="anthropic",
     toolsets=["file", "terminal"]
 )
@@ -63,13 +63,13 @@ delegate_task(
 ```python
 # WRONG — anthropic doesn't serve grok
 delegate_task(provider="anthropic", tasks=[
-    {"goal": "...", "model": "anthropic/claude-haiku-4-5"},  # ✅
+    {"goal": "...", "model": "anthropic/claude-haiku-4.5"},  # ✅
     {"goal": "...", "model": "x-ai/grok-4.1-fast"},          # ❌ 404
 ])
 
 # CORRECT — openrouter serves everything
 delegate_task(provider="openrouter", tasks=[
-    {"goal": "...", "model": "anthropic/claude-haiku-4-5"},
+    {"goal": "...", "model": "anthropic/claude-haiku-4.5"},
     {"goal": "...", "model": "x-ai/grok-4.1-fast"},
 ])
 ```
@@ -104,38 +104,56 @@ Intelligence synthesis   → grok-4.20                      → Premium  ← ONL
 
 ## Tier Reference
 
+> ⚠️ **These tiers are LLM decision guides, not API constraints.** The whitelist feature is not currently wired to the OpenRouter API. When you read these tiers, use them to decide which model to recommend or select for a subagent. Each model belongs to exactly one tier (Budget, Standard, or Premium). Coding overlaps all three tiers by design — it contains models from each.
+
+> **Canonical source:** `~/.hermes/scripts/refresh_openrouter_models.py → WHITELISTS`. See the WHITELISTS section below for the current authoritative lists.
+
 ### Budget — workhorse tasks, cron jobs, extraction
 Cost-efficient models for straightforward work. Use for anything that doesn't require deep reasoning or tight code integration.
 
 - `google/gemini-2.5-flash` — best all-round budget model, 1M context
-- `google/gemini-2.0-flash-lite-001` — cheapest useful model
+- `google/gemini-2.5-flash-lite` — lite but current
 - `x-ai/grok-4.1-fast` — fast, large context (2M), good quality
 - `openai/gpt-5-nano` — cheapest OpenAI option
+- `openai/gpt-5.4-nano` — slightly more capable nano
 - `meta-llama/llama-4-maverick` — open source, big context
 - `mistralai/devstral-small` — cheap coding specialist
 - `qwen/qwen3-coder-flash` — coding + huge context
+- `google/gemma-4-31b-it` — Google open model
+- `deepseek/deepseek-v4-flash` — ultra-cheap, 1M context
 
 ### Standard — most delegation tasks
-Use when Budget tier produces inconsistent results, or for code tasks.
+Use when Budget tier produces inconsistent results, or for tasks requiring reliable Anthropic/reasoning quality.
 
-**General:**
-- `anthropic/claude-haiku-4-5` — fast, reliable Anthropic quality
+- `anthropic/claude-haiku-4.5` — fast, reliable Anthropic quality
 - `openai/o4-mini` — reasoning specialist
-- `deepseek/deepseek-r1-0528` — strong open reasoning model
-- `google/gemini-2.5-pro` — Google flagship, 1M context
-
-**Coding (use for any task involving code writing or modification):**
-- `openai/gpt-5.1-codex-mini` — best cost/quality for code generation
-- `x-ai/grok-code-fast-1` — xAI code specialist
-- `qwen/qwen3-coder-flash` — code + huge context
-- `openai/gpt-5.1-codex` — full Codex for complex integration work
+- `qwen/qwq-32b` — open reasoning model
+- `deepseek/deepseek-v4-pro` — strong mid-range, 1M context
+- `openai/gpt-5.4-mini` — capable mid-range OpenAI
 
 ### Premium — reviews and high-stakes judgment
-Use for code review, architecture decisions, or when you want a trusted second opinion from a model with no skin in the game.
+Use for code review, architecture decisions, synthesis, or when you want a trusted second opinion.
 
+- `google/gemini-2.5-pro` — Google flagship, 1M context
+- `anthropic/claude-opus-4.7` — Opus-class Anthropic
+- `anthropic/claude-sonnet-4.6` — high-quality Anthropic
 - `x-ai/grok-4.20` — trusted third-party reviewer, 2M context
+- `x-ai/grok-4.20-multi-agent` — multi-agent Grok variant
 - `openai/o3` — deep reasoning
-- `anthropic/claude-sonnet-4` — high-quality Anthropic
+- `google/gemini-3.1-pro-preview` — next-gen Gemini Pro
+
+### Coding — anything touching code
+Coding specialists only. Overlaps with all three tiers intentionally. Use for any task involving writing, reviewing, or modifying code.
+
+- `x-ai/grok-code-fast-1` — xAI code specialist (Standard-tier cost)
+- `qwen/qwen3-coder-flash` — code + huge context (Budget-tier cost)
+- `qwen/qwen3-coder-next` — latest Qwen coder
+- `mistralai/devstral-small` — Mistral code, very cheap (Budget)
+- `mistralai/codestral-2508` — Mistral code flagship
+- `openai/gpt-5.1-codex-mini` — best cost/quality for code generation
+- `openai/gpt-5.1-codex` — full Codex for complex integration work
+- `anthropic/claude-sonnet-4.6` — maximum divergence review (Premium)
+- `anthropic/claude-opus-4.7` — Opus-class code judgment (Premium)
 
 ## Adversarial Code Review: Use a Different Coding Model, Not a Reasoning Model
 
@@ -214,7 +232,7 @@ Send Budget models to investigate first. Escalate to Standard or Premium only if
 result = delegate_task(goal="...", model="google/gemini-2.5-flash", provider="openrouter")
 # Round 2: only if needed
 if result_is_insufficient:
-    result = delegate_task(goal="...", model="anthropic/claude-haiku-4-5", provider="openrouter")
+    result = delegate_task(goal="...", model="anthropic/claude-haiku-4.5", provider="openrouter")
 ```
 
 ### Orchestrator-Direct
@@ -262,6 +280,12 @@ For automated background tasks (email scanning, file parsing, briefings), Budget
 **If `observability` is absent:** both the inline field and the `model_metadata_for_task.py` fallback script depend on the same observability plugin. Without the plugin, neither method works. Note this explicitly rather than silently omitting the metadata.
 
 The `model_observability` plugin (if installed) logs every API call to `~/.hermes/logs/model_usage.jsonl`. Each entry includes `model_request` (what was sent) and `model_response` (what actually responded). Always check this log after a delegation where the model mattered — OpenRouter's auto-router may resolve `openrouter/auto` to a different model than expected.
+
+## OpenRouter Model ID Notation Drift
+
+OpenRouter uses **dot notation** for versioned model IDs (e.g., `claude-sonnet-4.6`, `claude-opus-4.7`). Whitelists that store these with hyphens (`claude-sonnet-4-6`) will **silently fail** — the model lookup returns no match and subagent routing falls through to the auto-router or errors out with no visible warning.
+
+**Rule:** Always use the exact slug from the OpenRouter catalog. When in doubt, verify via the `/api/v1/models` endpoint or the weekly refresh cron report. The refresh script will flag missing models as ALERT — treat any "Missing Whitelisted Models" entry as breaking, not cosmetic.
 
 ## Mismatch Warnings
 
