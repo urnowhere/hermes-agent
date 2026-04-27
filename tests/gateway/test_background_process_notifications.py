@@ -32,6 +32,9 @@ class _FakeRegistry:
             return self._sessions.pop(0)
         return None
 
+    def is_completion_consumed(self, _session_id):
+        return False
+
 
 def _build_runner(monkeypatch, tmp_path, mode: str) -> GatewayRunner:
     """Create a GatewayRunner with a fake config for the given mode."""
@@ -337,6 +340,66 @@ async def test_inject_watch_notification_ignores_foreground_event_source(monkeyp
     # Must route to thread 42 (process origin), NOT some other thread
     assert synth_event.source.thread_id == "42"
     assert synth_event.source.user_id == "proc_owner"
+
+
+@pytest.mark.asyncio
+async def test_inject_watch_notification_drops_stale_boundary_after_reset(monkeypatch, tmp_path):
+    from gateway.session import SessionSource
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    adapter = runner.adapters[Platform.TELEGRAM]
+
+    runner.session_store._entries["agent:main:telegram:group:-100:42"] = SimpleNamespace(
+        session_id="sess-new",
+        origin=SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="-100",
+            chat_type="group",
+            thread_id="42",
+            user_id="proc_owner",
+            user_name="alice",
+        ),
+    )
+
+    evt = {
+        "session_id": "proc_stale_watch",
+        "session_key": "agent:main:telegram:group:-100:42",
+        "conversation_session_id": "sess-old",
+    }
+
+    await runner._inject_watch_notification("[SYSTEM: stale watch match]", evt)
+
+    adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_process_watcher_drops_completion_for_reset_session_boundary(monkeypatch, tmp_path):
+    import tools.process_registry as pr_module
+
+    sessions = [SimpleNamespace(output_buffer="done\n", exited=True, exit_code=0, command="echo hi")]
+    monkeypatch.setattr(pr_module, "process_registry", _FakeRegistry(sessions))
+
+    async def _instant_sleep(*_a, **_kw):
+        pass
+
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    adapter = runner.adapters[Platform.TELEGRAM]
+    runner.session_store._entries["agent:main:telegram:group:-100:42"] = SimpleNamespace(
+        session_id="sess-new",
+    )
+
+    watcher = _watcher_dict(session_id="proc_done")
+    watcher.update({
+        "session_key": "agent:main:telegram:group:-100:42",
+        "notify_on_complete": True,
+        "conversation_session_id": "sess-old",
+    })
+
+    await runner._run_process_watcher(watcher)
+
+    adapter.handle_message.assert_not_awaited()
 
 
 def test_build_process_event_source_returns_none_for_empty_evt(monkeypatch, tmp_path):

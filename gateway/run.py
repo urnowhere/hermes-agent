@@ -10370,6 +10370,7 @@ class GatewayRunner:
             user_id=str(context.source.user_id) if context.source.user_id else "",
             user_name=str(context.source.user_name) if context.source.user_name else "",
             session_key=context.session_key,
+            session_id=context.session_id,
         )
 
     def _clear_session_env(self, tokens: list) -> None:
@@ -10627,12 +10628,37 @@ class GatewayRunner:
             user_name=str(evt.get("user_name") or "").strip() or None,
         )
 
+    def _is_stale_process_notification(self, payload: dict) -> bool:
+        """Return True when a background-process event belongs to a superseded session."""
+        session_key = str(payload.get("session_key") or "").strip()
+        event_session_id = str(payload.get("conversation_session_id") or "").strip()
+        if not session_key or not event_session_id:
+            return False
+
+        try:
+            self.session_store._ensure_loaded()
+            entry = self.session_store._entries.get(session_key)
+        except Exception:
+            entry = None
+        current_session_id = str(getattr(entry, "session_id", "") or "").strip()
+        if current_session_id and current_session_id != event_session_id:
+            logger.info(
+                "Dropping stale process notification for %s: event session=%s current session=%s",
+                session_key[:40],
+                event_session_id,
+                current_session_id,
+            )
+            return True
+        return False
+
     async def _inject_watch_notification(self, synth_text: str, evt: dict) -> None:
         """Inject a watch-pattern notification as a synthetic message event.
 
         Routing must come from the queued watch event itself, not from whatever
         foreground message happened to be active when the queue was drained.
         """
+        if self._is_stale_process_notification(evt):
+            return
         source = self._build_process_event_source(evt)
         if not source:
             logger.warning(
@@ -10730,6 +10756,13 @@ class GatewayRunner:
                         f"Command: {session.command}\n"
                         f"Output:\n{_out}]"
                     )
+                    if self._is_stale_process_notification(watcher):
+                        logger.info(
+                            "Process %s finished after session boundary changed for %s — dropping stale agent notification",
+                            session_id,
+                            session_key[:40],
+                        )
+                        break
                     source = self._build_process_event_source({
                         "session_id": session_id,
                         "session_key": session_key,
@@ -10738,6 +10771,7 @@ class GatewayRunner:
                         "thread_id": thread_id,
                         "user_id": user_id,
                         "user_name": user_name,
+                        "conversation_session_id": watcher.get("conversation_session_id", ""),
                     })
                     if not source:
                         logger.warning(
