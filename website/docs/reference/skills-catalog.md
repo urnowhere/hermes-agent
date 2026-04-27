@@ -50,6 +50,7 @@ If a skill is missing from this list but present in the repo, the catalog is reg
 
 | Skill | Description | Path |
 |-------|-------------|------|
+| `duckdb-analytics` | Run analytical SQL with DuckDB over Parquet, CSV, and JSON - embedded OLAP, multi-file joins, window functions, and exports without a database server. Use for Parquet/CSV SQL, OLAP, and lightweight ETL. | `data-science/duckdb-analytics` |
 | [`jupyter-live-kernel`](/docs/user-guide/skills/bundled/data-science/data-science-jupyter-live-kernel) | Use a live Jupyter kernel for stateful, iterative Python execution via hamelnb. Load this skill when the task involves exploration, iteration, or inspecting intermediate results — data science, ML experimentation, API exploration, or bui... | `data-science/jupyter-live-kernel` |
 
 ## devops

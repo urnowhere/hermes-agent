@@ -78,6 +78,24 @@ def _clean_discord_id(entry: str) -> str:
     return entry.strip()
 
 
+def _discord_message_guild_id(message: Any) -> Optional[str]:
+    """Return ``guild`` id for session metadata (string) or None.
+
+    Real discord.py :class:`discord.Message` objects set ``.guild``; test doubles
+    and partial mocks may only attach a guild to ``message.channel`` — mirror
+    that fallback so unit tests do not need to duplicate ``Message.guild``.
+    """
+    guild = getattr(message, "guild", None)
+    if guild is None:
+        channel = getattr(message, "channel", None)
+        if channel is not None:
+            guild = getattr(channel, "guild", None)
+    if guild is None:
+        return None
+    raw_id = getattr(guild, "id", None)
+    return str(raw_id) if raw_id is not None else None
+
+
 def check_discord_requirements() -> bool:
     """Check if Discord dependencies are available."""
     return DISCORD_AVAILABLE
@@ -3294,7 +3312,6 @@ class DiscordAdapter(BasePlatformAdapter):
         chat_topic = self._get_effective_topic(message.channel, is_thread=is_thread)
 
         # Build source
-        guild = getattr(message, "guild", None)
         source = self.build_source(
             chat_id=str(effective_channel.id),
             chat_name=chat_name,
@@ -3304,7 +3321,7 @@ class DiscordAdapter(BasePlatformAdapter):
             thread_id=thread_id,
             chat_topic=chat_topic,
             is_bot=getattr(message.author, "bot", False),
-            guild_id=str(guild.id) if guild else None,
+            guild_id=_discord_message_guild_id(message),
             parent_chat_id=parent_channel_id,
             message_id=str(message.id),
         )

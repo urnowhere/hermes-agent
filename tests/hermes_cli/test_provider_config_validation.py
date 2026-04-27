@@ -86,10 +86,12 @@ class TestNormalizeCustomProviderEntry:
             "unknownField": "value",
             "anotherBad": 42,
         }
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.WARNING, logger="hermes_cli.config"):
             result = _normalize_custom_provider_entry(entry, provider_key="test")
         assert result is not None
-        assert any("unknown config keys" in r.message.lower() for r in caplog.records)
+        assert any(
+            "unknown config keys" in r.getMessage().lower() for r in caplog.records
+        )
 
     def test_camel_case_warning_logged(self, caplog):
         """camelCase alias mapping should produce a warning."""
@@ -97,10 +99,14 @@ class TestNormalizeCustomProviderEntry:
             "baseUrl": "https://api.example.com/v1",
             "apiKey": "sk-test-key",
         }
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.WARNING, logger="hermes_cli.config"):
             result = _normalize_custom_provider_entry(entry, provider_key="test")
         assert result is not None
-        camel_warnings = [r for r in caplog.records if "camelcase" in r.message.lower() or "auto-mapped" in r.message.lower()]
+        camel_warnings = [
+            r
+            for r in caplog.records
+            if "camelcase" in r.getMessage().lower() or "auto-mapped" in r.getMessage().lower()
+        ]
         assert len(camel_warnings) >= 1
 
     def test_snake_case_takes_precedence_over_camel(self):

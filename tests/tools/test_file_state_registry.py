@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -215,13 +216,35 @@ class FileToolsIntegrationTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
+        # ShellFileOperations uses POSIX coreutils (wc, sed, head) inside the
+        # local terminal backend. CI is Linux; skip on hosts without `wc` so
+        # Windows without Git Bash/MSYS does not produce false "file not found".
+        if not shutil.which("wc"):
+            self.skipTest("POSIX wc not on PATH (ShellFileOperations integration is CI/Linux-oriented)")
+
+        # Hermetic terminal backend: matches tests/conftest.py and .github/workflows/tests.yml
+        # so these tests do not inherit TERMINAL_ENV=modal from the shell.
+        self._prev_hermetic: dict[str, str | None] = {}
+        for _k in ("TERMINAL_ENV", "TERMINAL_MODAL_MODE"):
+            self._prev_hermetic[_k] = os.environ.get(_k)
+        os.environ["TERMINAL_ENV"] = "local"
+        os.environ["TERMINAL_MODAL_MODE"] = "auto"
+        self._hermetic_env_applied = True
+
         file_state.get_registry().clear()
         self._tmpdir = tempfile.mkdtemp(prefix="hermes_file_state_int_")
 
     def tearDown(self) -> None:
         import shutil
-        shutil.rmtree(self._tmpdir, ignore_errors=True)
+        if hasattr(self, "_tmpdir") and self._tmpdir:
+            shutil.rmtree(self._tmpdir, ignore_errors=True)
         file_state.get_registry().clear()
+        if getattr(self, "_hermetic_env_applied", False):
+            for _k, _v in self._prev_hermetic.items():
+                if _v is None:
+                    os.environ.pop(_k, None)
+                else:
+                    os.environ[_k] = _v
 
     def _write_seed(self, name: str, content: str = "seed\n") -> str:
         p = os.path.join(self._tmpdir, name)

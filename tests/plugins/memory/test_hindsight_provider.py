@@ -362,7 +362,13 @@ class TestPostSetup:
         hermes_home = tmp_path / "hermes-home"
         user_home = tmp_path / "user-home"
         user_home.mkdir()
-        monkeypatch.setenv("HOME", str(user_home))
+        u = str(user_home)
+        monkeypatch.setenv("HOME", u)
+        if sys.platform == "win32":
+            # pathlib.Path.home() prefers USERPROFILE on Windows.
+            monkeypatch.setenv("USERPROFILE", u)
+            monkeypatch.setenv("HOMEDRIVE", "")
+            monkeypatch.setenv("HOMEPATH", u)
 
         selections = iter([1, 0])  # local_embedded, openai
         monkeypatch.setattr("hermes_cli.memory_setup._curses_select", lambda *args, **kwargs: next(selections))

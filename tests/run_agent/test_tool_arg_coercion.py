@@ -65,9 +65,10 @@ class TestCoerceNumber:
         assert _coerce_number("1e5") == 100000
 
     def test_inf_stays_string_for_integer_only(self):
-        """Infinity should not be converted to int."""
-        result = _coerce_number("inf")
-        assert result == float("inf")
+        """Infinity/NaN stay as the original string (not JSON-serializable as float)."""
+        assert _coerce_number("inf") == "inf"
+        assert _coerce_number("-inf") == "-inf"
+        assert _coerce_number("nan") == "nan"
 
     def test_negative_float(self):
         assert _coerce_number("-2.5") == -2.5

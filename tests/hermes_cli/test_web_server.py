@@ -1847,6 +1847,7 @@ class TestPtyWebSocket:
     def test_resize_escape_is_forwarded(self, monkeypatch):
         # Resize escape gets intercepted and applied via TIOCSWINSZ,
         # then ``tput cols/lines`` reports the new dimensions back.
+        monkeypatch.setenv("TERM", "xterm")
         monkeypatch.setattr(
             self.ws_module,
             "_resolve_chat_argv",

@@ -280,6 +280,13 @@ def _hermetic_environment(tmp_path, monkeypatch):
     monkeypatch.setenv("AWS_METADATA_SERVICE_TIMEOUT", "1")
     monkeypatch.setenv("AWS_METADATA_SERVICE_NUM_ATTEMPTS", "1")
 
+    # 4c. Terminal sandbox: default to local + auto Modal mode. Developer shells
+    #     or CI may export TERMINAL_ENV=modal with TERMINAL_MODAL_MODE=direct;
+    #     without Modal credentials, file_tools / tool registry would drop
+    #     terminal + most file tools and fail unrelated tests.
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+    monkeypatch.setenv("TERMINAL_MODAL_MODE", "auto")
+
     # 5. Reset plugin singleton so tests don't leak plugins from
     #    ~/.hermes/plugins/ (which, per step 3, is now empty — but the
     #    singleton might still be cached from a previous test).
