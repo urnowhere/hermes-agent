@@ -133,8 +133,9 @@ def _normalize_multimodal_content(content: Any) -> Any:
     Returns a plain string when the content is text-only, or a list of
     ``{"type": "text"|"image_url", ...}`` parts when images are present.
     The output shape is the native OpenAI Chat Completions vision format,
-    which the agent pipeline accepts verbatim (OpenAI-wire providers) or
-    converts (``_preprocess_anthropic_content`` for Anthropic).
+    which the agent pipeline accepts verbatim, or converts at the API
+    boundary via ``_preprocess_multimodal_content_to_text`` when the active
+    provider/model cannot consume native image parts.
 
     Raises ``ValueError`` with an OpenAI-style code on invalid input:
       * ``unsupported_content_type`` — file/input_file/file_id parts, or

@@ -1223,10 +1223,13 @@ class AIAgent:
         self._persist_user_message_idx = None
         self._persist_user_message_override = None
 
-        # Cache anthropic image-to-text fallbacks per image payload/URL so a
-        # single tool loop does not repeatedly re-run auxiliary vision on the
-        # same image history.
-        self._anthropic_image_fallback_cache: Dict[str, str] = {}
+        # Cache image-to-text bridge results per image payload/URL so a
+        # single tool loop does not repeatedly re-run auxiliary vision on
+        # the same image history.  Used by the multimodal-to-text bridge
+        # applied to api_messages before sending to providers that do not
+        # accept native image parts (or where the configured main model
+        # cannot consume vision content).
+        self._image_text_bridge_cache: Dict[str, str] = {}
 
         # Initialize LLM client via centralized provider router.
         # The router handles auth resolution, base URL, headers, and
@@ -7226,15 +7229,15 @@ class AIAgent:
             "image/jpeg": ".jpg",
             "image/jpg": ".jpg",
         }.get(mime, ".jpg")
-        tmp = tempfile.NamedTemporaryFile(prefix="anthropic_image_", suffix=suffix, delete=False)
+        tmp = tempfile.NamedTemporaryFile(prefix="multimodal_image_", suffix=suffix, delete=False)
         with tmp:
             tmp.write(base64.b64decode(data))
         path = Path(tmp.name)
         return str(path), path
 
-    def _describe_image_for_anthropic_fallback(self, image_url: str, role: str) -> str:
+    def _describe_image_for_text_bridge(self, image_url: str, role: str) -> str:
         cache_key = hashlib.sha256(str(image_url or "").encode("utf-8")).hexdigest()
-        cached = self._anthropic_image_fallback_cache.get(cache_key)
+        cached = self._image_text_bridge_cache.get(cache_key)
         if cached:
             return cached
 
@@ -7280,10 +7283,10 @@ class AIAgent:
                 f"\n[If you need a closer look, use vision_analyze with image_url: {vision_source}]"
             )
 
-        self._anthropic_image_fallback_cache[cache_key] = note
+        self._image_text_bridge_cache[cache_key] = note
         return note
 
-    def _preprocess_anthropic_content(self, content: Any, role: str) -> Any:
+    def _preprocess_multimodal_content_to_text(self, content: Any, role: str) -> Any:
         if not self._content_has_image_parts(content):
             return content
 
@@ -7308,7 +7311,7 @@ class AIAgent:
                 image_data = part.get("image_url", {})
                 image_url = image_data.get("url", "") if isinstance(image_data, dict) else str(image_data or "")
                 if image_url:
-                    image_notes.append(self._describe_image_for_anthropic_fallback(image_url, role))
+                    image_notes.append(self._describe_image_for_text_bridge(image_url, role))
                 else:
                     image_notes.append("[An image was attached but no image source was available.]")
                 continue
@@ -7325,7 +7328,7 @@ class AIAgent:
             return prefix
         if suffix:
             return suffix
-        return "[A multimodal message was converted to text for Anthropic compatibility.]"
+        return "[A multimodal message was converted to text for provider compatibility.]"
 
     def _get_transport(self, api_mode: str = None):
         """Return the cached transport for the given (or current) api_mode.
@@ -7345,7 +7348,19 @@ class AIAgent:
             cache[mode] = t
         return t
 
-    def _prepare_anthropic_messages_for_api(self, api_messages: list) -> list:
+    def _prepare_messages_with_text_bridge(self, api_messages: list) -> list:
+        """Convert any multimodal image parts in api_messages to text notes.
+
+        Operates on a deep copy so the agent's internal ``messages`` history
+        (which may legitimately contain ``image_url`` / ``input_image`` parts
+        for native-vision providers) is never mutated.  When no message in
+        ``api_messages`` carries image parts, returns the input unchanged.
+
+        Used by both the Anthropic and chat_completions branches of
+        ``_build_api_kwargs`` so historical image content survives multi-turn
+        conversations even when the active main model does not support
+        native vision input.
+        """
         if not any(
             isinstance(msg, dict) and self._content_has_image_parts(msg.get("content"))
             for msg in api_messages
@@ -7356,11 +7371,39 @@ class AIAgent:
         for msg in transformed:
             if not isinstance(msg, dict):
                 continue
-            msg["content"] = self._preprocess_anthropic_content(
+            msg["content"] = self._preprocess_multimodal_content_to_text(
                 msg.get("content"),
                 str(msg.get("role", "user") or "user"),
             )
         return transformed
+
+    def _chat_model_likely_supports_native_vision(self, model_name: str) -> bool:
+        """Heuristic gate for native image-part support in chat_completions.
+
+        This deliberately stays lightweight (no catalog lookup, no config
+        schema expansion).  If the active model family is known to be vision-
+        capable, keep native multimodal content blocks.  Otherwise, bridge
+        image parts to text for compatibility.
+        """
+        name = (model_name or "").strip().lower()
+        if not name:
+            return False
+        known_vision_tokens = (
+            "gpt-4o",
+            "gpt-4.1",
+            "gemini",
+            "qwen-vl",
+            "qvq",
+            "llava",
+            "pixtral",
+            "internvl",
+            "minicpm-v",
+            "moondream",
+            "kimi-vl",
+            "glm-4v",
+            "grok-vision",
+        )
+        return any(token in name for token in known_vision_tokens)
 
     def _anthropic_preserve_dots(self) -> bool:
         """True when using an anthropic-compatible endpoint that preserves dots in model names.
@@ -7462,7 +7505,7 @@ class AIAgent:
         """Build the keyword arguments dict for the active API mode."""
         if self.api_mode == "anthropic_messages":
             _transport = self._get_transport()
-            anthropic_messages = self._prepare_anthropic_messages_for_api(api_messages)
+            anthropic_messages = self._prepare_messages_with_text_bridge(api_messages)
             ctx_len = getattr(self, "context_compressor", None)
             ctx_len = ctx_len.context_length if ctx_len else None
             ephemeral_out = getattr(self, "_ephemeral_max_output_tokens", None)
@@ -7591,9 +7634,16 @@ class AIAgent:
         if _ephemeral_out is not None:
             self._ephemeral_max_output_tokens = None
 
+        # Bridge only when the active chat model is unlikely to accept native
+        # image parts.  Vision-capable families keep native multimodal blocks.
+        if self._chat_model_likely_supports_native_vision(self.model):
+            chat_messages = api_messages
+        else:
+            chat_messages = self._prepare_messages_with_text_bridge(api_messages)
+
         return _ct.build_kwargs(
             model=self.model,
-            messages=api_messages,
+            messages=chat_messages,
             tools=self.tools,
             timeout=self._resolved_api_call_timeout(),
             max_tokens=self.max_tokens,

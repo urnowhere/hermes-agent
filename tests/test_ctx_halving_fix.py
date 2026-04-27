@@ -175,7 +175,7 @@ class TestEphemeralMaxOutputTokens:
         agent.context_compressor = compressor
 
         # Stub out the internal message-preparation helper
-        agent._prepare_anthropic_messages_for_api = MagicMock(
+        agent._prepare_messages_with_text_bridge = MagicMock(
             return_value=[{"role": "user", "content": "hi"}]
         )
         agent._anthropic_preserve_dots = MagicMock(return_value=False)
@@ -249,7 +249,7 @@ class TestContextNotHalvedOnOutputCapError:
         compressor.threshold_percent = 0.75
         agent.context_compressor = compressor
 
-        agent._prepare_anthropic_messages_for_api = MagicMock(
+        agent._prepare_messages_with_text_bridge = MagicMock(
             return_value=[{"role": "user", "content": "hi"}]
         )
         agent._anthropic_preserve_dots = MagicMock(return_value=False)

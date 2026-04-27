@@ -3757,6 +3757,178 @@ class TestAnthropicImageFallback:
         assert mock_vision.await_count == 1
 
 
+class TestChatCompletionsImageBridge:
+    """Multimodal text bridge for chat_completions providers.
+
+    Mirrors the Anthropic behavior so historical messages carrying
+    image_url / input_image parts survive multi-turn conversations even
+    when the active model does not consume native vision input.
+    """
+
+    def _captured_messages(self, agent, api_messages, vision_result):
+        """Run _build_api_kwargs through chat_completions and return the
+        message list seen by the transport.
+        """
+        from agent.transports.chat_completions import ChatCompletionsTransport
+
+        with (
+            patch(
+                "tools.vision_tools.vision_analyze_tool",
+                new=AsyncMock(return_value=json.dumps(vision_result)),
+            ),
+            patch.object(
+                ChatCompletionsTransport, "build_kwargs", autospec=True
+            ) as mock_build,
+        ):
+            mock_build.return_value = {"model": agent.model, "messages": []}
+            agent._build_api_kwargs(api_messages)
+
+        captured = mock_build.call_args.kwargs.get("messages")
+        if captured is None:
+            captured = mock_build.call_args.args[2]
+        return captured
+
+    def test_multimodal_user_image_in_history_is_converted_to_text(self, agent):
+        agent.api_mode = "chat_completions"
+        api_messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Look at this screenshot."},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/shot.png"}},
+                ],
+            },
+            {"role": "assistant", "content": "Got it."},
+            {"role": "user", "content": "What did the chart say again?"},
+        ]
+
+        captured = self._captured_messages(
+            agent,
+            api_messages,
+            {"success": True, "analysis": "A bar chart titled Q3 revenue."},
+        )
+
+        bridged_first = captured[0]["content"]
+        assert isinstance(bridged_first, str)
+        assert "A bar chart titled Q3 revenue." in bridged_first
+        assert "Look at this screenshot." in bridged_first
+        assert "vision_analyze with image_url: https://example.com/shot.png" in bridged_first
+        assert captured[1] == {"role": "assistant", "content": "Got it."}
+        assert captured[2] == {"role": "user", "content": "What did the chart say again?"}
+
+    def test_multi_turn_history_uses_cached_image_analysis(self, agent):
+        agent.api_mode = "chat_completions"
+        url = "https://example.com/shot.png"
+        api_messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "first turn"},
+                    {"type": "image_url", "image_url": {"url": url}},
+                ],
+            },
+            {"role": "assistant", "content": "ok"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "second turn references the same image"},
+                    {"type": "image_url", "image_url": {"url": url}},
+                ],
+            },
+        ]
+
+        from agent.transports.chat_completions import ChatCompletionsTransport
+
+        mock_vision = AsyncMock(
+            return_value=json.dumps({"success": True, "analysis": "Same image."})
+        )
+        with (
+            patch("tools.vision_tools.vision_analyze_tool", new=mock_vision),
+            patch.object(
+                ChatCompletionsTransport, "build_kwargs", autospec=True
+            ) as mock_build,
+        ):
+            mock_build.return_value = {"model": agent.model, "messages": []}
+            agent._build_api_kwargs(api_messages)
+
+        assert mock_vision.await_count == 1
+
+    def test_text_only_history_is_passed_through_unchanged(self, agent):
+        agent.api_mode = "chat_completions"
+        api_messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ]
+
+        from agent.transports.chat_completions import ChatCompletionsTransport
+
+        with patch.object(
+            ChatCompletionsTransport, "build_kwargs", autospec=True
+        ) as mock_build:
+            mock_build.return_value = {"model": agent.model, "messages": []}
+            agent._build_api_kwargs(api_messages)
+
+        captured = mock_build.call_args.kwargs.get("messages")
+        if captured is None:
+            captured = mock_build.call_args.args[2]
+        assert captured is api_messages
+
+    def test_internal_history_is_not_mutated_by_bridge(self, agent):
+        """The agent's persisted messages must keep their original
+        multimodal content list — only the API-call-time copy is bridged.
+        """
+        agent.api_mode = "chat_completions"
+        original_part = {"type": "image_url", "image_url": {"url": "https://example.com/shot.png"}}
+        api_messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "preserve me"},
+                    original_part,
+                ],
+            },
+        ]
+
+        self._captured_messages(
+            agent,
+            api_messages,
+            {"success": True, "analysis": "Preserved."},
+        )
+
+        assert isinstance(api_messages[0]["content"], list)
+        assert api_messages[0]["content"][1] is original_part
+
+    def test_vision_capable_chat_model_keeps_native_image_parts(self, agent):
+        agent.api_mode = "chat_completions"
+        agent.model = "gpt-4o-mini"
+        api_messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "inspect this"},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/vision.png"}},
+                ],
+            }
+        ]
+
+        from agent.transports.chat_completions import ChatCompletionsTransport
+
+        with (
+            patch("tools.vision_tools.vision_analyze_tool", new=AsyncMock()) as mock_vision,
+            patch.object(
+                ChatCompletionsTransport, "build_kwargs", autospec=True
+            ) as mock_build,
+        ):
+            mock_build.return_value = {"model": agent.model, "messages": []}
+            agent._build_api_kwargs(api_messages)
+
+        captured = mock_build.call_args.kwargs.get("messages")
+        if captured is None:
+            captured = mock_build.call_args.args[2]
+        assert captured is api_messages
+        assert mock_vision.await_count == 0
+
+
 class TestFallbackAnthropicProvider:
     """Bug fix: _try_activate_fallback had no case for anthropic provider."""
 
