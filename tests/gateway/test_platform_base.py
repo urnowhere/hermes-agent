@@ -370,6 +370,31 @@ class TestExtractMedia:
         assert media == []
         assert f"MEDIA:{secret}" in cleaned
 
+    def test_media_tag_rejects_arbitrary_existing_path_without_extension(
+        self, tmp_path, monkeypatch
+    ):
+        self._safe_media_file(tmp_path, monkeypatch, "allowed.png")
+        host_file = tmp_path / "host-account-metadata"
+        host_file.write_text("local account metadata should not be delivered")
+
+        media, cleaned = BasePlatformAdapter.extract_media(f"MEDIA:{host_file}")
+
+        assert media == []
+        assert f"MEDIA:{host_file}" in cleaned
+
+    def test_media_tag_rejects_unsafe_path_even_inside_code_block(
+        self, tmp_path, monkeypatch
+    ):
+        self._safe_media_file(tmp_path, monkeypatch, "allowed.png")
+        host_file = tmp_path / "host-account-metadata"
+        host_file.write_text("local account metadata should not be delivered")
+        content = f"```text\nMEDIA:{host_file}\n```"
+
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+
+        assert media == []
+        assert f"MEDIA:{host_file}" in cleaned
+
     def test_media_tag_rejects_symlink_escape(self, tmp_path, monkeypatch):
         root = tmp_path / "media-cache"
         root.mkdir()
