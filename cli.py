@@ -2294,6 +2294,7 @@ class HermesCLI:
         # Background task tracking: {task_id: threading.Thread}
         self._background_tasks: Dict[str, threading.Thread] = {}
         self._background_task_counter = 0
+        self._last_session_boundary_thread: Optional[threading.Thread] = None
 
     def _invalidate(self, min_interval: float = 0.25) -> None:
         """Throttled UI repaint — prevents terminal blinking on slow/SSH connections."""
@@ -4929,11 +4930,38 @@ class HermesCLI:
         except Exception:
             pass
 
+    def _launch_session_boundary_memory_flush(self, history_snapshot: list) -> None:
+        """Kick old-session memory extraction off-thread so /new can feel immediate."""
+        self._last_session_boundary_thread = None
+        agent = getattr(self, "agent", None)
+        if not agent or not history_snapshot:
+            return
+
+        def _run_boundary_flush():
+            if hasattr(agent, "flush_memories"):
+                try:
+                    agent.flush_memories(history_snapshot)
+                except (Exception, KeyboardInterrupt):
+                    pass
+            if hasattr(agent, "commit_memory_session"):
+                try:
+                    agent.commit_memory_session(history_snapshot)
+                except (Exception, KeyboardInterrupt):
+                    pass
+
+        thread = threading.Thread(
+            target=_run_boundary_flush,
+            daemon=True,
+            name=f"session-boundary-flush-{(getattr(agent, 'session_id', '') or 'unknown')[:24]}",
+        )
+        self._last_session_boundary_thread = thread
+        thread.start()
+
     def new_session(self, silent=False):
         """Start a fresh session with a new session ID and cleared agent state."""
         if self.agent and self.conversation_history:
-            # Trigger memory extraction on the old session before session_id rotates.
-            self.agent.commit_memory_session(self.conversation_history)
+            # Trigger memory extraction on the old session without blocking session rotation.
+            self._launch_session_boundary_memory_flush(list(self.conversation_history))
             self._notify_session_boundary("on_session_finalize")
         elif self.agent:
             # First session or empty history — still finalize the old session
