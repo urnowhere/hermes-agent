@@ -21,6 +21,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 _IS_WINDOWS = platform.system() == "Windows"
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _LAST_EXPANDED_CONFIG_BY_PATH: Dict[str, Any] = {}
+_CONFIG_LOCK = threading.RLock()
 # Env var names written to .env that aren't in OPTIONAL_ENV_VARS
 # (managed by setup/provider flows directly).
 _EXTRA_ENV_KEYS = frozenset({
@@ -3312,43 +3314,45 @@ def read_raw_config() -> Dict[str, Any]:
     single value and don't want the overhead of ``load_config()``'s deep-merge
     + migration pipeline.
     """
-    try:
-        config_path = get_config_path()
-        if config_path.exists():
-            with open(config_path, encoding="utf-8") as f:
-                return yaml.safe_load(f) or {}
-    except Exception:
-        pass
-    return {}
+    with _CONFIG_LOCK:
+        try:
+            config_path = get_config_path()
+            if config_path.exists():
+                with open(config_path, encoding="utf-8") as f:
+                    return yaml.safe_load(f) or {}
+        except Exception:
+            pass
+        return {}
 
 
 def load_config() -> Dict[str, Any]:
     """Load configuration from ~/.hermes/config.yaml."""
-    ensure_hermes_home()
-    config_path = get_config_path()
-    
-    config = copy.deepcopy(DEFAULT_CONFIG)
-    
-    if config_path.exists():
-        try:
-            with open(config_path, encoding="utf-8") as f:
-                user_config = yaml.safe_load(f) or {}
+    with _CONFIG_LOCK:
+        ensure_hermes_home()
+        config_path = get_config_path()
+        
+        config = copy.deepcopy(DEFAULT_CONFIG)
+        
+        if config_path.exists():
+            try:
+                with open(config_path, encoding="utf-8") as f:
+                    user_config = yaml.safe_load(f) or {}
 
-            if "max_turns" in user_config:
-                agent_user_config = dict(user_config.get("agent") or {})
-                if agent_user_config.get("max_turns") is None:
-                    agent_user_config["max_turns"] = user_config["max_turns"]
-                user_config["agent"] = agent_user_config
-                user_config.pop("max_turns", None)
+                if "max_turns" in user_config:
+                    agent_user_config = dict(user_config.get("agent") or {})
+                    if agent_user_config.get("max_turns") is None:
+                        agent_user_config["max_turns"] = user_config["max_turns"]
+                    user_config["agent"] = agent_user_config
+                    user_config.pop("max_turns", None)
 
-            config = _deep_merge(config, user_config)
-        except Exception as e:
-            print(f"Warning: Failed to load config: {e}")
+                config = _deep_merge(config, user_config)
+            except Exception as e:
+                print(f"Warning: Failed to load config: {e}")
 
-    normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
-    expanded = _expand_env_vars(normalized)
-    _LAST_EXPANDED_CONFIG_BY_PATH[str(config_path)] = copy.deepcopy(expanded)
-    return expanded
+        normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
+        expanded = _expand_env_vars(normalized)
+        _LAST_EXPANDED_CONFIG_BY_PATH[str(config_path)] = copy.deepcopy(expanded)
+        return expanded
 
 
 _SECURITY_COMMENT = """
@@ -3424,40 +3428,41 @@ _COMMENTED_SECTIONS = """
 
 def save_config(config: Dict[str, Any]):
     """Save configuration to ~/.hermes/config.yaml."""
-    if is_managed():
-        managed_error("save configuration")
-        return
-    from utils import atomic_yaml_write
+    with _CONFIG_LOCK:
+        if is_managed():
+            managed_error("save configuration")
+            return
+        from utils import atomic_yaml_write
 
-    ensure_hermes_home()
-    config_path = get_config_path()
-    current_normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
-    normalized = current_normalized
-    raw_existing = _normalize_root_model_keys(_normalize_max_turns_config(read_raw_config()))
-    if raw_existing:
-        normalized = _preserve_env_ref_templates(
+        ensure_hermes_home()
+        config_path = get_config_path()
+        current_normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
+        normalized = current_normalized
+        raw_existing = _normalize_root_model_keys(_normalize_max_turns_config(read_raw_config()))
+        if raw_existing:
+            normalized = _preserve_env_ref_templates(
+                normalized,
+                raw_existing,
+                _LAST_EXPANDED_CONFIG_BY_PATH.get(str(config_path)),
+            )
+
+        # Build optional commented-out sections for features that are off by
+        # default or only relevant when explicitly configured.
+        parts = []
+        sec = normalized.get("security", {})
+        if not sec or sec.get("redact_secrets") is None:
+            parts.append(_SECURITY_COMMENT)
+        fb = normalized.get("fallback_model", {})
+        if not fb or not isinstance(fb, dict) or not (fb.get("provider") and fb.get("model")):
+            parts.append(_FALLBACK_COMMENT)
+
+        atomic_yaml_write(
+            config_path,
             normalized,
-            raw_existing,
-            _LAST_EXPANDED_CONFIG_BY_PATH.get(str(config_path)),
+            extra_content="".join(parts) if parts else None,
         )
-
-    # Build optional commented-out sections for features that are off by
-    # default or only relevant when explicitly configured.
-    parts = []
-    sec = normalized.get("security", {})
-    if not sec or sec.get("redact_secrets") is None:
-        parts.append(_SECURITY_COMMENT)
-    fb = normalized.get("fallback_model", {})
-    if not fb or not isinstance(fb, dict) or not (fb.get("provider") and fb.get("model")):
-        parts.append(_FALLBACK_COMMENT)
-
-    atomic_yaml_write(
-        config_path,
-        normalized,
-        extra_content="".join(parts) if parts else None,
-    )
-    _secure_file(config_path)
-    _LAST_EXPANDED_CONFIG_BY_PATH[str(config_path)] = copy.deepcopy(current_normalized)
+        _secure_file(config_path)
+        _LAST_EXPANDED_CONFIG_BY_PATH[str(config_path)] = copy.deepcopy(current_normalized)
 
 
 def load_env() -> Dict[str, str]:
