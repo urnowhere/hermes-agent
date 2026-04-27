@@ -5,7 +5,7 @@ from unittest.mock import patch, MagicMock
 from hermes_cli.models import (
     OPENROUTER_MODELS, fetch_openrouter_models, model_ids, detect_provider_for_model,
     is_nous_free_tier, partition_nous_models_by_tier,
-    check_nous_free_tier, _FREE_TIER_CACHE_TTL,
+    check_nous_free_tier, _FREE_TIER_CACHE_TTL, model_supports_fast_mode,
 )
 import hermes_cli.models as _models_mod
 
@@ -15,6 +15,14 @@ LIVE_OPENROUTER_MODELS = [
     ("nvidia/nemotron-3-super-120b-a12b:free", "free"),
 ]
 
+
+
+class TestModelFastMode:
+    def test_gpt_55_supports_fast_mode(self):
+        assert model_supports_fast_mode("gpt-5.5") is True
+
+    def test_prefixed_gpt_55_supports_fast_mode(self):
+        assert model_supports_fast_mode("openai-codex/gpt-5.5") is True
 
 
 class TestModelIds:
