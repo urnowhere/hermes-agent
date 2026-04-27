@@ -3,6 +3,72 @@
 from types import SimpleNamespace
 
 
+class TestResolveApiKey:
+    """Test _resolve_api_key with various config shapes."""
+
+    def test_returns_api_key_from_root(self, monkeypatch):
+        import plugins.memory.honcho.cli as honcho_cli
+        monkeypatch.setattr(honcho_cli, "_host_key", lambda: "hermes")
+        monkeypatch.delenv("HONCHO_API_KEY", raising=False)
+        assert honcho_cli._resolve_api_key({"apiKey": "root-key"}) == "root-key"
+
+    def test_returns_api_key_from_host_block(self, monkeypatch):
+        import plugins.memory.honcho.cli as honcho_cli
+        monkeypatch.setattr(honcho_cli, "_host_key", lambda: "hermes")
+        monkeypatch.delenv("HONCHO_API_KEY", raising=False)
+        cfg = {"hosts": {"hermes": {"apiKey": "host-key"}}, "apiKey": "root-key"}
+        assert honcho_cli._resolve_api_key(cfg) == "host-key"
+
+    def test_returns_local_for_base_url_without_api_key(self, monkeypatch):
+        import plugins.memory.honcho.cli as honcho_cli
+        monkeypatch.setattr(honcho_cli, "_host_key", lambda: "hermes")
+        monkeypatch.delenv("HONCHO_API_KEY", raising=False)
+        monkeypatch.delenv("HONCHO_BASE_URL", raising=False)
+        cfg = {"baseUrl": "http://localhost:8000"}
+        assert honcho_cli._resolve_api_key(cfg) == "local"
+
+    def test_returns_local_for_base_url_env_var(self, monkeypatch):
+        import plugins.memory.honcho.cli as honcho_cli
+        monkeypatch.setattr(honcho_cli, "_host_key", lambda: "hermes")
+        monkeypatch.delenv("HONCHO_API_KEY", raising=False)
+        monkeypatch.setenv("HONCHO_BASE_URL", "http://10.0.0.5:8000")
+        assert honcho_cli._resolve_api_key({}) == "local"
+
+    def test_returns_empty_when_nothing_configured(self, monkeypatch):
+        import plugins.memory.honcho.cli as honcho_cli
+        monkeypatch.setattr(honcho_cli, "_host_key", lambda: "hermes")
+        monkeypatch.delenv("HONCHO_API_KEY", raising=False)
+        monkeypatch.delenv("HONCHO_BASE_URL", raising=False)
+        assert honcho_cli._resolve_api_key({}) == ""
+
+    def test_rejects_garbage_base_url_without_scheme(self, monkeypatch):
+        """A non-URL string in baseUrl (typo) must not pass the guard."""
+        import plugins.memory.honcho.cli as honcho_cli
+        monkeypatch.setattr(honcho_cli, "_host_key", lambda: "hermes")
+        monkeypatch.delenv("HONCHO_API_KEY", raising=False)
+        monkeypatch.delenv("HONCHO_BASE_URL", raising=False)
+        for garbage in ("true", "yes", "1", "localhost", "10.0.0.5"):
+            assert honcho_cli._resolve_api_key({"baseUrl": garbage}) == "", \
+                f"expected empty for garbage {garbage!r}"
+
+    def test_rejects_non_http_scheme_base_url(self, monkeypatch):
+        """Only http/https schemes are accepted; file:// / ftp:// are not."""
+        import plugins.memory.honcho.cli as honcho_cli
+        monkeypatch.setattr(honcho_cli, "_host_key", lambda: "hermes")
+        monkeypatch.delenv("HONCHO_API_KEY", raising=False)
+        monkeypatch.delenv("HONCHO_BASE_URL", raising=False)
+        for bad in ("file:///etc/passwd", "ftp://host/", "ws://host/"):
+            assert honcho_cli._resolve_api_key({"baseUrl": bad}) == "", \
+                f"expected empty for scheme of {bad!r}"
+
+    def test_accepts_https_base_url(self, monkeypatch):
+        import plugins.memory.honcho.cli as honcho_cli
+        monkeypatch.setattr(honcho_cli, "_host_key", lambda: "hermes")
+        monkeypatch.delenv("HONCHO_API_KEY", raising=False)
+        monkeypatch.delenv("HONCHO_BASE_URL", raising=False)
+        assert honcho_cli._resolve_api_key({"baseUrl": "https://honcho.example.com"}) == "local"
+
+
 class TestCmdStatus:
     def test_reports_connection_failure_when_session_setup_fails(self, monkeypatch, capsys, tmp_path):
         import plugins.memory.honcho.cli as honcho_cli
