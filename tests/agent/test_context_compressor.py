@@ -1170,6 +1170,25 @@ class TestSummaryTransientRetry:
         assert mock_call.call_count == 1, "non-transient errors must not retry"
         mock_sleep.assert_not_called()
 
+    def test_timeout_error_is_not_retried(self):
+        """Reviewer feedback on round-7 PR #16670: each retry pays the
+        full compression timeout window again. A 1+2 retry loop against
+        the 120 s default = ~6 min stalled compaction before fallback.
+        Keep timeouts on the existing cooldown path."""
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(model="test", quiet_mode=True)
+
+        with patch("agent.context_compressor.call_llm", side_effect=TimeoutError("upstream hung")) as mock_call, \
+             patch("agent.context_compressor.time.sleep") as mock_sleep:
+            result = c._generate_summary(self._messages())
+
+        assert result is None
+        assert mock_call.call_count == 1, "TimeoutError must not enter the retry loop"
+        mock_sleep.assert_not_called()
+        # Cooldown still set so subsequent compactions don't hammer the
+        # slow endpoint.
+        assert c._summary_failure_cooldown_until > 0.0
+
     def test_retries_exhausted_falls_through_to_cooldown(self):
         with patch("agent.context_compressor.get_model_context_length", return_value=100000):
             c = ContextCompressor(model="test", quiet_mode=True)

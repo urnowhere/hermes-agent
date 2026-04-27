@@ -1166,3 +1166,45 @@ class TestIsTransientTransportError:
     def test_none_is_not_transient(self):
         from agent.error_classifier import is_transient_transport_error
         assert not is_transient_transport_error(None)  # type: ignore[arg-type]
+
+    def test_builtin_timeout_error_is_not_transient(self):
+        """Each retry pays the full timeout window; chaining 3 of them
+        against a 120s compression timeout would stall the user-visible
+        response for ~6 minutes before fallback. Reviewer feedback on
+        round-7 PR #16670 — keep timeouts on the cooldown path."""
+        from agent.error_classifier import is_transient_transport_error
+        assert not is_transient_transport_error(TimeoutError("hung"))
+
+    def test_read_timeout_class_name_is_not_transient(self):
+        from agent.error_classifier import is_transient_transport_error
+
+        class ReadTimeout(MockTransportError):
+            pass
+
+        assert not is_transient_transport_error(ReadTimeout("slow read"))
+
+    def test_api_timeout_error_class_name_is_not_transient(self):
+        from agent.error_classifier import is_transient_transport_error
+
+        class APITimeoutError(MockTransportError):
+            pass
+
+        assert not is_transient_transport_error(APITimeoutError("upstream slow"))
+
+    def test_pool_timeout_class_name_is_not_transient(self):
+        from agent.error_classifier import is_transient_transport_error
+
+        class PoolTimeout(MockTransportError):
+            pass
+
+        assert not is_transient_transport_error(PoolTimeout("pool exhausted"))
+
+    def test_connect_timeout_class_name_is_not_transient(self):
+        """ConnectTimeout *is* a timeout — keep it on the cooldown path
+        even though it's transport-flavoured."""
+        from agent.error_classifier import is_transient_transport_error
+
+        class ConnectTimeout(MockTransportError):
+            pass
+
+        assert not is_transient_transport_error(ConnectTimeout("connect timeout"))
