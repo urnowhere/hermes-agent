@@ -24,6 +24,9 @@ import pytest
 
 from hermes_cli.models import (
     _MODELS_DEV_PREFERRED,
+    _PROVIDER_MODELS,
+    CANONICAL_PROVIDERS,
+    normalize_provider,
     _merge_with_models_dev,
     provider_model_ids,
 )
@@ -97,6 +100,32 @@ class TestProviderModelIdsPreferred:
             out = provider_model_ids("opencode-zen")
         assert "claude-opus-4-7" in out
         assert "kimi-k2.6" in out
+
+    def test_fireworks_is_first_class_with_curated_defaults(self):
+        """Fireworks should be selectable in `hermes model` with curated defaults."""
+        assert any(p.slug == "fireworks" for p in CANONICAL_PROVIDERS)
+        assert normalize_provider("fireworks-ai") == "fireworks"
+        assert _PROVIDER_MODELS["fireworks"] == [
+            "accounts/fireworks/models/kimi-k2p6",
+            "accounts/fireworks/models/minimax-m2p7",
+            "accounts/fireworks/models/qwen3p6-plus",
+            "accounts/fireworks/models/glm-5p1",
+            "accounts/fireworks/models/kimi-k2p5",
+            "accounts/fireworks/models/deepseek-v3p2",
+        ]
+
+    def test_fireworks_model_ids_stay_curated_for_runtime_picker(self):
+        """Classic /model and the TUI picker keep Fireworks to the curated list."""
+        mdev = [
+            "accounts/fireworks/models/glm-5p1",
+            "accounts/fireworks/models/deepseek-v3p2",
+            "accounts/fireworks/models/new-agentic-model",
+        ]
+        with patch("agent.models_dev.list_agentic_models", return_value=mdev):
+            out = provider_model_ids("fireworks")
+        assert out == _PROVIDER_MODELS["fireworks"]
+        assert "accounts/fireworks/models/new-agentic-model" not in out
+        assert "fireworks" not in _MODELS_DEV_PREFERRED
 
 
 class TestOpenRouterAndNousUnchanged:

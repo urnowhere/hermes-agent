@@ -59,6 +59,7 @@ def _build_provider_env_blocklist() -> frozenset:
         "PERPLEXITY_API_KEY",
         "COHERE_API_KEY",
         "FIREWORKS_API_KEY",
+        "FIREWORKS_BASE_URL",
         "XAI_API_KEY",
         "HELICONE_API_KEY",
         "PARALLEL_API_KEY",
