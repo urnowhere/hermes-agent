@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import Platform
+from gateway.config import GatewayConfig, HomeChannel, Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent
 from gateway.session import SessionSource
 
@@ -31,6 +31,15 @@ def _make_runner():
     from gateway.run import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
+    runner.config = GatewayConfig(
+        platforms={
+            Platform.TELEGRAM: PlatformConfig(
+                enabled=True,
+                token="***",
+                home_channel=HomeChannel(platform=Platform.TELEGRAM, chat_id="67890", name="Home"),
+            )
+        }
+    )
     runner.adapters = {}
     runner._voice_mode = {}
     runner._session_db = None
@@ -226,10 +235,81 @@ class TestHandleSwarmCommand:
                  "idle_seconds": 12.0,
                  "model": "gpt-5.4",
                  "goal": "Orchestrate worker swarm",
+                 "source_platform": "telegram",
+                 "source_chat_id": "67890",
+                 "source_thread_id": "",
              }]):
             result = await runner._handle_swarm_command(_make_event(text="/swarm status"))
         assert "foreman" in result
         assert "Detached foreman worker cap:" in result
+        assert "Active swarm agents in this chat:" in result
+
+    @pytest.mark.asyncio
+    async def test_swarm_status_is_scoped_to_this_chat_and_descendants(self):
+        runner = _make_runner()
+        rows = [
+            {
+                "subagent_id": "swarm_here",
+                "kind": "detached_foreman",
+                "depth": 0,
+                "status": "running",
+                "stalled": False,
+                "idle_seconds": 5.0,
+                "model": "gpt-5.4",
+                "goal": "This chat goal",
+                "source_platform": "telegram",
+                "source_chat_id": "67890",
+                "source_thread_id": "",
+            },
+            {
+                "subagent_id": "sa-child",
+                "parent_id": "swarm_here",
+                "kind": "delegate_child",
+                "depth": 1,
+                "status": "running",
+                "stalled": False,
+                "idle_seconds": 2.0,
+                "model": "gpt-5.4-mini",
+                "goal": "Child worker goal",
+            },
+            {
+                "subagent_id": "swarm_elsewhere",
+                "kind": "detached_foreman",
+                "depth": 0,
+                "status": "running",
+                "stalled": False,
+                "idle_seconds": 8.0,
+                "model": "gpt-5.4",
+                "goal": "Other chat goal",
+                "source_platform": "telegram",
+                "source_chat_id": "different-chat",
+                "source_thread_id": "",
+            },
+        ]
+        with patch("gateway.run._load_gateway_config", return_value={"swarm": {"max_workers": 6}}), \
+             patch("tools.delegate_tool.is_spawn_paused", return_value=False), \
+             patch("tools.delegate_tool._get_max_spawn_depth", return_value=1), \
+             patch("tools.delegate_tool._get_max_concurrent_children", return_value=3), \
+             patch("tools.delegate_tool.list_active_subagents", return_value=rows):
+            result = await runner._handle_swarm_command(_make_event(text="/swarm status"))
+        assert "swarm_here" in result
+        assert "sa-child" in result
+        assert "Child worker goal" in result
+        assert "swarm_elsewhere" not in result
+        assert "Other chat goal" not in result
+        assert "**Other active swarm agents:** 1" in result
+
+    @pytest.mark.asyncio
+    async def test_swarm_pause_is_denied_outside_home_channel(self):
+        runner = _make_runner()
+        result = await runner._handle_swarm_command(_make_event(text="/swarm pause", chat_id="not-home"))
+        assert "restricted to the platform home channel" in result
+
+    @pytest.mark.asyncio
+    async def test_swarm_resume_is_denied_outside_home_channel(self):
+        runner = _make_runner()
+        result = await runner._handle_swarm_command(_make_event(text="/swarm resume", chat_id="not-home"))
+        assert "restricted to the platform home channel" in result
 
     @pytest.mark.asyncio
     async def test_run_swarm_task_registers_interruptible_foreman_and_filters_toolsets(self):

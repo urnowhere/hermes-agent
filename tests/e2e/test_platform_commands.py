@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from gateway.config import HomeChannel
 from gateway.platforms.base import SendResult
 from tests.e2e.conftest import make_event, send_and_capture
 
@@ -136,6 +137,17 @@ class TestSlashCommands:
         assert "Usage: /swarm stop <id>" in response_text
         assert "use `/swarm start <prompt>`" in response_text
         runner._run_swarm_task.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_swarm_pause_is_restricted_to_home_channel_through_full_pipeline(self, adapter, runner, platform):
+        runner.config.platforms[platform].home_channel = HomeChannel(platform=platform, chat_id="home-chat", name="Home")
+
+        with patch("gateway.run._load_gateway_config", return_value={"swarm": {"max_workers": 5}}):
+            send = await send_and_capture(adapter, "/swarm pause", platform)
+
+        send.assert_called_once()
+        response_text = send.call_args[1].get("content") or send.call_args[0][1]
+        assert "restricted to the platform home channel" in response_text
 
 
 class TestSessionLifecycle:

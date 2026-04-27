@@ -5360,6 +5360,55 @@ class GatewayRunner:
             "- If blocked, return a blocker report with the exact failing command, output, and the smallest next fix."
         )
 
+    def _is_swarm_home_channel(self, source: SessionSource) -> bool:
+        """Return True when *source* is the configured home channel for its platform."""
+        platform = getattr(source, "platform", None)
+        if not platform:
+            return False
+        cfg = getattr(self, "config", None)
+        getter = getattr(cfg, "get_home_channel", None)
+        if not callable(getter):
+            return False
+        try:
+            home = getter(platform)
+        except Exception:
+            return False
+        if not home:
+            return False
+        return str(getattr(home, "chat_id", "") or "") == str(getattr(source, "chat_id", "") or "")
+
+    @staticmethod
+    def _swarm_row_matches_source(row: dict[str, Any], source: SessionSource) -> bool:
+        return (
+            str(row.get("kind") or "") == "detached_foreman"
+            and str(row.get("source_platform") or "") == str(source.platform.value if source.platform else "")
+            and str(row.get("source_chat_id") or "") == str(source.chat_id or "")
+            and str(row.get("source_thread_id") or "") == str(source.thread_id or "")
+        )
+
+    def _scoped_swarm_rows(self, rows: list[dict[str, Any]], source: SessionSource) -> list[dict[str, Any]]:
+        """Return only the foreman(s) for this chat/thread plus their descendants."""
+        visible_ids = {
+            str(row.get("subagent_id") or "")
+            for row in rows
+            if self._swarm_row_matches_source(row, source)
+        }
+        visible_ids.discard("")
+        if not visible_ids:
+            return []
+
+        changed = True
+        while changed:
+            changed = False
+            for row in rows:
+                sid = str(row.get("subagent_id") or "")
+                parent_id = str(row.get("parent_id") or "")
+                if sid and sid not in visible_ids and parent_id in visible_ids:
+                    visible_ids.add(sid)
+                    changed = True
+
+        return [row for row in rows if str(row.get("subagent_id") or "") in visible_ids]
+
     async def _handle_swarm_command(self, event: MessageEvent) -> str:
         """Handle /swarm command - launch or control detached swarm foremen."""
         from tools.delegate_tool import (
@@ -5381,9 +5430,11 @@ class GatewayRunner:
         reserved_prompt_hint = (
             "If your prompt begins with a control word, use `/swarm start <prompt>`."
         )
+        source = event.source
 
         if not args or (subcommand == "status" and not remainder):
-            rows = list_active_subagents()
+            all_rows = list_active_subagents()
+            rows = self._scoped_swarm_rows(all_rows, source)
             rows.sort(
                 key=lambda row: (
                     0 if str(row.get("kind") or "") == "detached_foreman" else 1,
@@ -5400,8 +5451,12 @@ class GatewayRunner:
                 f"**Detached foreman worker cap:** {swarm_settings['max_workers']}",
                 f"**Max depth:** {_get_max_spawn_depth()}",
                 f"**Delegate batch max concurrency:** {_get_max_concurrent_children()}",
-                f"**Active swarm agents:** {len(rows)}",
+                f"**Active swarm agents in this chat:** {len(rows)}",
             ]
+
+            if self._is_swarm_home_channel(source):
+                hidden_rows = max(0, len(all_rows) - len(rows))
+                lines.append(f"**Other active swarm agents:** {hidden_rows}")
 
             if rows:
                 for row in rows[:12]:
@@ -5428,7 +5483,7 @@ class GatewayRunner:
                 lines.extend(
                     [
                         "",
-                        "No active detached swarms or subagents.",
+                        "No active detached swarms or subagents in this chat.",
                         "Launch one with `/swarm start <prompt>` or `/swarm <prompt>`."
                     ]
                 )
@@ -5441,6 +5496,11 @@ class GatewayRunner:
         if subcommand == "pause":
             if remainder:
                 return f"Usage: /swarm pause\n{reserved_prompt_hint}"
+            if not self._is_swarm_home_channel(source):
+                return (
+                    "Global `/swarm pause` is restricted to the platform home channel because it affects every chat. "
+                    "Use `/swarm stop` to stop the swarm for just this chat."
+                )
             set_spawn_paused(True)
             return (
                 "Swarm paused. Active subagents keep running; "
@@ -5450,6 +5510,10 @@ class GatewayRunner:
         if subcommand == "resume":
             if remainder:
                 return f"Usage: /swarm resume\n{reserved_prompt_hint}"
+            if not self._is_swarm_home_channel(source):
+                return (
+                    "Global `/swarm resume` is restricted to the platform home channel because it affects every chat."
+                )
             set_spawn_paused(False)
             return "Swarm resumed. New delegation spawns are allowed."
 
@@ -5459,13 +5523,9 @@ class GatewayRunner:
                 return f"Usage: /swarm stop <id>\n{reserved_prompt_hint}"
             stop_target = stop_parts[0] if stop_parts else ""
             rows = list_active_subagents()
-            source = event.source
             matching_foremen = [
                 row for row in rows
-                if str(row.get("kind") or "") == "detached_foreman"
-                and str(row.get("source_platform") or "") == str(source.platform.value if source.platform else "")
-                and str(row.get("source_chat_id") or "") == str(source.chat_id or "")
-                and str(row.get("source_thread_id") or "") == str(source.thread_id or "")
+                if self._swarm_row_matches_source(row, source)
             ]
 
             if stop_target:
@@ -5504,10 +5564,7 @@ class GatewayRunner:
         source = event.source
         active_foremen = [
             row for row in list_active_subagents()
-            if str(row.get("kind") or "") == "detached_foreman"
-            and str(row.get("source_platform") or "") == str(source.platform.value if source.platform else "")
-            and str(row.get("source_chat_id") or "") == str(source.chat_id or "")
-            and str(row.get("source_thread_id") or "") == str(source.thread_id or "")
+            if self._swarm_row_matches_source(row, source)
         ]
         if active_foremen:
             return "A detached swarm foreman is already active for this chat. Use `/swarm status` to inspect it or `/swarm stop` to interrupt it first."

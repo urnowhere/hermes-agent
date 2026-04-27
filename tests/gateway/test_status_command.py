@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, PlatformConfig
+from gateway.config import GatewayConfig, HomeChannel, Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent
 from gateway.session import SessionEntry, SessionSource, build_session_key
 
@@ -35,7 +35,13 @@ def _make_runner(session_entry: SessionEntry):
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
-        platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="***")}
+        platforms={
+            Platform.TELEGRAM: PlatformConfig(
+                enabled=True,
+                token="***",
+                home_channel=HomeChannel(platform=Platform.TELEGRAM, chat_id="c1", name="Home"),
+            )
+        }
     )
     adapter = MagicMock()
     adapter.send = AsyncMock()
@@ -203,12 +209,16 @@ async def test_swarm_status_reports_pause_caps_and_active_subagents(monkeypatch)
         lambda: [
             {
                 "subagent_id": "sa-0-abcd1234",
+                "kind": "detached_foreman",
                 "depth": 0,
                 "status": "running",
                 "stalled": True,
                 "idle_seconds": 312.4,
                 "model": "openai/orch-model",
                 "goal": "Coordinate backend and tests",
+                "source_platform": "telegram",
+                "source_chat_id": "c1",
+                "source_thread_id": "",
             }
         ],
     )
@@ -219,9 +229,10 @@ async def test_swarm_status_reports_pause_caps_and_active_subagents(monkeypatch)
     assert "**Paused:** Yes" in result
     assert "**Max depth:** 2" in result
     assert "**Delegate batch max concurrency:** 4" in result
-    assert "**Active swarm agents:** 1" in result
+    assert "**Active swarm agents in this chat:** 1" in result
+    assert "**Other active swarm agents:** 0" in result
     assert "sa-0-abcd1234" in result
-    assert "d0" in result
+    assert "foreman" in result
     assert "stalled=yes" in result
     assert "idle=312s" in result
     assert "Coordinate backend and tests" in result
@@ -247,6 +258,41 @@ async def test_swarm_pause_bypasses_running_agent_and_does_not_interrupt(monkeyp
     result = await runner._handle_message(_make_event("/swarm pause"))
 
     assert "Swarm paused" in result
+    running_agent.interrupt.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_swarm_pause_is_denied_outside_home_channel(monkeypatch):
+    session_entry = SessionEntry(
+        session_key=build_session_key(_make_source()),
+        session_id="sess-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        total_tokens=0,
+    )
+    runner = _make_runner(session_entry)
+    running_agent = MagicMock()
+    runner._running_agents[build_session_key(_make_source())] = running_agent
+
+    monkeypatch.setattr("tools.delegate_tool.set_spawn_paused", lambda paused: bool(paused))
+
+    off_home_event = MessageEvent(
+        text="/swarm pause",
+        source=SessionSource(
+            platform=Platform.TELEGRAM,
+            user_id="u1",
+            chat_id="not-home",
+            user_name="tester",
+            chat_type="dm",
+        ),
+        message_id="m2",
+    )
+
+    result = await runner._handle_message(off_home_event)
+
+    assert "restricted to the platform home channel" in result
     running_agent.interrupt.assert_not_called()
 
 
