@@ -2359,6 +2359,7 @@ def _client_cache_key(
     provider: str,
     *,
     async_mode: bool,
+    model: Optional[str] = None,
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
     api_mode: Optional[str] = None,
@@ -2366,7 +2367,7 @@ def _client_cache_key(
 ) -> tuple:
     runtime = _normalize_main_runtime(main_runtime)
     runtime_key = tuple(runtime.get(field, "") for field in _MAIN_RUNTIME_FIELDS) if provider == "auto" else ()
-    return (provider, async_mode, base_url or "", api_key or "", api_mode or "", runtime_key)
+    return (provider, async_mode, model or "", base_url or "", api_key or "", api_mode or "", runtime_key)
 
 
 def _store_cached_client(cache_key: tuple, client: Any, default_model: Optional[str], *, bound_loop: Any = None) -> None:
@@ -2416,6 +2417,7 @@ def _refresh_nous_auxiliary_client(
     cache_key = _client_cache_key(
         cache_provider,
         async_mode=async_mode,
+        model=final_model,
         base_url=base_url,
         api_key=api_key,
         api_mode=api_mode,
@@ -2581,6 +2583,7 @@ def _get_cached_client(
     cache_key = _client_cache_key(
         provider,
         async_mode=async_mode,
+        model=model,
         base_url=base_url,
         api_key=api_key,
         api_mode=api_mode,
