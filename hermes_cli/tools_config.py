@@ -64,6 +64,7 @@ CONFIGURABLE_TOOLSETS = [
     ("todo",            "📋 Task Planning",             "todo"),
     ("memory",          "💾 Memory",                    "persistent memory across sessions"),
     ("session_search",  "🔎 Session Search",            "search past conversations"),
+    ("cognee",          "🧠 Cognee Lab Retrieval",       "read-only cognee_query against isolated cognee-lab corpus"),
     ("clarify",         "❓ Clarifying Questions",      "clarify"),
     ("delegation",      "👥 Task Delegation",           "delegate_task"),
     ("cronjob",         "⏰ Cron Jobs",                 "create/list/update/pause/resume/run, with optional attached skills"),
@@ -101,6 +102,38 @@ def _toolset_allowed_for_platform(ts_key: str, platform: str) -> bool:
     """
     allowed = _TOOLSET_PLATFORM_RESTRICTIONS.get(ts_key)
     return allowed is None or platform in allowed
+
+
+def _default_off_toolsets_for_platform(platform: str) -> set[str]:
+    """Return default-off toolsets after platform/runtime exceptions."""
+    default_off = set(_DEFAULT_OFF_TOOLSETS)
+    if platform in default_off and platform not in _TOOLSET_PLATFORM_RESTRICTIONS:
+        default_off.remove(platform)
+    if "homeassistant" in default_off and os.getenv("HASS_TOKEN"):
+        default_off.remove("homeassistant")
+    return default_off
+
+
+def _infer_configurable_toolsets_from_tools(
+    tool_names: set[str],
+    platform: str,
+    configurable_keys: set[str] | None = None,
+) -> set[str]:
+    """Infer configurable toolsets whose tools are all present in a tool set."""
+    from toolsets import resolve_toolset
+
+    if configurable_keys is None:
+        configurable_keys = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS}
+    enabled: set[str] = set()
+    for ts_key, _, _ in CONFIGURABLE_TOOLSETS:
+        if ts_key not in configurable_keys:
+            continue
+        if not _toolset_allowed_for_platform(ts_key, platform):
+            continue
+        ts_tools = set(resolve_toolset(ts_key))
+        if ts_tools and ts_tools.issubset(tool_names):
+            enabled.add(ts_key)
+    return enabled
 
 
 def _get_effective_configurable_toolsets():
@@ -839,12 +872,28 @@ def _get_platform_tools(
     # "hermes-cli" (which include all _HERMES_CORE_TOOLS) cause disabled
     # toolsets to re-appear as enabled.
     has_explicit_config = any(ts in configurable_keys for ts in toolset_names)
+    has_platform_default = any(ts in platform_default_keys for ts in toolset_names)
 
     if has_explicit_config:
         enabled_toolsets = {
             ts for ts in toolset_names
             if ts in configurable_keys and _toolset_allowed_for_platform(ts, platform)
         }
+        # Allow configs to extend a platform default composite with additional
+        # explicit configurable toolsets, e.g. ["hermes-cli", "cognee"].
+        # Without this, adding any configurable key made the composite default
+        # vanish and left only the added toolset enabled.
+        if has_platform_default:
+            composite_tool_names = set()
+            for ts_name in toolset_names:
+                if ts_name in platform_default_keys:
+                    composite_tool_names.update(resolve_toolset(ts_name))
+            enabled_toolsets.update(_infer_configurable_toolsets_from_tools(
+                composite_tool_names,
+                platform,
+                configurable_keys,
+            ))
+            enabled_toolsets -= _default_off_toolsets_for_platform(platform)
     else:
         # No explicit config — fall back to resolving composite toolset names
         # (e.g. "hermes-cli") to individual tool names and reverse-mapping.
@@ -852,32 +901,13 @@ def _get_platform_tools(
         for ts_name in toolset_names:
             all_tool_names.update(resolve_toolset(ts_name))
 
-        enabled_toolsets = set()
-        for ts_key, _, _ in CONFIGURABLE_TOOLSETS:
-            if not _toolset_allowed_for_platform(ts_key, platform):
-                continue
-            ts_tools = set(resolve_toolset(ts_key))
-            if ts_tools and ts_tools.issubset(all_tool_names):
-                enabled_toolsets.add(ts_key)
+        enabled_toolsets = _infer_configurable_toolsets_from_tools(
+            all_tool_names,
+            platform,
+            configurable_keys,
+        )
 
-        default_off = set(_DEFAULT_OFF_TOOLSETS)
-        # Legacy safety: if the platform's own name matches a default-off
-        # toolset (e.g. `homeassistant` platform + `homeassistant` toolset),
-        # keep that toolset enabled on first install.  Skip this dodge for
-        # platform-restricted toolsets — those are always opt-in even on
-        # their own platform (e.g. `discord` + `discord` should stay OFF).
-        if platform in default_off and platform not in _TOOLSET_PLATFORM_RESTRICTIONS:
-            default_off.remove(platform)
-        # Home Assistant is already runtime-gated by its check_fn (requires
-        # HASS_TOKEN to register any tools). When a user has configured
-        # HASS_TOKEN, they've explicitly opted in — don't also strip it via
-        # _DEFAULT_OFF_TOOLSETS, which would silently drop HA from platforms
-        # (e.g. cron) that run through _get_platform_tools without an
-        # explicit saved toolset list. Without this, Norbert's HA cron jobs
-        # regressed after #14798 made cron honor per-platform tool config.
-        if "homeassistant" in default_off and os.getenv("HASS_TOKEN"):
-            default_off.remove("homeassistant")
-        enabled_toolsets -= default_off
+        enabled_toolsets -= _default_off_toolsets_for_platform(platform)
 
     # Recover non-configurable platform toolsets (e.g. discord, feishu_doc,
     # feishu_drive).  These are part of the platform's default composite but
