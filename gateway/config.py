@@ -148,16 +148,22 @@ class PlatformConfig:
     token: Optional[str] = None  # Bot token (Telegram, Discord)
     api_key: Optional[str] = None  # API key if different from token
     home_channel: Optional[HomeChannel] = None
-    
+
     # Reply threading mode (Telegram/Slack)
     # - "off": Never thread replies to original message
     # - "first": Only first chunk threads to user's message (default)
     # - "all": All chunks in multi-part replies thread to user's message
     reply_to_mode: str = "first"
-    
+
     # Platform-specific settings
     extra: Dict[str, Any] = field(default_factory=dict)
-    
+
+    # True iff yaml/dict had an explicit "enabled" key. Lets the env-override
+    # layer distinguish "user set enabled: false" from "user set channel_prompts
+    # but never touched enabled" — only the former should suppress env-token
+    # activation. See #16682.
+    _enabled_explicit: bool = field(default=False, repr=False, compare=False)
+
     def to_dict(self) -> Dict[str, Any]:
         result = {
             "enabled": self.enabled,
@@ -171,13 +177,13 @@ class PlatformConfig:
         if self.home_channel:
             result["home_channel"] = self.home_channel.to_dict()
         return result
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PlatformConfig":
         home_channel = None
         if "home_channel" in data:
             home_channel = HomeChannel.from_dict(data["home_channel"])
-        
+
         return cls(
             enabled=_coerce_bool(data.get("enabled"), False),
             token=data.get("token"),
@@ -185,6 +191,7 @@ class PlatformConfig:
             home_channel=home_channel,
             reply_to_mode=data.get("reply_to_mode", "first"),
             extra=data.get("extra", {}),
+            _enabled_explicit="enabled" in data,
         )
 
 
@@ -937,14 +944,22 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     # Slack
     slack_token = os.getenv("SLACK_BOT_TOKEN")
     if slack_token:
-        if Platform.SLACK not in config.platforms:
+        slack_pc = config.platforms.get(Platform.SLACK)
+        if slack_pc is None:
             # No yaml config for Slack — env-only setup, enable it
-            config.platforms[Platform.SLACK] = PlatformConfig()
-            config.platforms[Platform.SLACK].enabled = True
-        # If yaml config exists, respect its enabled flag (don't override
-        # explicit enabled: false). Token is still stored so skills that
-        # send Slack messages can use it without activating the gateway adapter.
-        config.platforms[Platform.SLACK].token = slack_token
+            slack_pc = PlatformConfig(enabled=True)
+            config.platforms[Platform.SLACK] = slack_pc
+        elif not slack_pc._enabled_explicit:
+            # yaml mentioned slack (e.g. channel_prompts, require_mention) but
+            # never set the `enabled` key. Pre-a01e767b behaviour was to enable
+            # the gateway whenever SLACK_BOT_TOKEN was present; preserve that
+            # for the no-explicit-enabled case so a yaml block of bridged keys
+            # alone doesn't silently disable Slack. (#16682)
+            slack_pc.enabled = True
+        # If yaml explicitly set enabled (true or false), respect it. Token is
+        # still stored so skills that send Slack messages can use it without
+        # activating the gateway adapter.
+        slack_pc.token = slack_token
     slack_home = os.getenv("SLACK_HOME_CHANNEL")
     if slack_home and Platform.SLACK in config.platforms:
         config.platforms[Platform.SLACK].home_channel = HomeChannel(
