@@ -193,16 +193,20 @@ class TestCLIStatusBar:
             context_length=200_000,
         )
         cli_obj.agent.provider = "openai-codex"
+        cli_obj.agent._credential_pool = SimpleNamespace(
+            current=lambda: SimpleNamespace(label="main"),
+            peek=lambda: SimpleNamespace(label="main"),
+        )
         cli_obj._account_limit_status_cache = {
-            "key": ("openai-codex", "", ""),
+            "key": ("openai-codex", "", "", "main"),
             "expires_at": 9999999999.0,
-            "text": "Codex 5h 98% • weekly 43%",
+            "text": "Codex main 5h 98% • weekly 43%",
             "level": "ok",
         }
 
         text = cli_obj._build_status_bar_text(width=140)
 
-        assert "Codex 5h 98% • weekly 43%" in text
+        assert "Codex main 5h 98% • weekly 43%" in text
 
     def test_account_limit_refresh_populates_compact_cache(self):
         cli_obj = _attach_agent(
@@ -215,7 +219,12 @@ class TestCLIStatusBar:
             context_length=200_000,
         )
         cli_obj.agent.provider = "openai-codex"
-        reset_at = datetime.now(timezone.utc) + timedelta(hours=5, minutes=10)
+        cli_obj.agent.api_key = "active-runtime-token"
+        cli_obj.agent._credential_pool = SimpleNamespace(
+            current=lambda: SimpleNamespace(label="main"),
+            peek=lambda: SimpleNamespace(label="main"),
+        )
+        reset_at = datetime.now(timezone.utc) + timedelta(minutes=25)
         snapshot = AccountUsageSnapshot(
             provider="openai-codex",
             source="usage_api",
@@ -227,10 +236,14 @@ class TestCLIStatusBar:
         )
 
         with patch("cli.fetch_account_usage", return_value=snapshot) as fetch_mock:
-            cli_obj._refresh_account_limit_status(cli_obj.agent, ("openai-codex", "", ""))
+            key = cli_obj._account_limit_status_cache_key(cli_obj.agent)
+            cli_obj._refresh_account_limit_status(cli_obj.agent, key)
 
-        fetch_mock.assert_called_once_with("openai-codex", base_url="", api_key=None)
-        assert cli_obj._account_limit_status_cache["text"] == "Codex 5h 98% • weekly 43%"
+        fetch_mock.assert_called_once_with("openai-codex", base_url="", api_key="active-runtime-token")
+        cache_key = cli_obj._account_limit_status_cache["key"]
+        assert cache_key[:2] == ("openai-codex", "")
+        assert cache_key[3] == "main"
+        assert cli_obj._account_limit_status_cache["text"] == "Codex main 5h 98% • weekly 43%"
         assert cli_obj._account_limit_status_cache["level"] == "ok"
 
     def test_build_status_bar_text_collapses_for_narrow_terminal(self):

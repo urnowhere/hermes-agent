@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+import base64
+import json
+
 import httpx
 
 from agent.anthropic_adapter import _is_oauth_token, resolve_anthropic_token
@@ -124,20 +127,56 @@ def _resolve_codex_usage_url(base_url: str) -> str:
     return normalized + "/api/codex/usage"
 
 
-def _fetch_codex_account_usage() -> Optional[AccountUsageSnapshot]:
-    creds = resolve_codex_runtime_credentials(refresh_if_expiring=True)
-    token_data = _read_codex_tokens()
-    tokens = token_data.get("tokens") or {}
-    account_id = str(tokens.get("account_id", "") or "").strip() or None
+def _codex_account_id_from_access_token(access_token: Optional[str]) -> Optional[str]:
+    """Extract the ChatGPT account id from a Codex access-token JWT."""
+    token = str(access_token or "").strip()
+    parts = token.split(".")
+    if len(parts) < 2:
+        return None
+    try:
+        payload_part = parts[1] + "=" * (-len(parts[1]) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_part.encode("ascii")))
+    except Exception:
+        return None
+    auth_claims = payload.get("https://api.openai.com/auth")
+    if not isinstance(auth_claims, dict):
+        return None
+    account_id = auth_claims.get("chatgpt_account_id") or auth_claims.get("account_id")
+    account_id = str(account_id or "").strip()
+    return account_id or None
+
+
+def _fetch_codex_account_usage(
+    *,
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> Optional[AccountUsageSnapshot]:
+    access_token = str(api_key or "").strip()
+    account_id = _codex_account_id_from_access_token(access_token)
+    resolved_base_url = str(base_url or "").strip()
+
+    if not access_token:
+        creds = resolve_codex_runtime_credentials(refresh_if_expiring=True)
+        access_token = str(creds.get("api_key", "") or "").strip()
+        resolved_base_url = resolved_base_url or str(creds.get("base_url", "") or "").strip()
+        account_id = _codex_account_id_from_access_token(access_token)
+        if not account_id:
+            token_data = _read_codex_tokens()
+            tokens = token_data.get("tokens") or {}
+            account_id = str(tokens.get("account_id", "") or "").strip() or None
+
+    if not access_token:
+        return None
+
     headers = {
-        "Authorization": f"Bearer {creds['api_key']}",
+        "Authorization": f"Bearer {access_token}",
         "Accept": "application/json",
         "User-Agent": "codex-cli",
     }
     if account_id:
         headers["ChatGPT-Account-Id"] = account_id
     with httpx.Client(timeout=15.0) as client:
-        response = client.get(_resolve_codex_usage_url(creds.get("base_url", "")), headers=headers)
+        response = client.get(_resolve_codex_usage_url(resolved_base_url), headers=headers)
         response.raise_for_status()
     payload = response.json() or {}
     rate_limit = payload.get("rate_limit") or {}
@@ -316,7 +355,7 @@ def fetch_account_usage(
         return None
     try:
         if normalized == "openai-codex":
-            return _fetch_codex_account_usage()
+            return _fetch_codex_account_usage(base_url=base_url, api_key=api_key)
         if normalized == "anthropic":
             return _fetch_anthropic_account_usage()
         if normalized == "openrouter":

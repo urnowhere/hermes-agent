@@ -2410,20 +2410,50 @@ class HermesCLI:
         return normalized.replace("_", "-").replace("-", " ").title().replace(" ", "")
 
     @staticmethod
+    def _compact_account_limit_credential_label(label: Optional[str], max_width: int = 10) -> str:
+        cleaned = re.sub(r"\s+", "-", str(label or "").strip())
+        cleaned = re.sub(r"[^A-Za-z0-9._@+-]+", "-", cleaned).strip("-")
+        if not cleaned:
+            return ""
+        if len(cleaned) <= max_width:
+            return cleaned
+        return cleaned[: max(1, max_width - 1)] + "…"
+
+    def _account_limit_credential_label(self, agent) -> str:
+        for attr in ("credential_label", "credential_name", "auth_label"):
+            label = self._compact_account_limit_credential_label(getattr(agent, attr, None))
+            if label:
+                return label
+
+        pool = getattr(agent, "_credential_pool", None) or getattr(self, "_credential_pool", None)
+        if pool is None:
+            return ""
+        for method_name in ("current", "peek"):
+            try:
+                method = getattr(pool, method_name, None)
+                entry = method() if callable(method) else None
+            except Exception:
+                entry = None
+            label = self._compact_account_limit_credential_label(getattr(entry, "label", None))
+            if label:
+                return label
+        return ""
+
+    @staticmethod
     def _account_limit_window_label(label: str) -> str:
         normalized = str(label or "").strip().lower()
-        if normalized in {"session", "current session", "five hour", "five_hour"}:
-            return "session"
-        if normalized in {"weekly", "current week", "seven day", "seven_day"}:
+        if "session" in normalized:
+            return "5h"
+        if "opus" in normalized and "week" in normalized:
+            return "opus wk"
+        if "sonnet" in normalized and "week" in normalized:
+            return "sonnet wk"
+        if "week" in normalized or "weekly" in normalized:
             return "weekly"
-        if "opus" in normalized:
-            return "opus"
-        if "sonnet" in normalized:
-            return "sonnet"
         if "quota" in normalized:
             return "quota"
         cleaned = re.sub(r"[^A-Za-z0-9]+", "-", normalized).strip("-")
-        return cleaned[:12] if cleaned else "limit"
+        return cleaned[:10] if cleaned else "limit"
 
     @staticmethod
     def _format_account_limit_reset(reset_at) -> Optional[str]:
@@ -2444,7 +2474,7 @@ class HermesCLI:
         return f"{minutes}m"
 
     @classmethod
-    def _format_account_limit_status(cls, snapshot) -> Optional[Dict[str, str]]:
+    def _format_account_limit_status(cls, snapshot, credential_label: Optional[str] = None) -> Optional[Dict[str, str]]:
         if not snapshot or not getattr(snapshot, "windows", None):
             return None
 
@@ -2459,11 +2489,7 @@ class HermesCLI:
             except Exception:
                 continue
             lowest_remaining = remaining if lowest_remaining is None else min(lowest_remaining, remaining)
-            reset_label = cls._format_account_limit_reset(getattr(window, "reset_at", None))
-            if index == 0 and reset_label:
-                label = reset_label
-            else:
-                label = cls._account_limit_window_label(getattr(window, "label", ""))
+            label = cls._account_limit_window_label(getattr(window, "label", ""))
             parts.append(f"{label} {remaining}%" if label else f"{remaining}%")
 
         if not parts:
@@ -2476,7 +2502,11 @@ class HermesCLI:
         else:
             level = "ok"
         provider_label = cls._account_limit_provider_label(getattr(snapshot, "provider", None))
-        return {"text": f"{provider_label} {' • '.join(parts)}", "level": level}
+        label_prefix = provider_label
+        credential_label = cls._compact_account_limit_credential_label(credential_label)
+        if credential_label:
+            label_prefix = f"{provider_label} {credential_label}"
+        return {"text": f"{label_prefix} {' • '.join(parts)}", "level": level}
 
     @staticmethod
     def _status_bar_account_limit_style(level: Optional[str]) -> str:
@@ -2496,16 +2526,17 @@ class HermesCLI:
         if not hasattr(self, "_account_limit_status_ttl"):
             self._account_limit_status_ttl = 300.0
 
-    def _account_limit_status_cache_key(self, agent) -> Optional[tuple[str, str, str]]:
+    def _account_limit_status_cache_key(self, agent) -> Optional[tuple[str, str, str, str]]:
         provider = str(getattr(agent, "provider", None) or getattr(self, "provider", None) or "").strip().lower()
         if provider in {"", "auto", "custom"}:
             return None
         base_url = str(getattr(agent, "base_url", None) or getattr(self, "base_url", None) or "").strip()
         api_key = str(getattr(agent, "api_key", None) or getattr(self, "api_key", None) or "")
         api_fingerprint = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12] if api_key else ""
-        return (provider, base_url, api_fingerprint)
+        credential_label = self._account_limit_credential_label(agent)
+        return (provider, base_url, api_fingerprint, credential_label)
 
-    def _get_cached_account_limit_status(self, key: tuple[str, str, str], now: Optional[float] = None):
+    def _get_cached_account_limit_status(self, key: tuple[str, ...], now: Optional[float] = None):
         self._ensure_account_limit_status_state()
         now = time.monotonic() if now is None else now
         cache = getattr(self, "_account_limit_status_cache", None)
@@ -2520,20 +2551,23 @@ class HermesCLI:
             return None
         return cache
 
-    def _refresh_account_limit_status(self, agent, key: tuple[str, str, str]) -> None:
+    def _refresh_account_limit_status(self, agent, key: tuple[str, ...]) -> None:
         self._ensure_account_limit_status_state()
-        provider, base_url, _api_fingerprint = key
+        provider = key[0]
+        base_url = key[1] if len(key) > 1 else ""
+        credential_label = key[3] if len(key) > 3 else self._account_limit_credential_label(agent)
+        cache_key = (provider, base_url, key[2] if len(key) > 2 else "", credential_label)
         api_key = getattr(agent, "api_key", None) or getattr(self, "api_key", None)
         try:
             snapshot = fetch_account_usage(provider, base_url=base_url, api_key=api_key or None)
-            formatted = self._format_account_limit_status(snapshot)
+            formatted = self._format_account_limit_status(snapshot, credential_label=credential_label)
         except Exception:
             formatted = None
 
         ttl = float(getattr(self, "_account_limit_status_ttl", 300.0) or 300.0)
         retry_ttl = min(ttl, 60.0)
         cache = {
-            "key": key,
+            "key": cache_key,
             "expires_at": time.monotonic() + (ttl if formatted else retry_ttl),
             "text": (formatted or {}).get("text", ""),
             "level": (formatted or {}).get("level", "ok"),
