@@ -26,6 +26,7 @@ import concurrent.futures
 import contextvars
 import copy
 import hashlib
+import inspect
 import json
 import logging
 logger = logging.getLogger(__name__)
@@ -9003,12 +9004,30 @@ class AIAgent:
             except Exception:
                 pass
 
-        try:
-            compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic)
-        except TypeError:
-            # Plugin context engine with strict signature that doesn't accept
-            # focus_topic — fall back to calling without it.
-            compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens)
+        compress_kwargs = {"current_tokens": approx_tokens}
+        if focus_topic is not None:
+            _supports_focus_topic = False
+            try:
+                _sig = inspect.signature(self.context_compressor.compress)
+                _supports_focus_topic = (
+                    "focus_topic" in _sig.parameters
+                    or any(
+                        param.kind == inspect.Parameter.VAR_KEYWORD
+                        for param in _sig.parameters.values()
+                    )
+                )
+            except (TypeError, ValueError):
+                _supports_focus_topic = False
+
+            if _supports_focus_topic:
+                compress_kwargs["focus_topic"] = focus_topic
+            else:
+                logger.debug(
+                    "Context engine '%s' does not accept focus_topic; compressing without it",
+                    getattr(self.context_compressor, "name", type(self.context_compressor).__name__),
+                )
+
+        compressed = self.context_compressor.compress(messages, **compress_kwargs)
 
         summary_error = getattr(self.context_compressor, "_last_summary_error", None)
         if summary_error:
