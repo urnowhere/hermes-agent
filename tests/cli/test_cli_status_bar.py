@@ -1,8 +1,9 @@
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from agent.account_usage import AccountUsageSnapshot, AccountUsageWindow
 from cli import HermesCLI
 
 
@@ -180,6 +181,57 @@ class TestCLIStatusBar:
 
         text = cli_obj._build_status_bar_text(width=120)
         assert "$" not in text  # cost is never shown in status bar
+
+    def test_build_status_bar_text_includes_cached_account_limits(self):
+        cli_obj = _attach_agent(
+            _make_cli(model="gpt-5.3-codex"),
+            prompt_tokens=10000,
+            completion_tokens=5000,
+            total_tokens=15000,
+            api_calls=7,
+            context_tokens=50000,
+            context_length=200_000,
+        )
+        cli_obj.agent.provider = "openai-codex"
+        cli_obj._account_limit_status_cache = {
+            "key": ("openai-codex", "", ""),
+            "expires_at": 9999999999.0,
+            "text": "Codex 5h 98% • weekly 43%",
+            "level": "ok",
+        }
+
+        text = cli_obj._build_status_bar_text(width=140)
+
+        assert "Codex 5h 98% • weekly 43%" in text
+
+    def test_account_limit_refresh_populates_compact_cache(self):
+        cli_obj = _attach_agent(
+            _make_cli(model="gpt-5.3-codex"),
+            prompt_tokens=10000,
+            completion_tokens=5000,
+            total_tokens=15000,
+            api_calls=7,
+            context_tokens=50000,
+            context_length=200_000,
+        )
+        cli_obj.agent.provider = "openai-codex"
+        reset_at = datetime.now(timezone.utc) + timedelta(hours=5, minutes=10)
+        snapshot = AccountUsageSnapshot(
+            provider="openai-codex",
+            source="usage_api",
+            fetched_at=datetime.now(timezone.utc),
+            windows=(
+                AccountUsageWindow("Session", used_percent=2.0, reset_at=reset_at),
+                AccountUsageWindow("Weekly", used_percent=57.0),
+            ),
+        )
+
+        with patch("cli.fetch_account_usage", return_value=snapshot) as fetch_mock:
+            cli_obj._refresh_account_limit_status(cli_obj.agent, ("openai-codex", "", ""))
+
+        fetch_mock.assert_called_once_with("openai-codex", base_url="", api_key=None)
+        assert cli_obj._account_limit_status_cache["text"] == "Codex 5h 98% • weekly 43%"
+        assert cli_obj._account_limit_status_cache["level"] == "ok"
 
     def test_build_status_bar_text_collapses_for_narrow_terminal(self):
         cli_obj = _attach_agent(
