@@ -1375,6 +1375,13 @@ class MCPServerTask:
 
 _servers: Dict[str, MCPServerTask] = {}
 
+# Lazy initialization flag: MCP servers are only connected on first use,
+# not at import time.  This prevents duplicate subprocess spawning when
+# multiple entry points (tui_gateway.entry, slash_worker, etc.) import
+# model_tools in the same process.  See #15275.
+_mcp_initialized = False
+_mcp_init_lock = threading.Lock()
+
 # Circuit breaker: consecutive error counts per server.  After
 # _CIRCUIT_BREAKER_THRESHOLD consecutive failures, the handler returns
 # a "server unreachable" message that tells the model to stop retrying,
@@ -2789,7 +2796,218 @@ def register_mcp_servers(servers: Dict[str, dict]) -> List[str]:
     return _existing_tool_names()
 
 
-def discover_mcp_tools() -> List[str]:
+def _register_mcp_tool_stubs(servers: Dict[str, dict]) -> List[str]:
+    """Register MCP tool stubs from config without connecting to servers.
+
+    This allows the model to see MCP tools in its tool list at session start,
+    but defers the expensive subprocess spawning until first actual tool use.
+    The stubs use a handler that calls ``ensure_mcp_initialized()`` before
+    delegating to the real server.
+
+    Inspired by Claude Code's SocketPool pattern: tool metadata is available
+    immediately, but connections are established lazily on first use.
+    """
+    if not _MCP_AVAILABLE:
+        return []
+
+    from tools.registry import registry
+
+    stub_names: List[str] = []
+    for name, cfg in servers.items():
+        if not _parse_boolish(cfg.get("enabled", True), default=True):
+            continue
+        if name in _servers:
+            # Already connected (e.g. from a prior eager call) — skip stub
+            stub_names.extend(getattr(_servers[name], "_registered_tool_names", []))
+            continue
+
+        toolset_name = f"mcp-{name}"
+
+        # Load cached tool schemas if available, otherwise register a
+        # generic "not yet connected" placeholder.
+        # We read from a local cache file to avoid needing to connect.
+        tools_filter = cfg.get("tools") or {}
+        include_set = _normalize_name_filter(tools_filter.get("include"), f"mcp_servers.{name}.tools.include") if tools_filter else None
+        exclude_set = _normalize_name_filter(tools_filter.get("exclude"), f"mcp_servers.{name}.tools.exclude") if tools_filter else None
+
+        # Try loading cached tool definitions
+        cached_tools = _load_cached_tool_definitions(name)
+        if cached_tools:
+            for tool in cached_tools:
+                if include_set and tool['name'] not in include_set:
+                    continue
+                if exclude_set and tool['name'] in exclude_set:
+                    continue
+
+                # Build a schema matching the format used by _convert_mcp_schema
+                util_name = f"mcp__{name}__{tool['name']}"
+                schema = {
+                    "type": "function",
+                    "name": util_name,
+                    "description": tool.get("description", ""),
+                    "parameters": tool.get("inputSchema", {"type": "object", "properties": {}}),
+                }
+
+                # Skip if already registered (from a prior discover call)
+                if util_name in registry._tools:
+                    stub_names.append(util_name)
+                    continue
+
+                registry.register(
+                    name=util_name,
+                    toolset=toolset_name,
+                    schema=schema,
+                    handler=_make_lazy_handler(name, tool['name'], cfg),
+                    check_fn=lambda: True,
+                    is_async=False,
+                    description=tool.get("description", ""),
+                )
+                stub_names.append(util_name)
+
+            if stub_names:
+                registry.register_toolset_alias(name, toolset_name)
+        else:
+            # No cache available — log that lazy init will connect on first use
+            logger.debug(
+                "MCP server '%s': no cached tool definitions, "
+                "will connect lazily on first tool use",
+                name,
+            )
+
+    return stub_names
+
+
+def _load_cached_tool_definitions(server_name: str) -> Optional[List[dict]]:
+    """Load cached MCP tool definitions from disk.
+
+    After a successful discovery, tool schemas are cached to avoid
+    needing to connect on every process start.  Returns None if no
+    cache exists.
+    """
+    try:
+        from hermes_constants import get_hermes_home
+        cache_dir = os.path.join(get_hermes_home(), "cache", "mcp_tools")
+        cache_file = os.path.join(cache_dir, f"{server_name}.json")
+        if os.path.exists(cache_file):
+            with open(cache_file, "r") as f:
+                return json.load(f)
+    except Exception as e:
+        logger.debug("Failed to load MCP tool cache for '%s': %s", server_name, e)
+    return None
+
+
+def _save_cached_tool_definitions(server_name: str, tools: List[dict]) -> None:
+    """Cache MCP tool definitions to disk for lazy loading."""
+    try:
+        from hermes_constants import get_hermes_home
+        cache_dir = os.path.join(get_hermes_home(), "cache", "mcp_tools")
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_file = os.path.join(cache_dir, f"{server_name}.json")
+        with open(cache_file, "w") as f:
+            json.dump(tools, f, default=str)
+    except Exception as e:
+        logger.debug("Failed to save MCP tool cache for '%s': %s", server_name, e)
+
+
+def _make_lazy_handler(server_name: str, tool_name: str, config: dict):
+    """Create a tool handler that lazily initializes MCP before delegating."""
+    tool_timeout = config.get("timeout", _DEFAULT_TOOL_TIMEOUT)
+
+    def _lazy_handler(args: dict, **kwargs) -> str:
+        # Ensure MCP servers are connected before first tool call
+        ensure_mcp_initialized()
+
+        # Now delegate to the real handler (which checks _servers dict)
+        with _lock:
+            server = _servers.get(server_name)
+        if not server or not server.session:
+            return json.dumps({
+                "error": f"MCP server '{server_name}' failed to connect during lazy initialization"
+            }, ensure_ascii=False)
+
+        async def _call():
+            result = await server.session.call_tool(tool_name, arguments=args)
+            if result.isError:
+                error_text = ""
+                for block in (result.content or []):
+                    if hasattr(block, "text"):
+                        error_text += block.text
+                return json.dumps({
+                    "error": _sanitize_error(error_text or "MCP tool returned an error")
+                }, ensure_ascii=False)
+
+            parts: List[str] = []
+            for block in (result.content or []):
+                if hasattr(block, "text"):
+                    parts.append(block.text)
+            text_result = "\n".join(parts) if parts else ""
+
+            structured = getattr(result, "structuredContent", None)
+            if structured is not None:
+                if text_result:
+                    return json.dumps({
+                        "result": text_result,
+                        "structuredContent": structured,
+                    }, ensure_ascii=False)
+                return json.dumps({"result": structured}, ensure_ascii=False)
+            return json.dumps({"result": text_result}, ensure_ascii=False)
+
+        try:
+            return _run_on_mcp_loop(_call(), timeout=tool_timeout)
+        except Exception as exc:
+            _server_error_counts[server_name] = _server_error_counts.get(server_name, 0) + 1
+            logger.error("MCP tool %s/%s lazy call failed: %s", server_name, tool_name, exc)
+            return json.dumps({
+                "error": _sanitize_error(f"MCP call failed: {type(exc).__name__}: {exc}")
+            }, ensure_ascii=False)
+
+    return _lazy_handler
+
+
+def ensure_mcp_initialized() -> None:
+    """Ensure MCP servers are connected. Safe to call multiple times.
+
+    This is the core of the lazy connection pool pattern (inspired by
+    Claude Code's SocketPool.ensureConnected()).  On first call, it
+    connects all configured MCP servers.  Subsequent calls are no-ops.
+
+    Thread-safe: uses a lock to prevent concurrent initialization from
+    multiple threads (e.g. parallel tool calls hitting lazy stubs).
+    """
+    global _mcp_initialized
+
+    if _mcp_initialized:
+        return
+
+    with _mcp_init_lock:
+        if _mcp_initialized:
+            return
+
+        logger.info("MCP lazy initialization: connecting servers on first tool use")
+        servers = _load_mcp_config()
+        if servers:
+            tool_names = register_mcp_servers(servers)
+
+            # Cache tool definitions for future lazy loads
+            with _lock:
+                for name, server in _servers.items():
+                    if hasattr(server, "_tools") and server._tools:
+                        _save_cached_tool_definitions(name, [
+                            {
+                                "type": "object",
+                                "name": t.name,
+                                "description": t.description or "",
+                                "inputSchema": t.inputSchema.model_dump()
+                                if hasattr(t.inputSchema, "model_dump")
+                                else (t.inputSchema if isinstance(t.inputSchema, dict) else {}),
+                            }
+                            for t in server._tools
+                        ])
+
+        _mcp_initialized = True
+
+
+def discover_mcp_tools(lazy: bool = False) -> List[str]:
     """Entry point: load config, connect to MCP servers, register tools.
 
     Called from ``model_tools`` after ``discover_builtin_tools()``. Safe to call even when
@@ -2798,9 +3016,19 @@ def discover_mcp_tools() -> List[str]:
     Idempotent for already-connected servers. If some servers failed on a
     previous call, only the missing ones are retried.
 
+    Args:
+        lazy: If True, defer actual MCP server connections until first tool
+            use.  When lazy, this function only *registers tool stubs* in the
+            tool registry so that the model knows the tools exist.  The actual
+            subprocess spawning happens on first call_tool, via
+            ``ensure_mcp_initialized()``.  This prevents eager subprocess
+            spawning at import time (#15275).
+
     Returns:
         List of all registered MCP tool names.
     """
+    global _mcp_initialized
+
     if not _MCP_AVAILABLE:
         logger.debug("MCP SDK not available -- skipping MCP tool discovery")
         return []
@@ -2809,6 +3037,11 @@ def discover_mcp_tools() -> List[str]:
     if not servers:
         logger.debug("No MCP servers configured")
         return []
+
+    if lazy:
+        # Register tool stubs from config without connecting.
+        # The actual connections are deferred to ensure_mcp_initialized().
+        return _register_mcp_tool_stubs(servers)
 
     with _lock:
         new_server_names = [
@@ -2835,6 +3068,7 @@ def discover_mcp_tools() -> List[str]:
             summary += f" ({failed_count} failed)"
         logger.info(summary)
 
+    _mcp_initialized = True
     return tool_names
 
 

@@ -139,9 +139,13 @@ def _run_async(coro):
 discover_builtin_tools()
 
 # MCP tool discovery (external MCP servers from config)
+# Use lazy=True so MCP server subprocesses are only spawned on first
+# actual tool use, not at import time.  This prevents duplicate
+# subprocess children when multiple entry points (tui_gateway.entry,
+# slash_worker) import model_tools in the same process.  See #15275.
 try:
     from tools.mcp_tool import discover_mcp_tools
-    discover_mcp_tools()
+    discover_mcp_tools(lazy=True)
 except Exception as e:
     logger.debug("MCP tool discovery failed: %s", e)
 
