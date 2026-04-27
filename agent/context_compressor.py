@@ -871,8 +871,8 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
             self._last_summary_error = "no auxiliary LLM provider configured"
             logging.warning("Context compression: no provider available for "
-                            "summary. Middle turns will be dropped without summary "
-                            "for %d seconds.",
+                            "summary. Preserving original messages and pausing "
+                            "summary attempts for %d seconds.",
                             _SUMMARY_FAILURE_COOLDOWN_SECONDS)
             return None
         except Exception as e:
@@ -1209,6 +1209,13 @@ The user has requested that this compaction PRIORITISE preserving all informatio
 
         display_tokens = current_tokens if current_tokens else self.last_prompt_tokens or estimate_messages_tokens_rough(messages)
 
+        # Snapshot the original messages before any lossy modifications.
+        # _prune_old_tool_results() returns a NEW list (via [m.copy() for m in messages])
+        # so rebinding 'messages' below does not affect original_messages.
+        # If summary generation fails later, we return this exact list so
+        # the caller's conversation history is completely unmodified.
+        original_messages = messages
+
         # Phase 1: Prune old tool results (cheap, no LLM call)
         messages, pruned_count = self._prune_old_tool_results(
             messages, protect_tail_count=self.protect_last_n,
@@ -1225,7 +1232,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         compress_end = self._find_tail_cut_by_tokens(messages, compress_start)
 
         if compress_start >= compress_end:
-            return messages
+            return original_messages
 
         turns_to_summarize = messages[compress_start:compress_end]
 
@@ -1268,19 +1275,18 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                     )
             compressed.append(msg)
 
-        # If LLM summary failed, insert a static fallback so the model
-        # knows context was lost rather than silently dropping everything.
+        # If LLM summary failed, preserve the original messages rather than
+        # destroying conversation history.  Dropping turns without a summary
+        # causes permanent data loss — the model loses context of earlier work
+        # with no way to recover it.  (#10719, #12131, #11914, #11585)
         if not summary:
             if not self.quiet_mode:
-                logger.warning("Summary generation failed — inserting static fallback context marker")
-            n_dropped = compress_end - compress_start
-            summary = (
-                f"{SUMMARY_PREFIX}\n"
-                f"Summary generation was unavailable. {n_dropped} conversation turns were "
-                f"removed to free context space but could not be summarized. The removed "
-                f"turns contained earlier work in this session. Continue based on the "
-                f"recent messages below and the current state of any files or resources."
-            )
+                logger.warning(
+                    "Summary generation failed — preserving original messages "
+                    "to prevent data loss (%d middle turns kept intact)",
+                    compress_end - compress_start,
+                )
+            return original_messages
 
         _merge_summary_into_tail = False
         last_head_role = messages[compress_start - 1].get("role", "user") if compress_start > 0 else "user"

@@ -65,9 +65,10 @@ class TestCompress:
         assert result == msgs
 
     def test_truncation_fallback_no_client(self, compressor):
-        # compressor has client=None, so should use truncation fallback
+        # With a mocked summary, compression should reduce message count
         msgs = [{"role": "system", "content": "System prompt"}] + self._make_messages(10)
-        result = compressor.compress(msgs)
+        with patch.object(compressor, "_generate_summary", return_value=f"{SUMMARY_PREFIX}\nSummary"):
+            result = compressor.compress(msgs)
         assert len(result) < len(msgs)
         # Should keep system message and last N
         assert result[0]["role"] == "system"
@@ -75,14 +76,17 @@ class TestCompress:
 
     def test_compression_increments_count(self, compressor):
         msgs = self._make_messages(10)
-        compressor.compress(msgs)
+        with patch.object(compressor, "_generate_summary", return_value=f"{SUMMARY_PREFIX}\nSummary"):
+            compressor.compress(msgs)
         assert compressor.compression_count == 1
-        compressor.compress(msgs)
+        with patch.object(compressor, "_generate_summary", return_value=f"{SUMMARY_PREFIX}\nSummary 2"):
+            compressor.compress(msgs)
         assert compressor.compression_count == 2
 
     def test_protects_first_and_last(self, compressor):
         msgs = self._make_messages(10)
-        result = compressor.compress(msgs)
+        with patch.object(compressor, "_generate_summary", return_value=f"{SUMMARY_PREFIX}\nSummary"):
+            result = compressor.compress(msgs)
         # First 2 messages should be preserved (protect_first_n=2)
         # Last 2 messages should be preserved (protect_last_n=2)
         assert result[-1]["content"] == msgs[-1]["content"]
@@ -91,6 +95,133 @@ class TestCompress:
         # (head=assistant, tail=user in this fixture).  Verify the
         # original content is present in either case.
         assert msgs[-2]["content"] in result[-2]["content"]
+
+
+class TestPreserveOnSummaryFailure:
+    """Regression: when summary generation fails, compress() must return messages
+    unchanged instead of destroying middle turns.  (#10719, #12131, #11914, #11585)"""
+
+    def test_summary_failure_preserves_all_messages(self):
+        """When _generate_summary returns None, no messages should be dropped."""
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(model="test", quiet_mode=True, protect_first_n=2, protect_last_n=2)
+
+        msgs = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"msg {i}"} for i in range(10)]
+
+        with patch.object(c, "_generate_summary", return_value=None):
+            result = c.compress(msgs)
+
+        assert len(result) == len(msgs), (
+            f"Messages were dropped despite summary failure: {len(msgs)} -> {len(result)}"
+        )
+
+    def test_summary_failure_preserves_content(self):
+        """Every original message should be present after a failed compression."""
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(model="test", quiet_mode=True, protect_first_n=2, protect_last_n=2)
+
+        msgs = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"msg {i}"} for i in range(10)]
+        original_contents = [m["content"] for m in msgs]
+
+        with patch.object(c, "_generate_summary", return_value=None):
+            result = c.compress(msgs)
+
+        result_contents = [m["content"] for m in result]
+        for content in original_contents:
+            assert content in result_contents, f"Message '{content}' was lost"
+
+    def test_summary_failure_does_not_increment_compression_count(self):
+        """A failed compression should not count as a successful one."""
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(model="test", quiet_mode=True, protect_first_n=2, protect_last_n=2)
+
+        msgs = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"msg {i}"} for i in range(10)]
+
+        with patch.object(c, "_generate_summary", return_value=None):
+            c.compress(msgs)
+
+        assert c.compression_count == 0
+
+    def test_successful_summary_still_compresses(self):
+        """Verify the normal path still works — compression happens when summary succeeds."""
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(model="test", quiet_mode=True, protect_first_n=2, protect_last_n=2)
+
+        msgs = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"msg {i}"} for i in range(10)]
+
+        with patch.object(c, "_generate_summary", return_value=f"{SUMMARY_PREFIX}\nSummary of work"):
+            result = c.compress(msgs)
+
+        assert len(result) < len(msgs)
+        assert c.compression_count == 1
+
+    def test_transient_llm_error_preserves_messages(self):
+        """Simulate a real transient error (timeout/rate limit) through the full
+        _generate_summary path — messages should be preserved."""
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(model="test", quiet_mode=True, protect_first_n=2, protect_last_n=2)
+
+        msgs = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"msg {i}"} for i in range(10)]
+
+        with patch("agent.context_compressor.call_llm", side_effect=Exception("Connection timeout")):
+            result = c.compress(msgs)
+
+        assert len(result) == len(msgs), "Transient LLM error should not cause data loss"
+
+    def test_runtime_error_no_provider_preserves_messages(self):
+        """When no compression provider is configured (RuntimeError), messages
+        should be preserved rather than destroyed."""
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(model="test", quiet_mode=True, protect_first_n=2, protect_last_n=2)
+
+        msgs = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"msg {i}"} for i in range(10)]
+
+        with patch("agent.context_compressor.call_llm", side_effect=RuntimeError("No provider")):
+            result = c.compress(msgs)
+
+        assert len(result) == len(msgs), "Missing provider should not cause data loss"
+
+    def test_summary_failure_preserves_messages_exactly_after_tool_pruning_would_run(self):
+        """On summary failure, compress() must return the exact original message
+        list — including any large tool outputs that _prune_old_tool_results
+        would normally replace with 1-line summaries.
+
+        This is the key regression test: the pre-summary pruning pass is lossy
+        (it replaces tool outputs with summaries), so returning the post-pruning
+        list on summary failure silently mutates the caller's conversation.
+        The fix saves original_messages before pruning and returns that instead.
+        """
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(model="test", quiet_mode=True, protect_first_n=2, protect_last_n=2)
+
+        # Unique 500-char tool output that pruning would replace with a summary
+        unique_tool_output = "UNIQUE_MARKER_" + ("x" * 486)
+        msgs = [
+            {"role": "user", "content": "msg 0"},
+            {"role": "assistant", "content": "msg 1"},
+            {"role": "user", "content": "msg 2"},
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "terminal", "arguments": '{"command": "ls"}'}},
+            ]},
+            {"role": "tool", "content": unique_tool_output, "tool_call_id": "c1"},
+            {"role": "user", "content": "msg 5"},
+            {"role": "assistant", "content": "msg 6"},
+            {"role": "user", "content": "msg 7"},
+            {"role": "assistant", "content": "msg 8"},
+            {"role": "user", "content": "msg 9"},
+        ]
+
+        with patch.object(c, "_generate_summary", return_value=None):
+            result = c.compress(msgs)
+
+        # Exact preservation — not just same length, same object
+        assert result == msgs, (
+            "Summary failure must return the exact original messages, "
+            "not the post-pruning version"
+        )
+        assert result is msgs, (
+            "Summary failure should return the same list object"
+        )
 
 
 class TestGenerateSummaryNoneContent:
@@ -128,7 +259,8 @@ class TestGenerateSummaryNoneContent:
             {"role": "user" if i % 2 == 0 else "assistant", "content": f"msg {i}"}
             for i in range(10)
         ]
-        result = c.compress(msgs)
+        with patch.object(c, "_generate_summary", return_value=f"{SUMMARY_PREFIX}\nSummary"):
+            result = c.compress(msgs)
         assert len(result) < len(msgs)
 
 
