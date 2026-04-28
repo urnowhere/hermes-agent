@@ -1330,10 +1330,11 @@ run_setup_wizard() {
     # The setup wizard reads from /dev/tty, so it works even when the
     # install script itself is piped (curl | bash). Only skip if no
     # terminal is available at all (e.g. Docker build, CI).
-    if ! [ -e /dev/tty ]; then
+    if ! { exec 3</dev/tty; } 2>/dev/null; then
         log_info "Setup wizard skipped (no terminal available). Run 'hermes setup' after install."
         return 0
     fi
+    exec 3</&-
 
     echo ""
     log_info "Starting setup wizard..."
