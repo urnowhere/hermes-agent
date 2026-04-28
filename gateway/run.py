@@ -29,7 +29,7 @@ from collections import OrderedDict
 from contextvars import copy_context
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Optional, Any, List
+from typing import Callable, Dict, Optional, Any, List
 
 from agent.account_usage import fetch_account_usage, render_account_usage_lines
 
@@ -2288,6 +2288,7 @@ class GatewayRunner:
             adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
             adapter.set_session_store(self.session_store)
             adapter.set_busy_session_handler(self._handle_active_session_busy_message)
+            adapter.set_authorization_check(self._make_adapter_auth_check(adapter.platform))
             
             # Try to connect
             logger.info("Connecting to %s...", platform.value)
@@ -2688,6 +2689,7 @@ class GatewayRunner:
                     adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
                     adapter.set_session_store(self.session_store)
                     adapter.set_busy_session_handler(self._handle_active_session_busy_message)
+                    adapter.set_authorization_check(self._make_adapter_auth_check(adapter.platform))
 
                     success = await adapter.connect()
                     if success:
@@ -3176,6 +3178,38 @@ class GatewayRunner:
             return YuanbaoAdapter(config)
 
         return None
+    def _make_adapter_auth_check(
+        self,
+        platform: Platform,
+    ) -> Callable[[str, Optional[str], Optional[str]], bool]:
+        """Build a platform-bound auth callback for adapter use.
+
+        Adapters that fetch external context (e.g. Slack
+        ``conversations.replies``) call this through
+        ``BasePlatformAdapter._is_sender_authorized`` to mark non-allowlisted
+        senders as untrusted in LLM context, mitigating indirect prompt
+        injection from third parties in shared threads/channels.
+
+        The returned callback delegates to :meth:`_is_user_authorized` so the
+        full auth chain — platform allowlists, group allowlists, pairing
+        store, allow-all flags — stays the single source of truth.
+        """
+        def check(
+            user_id: str,
+            chat_type: Optional[str] = None,
+            chat_id: Optional[str] = None,
+        ) -> bool:
+            if not user_id:
+                return False
+            source = SessionSource(
+                platform=platform,
+                chat_id=chat_id or "",
+                chat_type=chat_type or "group",
+                user_id=user_id,
+            )
+            return self._is_user_authorized(source)
+        return check
+
     def _is_user_authorized(self, source: SessionSource) -> bool:
         """
         Check if a user is authorized to use the bot.
