@@ -280,6 +280,13 @@ def _hermetic_environment(tmp_path, monkeypatch):
     monkeypatch.setenv("AWS_METADATA_SERVICE_TIMEOUT", "1")
     monkeypatch.setenv("AWS_METADATA_SERVICE_NUM_ATTEMPTS", "1")
 
+    # Terminal: hermetic defaults so file/terminal tool tests pass without Modal creds
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+    monkeypatch.setenv("TERMINAL_MODAL_MODE", "auto")
+    # PTY/child shells (tput, resize tests): CI often has no TERM
+    if not (os.environ.get("TERM") or "").strip():
+        monkeypatch.setenv("TERM", "xterm-256color")
+
     # 5. Reset plugin singleton so tests don't leak plugins from
     #    ~/.hermes/plugins/ (which, per step 3, is now empty — but the
     #    singleton might still be cached from a previous test).
@@ -397,6 +404,18 @@ def _reset_module_state():
             _ft_mod._read_tracker.clear()
         with _ft_mod._file_ops_lock:
             _ft_mod._file_ops_cache.clear()
+    except Exception:
+        pass
+
+    # tools.terminal_tool — stale sandbox per-task_id must not win over
+    # TERMINAL_CWD in file_tools._resolve_path_for_task (xdist workers
+    # reuse a process; a prior test may have left "default" container cwd
+    # equal to the repo root).
+    try:
+        from tools import terminal_tool as _tt_mod
+        with _tt_mod._env_lock:
+            _tt_mod._active_environments.clear()
+        _tt_mod._task_env_overrides.clear()
     except Exception:
         pass
 

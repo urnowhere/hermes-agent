@@ -21,6 +21,7 @@ Public API (signatures preserved from the original 2,400-line version):
 """
 
 import json
+import math
 import asyncio
 import logging
 import threading
@@ -476,7 +477,7 @@ def _coerce_number(value: str, integer_only: bool = False):
     except (ValueError, OverflowError):
         return value
     # Guard against inf/nan — not JSON-serializable, keep original string
-    if f != f or f == float("inf") or f == float("-inf"):
+    if not math.isfinite(f):
         return value
     # If it looks like an integer (no fractional part), return int
     if f == int(f):

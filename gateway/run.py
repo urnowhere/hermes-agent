@@ -708,6 +708,12 @@ class GatewayRunner:
         import threading as _threading
         self._agent_cache: "OrderedDict[str, tuple]" = OrderedDict()
         self._agent_cache_lock = _threading.Lock()
+        # Soft-cleanup queue for evicted agents. We intentionally serialize
+        # release_clients() work to avoid spawning hundreds of daemon threads
+        # under cache lock pressure in high-concurrency bursts.
+        self._agent_cache_cleanup_queue = None
+        self._agent_cache_cleanup_worker = None
+        self._agent_cache_cleanup_lock = _threading.Lock()
 
         # Per-session model overrides from /model command.
         # Key: session_key, Value: dict with model/provider/api_key/base_url/api_mode
@@ -9194,6 +9200,57 @@ class GatewayRunner:
         except Exception:
             pass
 
+    def _enqueue_evicted_agent_cleanup(self, key: str, agent: Any) -> None:
+        """Queue soft cleanup for an evicted cached agent.
+
+        Uses a single daemon worker thread to process release_clients() tasks
+        in FIFO order. This avoids per-eviction thread creation while callers
+        hold ``_agent_cache_lock``, which can otherwise cause pathological
+        contention and test-time deadlocks under heavy concurrent inserts.
+        """
+        if agent is None:
+            return
+
+        import queue as _queue
+        import threading as _threading
+
+        _lock = getattr(self, "_agent_cache_cleanup_lock", None)
+        if _lock is None:
+            _lock = _threading.Lock()
+            self._agent_cache_cleanup_lock = _lock
+        if getattr(self, "_agent_cache_cleanup_queue", None) is None:
+            self._agent_cache_cleanup_queue = _queue.SimpleQueue()
+        if getattr(self, "_agent_cache_cleanup_worker", None) is None:
+            self._agent_cache_cleanup_worker = None
+
+        with _lock:
+            if self._agent_cache_cleanup_queue is None:
+                self._agent_cache_cleanup_queue = _queue.SimpleQueue()
+
+            if (
+                self._agent_cache_cleanup_worker is None
+                or not self._agent_cache_cleanup_worker.is_alive()
+            ):
+                def _worker():
+                    while True:
+                        _item = self._agent_cache_cleanup_queue.get()
+                        if _item is None:
+                            break
+                        _k, _a = _item
+                        try:
+                            self._release_evicted_agent_soft(_a)
+                        except Exception:
+                            pass
+
+                self._agent_cache_cleanup_worker = _threading.Thread(
+                    target=_worker,
+                    daemon=True,
+                    name="agent-cache-cleanup-worker",
+                )
+                self._agent_cache_cleanup_worker.start()
+
+        self._agent_cache_cleanup_queue.put((key, agent))
+
     def _enforce_agent_cache_cap(self) -> None:
         """Evict oldest cached agents when cache exceeds _AGENT_CACHE_MAX_SIZE.
 
@@ -9262,13 +9319,7 @@ class GatewayRunner:
                 "Agent cache at cap; evicting LRU session=%s (cache_size=%d)",
                 key, len(_cache),
             )
-            if agent is not None:
-                threading.Thread(
-                    target=self._release_evicted_agent_soft,
-                    args=(agent,),
-                    daemon=True,
-                    name=f"agent-cache-evict-{key[:24]}",
-                ).start()
+            self._enqueue_evicted_agent_cleanup(key, agent)
 
     def _sweep_idle_cached_agents(self) -> int:
         """Evict cached agents whose AIAgent has been idle > _AGENT_CACHE_IDLE_TTL_SECS.
@@ -9311,12 +9362,7 @@ class GatewayRunner:
                 "Agent cache idle-TTL evict: session=%s (idle=%.0fs)",
                 key, now - getattr(agent, "_last_activity_ts", now),
             )
-            threading.Thread(
-                target=self._release_evicted_agent_soft,
-                args=(agent,),
-                daemon=True,
-                name=f"agent-cache-idle-{key[:24]}",
-            ).start()
+            self._enqueue_evicted_agent_cleanup(key, agent)
         return len(to_evict)
 
     # ------------------------------------------------------------------
@@ -9459,21 +9505,11 @@ class GatewayRunner:
                     if source.platform == Platform.MATRIX:
                         _effective_cursor = ""
                         _buffer_only = True
-                    # Fresh-final applies to Telegram only — other
-                    # platforms either edit in place cheaply (Discord,
-                    # Slack) or don't have the timestamp-on-edit
-                    # problem.  (Ported from openclaw/openclaw#72038.)
-                    _fresh_final_secs = (
-                        float(getattr(_scfg, "fresh_final_after_seconds", 0.0) or 0.0)
-                        if source.platform == Platform.TELEGRAM
-                        else 0.0
-                    )
                     _consumer_cfg = StreamConsumerConfig(
                         edit_interval=_scfg.edit_interval,
                         buffer_threshold=_scfg.buffer_threshold,
                         cursor=_effective_cursor,
                         buffer_only=_buffer_only,
-                        fresh_final_after_seconds=_fresh_final_secs,
                     )
                     _stream_consumer = GatewayStreamConsumer(
                         adapter=_adapter,
@@ -10157,21 +10193,11 @@ class GatewayRunner:
                         if source.platform == Platform.MATRIX:
                             _effective_cursor = ""
                             _buffer_only = True
-                        # Fresh-final applies to Telegram only — other
-                        # platforms either edit in place cheaply or don't
-                        # have the edit-timestamp-stays-stale problem.
-                        # (Ported from openclaw/openclaw#72038.)
-                        _fresh_final_secs = (
-                            float(getattr(_scfg, "fresh_final_after_seconds", 0.0) or 0.0)
-                            if source.platform == Platform.TELEGRAM
-                            else 0.0
-                        )
                         _consumer_cfg = StreamConsumerConfig(
                             edit_interval=_scfg.edit_interval,
                             buffer_threshold=_scfg.buffer_threshold,
                             cursor=_effective_cursor,
                             buffer_only=_buffer_only,
-                            fresh_final_after_seconds=_fresh_final_secs,
                         )
                         _stream_consumer = GatewayStreamConsumer(
                             adapter=_adapter,

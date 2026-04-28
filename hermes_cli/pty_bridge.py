@@ -111,6 +111,10 @@ class PtyBridge:
         # Let caller-supplied env fully override inheritance; if they pass
         # None we inherit the server's env (same semantics as subprocess).
         spawn_env = os.environ.copy() if env is None else env
+        # CI and minimal envs often omit TERM; tput/ncurses need a terminal type.
+        if not (spawn_env.get("TERM") or "").strip():
+            spawn_env = dict(spawn_env)
+            spawn_env["TERM"] = "xterm"
         proc = ptyprocess.PtyProcess.spawn(  # type: ignore[union-attr]
             list(argv),
             cwd=cwd,

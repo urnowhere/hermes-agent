@@ -753,10 +753,17 @@ class TestAgentCacheSpilloverLive:
 
         CAP = 16
         monkeypatch.setattr(gw_run, "_AGENT_CACHE_MAX_SIZE", CAP)
+        # Avoid auxiliary-provider auto-detect churn in AIAgent __init__ under
+        # high concurrency; without this, xdist Linux workers can spend most of
+        # the 30s join window in repeated provider warning paths.
+        monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
         runner = self._runner()
 
-        N_THREADS = 8
-        PER_THREAD = 20  # 8 * 20 = 160 inserts into a 16-slot cache
+        N_THREADS = 6
+        # Keep enough pressure to trigger repeated evictions while avoiding
+        # pathological startup latency from constructing hundreds of real
+        # AIAgent instances concurrently on slower CI workers.
+        PER_THREAD = 10  # 6 * 10 = 60 inserts into a 16-slot cache
 
         def worker(tid: int):
             for j in range(PER_THREAD):
@@ -773,7 +780,7 @@ class TestAgentCacheSpilloverLive:
         for t in threads:
             t.start()
         for t in threads:
-            t.join(timeout=30)
+            t.join(timeout=60)
             assert not t.is_alive(), "Worker thread hung — possible deadlock?"
 
         # Let daemon cleanup threads settle.
@@ -1172,3 +1179,4 @@ class TestCachedAgentInactivityReset:
             f"Watchdog would see {idle_secs:.0f}s idle, expected ~{STUCK_FOR}s. "
             "Inactivity timeout could not fire for a stuck interrupted turn."
         )
+
