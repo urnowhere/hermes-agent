@@ -188,7 +188,17 @@ class ChatCompletionsTransport(ProviderTransport):
         anthropic_max_out = params.get("anthropic_max_output")
         is_nvidia_nim = params.get("is_nvidia_nim", False)
         is_kimi = params.get("is_kimi", False)
+        _model_lower = params.get("model_lower") or (model or "").lower()
+        is_deepseek_v4 = _model_lower.startswith("deepseek-v4")
         reasoning_config = params.get("reasoning_config")
+        _ds_thinking_off = bool(
+            reasoning_config
+            and isinstance(reasoning_config, dict)
+            and (
+                reasoning_config.get("enabled") is False
+                or (reasoning_config.get("effort") or "").strip().lower() == "none"
+            )
+        )
 
         if ephemeral is not None and max_tokens_fn:
             api_kwargs.update(max_tokens_fn(ephemeral))
@@ -219,6 +229,16 @@ class ChatCompletionsTransport(ProviderTransport):
                         _kimi_effort = _e
                 api_kwargs["reasoning_effort"] = _kimi_effort
 
+        # DeepSeek V4: top-level reasoning_effort (xhigh→max, others→high)
+        if is_deepseek_v4:
+            if not _ds_thinking_off:
+                _ds_effort = "high"
+                if reasoning_config and isinstance(reasoning_config, dict):
+                    _e = (reasoning_config.get("effort") or "").strip().lower()
+                    if _e == "xhigh":
+                        _ds_effort = "max"
+                api_kwargs["reasoning_effort"] = _ds_effort
+
         # extra_body assembly
         extra_body: Dict[str, Any] = {}
 
@@ -240,8 +260,14 @@ class ChatCompletionsTransport(ProviderTransport):
                 "type": "enabled" if _kimi_thinking_enabled else "disabled",
             }
 
+        # DeepSeek V4: extra_body.thinking
+        if is_deepseek_v4:
+            extra_body["thinking"] = {
+                "type": "enabled" if not _ds_thinking_off else "disabled",
+            }
+
         # Reasoning
-        if params.get("supports_reasoning", False):
+        if params.get("supports_reasoning", False) and not is_deepseek_v4:
             if is_github_models:
                 gh_reasoning = params.get("github_reasoning_extra")
                 if gh_reasoning is not None:

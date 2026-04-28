@@ -7976,6 +7976,10 @@ class AIAgent:
                 return bool(github_model_reasoning_efforts(self.model))
             except Exception:
                 return False
+        # DeepSeek V4 series: supports reasoning_effort + thinking via any route
+        if self.model and self.model.lower().startswith("deepseek-v4"):
+            return True
+
         if "openrouter" not in self._base_url_lower:
             return False
         if "api.mistral.ai" in self._base_url_lower:
@@ -9485,13 +9489,28 @@ class AIAgent:
             _summary_temperature = None if _omit_summary_temperature else _raw_summary_temp
             _is_nous = "nousresearch" in self._base_url_lower
             if self._supports_reasoning_extra_body():
-                if self.reasoning_config is not None:
-                    summary_extra_body["reasoning"] = self.reasoning_config
-                else:
-                    summary_extra_body["reasoning"] = {
-                        "enabled": True,
-                        "effort": "medium"
+                _model_lower = (self.model or "").lower()
+                if _model_lower.startswith("deepseek-v4"):
+                    # DeepSeek V4 uses thinking.type, not the generic reasoning object
+                    _ds_thinking_off = (
+                        self.reasoning_config is not None
+                        and isinstance(self.reasoning_config, dict)
+                        and (
+                            self.reasoning_config.get("enabled") is False
+                            or (self.reasoning_config.get("effort") or "").strip().lower() == "none"
+                        )
+                    )
+                    summary_extra_body["thinking"] = {
+                        "type": "enabled" if not _ds_thinking_off else "disabled",
                     }
+                else:
+                    if self.reasoning_config is not None:
+                        summary_extra_body["reasoning"] = self.reasoning_config
+                    else:
+                        summary_extra_body["reasoning"] = {
+                            "enabled": True,
+                            "effort": "medium"
+                        }
             if _is_nous:
                 summary_extra_body["tags"] = ["product=hermes-agent"]
 

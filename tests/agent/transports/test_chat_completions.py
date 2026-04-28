@@ -241,6 +241,91 @@ class TestChatCompletionsKimi:
         )
         assert kw["extra_body"]["thinking"] == {"type": "disabled"}
 
+
+class TestChatCompletionsDeepSeek:
+    """DeepSeek V4 thinking mode — reasoning_effort + thinking.type support."""
+
+    def test_deepseek_v4_reasoning_effort_top_level(self, transport):
+        kw = transport.build_kwargs(
+            model="deepseek-v4-pro", messages=[{"role": "user", "content": "Hi"}],
+            model_lower="deepseek-v4-pro",
+            reasoning_config={"effort": "high"},
+            max_tokens_param_fn=lambda n: {"max_tokens": n},
+        )
+        assert kw["reasoning_effort"] == "high"
+
+    def test_deepseek_v4_reasoning_effort_xhigh_maps_to_max(self, transport):
+        kw = transport.build_kwargs(
+            model="deepseek-v4-pro", messages=[{"role": "user", "content": "Hi"}],
+            model_lower="deepseek-v4-pro",
+            reasoning_config={"effort": "xhigh"},
+            max_tokens_param_fn=lambda n: {"max_tokens": n},
+        )
+        assert kw["reasoning_effort"] == "max"
+
+    def test_deepseek_v4_reasoning_effort_omitted_when_thinking_disabled(self, transport):
+        kw = transport.build_kwargs(
+            model="deepseek-v4-pro", messages=[{"role": "user", "content": "Hi"}],
+            model_lower="deepseek-v4-pro",
+            reasoning_config={"enabled": False},
+            max_tokens_param_fn=lambda n: {"max_tokens": n},
+        )
+        assert "reasoning_effort" not in kw
+
+    def test_deepseek_v4_thinking_enabled_extra_body(self, transport):
+        kw = transport.build_kwargs(
+            model="deepseek-v4-pro", messages=[{"role": "user", "content": "Hi"}],
+            model_lower="deepseek-v4-pro",
+            max_tokens_param_fn=lambda n: {"max_tokens": n},
+        )
+        assert kw["extra_body"]["thinking"] == {"type": "enabled"}
+
+    def test_deepseek_v4_thinking_disabled_extra_body(self, transport):
+        kw = transport.build_kwargs(
+            model="deepseek-v4-pro", messages=[{"role": "user", "content": "Hi"}],
+            model_lower="deepseek-v4-pro",
+            reasoning_config={"enabled": False},
+            max_tokens_param_fn=lambda n: {"max_tokens": n},
+        )
+        assert kw["extra_body"]["thinking"] == {"type": "disabled"}
+
+    def test_deepseek_v4_thinking_disabled_by_effort_none(self, transport):
+        """reasoning_config={'effort': 'none'} also disables thinking."""
+        kw = transport.build_kwargs(
+            model="deepseek-v4-pro", messages=[{"role": "user", "content": "Hi"}],
+            model_lower="deepseek-v4-pro",
+            reasoning_config={"effort": "none"},
+            max_tokens_param_fn=lambda n: {"max_tokens": n},
+        )
+        assert "reasoning_effort" not in kw
+        assert kw["extra_body"]["thinking"] == {"type": "disabled"}
+
+    def test_deepseek_v4_no_generic_reasoning_extra_body(self, transport):
+        """DeepSeek V4 must NOT get extra_body.reasoning (uses thinking.type instead)."""
+        kw = transport.build_kwargs(
+            model="deepseek-v4-pro", messages=[{"role": "user", "content": "Hi"}],
+            model_lower="deepseek-v4-pro",
+            supports_reasoning=True,
+            reasoning_config={"effort": "high"},
+            max_tokens_param_fn=lambda n: {"max_tokens": n},
+        )
+        assert "reasoning" not in kw.get("extra_body", {})
+
+    def test_deepseek_chat_not_affected(self, transport):
+        """deepseek-chat (V2/V3) must still get generic reasoning, not thinking.type."""
+        kw = transport.build_kwargs(
+            model="deepseek-chat", messages=[{"role": "user", "content": "Hi"}],
+            model_lower="deepseek-chat",
+            supports_reasoning=True,
+            max_tokens_param_fn=lambda n: {"max_tokens": n},
+        )
+        assert "thinking" not in kw.get("extra_body", {})
+        assert kw["extra_body"]["reasoning"] == {"enabled": True, "effort": "medium"}
+
+
+class TestChatCompletionsKimi_Moonshot:
+    """Moonshot/Kimi tool sanitization tests."""
+
     def test_moonshot_tool_schemas_are_sanitized_by_model_name(self, transport):
         """Aggregator routes (Nous, OpenRouter) hit Moonshot by model name, not base URL."""
         tools = [
