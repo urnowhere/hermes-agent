@@ -750,7 +750,7 @@ def load_gateway_config() -> GatewayConfig:
                     bridged["group_policy"] = platform_cfg["group_policy"]
                 if "group_allow_from" in platform_cfg:
                     bridged["group_allow_from"] = platform_cfg["group_allow_from"]
-                for key in ("enable_sessions", "session_idle_minutes", "session_max_live_per_chat"):
+                for key in ("enable_sessions", "session_idle_minutes", "session_max_live_per_chat", "busy_text_policy"):
                     if key in platform_cfg:
                         bridged[key] = platform_cfg[key]
                 if plat in (Platform.DISCORD, Platform.SLACK) and "channel_skill_bindings" in platform_cfg:

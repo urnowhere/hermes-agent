@@ -4519,6 +4519,17 @@ class AIAgent:
             len(steer_text),
             steer_text[:120] + ("..." if len(steer_text) > 120 else ""),
         )
+        progress_callback = getattr(self, "tool_progress_callback", None)
+        if progress_callback:
+            try:
+                progress_callback(
+                    "steer.delivered",
+                    "steer",
+                    steer_text,
+                    chars=len(steer_text),
+                )
+            except Exception:
+                logger.debug("tool_progress_callback failed for delivered steer", exc_info=True)
 
     def _touch_activity(self, desc: str) -> None:
         """Update the last-activity timestamp and description (thread-safe)."""
