@@ -15,6 +15,17 @@ Hermes now ships an **adapter-agnostic skill event resolver**
 gateway events (buttons, reactions, mentions, slash commands) to skills
 whose frontmatter declares matching triggers.
 
+Three LLM-callable outbound tools complete the loop so skills can emit
+the same surfaces they receive:
+
+- `discord_send_button_message` — emit a message with a `SkillButtonView`
+  attached (canonical `custom_id` shape `skill_<name>_<action>`).
+- `discord_add_reaction` — bot pre-attaches an emoji on a message,
+  enabling 1-tap UX where users complete an action with a single
+  reaction click.
+- `discord_remove_reaction` — bot removes its own reaction for cleanup
+  (e.g., when a recommendation expires).
+
 This is purely an extension. The existing prompt-builder skill injection
 path, slash command registration, and message handling pipelines are all
 unchanged. Skills not using the new schema behave exactly as they did
@@ -157,6 +168,69 @@ per button. Styles default to `primary` when omitted. The Python
 (`Dict[label, discord.ButtonStyle]`) for callers that construct the view
 directly — existing callers that omit it get the previous all-primary
 behavior unchanged.
+
+### LLM-callable reaction emit — `discord_add_reaction` / `discord_remove_reaction` tools
+
+The framework already routes inbound Discord reaction events to skills
+that declare `triggers.reaction` (see *Discord — opt-in inbound reactions*
+above). Two companion outbound tools close the asymmetry so skills can
+emit reactions of their own — most usefully, a bot pre-attaches `✅` to
+its freshly-sent message so the user can complete an action with a single
+tap on the existing reaction:
+
+```json
+{
+  "name": "discord_add_reaction",
+  "arguments": {
+    "channel_id": "1496609306995458048",
+    "message_id": "1497123456789012345",
+    "emoji": "✅"
+  }
+}
+```
+
+Returns:
+
+```json
+{
+  "message_id": "1497123456789012345",
+  "channel_id": "1496609306995458048",
+  "emoji": "✅"
+}
+```
+
+`discord_remove_reaction` has the same signature and removes the **bot's
+own** reaction (the tool passes `client.user` to discord.py's
+`message.remove_reaction`); it is not a generic admin operation and
+cannot remove other users' reactions. Use it for cleanup when a
+recommendation expires, an action is reversed, or a button no longer
+applies.
+
+```json
+{
+  "name": "discord_remove_reaction",
+  "arguments": {
+    "channel_id": "1496609306995458048",
+    "message_id": "1497123456789012345",
+    "emoji": "✅"
+  }
+}
+```
+
+**1-tap UX pattern.** After a skill sends a message — via plain
+`channel.send`, the LLM's `discord_send_message` tool, or
+`discord_send_button_message` above — call `discord_add_reaction` with
+the returned `message_id` to pre-attach the affordance. When the user
+clicks it, the inbound reaction routing dispatches the same skill via
+`triggers.reaction.emoji`, closing the loop.
+
+**Add+remove timing.** discord.py processes reaction add/remove on the
+gateway WebSocket; calling `discord_remove_reaction` within milliseconds
+of `discord_add_reaction` may surface a `NotFound` because the add has
+not yet propagated to Discord. The tool wraps the error structurally
+(returns `{"error": ...}` JSON, never raises), so callers can retry
+or accept the no-op — design rapid-toggle flows expecting that case
+rather than relying on strict ordering.
 
 ## Feishu — backward-compatibility fallback
 
