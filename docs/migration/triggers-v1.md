@@ -218,8 +218,8 @@ applies.
 ```
 
 **1-tap UX pattern.** After a skill sends a message — via plain
-`channel.send`, the action-based `discord` tool's `send_message`
-action, or `discord_send_button_message` above — call
+`channel.send`, the cross-platform `send_message` tool from the
+`messaging` toolset, or `discord_send_button_message` above — call
 `discord_add_reaction` with the returned `message_id` to pre-attach the
 affordance. When the user clicks it, the inbound reaction routing
 dispatches the same skill via `triggers.reaction.emoji`, closing the
