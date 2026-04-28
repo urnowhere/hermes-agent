@@ -30,6 +30,14 @@ def test_make_agent_passes_resolved_provider():
     }
 
     with (
+        patch.dict(
+            os.environ,
+            {
+                "HERMES_MODEL": "",
+                "HERMES_INFERENCE_MODEL": "",
+                "HERMES_TUI_PROVIDER": "",
+            },
+        ),
         patch("tui_gateway.server._load_cfg", return_value=fake_cfg),
         patch("tui_gateway.server._get_db", return_value=MagicMock()),
         patch("tui_gateway.server._load_tool_progress_mode", return_value="compact"),
