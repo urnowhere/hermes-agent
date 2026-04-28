@@ -645,6 +645,56 @@ class TestSendDocument:
         assert call_kwargs["message_thread_id"] == 789
 
 
+class TestSendVoice:
+    @pytest.fixture()
+    def connected_adapter(self, adapter):
+        bot = AsyncMock()
+        adapter._bot = bot
+        return adapter
+
+    @pytest.mark.asyncio
+    async def test_send_voice_includes_duration_and_filename_for_ogg(self, connected_adapter, tmp_path, monkeypatch):
+        voice_file = tmp_path / "reply.ogg"
+        voice_file.write_bytes(b"OggS" + b"\x00" * 32)
+
+        mock_msg = MagicMock()
+        mock_msg.message_id = 104
+        connected_adapter._bot.send_voice = AsyncMock(return_value=mock_msg)
+        monkeypatch.setattr("gateway.platforms.telegram._probe_audio_duration_seconds", lambda _path: 3)
+
+        result = await connected_adapter.send_voice(
+            chat_id="12345",
+            audio_path=str(voice_file),
+        )
+
+        assert result.success is True
+        kwargs = connected_adapter._bot.send_voice.call_args[1]
+        assert kwargs["chat_id"] == 12345
+        assert kwargs["filename"] == "reply.ogg"
+        assert kwargs["duration"] == 3
+
+    @pytest.mark.asyncio
+    async def test_send_audio_includes_duration_and_filename_for_mp3(self, connected_adapter, tmp_path, monkeypatch):
+        audio_file = tmp_path / "reply.mp3"
+        audio_file.write_bytes(b"ID3" + b"\x00" * 32)
+
+        mock_msg = MagicMock()
+        mock_msg.message_id = 105
+        connected_adapter._bot.send_audio = AsyncMock(return_value=mock_msg)
+        monkeypatch.setattr("gateway.platforms.telegram._probe_audio_duration_seconds", lambda _path: 8)
+
+        result = await connected_adapter.send_voice(
+            chat_id="12345",
+            audio_path=str(audio_file),
+        )
+
+        assert result.success is True
+        kwargs = connected_adapter._bot.send_audio.call_args[1]
+        assert kwargs["chat_id"] == 12345
+        assert kwargs["filename"] == "reply.mp3"
+        assert kwargs["duration"] == 8
+
+
 class TestTelegramPhotoBatching:
     @pytest.mark.asyncio
     async def test_flush_photo_batch_does_not_drop_newer_scheduled_task(self, adapter):

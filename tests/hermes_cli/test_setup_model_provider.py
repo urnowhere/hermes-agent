@@ -507,3 +507,34 @@ def test_setup_summary_does_not_mark_incomplete_browserbase_as_available(tmp_pat
     assert "Browser Automation (Browserbase)" not in output
     assert "Browser Automation" in output
     assert "BROWSERBASE_API_KEY/BROWSERBASE_PROJECT_ID" in output
+
+
+def test_setup_summary_marks_ready_piper_as_available(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _clear_provider_env(monkeypatch)
+    cfg = load_config()
+    cfg["tts"]["provider"] = "piper"
+    save_config(cfg)
+    monkeypatch.setattr("hermes_cli.setup._check_piper_status", lambda config: (True, None))
+    monkeypatch.setattr("agent.auxiliary_client.get_available_vision_backends", lambda: [])
+
+    _print_setup_summary(load_config(), tmp_path)
+    output = capsys.readouterr().out
+
+    assert "Text-to-Speech (Piper local/offline)" in output
+
+
+def test_setup_summary_marks_unready_piper_as_missing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _clear_provider_env(monkeypatch)
+    cfg = load_config()
+    cfg["tts"]["provider"] = "piper"
+    save_config(cfg)
+    monkeypatch.setattr("hermes_cli.setup._check_piper_status", lambda config: (False, "Piper binary not found"))
+    monkeypatch.setattr("agent.auxiliary_client.get_available_vision_backends", lambda: [])
+
+    _print_setup_summary(load_config(), tmp_path)
+    output = capsys.readouterr().out
+
+    assert "Text-to-Speech (Piper local/offline)" in output
+    assert "Piper binary not found" in output
