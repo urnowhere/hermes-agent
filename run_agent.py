@@ -2804,6 +2804,12 @@ class AIAgent:
         model_lower = eff_model.lower()
         provider_lower = eff_provider.lower()
         is_claude = "claude" in model_lower
+        if not is_claude and provider_lower == "bedrock":
+            try:
+                from agent.bedrock_adapter import is_anthropic_bedrock_model
+                is_claude = is_anthropic_bedrock_model(eff_model)
+            except Exception:
+                pass
         is_openrouter = base_url_host_matches(eff_base_url, "openrouter.ai")
         is_anthropic_wire = eff_api_mode == "anthropic_messages"
         is_native_anthropic = (
