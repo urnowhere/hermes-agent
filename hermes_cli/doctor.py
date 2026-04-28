@@ -931,8 +931,10 @@ def run_doctor(args):
 
     # -- API-key providers --
     # Tuple: (name, env_vars, default_url, base_env, supports_models_endpoint)
-    # If supports_models_endpoint is False, we skip the health check and just show "configured"
-    _apikey_providers = [
+    # Base list augmented at runtime from any registered ProviderProfile with
+    # auth_type="api_key" — adding a providers/*.py file is sufficient to get
+    # the provider into the doctor check without touching this file.
+    _apikey_providers_static = [
         ("Z.AI / GLM",      ("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"), "https://api.z.ai/api/paas/v4/models", "GLM_BASE_URL", True),
         ("Kimi / Moonshot",  ("KIMI_API_KEY",),                              "https://api.moonshot.ai/v1/models",   "KIMI_BASE_URL", True),
         ("StepFun Step Plan",   ("STEPFUN_API_KEY",),                           "https://api.stepfun.ai/step_plan/v1/models", "STEPFUN_BASE_URL", True),
@@ -952,6 +954,25 @@ def run_doctor(args):
         # OpenCode Go has no shared /models endpoint; skip the health check.
         ("OpenCode Go",      ("OPENCODE_GO_API_KEY",),                         None,                                  "OPENCODE_GO_BASE_URL", False),
     ]
+    # Auto-extend with profiles registered after this list was written
+    _known_doctor_names = {t[0] for t in _apikey_providers_static}
+    try:
+        from providers import list_providers
+        from providers.base import ProviderProfile as _PP
+        for _pp in list_providers():
+            if not isinstance(_pp, _PP):
+                continue
+            if _pp.auth_type != "api_key" or not _pp.env_vars:
+                continue
+            _label = _pp.display_name or _pp.name
+            if _label in _known_doctor_names:
+                continue
+            _models_url = (_pp.models_url or (_pp.base_url.rstrip("/") + "/models")) if _pp.base_url else None
+            _base_env = _pp.env_vars[-1] if len(_pp.env_vars) > 1 else None
+            _apikey_providers_static.append((_label, _pp.env_vars, _models_url, _base_env, True))
+    except Exception:
+        pass
+    _apikey_providers = _apikey_providers_static
     for _pname, _env_vars, _default_url, _base_env, _supports_health_check in _apikey_providers:
         _key = ""
         for _ev in _env_vars:

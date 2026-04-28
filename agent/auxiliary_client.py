@@ -151,22 +151,30 @@ def _fixed_temperature_for_model(
     return None
 
 # Default auxiliary models for direct API-key providers (cheap/fast for side tasks)
-_API_KEY_PROVIDER_AUX_MODELS: Dict[str, str] = {
-    "gemini": "gemini-3-flash-preview",
-    "zai": "glm-4.5-flash",
-    "kimi-coding": "kimi-k2-turbo-preview",
-    "stepfun": "step-3.5-flash",
-    "kimi-coding-cn": "kimi-k2-turbo-preview",
-    "gmi": "google/gemini-3.1-flash-lite-preview",
-    "minimax": "MiniMax-M2.7",
-    "minimax-cn": "MiniMax-M2.7",
+def _get_aux_model_for_provider(provider_id: str) -> str:
+    """Return the cheap auxiliary model for a provider.
+
+    Reads from ProviderProfile.default_aux_model first, falling back to the
+    legacy hardcoded dict for providers that predate the profiles system.
+    """
+    try:
+        from providers import get_provider_profile
+        _p = get_provider_profile(provider_id)
+        if _p and _p.default_aux_model:
+            return _p.default_aux_model
+    except Exception:
+        pass
+    return _API_KEY_PROVIDER_AUX_MODELS_FALLBACK.get(provider_id, "")
+
+
+# Fallback for providers not yet migrated to ProviderProfile.default_aux_model.
+# New providers should set default_aux_model on their profile instead.
+_API_KEY_PROVIDER_AUX_MODELS_FALLBACK: Dict[str, str] = {
     "anthropic": "claude-haiku-4-5-20251001",
-    "ai-gateway": "google/gemini-3-flash",
-    "opencode-zen": "gemini-3-flash",
-    "opencode-go": "glm-5",
-    "kilocode": "google/gemini-3-flash-preview",
-    "ollama-cloud": "nemotron-3-nano:30b",
 }
+
+# Legacy alias — callers that haven't been updated yet can still use this.
+_API_KEY_PROVIDER_AUX_MODELS: Dict[str, str] = _API_KEY_PROVIDER_AUX_MODELS_FALLBACK
 
 # Vision-specific model overrides for direct providers.
 # When the user's main provider has a dedicated vision/multimodal model that
@@ -868,7 +876,7 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
             base_url = _to_openai_base_url(
                 _pool_runtime_base_url(entry, pconfig.inference_base_url) or pconfig.inference_base_url
             )
-            model = _API_KEY_PROVIDER_AUX_MODELS.get(provider_id)
+            model = _get_aux_model_for_provider(provider_id) or None
             if model is None:
                 continue  # skip provider if we don't know a valid aux model
             logger.debug("Auxiliary text client: %s (%s) via pool", pconfig.name, model)
@@ -894,7 +902,7 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
         base_url = _to_openai_base_url(
             str(creds.get("base_url", "")).strip().rstrip("/") or pconfig.inference_base_url
         )
-        model = _API_KEY_PROVIDER_AUX_MODELS.get(provider_id)
+        model = _get_aux_model_for_provider(provider_id) or None
         if model is None:
             continue  # skip provider if we don't know a valid aux model
         logger.debug("Auxiliary text client: %s (%s)", pconfig.name, model)
@@ -1258,7 +1266,7 @@ def _try_anthropic() -> Tuple[Optional[Any], Optional[str]]:
 
     from agent.anthropic_adapter import _is_oauth_token
     is_oauth = _is_oauth_token(token)
-    model = _API_KEY_PROVIDER_AUX_MODELS.get("anthropic", "claude-haiku-4-5-20251001")
+    model = _get_aux_model_for_provider("anthropic") or "claude-haiku-4-5-20251001"
     logger.debug("Auxiliary client: Anthropic native (%s) at %s (oauth=%s)", model, base_url, is_oauth)
     try:
         real_client = build_anthropic_client(token, base_url)
@@ -1642,7 +1650,7 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
     except ImportError:
         pass
     try:
-        from agent.copilot_acp_client import CopilotACPClient
+        from acp_adapter.copilot_client import CopilotACPClient
         if isinstance(sync_client, CopilotACPClient):
             return sync_client, model
     except ImportError:
@@ -1986,7 +1994,7 @@ def resolve_provider_client(
             str(creds.get("base_url", "")).strip().rstrip("/") or pconfig.inference_base_url
         )
 
-        default_model = _API_KEY_PROVIDER_AUX_MODELS.get(provider, "")
+        default_model = _get_aux_model_for_provider(provider)
         final_model = _normalize_resolved_model(model or default_model, provider)
 
         if provider == "gemini":
@@ -2056,7 +2064,7 @@ def resolve_provider_client(
                     "process credentials are incomplete"
                 )
                 return None, None
-            from agent.copilot_acp_client import CopilotACPClient
+            from acp_adapter.copilot_client import CopilotACPClient
 
             client = CopilotACPClient(
                 api_key=api_key,
