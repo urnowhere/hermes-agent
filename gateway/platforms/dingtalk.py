@@ -279,9 +279,16 @@ class DingTalkAdapter(BasePlatformAdapter):
         while self._running:
             try:
                 logger.debug("[%s] Starting stream client...", self.name)
-                await self._stream_client.start()
+                await asyncio.wait_for(self._stream_client.start(), timeout=300)
             except asyncio.CancelledError:
                 return
+            except asyncio.TimeoutError:
+                if not self._running:
+                    return
+                logger.warning(
+                    "[%s] Stream client timed out after 300s without activity; forcing reconnect",
+                    self.name,
+                )
             except Exception as e:
                 if not self._running:
                     return
