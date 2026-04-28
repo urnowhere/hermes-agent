@@ -111,6 +111,25 @@ DINGTALK_TYPE_MAPPING = {
 }
 
 
+def _env_truthy(name: str) -> bool:
+    return str(os.getenv(name, "") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+def build_dingtalk_http_client_kwargs() -> Dict[str, Any]:
+    """Build HTTP client kwargs shared by gateway and proactive send paths."""
+    client_kwargs: Dict[str, Any] = {
+        "timeout": 30.0,
+        "follow_redirects": True,
+    }
+    proxy_url = resolve_proxy_url("DINGTALK_PROXY")
+    if proxy_url:
+        client_kwargs["proxy"] = proxy_url
+    elif _env_truthy("DINGTALK_FORCE_IPV4"):
+        client_kwargs["transport"] = httpx.AsyncHTTPTransport(
+            local_address="0.0.0.0"
+        )
+    return client_kwargs
+
+
 def check_dingtalk_requirements() -> bool:
     """Check if DingTalk dependencies are available and configured."""
     if not DINGTALK_STREAM_AVAILABLE or not HTTPX_AVAILABLE:
@@ -231,7 +250,14 @@ class DingTalkAdapter(BasePlatformAdapter):
             return False
 
         try:
-            self._http_client = httpx.AsyncClient(timeout=30.0)
+            client_kwargs = build_dingtalk_http_client_kwargs()
+            proxy_url = client_kwargs.get("proxy")
+            if proxy_url:
+                logger.info("[%s] Proxy detected for DingTalk HTTP client: %s", self.name, proxy_url)
+            elif client_kwargs.get("transport") is not None:
+                logger.info("[%s] DingTalk HTTP client forcing IPv4 via env/config", self.name)
+
+            self._http_client = httpx.AsyncClient(**client_kwargs)
 
             credential = dingtalk_stream.Credential(
                 self._client_id, self._client_secret

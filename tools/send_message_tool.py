@@ -30,6 +30,7 @@ _FEISHU_TARGET_RE = re.compile(r"^\s*((?:oc|ou|on|chat|open)_[-A-Za-z0-9]+)(?::(
 _SLACK_TARGET_RE = re.compile(r"^\s*([CGD][A-Z0-9]{8,})\s*$")
 _WEIXIN_TARGET_RE = re.compile(r"^\s*((?:wxid|gh|v\d+|wm|wb)_[A-Za-z0-9_-]+|[A-Za-z0-9._-]+@chatroom|filehelper)\s*$")
 _YUANBAO_TARGET_RE = re.compile(r"^\s*((?:group|direct):[^:]+)\s*$")
+_DINGTALK_TARGET_RE = re.compile(r"^\s*(cid[-A-Za-z0-9_=]+)\s*$")
 # Discord snowflake IDs are numeric, same regex pattern as Telegram topic targets.
 _NUMERIC_TOPIC_RE = _TELEGRAM_TOPIC_TARGET_RE
 # Platforms that address recipients by phone number and accept E.164 format
@@ -366,6 +367,10 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         match = _WEIXIN_TARGET_RE.fullmatch(target_ref)
         if match:
             return match.group(1), None, True
+    if platform_name == "dingtalk":
+        match = _DINGTALK_TARGET_RE.fullmatch(target_ref)
+        if match:
+            return match.group(1), None, True
     if platform_name == "yuanbao":
         match = _YUANBAO_TARGET_RE.fullmatch(target_ref)
         if match:
@@ -579,9 +584,10 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             last_result = result
         return last_result
 
-    # --- DingTalk: native attachment support via adapter media sends ---
-    if platform == Platform.DINGTALK and media_files:
+    # --- DingTalk: route explicit/proactive chat sends via the adapter ---
+    if platform == Platform.DINGTALK:
         last_result = None
+        adapter_error = None
         for i, chunk in enumerate(chunks):
             is_last = (i == len(chunks) - 1)
             result = await _send_dingtalk_via_adapter(
@@ -590,6 +596,25 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
                 chunk,
                 media_files=media_files if is_last else [],
             )
+            if isinstance(result, dict) and result.get("error"):
+                adapter_error = result
+                break
+            last_result = result
+
+        if adapter_error is None:
+            return last_result
+
+        if media_files:
+            return adapter_error
+
+        logger.info(
+            "DingTalk adapter send fell back to webhook delivery for %s: %s",
+            chat_id,
+            adapter_error.get("error"),
+        )
+        last_result = None
+        for chunk in chunks:
+            result = await _send_dingtalk(pconfig.extra, chat_id, chunk)
             if isinstance(result, dict) and result.get("error"):
                 return result
             last_result = result
@@ -1386,7 +1411,10 @@ async def _send_dingtalk(extra, chat_id, message):
 async def _send_dingtalk_via_adapter(pconfig, chat_id, message, media_files=None):
     """Send via the DingTalk adapter so native media uploads are preserved."""
     try:
-        from gateway.platforms.dingtalk import DingTalkAdapter
+        from gateway.platforms.dingtalk import (
+            DingTalkAdapter,
+            build_dingtalk_http_client_kwargs,
+        )
         import httpx
     except ImportError:
         return {"error": "DingTalk adapter not available."}
@@ -1395,7 +1423,7 @@ async def _send_dingtalk_via_adapter(pconfig, chat_id, message, media_files=None
 
     try:
         adapter = DingTalkAdapter(pconfig)
-        adapter._http_client = httpx.AsyncClient(timeout=30.0)
+        adapter._http_client = httpx.AsyncClient(**build_dingtalk_http_client_kwargs())
 
         # Cross-platform send_message targets do not carry an inbound message
         # context, so seed a minimal pseudo-context for proactive media routing.

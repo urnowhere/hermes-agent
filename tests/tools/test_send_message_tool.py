@@ -65,6 +65,16 @@ def _ensure_slack_mock(monkeypatch):
 
 
 class TestSendMessageTool:
+    def test_parse_dingtalk_cid_target_as_explicit(self):
+        chat_id, thread_id, is_explicit = _parse_target_ref(
+            "dingtalk",
+            "cidX9G6ZKg7IT8OL0KIrKn7tw8T8U9NTbKIQq0BVjyPnFI=",
+        )
+
+        assert chat_id == "cidX9G6ZKg7IT8OL0KIrKn7tw8T8U9NTbKIQq0BVjyPnFI="
+        assert thread_id is None
+        assert is_explicit is True
+
     def test_cron_duplicate_target_is_skipped_and_explained(self):
         home = SimpleNamespace(chat_id="-1001")
         config, _telegram_cfg = _make_config()
@@ -258,6 +268,62 @@ class TestSendTelegramMediaDelivery:
         sent_text = bot.send_message.await_args.kwargs["text"]
         assert "MEDIA:" not in sent_text
         assert sent_text == "Hello there"
+
+
+class TestSendDingTalkDelivery:
+    def test_send_to_platform_prefers_adapter_for_plain_text(self):
+        dingtalk_cfg = SimpleNamespace(enabled=True, token=None, extra={})
+
+        with patch(
+            "tools.send_message_tool._send_dingtalk_via_adapter",
+            new=AsyncMock(return_value={"success": True, "platform": "dingtalk", "message_id": "msg-1"}),
+        ) as adapter_send, patch(
+            "tools.send_message_tool._send_dingtalk",
+            new=AsyncMock(return_value={"success": True, "platform": "dingtalk", "message_id": "webhook-msg"}),
+        ) as webhook_send:
+            result = asyncio.run(
+                _send_to_platform(
+                    Platform.DINGTALK,
+                    dingtalk_cfg,
+                    "cidX9G6ZKg7IT8OL0KIrKn7tw8T8U9NTbKIQq0BVjyPnFI=",
+                    "hello dingtalk",
+                )
+            )
+
+        assert result["success"] is True
+        adapter_send.assert_awaited_once()
+        webhook_send.assert_not_awaited()
+
+    def test_send_to_platform_falls_back_to_webhook_for_text_only(self):
+        dingtalk_cfg = SimpleNamespace(
+            enabled=True,
+            token=None,
+            extra={"webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=abc"},
+        )
+
+        with patch(
+            "tools.send_message_tool._send_dingtalk_via_adapter",
+            new=AsyncMock(return_value={"error": "no proactive context"}),
+        ) as adapter_send, patch(
+            "tools.send_message_tool._send_dingtalk",
+            new=AsyncMock(return_value={"success": True, "platform": "dingtalk", "message_id": "webhook-msg"}),
+        ) as webhook_send:
+            result = asyncio.run(
+                _send_to_platform(
+                    Platform.DINGTALK,
+                    dingtalk_cfg,
+                    "cidX9G6ZKg7IT8OL0KIrKn7tw8T8U9NTbKIQq0BVjyPnFI=",
+                    "hello dingtalk",
+                )
+            )
+
+        assert result["success"] is True
+        adapter_send.assert_awaited_once()
+        webhook_send.assert_awaited_once_with(
+            dingtalk_cfg.extra,
+            "cidX9G6ZKg7IT8OL0KIrKn7tw8T8U9NTbKIQq0BVjyPnFI=",
+            "hello dingtalk",
+        )
 
     def test_sends_voice_for_ogg_with_voice_directive(self, tmp_path, monkeypatch):
         voice_path = tmp_path / "voice.ogg"
