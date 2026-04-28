@@ -260,6 +260,38 @@ class TestProviderPersistsAfterModelSave:
         assert model.get("default") == "minimax-m2.5"
         assert model.get("api_mode") == "anthropic_messages"
 
+    def test_api_key_provider_switch_clears_stale_model_api_key(
+        self, config_home, monkeypatch
+    ):
+        """Switching API-key providers should not persist the previous provider's inline api_key."""
+        from hermes_cli.main import _model_flow_api_key_provider
+        from hermes_cli.config import load_config
+
+        monkeypatch.setenv("KIMI_API_KEY", "sk-kimi-test-key")
+        (config_home / "config.yaml").write_text(
+            "model:\n"
+            "  default: anthropic/claude-opus-4.6\n"
+            "  provider: openrouter\n"
+            "  base_url: https://openrouter.ai/api/v1\n"
+            "  api_key: sk-or-stale\n"
+            "  api_mode: anthropic_messages\n"
+        )
+
+        with patch("hermes_cli.auth._prompt_model_selection", return_value="kimi-k2.5"), \
+             patch("hermes_cli.auth.deactivate_provider"), \
+             patch("builtins.input", return_value=""):
+            _model_flow_api_key_provider(load_config(), "kimi-coding", "anthropic/claude-opus-4.6")
+
+        import yaml
+
+        config = yaml.safe_load((config_home / "config.yaml").read_text()) or {}
+        model = config.get("model")
+        assert isinstance(model, dict)
+        assert model.get("provider") == "kimi-coding"
+        assert model.get("default") == "kimi-k2.5"
+        assert "api_key" not in model
+        assert "api_mode" not in model
+
 
 class TestBaseUrlValidation:
     """Reject non-URL values in the base URL prompt (e.g. shell commands)."""
