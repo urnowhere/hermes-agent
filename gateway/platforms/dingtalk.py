@@ -378,6 +378,28 @@ class DingTalkAdapter(BasePlatformAdapter):
         self._dedup.clear()
         logger.info("[%s] Disconnected", self.name)
 
+    def _ensure_http_client(self) -> bool:
+        """Lazily recreate the HTTP client after reload/restart edge cases."""
+        if self._http_client is not None:
+            return True
+        if not HTTPX_AVAILABLE:
+            return False
+        client_kwargs = build_dingtalk_http_client_kwargs()
+        proxy_url = client_kwargs.get("proxy")
+        if proxy_url:
+            logger.info(
+                "[%s] Restoring DingTalk HTTP client with proxy: %s",
+                self.name,
+                proxy_url,
+            )
+        elif client_kwargs.get("transport") is not None:
+            logger.info(
+                "[%s] Restoring DingTalk HTTP client with IPv4 transport",
+                self.name,
+            )
+        self._http_client = httpx.AsyncClient(**client_kwargs)
+        return True
+
     # -- Group gating --------------------------------------------------------
 
     def _dingtalk_require_mention(self) -> bool:
@@ -833,7 +855,7 @@ class DingTalkAdapter(BasePlatformAdapter):
                 )
             session_webhook, _ = webhook_info
 
-        if not self._http_client:
+        if not self._ensure_http_client():
             return SendResult(success=False, error="HTTP client not initialized")
 
         # Look up the inbound message for this chat (for AI Card routing)
@@ -924,7 +946,7 @@ class DingTalkAdapter(BasePlatformAdapter):
     ) -> SendResult:
         del metadata
 
-        if not self._http_client:
+        if not self._ensure_http_client():
             return SendResult(success=False, error="HTTP client not initialized")
 
         from tools.url_safety import is_safe_url
@@ -960,7 +982,7 @@ class DingTalkAdapter(BasePlatformAdapter):
     ) -> SendResult:
         del kwargs
 
-        if not self._http_client:
+        if not self._ensure_http_client():
             return SendResult(success=False, error="HTTP client not initialized")
 
         file_path = self._resolve_local_image_path(image_path)
@@ -1244,7 +1266,7 @@ class DingTalkAdapter(BasePlatformAdapter):
                 logger.error("[%s] Failed to get access token: %s", self.name, e)
                 return None
 
-        if not self._http_client or not self._client_id or not self._client_secret:
+        if (not self._http_client and not self._ensure_http_client()) or not self._client_id or not self._client_secret:
             return None
 
         try:
@@ -1271,7 +1293,7 @@ class DingTalkAdapter(BasePlatformAdapter):
         now_ts = datetime.now(tz=timezone.utc).timestamp()
         if self._oapi_token and now_ts < self._oapi_token_expiry_ts - 60:
             return self._oapi_token
-        if not self._http_client or not self._client_id or not self._client_secret:
+        if (not self._http_client and not self._ensure_http_client()) or not self._client_id or not self._client_secret:
             return None
 
         try:
