@@ -159,6 +159,17 @@ class LiveKitAdapter(BasePlatformAdapter):
 
         self._presence_poll_interval: float = self._resolve_presence_poll_interval()
 
+    def _should_auto_tts_for_chat(self, chat_id: str) -> bool:
+        """LiveKit is voice-first — always auto-TTS unless the chat opted out.
+
+        On text platforms the default is gated by ``voice.auto_tts`` (off by
+        default). On LiveKit the channel itself is audio, so a typed-only
+        reply gives the user nothing. Per-chat ``/voice off`` still wins.
+        """
+        if chat_id in self._auto_tts_disabled_chats:
+            return False
+        return True
+
     def _resolve_presence_poll_interval(self) -> float:
         """Pick the presence-poll interval: env override > cloud/local default.
 
@@ -565,7 +576,36 @@ class LiveKitAdapter(BasePlatformAdapter):
             logger.debug("[%s] Could not resolve agent name from LLM: %s", self.name, e)
 
     def _cleanup_participant(self, identity: str):
-        """Remove buffers and cancel audio stream for a participant."""
+        """Remove buffers and cancel audio stream for a participant.
+
+        If the participant was mid-utterance when the track went away
+        (e.g. their mic dropped or — for file-based publishers — the
+        clip ended), flush whatever speech has been buffered before
+        discarding it, so the user's last words still reach STT.
+        """
+        # Flush a pending utterance, if any, before tearing buffers down.
+        buf = self._audio_buffers.get(identity)
+        if buf is not None and identity in self._speaking_participants and len(buf) > 0:
+            silence_bytes = int(SILENCE_THRESHOLD_SECONDS * SAMPLE_RATE * NUM_CHANNELS * 2)
+            speech_end = max(0, len(buf) - silence_bytes)
+            duration = speech_end / (SAMPLE_RATE * NUM_CHANNELS * 2)
+            if duration >= MIN_SPEECH_DURATION:
+                pcm_data = bytes(buf[:speech_end])
+                logger.info(
+                    "[%s] Utterance from %s: %.1fs audio (flushed on track end)",
+                    self.name, identity, duration,
+                )
+                try:
+                    asyncio.create_task(
+                        self._publish_agent_event(
+                            "agent:listening-stop", {"identity": identity}
+                        )
+                    )
+                    asyncio.create_task(self._process_voice_input(identity, pcm_data))
+                except RuntimeError:
+                    # No running event loop (e.g. during disconnect path) — skip flush.
+                    pass
+
         task = self._audio_streams.pop(identity, None)
         if task:
             task.cancel()
