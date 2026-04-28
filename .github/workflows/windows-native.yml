@@ -1,0 +1,140 @@
+name: Windows Native Tests
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - ".github/workflows/windows-native.yml"
+      - "windows-native/**"
+      - "tools/**"
+      - "tests/**"
+      - "pyproject.toml"
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - ".github/workflows/windows-native.yml"
+      - "windows-native/**"
+      - "tools/**"
+      - "tests/**"
+      - "pyproject.toml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-tests:
+    name: Windows ${{ matrix.python-version }} Tests
+    runs-on: windows-latest
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Setup Git for Windows
+        uses: crazy-max/ghaction-chocolatey@v3
+        with:
+          args: install -y git
+
+      - name: Verify Git installation
+        run: |
+          git --version
+          echo "Git executable: $(where.exe git)"
+        shell: pwsh
+
+      - name: Setup Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Create Windows-native virtual environment
+        run: |
+          uv venv .venv-windows-native --python ${{ matrix.python-version }}
+        shell: pwsh
+
+      - name: Install Hermes Agent with dev dependencies
+        run: |
+          uv pip install -e ".[dev]" --python .venv-windows-native\Scripts\python.exe
+        shell: pwsh
+
+      - name: Verify installation
+        run: |
+          .venv-windows-native\Scripts\python.exe --version
+          .venv-windows-native\Scripts\python.exe -c "import pytest; print(f'pytest {pytest.__version__}')"
+        shell: pwsh
+
+      - name: Set Windows environment variables
+        run: |
+          echo "PYTHONUTF8=1" >> $env:GITHUB_ENV
+          echo "PYTHONIOENCODING=utf-8" >> $env:GITHUB_ENV
+          echo "HERMES_GIT_BASH_PATH=C:\Program Files\Git\bin\bash.exe" >> $env:GITHUB_ENV
+          echo "HERMES_STORAGE_DIR=$env:TEMP\hermes-results" >> $env:GITHUB_ENV
+          echo "PYTHONPATH=windows-native" >> $env:GITHUB_ENV
+        shell: pwsh
+
+      - name: Copy test runner to root
+        run: |
+          Copy-Item -Path "windows-native\run_tests.py" -Destination ".\run_tests.py" -Force
+        shell: pwsh
+
+      - name: Display environment
+        run: |
+          Write-Host "=== Environment Variables ==="
+          Write-Host "PYTHONPATH: $env:PYTHONPATH"
+          Write-Host "PYTHONUTF8: $env:PYTHONUTF8"
+          Write-Host "HERMES_GIT_BASH_PATH: $env:HERMES_GIT_BASH_PATH"
+          Write-Host "HERMES_STORAGE_DIR: $env:HERMES_STORAGE_DIR"
+          Write-Host ""
+          Write-Host "=== Python Path ==="
+          .venv-windows-native\Scripts\python.exe -c "import sys; print(sys.path)"
+        shell: pwsh
+
+      - name: Test patch import
+        run: |
+          .venv-windows-native\Scripts\python.exe -c "import sys; sys.path.insert(0, 'windows-native'); import patches; print('Patches loaded successfully')"
+        shell: pwsh
+
+      - name: "Run tests - Batch 1: Agent tests"
+        run: |
+          .venv-windows-native\Scripts\python.exe windows-native/run_tests.py tests/agent/
+        shell: pwsh
+
+      - name: "Run tests - Batch 2: CLI tests"
+        run: |
+          .venv-windows-native\Scripts\python.exe windows-native/run_tests.py tests/cli/
+        shell: pwsh
+
+      - name: "Run tests - Batch 3: Tools tests (core)"
+        run: |
+          .venv-windows-native\Scripts\python.exe windows-native/run_tests.py tests/tools/test_registry.py tests/tools/test_windows_compat.py tests/tools/test_tool_result_storage.py tests/tools/test_file_operations.py
+        shell: pwsh
+
+      # Note: Skipped tests:
+      # - tests/cron/ : Unix-specific (cron, signal handling, daemon processes)
+      # - tests/gateway/ : External service integrations (Telegram/Discord/etc.) require API keys
+      # - tests/acp/ : ACP server tests (optional, requires additional setup)
+      # - tests/integration/ : Integration tests (external dependencies)
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-coverage-${{ matrix.python-version }}
+          path: |
+            coverage.xml
+            htmlcov/
+          retention-days: 3
