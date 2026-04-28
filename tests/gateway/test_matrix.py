@@ -136,6 +136,9 @@ def _make_fake_mautrix():
         async def get_members(self, room_id):
             return []
 
+        async def has_full_member_list(self, room_id):
+            return False
+
         async def get_member_profiles(self, room_id):
             return {}
 
@@ -449,7 +452,7 @@ class TestMatrixDmDetection:
 
     @pytest.mark.asyncio
     async def test_refresh_dm_cache_with_m_direct(self):
-        """_refresh_dm_cache should populate _dm_rooms from m.direct data."""
+        """_refresh_dm_cache should add positive DM cache entries only."""
         self.adapter._joined_rooms = {"!room_a:ex.org", "!room_b:ex.org", "!room_c:ex.org"}
 
         mock_client = MagicMock()
@@ -465,7 +468,83 @@ class TestMatrixDmDetection:
 
         assert self.adapter._dm_rooms["!room_a:ex.org"] is True
         assert self.adapter._dm_rooms["!room_b:ex.org"] is True
-        assert self.adapter._dm_rooms["!room_c:ex.org"] is False
+        assert "!room_c:ex.org" not in self.adapter._dm_rooms
+
+    @pytest.mark.asyncio
+    async def test_is_dm_room_uses_full_member_list_when_authoritative(self):
+        """Authoritative state-store membership should be trusted."""
+        state_store = MagicMock()
+        state_store.has_full_member_list = AsyncMock(return_value=True)
+        state_store.get_members = AsyncMock(return_value=["@alice:ex.org", "@bot:ex.org"])
+
+        mock_client = MagicMock()
+        mock_client.state_store = state_store
+        mock_client.get_joined_members = AsyncMock()
+        self.adapter._client = mock_client
+
+        assert await self.adapter._is_dm_room("!room_a:ex.org") is True
+        mock_client.get_joined_members.assert_not_awaited()
+        assert self.adapter._dm_rooms["!room_a:ex.org"] is True
+
+    @pytest.mark.asyncio
+    async def test_is_dm_room_falls_back_to_joined_members_for_fresh_rooms(self):
+        """Fresh rooms should use joined_members when local state is incomplete."""
+        state_store = MagicMock()
+        state_store.has_full_member_list = AsyncMock(return_value=False)
+        state_store.get_members = AsyncMock(return_value=["@bot:ex.org"])
+
+        mock_client = MagicMock()
+        mock_client.state_store = state_store
+        mock_client.get_joined_members = AsyncMock(
+            return_value={
+                "@alice:ex.org": MagicMock(),
+                "@bot:ex.org": MagicMock(),
+            }
+        )
+        self.adapter._client = mock_client
+
+        assert await self.adapter._is_dm_room("!fresh:ex.org") is True
+        mock_client.get_joined_members.assert_awaited_once()
+        assert self.adapter._dm_rooms["!fresh:ex.org"] is True
+
+    @pytest.mark.asyncio
+    async def test_is_dm_room_caches_group_false_from_full_member_list(self):
+        """A full local member list may authoritatively cache a non-DM room."""
+        state_store = MagicMock()
+        state_store.has_full_member_list = AsyncMock(return_value=True)
+        state_store.get_members = AsyncMock(
+            return_value=["@alice:ex.org", "@bot:ex.org", "@bob:ex.org"]
+        )
+
+        mock_client = MagicMock()
+        mock_client.state_store = state_store
+        mock_client.get_joined_members = AsyncMock()
+        self.adapter._client = mock_client
+
+        assert await self.adapter._is_dm_room("!group:ex.org") is False
+        assert self.adapter._dm_rooms["!group:ex.org"] is False
+        mock_client.get_joined_members.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_is_dm_room_caches_group_false_from_joined_members(self):
+        """Server-side joined_members fallback may also cache a non-DM room."""
+        state_store = MagicMock()
+        state_store.has_full_member_list = AsyncMock(return_value=False)
+        state_store.get_members = AsyncMock(return_value=["@bot:ex.org"])
+
+        mock_client = MagicMock()
+        mock_client.state_store = state_store
+        mock_client.get_joined_members = AsyncMock(
+            return_value={
+                "@alice:ex.org": MagicMock(),
+                "@bot:ex.org": MagicMock(),
+                "@bob:ex.org": MagicMock(),
+            }
+        )
+        self.adapter._client = mock_client
+
+        assert await self.adapter._is_dm_room("!group-fresh:ex.org") is False
+        assert self.adapter._dm_rooms["!group-fresh:ex.org"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -1170,13 +1249,14 @@ class TestMatrixDeviceIdConfig:
 
 class TestMatrixSyncLoop:
     @pytest.mark.asyncio
-    async def test_sync_loop_dispatches_events_and_stores_token(self):
-        """_sync_loop should call handle_sync() and persist next_batch."""
+    async def test_sync_loop_dispatches_events_before_storing_token(self):
+        """_sync_loop should only persist next_batch after dispatch succeeds."""
         adapter = _make_adapter()
         adapter._encryption = True
         adapter._closing = False
 
         call_count = 0
+        dispatch_steps = []
 
         async def _sync_once(**kwargs):
             nonlocal call_count
@@ -1189,13 +1269,27 @@ class TestMatrixSyncLoop:
 
         mock_sync_store = MagicMock()
         mock_sync_store.get_next_batch = AsyncMock(return_value=None)
-        mock_sync_store.put_next_batch = AsyncMock()
+
+        async def _put_next_batch(token):
+            dispatch_steps.append(("put_next_batch", token))
+            assert dispatch_steps == [
+                ("handle_sync", None),
+                ("task", None),
+                ("put_next_batch", "s1234"),
+            ]
+
+        mock_sync_store.put_next_batch = AsyncMock(side_effect=_put_next_batch)
+
+        async def _dispatch_task():
+            dispatch_steps.append(("task", None))
 
         fake_client = MagicMock()
         fake_client.sync = AsyncMock(side_effect=_sync_once)
         fake_client.crypto = mock_crypto
         fake_client.sync_store = mock_sync_store
-        fake_client.handle_sync = MagicMock(return_value=[])
+        fake_client.handle_sync = MagicMock(
+            side_effect=lambda payload: dispatch_steps.append(("handle_sync", None)) or [_dispatch_task()]
+        )
         adapter._client = fake_client
 
         await adapter._sync_loop()
@@ -1203,6 +1297,105 @@ class TestMatrixSyncLoop:
         fake_client.sync.assert_awaited_once()
         fake_client.handle_sync.assert_called_once()
         mock_sync_store.put_next_batch.assert_awaited_once_with("s1234")
+
+    @pytest.mark.asyncio
+    async def test_sync_loop_dispatch_failure_retries_after_backoff(self):
+        """Failed dispatch must not advance next_batch and should back off."""
+        adapter = _make_adapter()
+        adapter._closing = False
+
+        call_count = 0
+
+        async def _sync_once(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 1:
+                adapter._closing = True
+            return {"rooms": {"join": {"!room:example.org": {}}}, "next_batch": "s1234"}
+
+        async def _failing_task():
+            raise RuntimeError("boom")
+
+        mock_sync_store = MagicMock()
+        mock_sync_store.get_next_batch = AsyncMock(return_value=None)
+        mock_sync_store.put_next_batch = AsyncMock()
+
+        fake_client = MagicMock()
+        fake_client.sync = AsyncMock(side_effect=_sync_once)
+        fake_client.sync_store = mock_sync_store
+        fake_client.handle_sync = MagicMock(return_value=[_failing_task()])
+        adapter._client = fake_client
+
+        with patch("gateway.platforms.matrix.asyncio.sleep", AsyncMock()) as mock_sleep:
+            await adapter._sync_loop()
+
+        fake_client.handle_sync.assert_called_once()
+        mock_sync_store.put_next_batch.assert_not_awaited()
+        mock_sleep.assert_awaited_once_with(5)
+
+    @pytest.mark.asyncio
+    async def test_connect_initial_sync_does_not_store_token_when_dispatch_fails(self):
+        """connect() should not persist the initial sync token before dispatch succeeds."""
+        from gateway.platforms.matrix import MatrixAdapter
+
+        config = PlatformConfig(
+            enabled=True,
+            token="syt_test_access_token",
+            extra={
+                "homeserver": "https://matrix.example.org",
+                "user_id": "@bot:example.org",
+                "encryption": False,
+            },
+        )
+        adapter = MatrixAdapter(config)
+
+        class FakeWhoamiResponse:
+            def __init__(self, user_id, device_id):
+                self.user_id = user_id
+                self.device_id = device_id
+
+        fake_mautrix_mods = _make_fake_mautrix()
+
+        async def _failing_task():
+            raise RuntimeError("boom")
+
+        mock_sync_store = MagicMock()
+        mock_sync_store.put_next_batch = AsyncMock()
+
+        mock_client = MagicMock()
+        mock_client.mxid = "@bot:example.org"
+        mock_client.device_id = None
+        mock_client.state_store = MagicMock()
+        mock_client.sync_store = mock_sync_store
+        mock_client.crypto = None
+        mock_client.whoami = AsyncMock(
+            return_value=FakeWhoamiResponse("@bot:example.org", "DEV123")
+        )
+        mock_client.sync = AsyncMock(
+            return_value={
+                "rooms": {"join": {"!room:server": {}}},
+                "next_batch": "s1234",
+            }
+        )
+        mock_client.add_event_handler = MagicMock()
+        mock_client.add_dispatcher = MagicMock()
+        mock_client.handle_sync = MagicMock(return_value=[_failing_task()])
+        mock_client.api = MagicMock()
+        mock_client.api.token = "syt_test_access_token"
+        mock_client.api.session = MagicMock()
+        mock_client.api.session.close = AsyncMock()
+
+        fake_mautrix_mods["mautrix.client"].Client = MagicMock(return_value=mock_client)
+
+        with patch.dict("sys.modules", fake_mautrix_mods):
+            with patch.object(adapter, "_refresh_dm_cache", AsyncMock()):
+                with patch.object(adapter, "_sync_loop", AsyncMock(return_value=None)):
+                    assert await adapter.connect() is True
+
+        mock_client.handle_sync.assert_called_once()
+        mock_sync_store.put_next_batch.assert_not_awaited()
+
+        await adapter.disconnect()
 
 
 class TestMatrixUploadAndSend:
@@ -1241,9 +1434,10 @@ class TestMatrixUploadAndSend:
         mock_client.send_message_event = AsyncMock(return_value="$event")
         adapter._client = mock_client
 
-        result = await adapter._upload_and_send(
-            "!room:example.org", b"secret", "secret.txt", "text/plain", "m.file",
-        )
+        with patch.dict("sys.modules", _make_fake_mautrix()):
+            result = await adapter._upload_and_send(
+                "!room:example.org", b"secret", "secret.txt", "text/plain", "m.file",
+            )
 
         assert result.success is True
         # Should have uploaded ciphertext, not plaintext

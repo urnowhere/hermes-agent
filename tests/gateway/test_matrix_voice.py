@@ -88,6 +88,7 @@ def _make_audio_event(
 def _make_state_store(member_count: int = 2):
     """Create a mock state store with get_members/get_member support."""
     store = MagicMock()
+    store.has_full_member_list = AsyncMock(return_value=True)
     # get_members returns a list of member user IDs
     members = [MagicMock() for _ in range(member_count)]
     store.get_members = AsyncMock(return_value=members)
