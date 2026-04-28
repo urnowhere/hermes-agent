@@ -254,7 +254,10 @@ def _resolve_runtime_from_pool_entry(
         # Only override when the pool entry has no explicit base_url (i.e. it
         # fell back to the hardcoded default).  Env var overrides win (#6039).
         pconfig = PROVIDER_REGISTRY.get(provider)
-        pool_url_is_default = pconfig and base_url.rstrip("/") == pconfig.inference_base_url.rstrip("/")
+        pool_url_is_default = pconfig and (
+            not base_url
+            or base_url.rstrip("/") == pconfig.inference_base_url.rstrip("/")
+        )
         if configured_provider == provider and pool_url_is_default:
             cfg_base_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
             if cfg_base_url:
@@ -262,10 +265,14 @@ def _resolve_runtime_from_pool_entry(
         configured_mode = _parse_api_mode(model_cfg.get("api_mode"))
         if configured_mode and _provider_supports_explicit_api_mode(provider, configured_provider):
             api_mode = configured_mode
-        elif provider in ("opencode-zen", "opencode-go"):
+        # For opencode providers, ALWAYS re-detect api_mode from the target model.
+        # This prevents stale config api_mode (e.g. anthropic_messages from when
+        # minimax was default) from overriding the correct api_mode for the target
+        # model (e.g. chat_completions for deepseek).
+        if provider in ("opencode-zen", "opencode-go"):
             from hermes_cli.models import opencode_model_api_mode
             api_mode = opencode_model_api_mode(provider, effective_model)
-        else:
+        elif not configured_mode or not _provider_supports_explicit_api_mode(provider, configured_provider):
             # Auto-detect Anthropic-compatible endpoints (/anthropic suffix,
             # Kimi /coding, api.openai.com → codex_responses, api.x.ai →
             # codex_responses).
@@ -1208,19 +1215,20 @@ def resolve_runtime_provider(
             api_mode = _copilot_runtime_api_mode(model_cfg, creds.get("api_key", ""))
         elif provider == "xai":
             api_mode = "codex_responses"
+        elif provider in ("opencode-zen", "opencode-go"):
+            # For opencode providers, ALWAYS re-detect api_mode from the target model.
+            # This prevents stale config api_mode (e.g. anthropic_messages from when
+            # minimax was default) from overriding the correct api_mode for the target
+            # model (e.g. chat_completions for deepseek).
+            from hermes_cli.models import opencode_model_api_mode
+            _effective = target_model or model_cfg.get("default", "")
+            api_mode = opencode_model_api_mode(provider, _effective)
         else:
             configured_provider = str(model_cfg.get("provider") or "").strip().lower()
             # Only honor persisted api_mode when it belongs to the same provider family.
             configured_mode = _parse_api_mode(model_cfg.get("api_mode"))
             if configured_mode and _provider_supports_explicit_api_mode(provider, configured_provider):
                 api_mode = configured_mode
-            elif provider in ("opencode-zen", "opencode-go"):
-                from hermes_cli.models import opencode_model_api_mode
-                # Prefer the target_model from the caller (explicit mid-session
-                # switch) over the stale model.default; see _resolve_runtime_from_pool_entry
-                # for the same rationale.
-                _effective = target_model or model_cfg.get("default", "")
-                api_mode = opencode_model_api_mode(provider, _effective)
             else:
                 # Auto-detect Anthropic-compatible endpoints by URL convention
                 # (e.g. https://api.minimax.io/anthropic, https://dashscope.../anthropic)
