@@ -841,6 +841,7 @@ class AIAgent:
         self,
         base_url: str = None,
         api_key: str = None,
+        default_headers: Dict[str, Any] = None,
         provider: str = None,
         api_mode: str = None,
         acp_command: str = None,
@@ -906,6 +907,7 @@ class AIAgent:
         Args:
             base_url (str): Base URL for the model API (optional)
             api_key (str): API key for authentication (optional, uses env var if not provided)
+            default_headers (Dict[str, Any]): Extra headers to attach to OpenAI-compatible requests.
             provider (str): Provider identifier (optional; used for telemetry/routing hints)
             api_mode (str): API mode override: "chat_completions" or "codex_responses"
             model (str): Model name to use (default: "anthropic/claude-opus-4.6")
@@ -962,6 +964,15 @@ class AIAgent:
         self._chat_type = chat_type
         self._thread_id = thread_id
         self._gateway_session_key = gateway_session_key  # Stable per-chat key (e.g. agent:main:telegram:dm:123)
+        self._user_default_headers = {}
+        if isinstance(default_headers, dict):
+            for key, value in default_headers.items():
+                if key is None or value is None:
+                    continue
+                key_str = str(key).strip()
+                value_str = str(value).strip()
+                if key_str and value_str:
+                    self._user_default_headers[key_str] = value_str
         # Pluggable print function — CLI replaces this with _cprint so that
         # raw ANSI status lines are routed through prompt_toolkit's renderer
         # instead of going directly to stdout where patch_stdout's StdoutProxy
@@ -1350,27 +1361,30 @@ class AIAgent:
                     client_kwargs["command"] = self.acp_command
                     client_kwargs["args"] = self.acp_args
                 effective_base = base_url
+                merged_headers = dict(self._user_default_headers)
                 if base_url_host_matches(effective_base, "openrouter.ai"):
-                    client_kwargs["default_headers"] = {
+                    merged_headers.update({
                         "HTTP-Referer": "https://hermes-agent.nousresearch.com",
                         "X-OpenRouter-Title": "Hermes Agent",
                         "X-OpenRouter-Categories": "productivity,cli-agent",
-                    }
+                    })
                 elif base_url_host_matches(effective_base, "api.routermint.com"):
-                    client_kwargs["default_headers"] = _routermint_headers()
+                    merged_headers.update(_routermint_headers())
                 elif base_url_host_matches(effective_base, "api.githubcopilot.com"):
                     from hermes_cli.models import copilot_default_headers
 
-                    client_kwargs["default_headers"] = copilot_default_headers()
+                    merged_headers.update(copilot_default_headers())
                 elif base_url_host_matches(effective_base, "api.kimi.com"):
-                    client_kwargs["default_headers"] = {
+                    merged_headers.update({
                         "User-Agent": "claude-code/0.1.0",
-                    }
+                    })
                 elif base_url_host_matches(effective_base, "portal.qwen.ai"):
-                    client_kwargs["default_headers"] = _qwen_portal_headers()
+                    merged_headers.update(_qwen_portal_headers())
                 elif base_url_host_matches(effective_base, "chatgpt.com"):
                     from agent.auxiliary_client import _codex_cloudflare_headers
-                    client_kwargs["default_headers"] = _codex_cloudflare_headers(api_key)
+                    merged_headers.update(_codex_cloudflare_headers(api_key))
+                if merged_headers:
+                    client_kwargs["default_headers"] = merged_headers
             else:
                 # No explicit creds — use the centralized provider router
                 from agent.auxiliary_client import resolve_provider_client
@@ -5706,25 +5720,29 @@ class AIAgent:
     def _apply_client_headers_for_base_url(self, base_url: str) -> None:
         from agent.auxiliary_client import _AI_GATEWAY_HEADERS, _OR_HEADERS
 
+        merged_headers = dict(getattr(self, "_user_default_headers", {}) or {})
         if base_url_host_matches(base_url, "openrouter.ai"):
-            self._client_kwargs["default_headers"] = dict(_OR_HEADERS)
+            merged_headers.update(_OR_HEADERS)
         elif base_url_host_matches(base_url, "ai-gateway.vercel.sh"):
-            self._client_kwargs["default_headers"] = dict(_AI_GATEWAY_HEADERS)
+            merged_headers.update(_AI_GATEWAY_HEADERS)
         elif base_url_host_matches(base_url, "api.routermint.com"):
-            self._client_kwargs["default_headers"] = _routermint_headers()
+            merged_headers.update(_routermint_headers())
         elif base_url_host_matches(base_url, "api.githubcopilot.com"):
             from hermes_cli.models import copilot_default_headers
 
-            self._client_kwargs["default_headers"] = copilot_default_headers()
+            merged_headers.update(copilot_default_headers())
         elif base_url_host_matches(base_url, "api.kimi.com"):
-            self._client_kwargs["default_headers"] = {"User-Agent": "claude-code/0.1.0"}
+            merged_headers.update({"User-Agent": "claude-code/0.1.0"})
         elif base_url_host_matches(base_url, "portal.qwen.ai"):
-            self._client_kwargs["default_headers"] = _qwen_portal_headers()
+            merged_headers.update(_qwen_portal_headers())
         elif base_url_host_matches(base_url, "chatgpt.com"):
             from agent.auxiliary_client import _codex_cloudflare_headers
-            self._client_kwargs["default_headers"] = _codex_cloudflare_headers(
+            merged_headers.update(_codex_cloudflare_headers(
                 self._client_kwargs.get("api_key", "")
-            )
+            ))
+
+        if merged_headers:
+            self._client_kwargs["default_headers"] = merged_headers
         else:
             self._client_kwargs.pop("default_headers", None)
 
