@@ -233,6 +233,18 @@ For cloud sandbox backends, persistence is filesystem-oriented. `TERMINAL_LIFETI
 | `WHATSAPP_ALLOWED_USERS` | Comma-separated phone numbers (with country code, no `+`), or `*` to allow all senders |
 | `WHATSAPP_ALLOW_ALL_USERS` | Allow all WhatsApp senders without an allowlist (`true`/`false`) |
 | `WHATSAPP_DEBUG` | Log raw message events in the bridge for troubleshooting (`true`/`false`) |
+| `LINE_CHANNEL_ACCESS_TOKEN` | LINE Messaging API channel access token |
+| `LINE_CHANNEL_SECRET` | LINE Messaging API channel secret used to validate webhook signatures |
+| `LINE_ALLOWED_USERS` | Comma-separated LINE user IDs allowed to use the bot, or `*` to allow all senders |
+| `LINE_ALLOW_ALL_USERS` | Allow all LINE users without an allowlist (`true`/`false`) |
+| `LINE_WEBHOOK_HOST` | Local bind address for the LINE webhook server (default: `0.0.0.0`) |
+| `LINE_WEBHOOK_PORT` | Local listen port for the LINE webhook server (default: `8645`) |
+| `LINE_WEBHOOK_PATH` | LINE webhook path (default: `/webhooks/line`) |
+| `LINE_MEDIA_PATH` | Public path for serving LINE outbound voice reply media (default: `/media/line`) |
+| `LINE_PUBLIC_BASE_URL` | Public HTTPS origin used when sending LINE audio replies, for example `https://bot.example.com` |
+| `LINE_MULTIMODAL_GRACE_PERIOD_SECONDS` | Window for grouping near-simultaneous LINE media/text events into one turn (default: `5`) |
+| `LINE_HOME_CHANNEL` | Optional named LINE chat for display only; bare `line` sends do not use a home-channel fallback |
+| `LINE_HOME_CHANNEL_NAME` | Display name for the optional LINE home channel |
 | `SIGNAL_HTTP_URL` | signal-cli daemon HTTP endpoint (for example `http://127.0.0.1:8080`) |
 | `SIGNAL_ACCOUNT` | Bot phone number in E.164 format |
 | `SIGNAL_ALLOWED_USERS` | Comma-separated E.164 phone numbers or UUIDs |

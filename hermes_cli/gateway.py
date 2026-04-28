@@ -2507,6 +2507,35 @@ _PLATFORMS = [
         "token_var": "WHATSAPP_ENABLED",
     },
     {
+        "key": "line",
+        "label": "LINE",
+        "emoji": "💬",
+        "token_var": "LINE_CHANNEL_ACCESS_TOKEN",
+        "setup_instructions": [
+            "1. Open https://manager.line.biz/ and create or select a LINE Official Account",
+            "2. Enable Messaging API for the account and create/link a LINE Developers provider",
+            "3. Open https://developers.line.biz/console/ → your Messaging API channel",
+            "4. Copy Basic settings → Channel secret",
+            "5. Issue and copy Messaging API → Channel access token",
+            "6. Set the webhook URL to https://your-domain/webhooks/line and enable webhooks",
+            "7. Disable LINE auto-reply/greeting if Hermes should own all replies",
+        ],
+        "vars": [
+            {"name": "LINE_CHANNEL_ACCESS_TOKEN", "prompt": "Channel access token", "password": True,
+             "help": "Paste the long-lived channel access token from the Messaging API tab."},
+            {"name": "LINE_CHANNEL_SECRET", "prompt": "Channel secret", "password": True,
+             "help": "Paste the channel secret from the Basic settings tab."},
+            {"name": "LINE_ALLOWED_USERS", "prompt": "Allowed LINE user IDs (comma-separated)", "password": False,
+             "is_allowlist": True,
+             "allow_all_var": "LINE_ALLOW_ALL_USERS",
+             "help": "LINE user IDs that may interact with Hermes. Leave empty to use pairing or open access."},
+            {"name": "LINE_PUBLIC_BASE_URL", "prompt": "Public HTTPS base URL for media replies (optional)", "password": False,
+             "help": "Optional. Set when LINE must fetch generated voice/media files from your server."},
+            {"name": "LINE_WEBHOOK_PORT", "prompt": "Webhook listener port (default: 8645)", "password": False,
+             "help": "Optional. Port for the LINE webhook HTTP listener."},
+        ],
+    },
+    {
         "key": "signal",
         "label": "Signal",
         "emoji": "📡",
@@ -2898,11 +2927,11 @@ def _setup_standard_platform(platform: dict):
                 ]
                 access_idx = prompt_choice("  How should unauthorized users be handled?", access_choices, 1)
                 if access_idx == 0:
-                    save_env_value("GATEWAY_ALLOW_ALL_USERS", "true")
+                    save_env_value(var.get("allow_all_var", "GATEWAY_ALLOW_ALL_USERS"), "true")
                     print_warning("  Open access enabled — anyone can use your bot!")
                 elif access_idx == 1:
                     print_success("  DM pairing mode — users will receive a code to request access.")
-                    print_info("  Approve with: hermes pairing approve <platform> <code>")
+                    print_info(f"  Approve with: hermes pairing approve {platform['key']} <code>")
                 else:
                     print_info("  Skipped — configure later with 'hermes gateway setup'")
             continue
@@ -3130,6 +3159,12 @@ def _setup_yuanbao():
     """Configure Yuanbao via the standard platform setup."""
     yuanbao_platform = next(p for p in _PLATFORMS if p["key"] == "yuanbao")
     _setup_standard_platform(yuanbao_platform)
+
+
+def _setup_line():
+    """Configure LINE via the standard platform setup."""
+    line_platform = next(p for p in _PLATFORMS if p["key"] == "line")
+    _setup_standard_platform(line_platform)
 
 
 def _is_service_installed() -> bool:

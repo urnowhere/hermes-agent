@@ -2224,6 +2224,12 @@ def _setup_qqbot():
     _gateway_setup_qqbot()
 
 
+def _setup_line():
+    """Configure LINE Messaging API via gateway setup."""
+    from hermes_cli.gateway import _setup_line as _gateway_setup_line
+    _gateway_setup_line()
+
+
 def _setup_webhooks():
     """Configure webhook integration."""
     print_header("Webhooks")
@@ -2281,6 +2287,7 @@ _GATEWAY_PLATFORMS = [
     ("Matrix", "MATRIX_ACCESS_TOKEN", _setup_matrix),
     ("Mattermost", "MATTERMOST_TOKEN", _setup_mattermost),
     ("WhatsApp", "WHATSAPP_ENABLED", _setup_whatsapp),
+    ("LINE", "LINE_CHANNEL_ACCESS_TOKEN", _setup_line),
     ("DingTalk", "DINGTALK_CLIENT_ID", _setup_dingtalk),
     ("Feishu / Lark", "FEISHU_APP_ID", _setup_feishu),
     ("Yuanbao", "YUANBAO_APP_ID", _setup_yuanbao),

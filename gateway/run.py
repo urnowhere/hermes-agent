@@ -794,6 +794,8 @@ class GatewayRunner:
 
         # Per-chat voice reply mode: "off" | "voice_only" | "all"
         self._voice_mode: Dict[str, str] = self._load_voice_modes()
+        # LINE-specific last non-image inbound modality per chat/user: "text" | "voice"
+        self._line_last_non_image_input_modality: Dict[str, str] = {}
 
         # Track background tasks to prevent garbage collection mid-execution
         self._background_tasks: set = set()
@@ -2160,6 +2162,7 @@ class GatewayRunner:
                        "WECOM_ALLOWED_USERS",
                        "WECOM_CALLBACK_ALLOWED_USERS",
                        "WEIXIN_ALLOWED_USERS",
+                       "LINE_ALLOWED_USERS",
                        "BLUEBUBBLES_ALLOWED_USERS",
                        "QQ_ALLOWED_USERS",
                        "YUANBAO_ALLOWED_USERS",
@@ -2176,6 +2179,7 @@ class GatewayRunner:
                        "WECOM_ALLOW_ALL_USERS",
                        "WECOM_CALLBACK_ALLOW_ALL_USERS",
                        "WEIXIN_ALLOW_ALL_USERS",
+                       "LINE_ALLOW_ALL_USERS",
                        "BLUEBUBBLES_ALLOW_ALL_USERS",
                        "QQ_ALLOW_ALL_USERS",
                        "YUANBAO_ALLOW_ALL_USERS")
@@ -3124,6 +3128,13 @@ class GatewayRunner:
                 return None
             return WeixinAdapter(config)
 
+        elif platform == Platform.LINE:
+            from gateway.platforms.line import LineAdapter, check_line_requirements
+            if not check_line_requirements():
+                logger.warning("LINE: line-bot-sdk/aiohttp not installed or LINE credentials not set")
+                return None
+            return LineAdapter(config)
+
         elif platform == Platform.MATTERMOST:
             from gateway.platforms.mattermost import MattermostAdapter, check_mattermost_requirements
             if not check_mattermost_requirements():
@@ -3214,6 +3225,7 @@ class GatewayRunner:
             Platform.WECOM: "WECOM_ALLOWED_USERS",
             Platform.WECOM_CALLBACK: "WECOM_CALLBACK_ALLOWED_USERS",
             Platform.WEIXIN: "WEIXIN_ALLOWED_USERS",
+            Platform.LINE: "LINE_ALLOWED_USERS",
             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOWED_USERS",
             Platform.QQBOT: "QQ_ALLOWED_USERS",
             Platform.YUANBAO: "YUANBAO_ALLOWED_USERS",
@@ -3237,6 +3249,7 @@ class GatewayRunner:
             Platform.WECOM: "WECOM_ALLOW_ALL_USERS",
             Platform.WECOM_CALLBACK: "WECOM_CALLBACK_ALLOW_ALL_USERS",
             Platform.WEIXIN: "WEIXIN_ALLOW_ALL_USERS",
+            Platform.LINE: "LINE_ALLOW_ALL_USERS",
             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOW_ALL_USERS",
             Platform.QQBOT: "QQ_ALLOW_ALL_USERS",
             Platform.YUANBAO: "YUANBAO_ALLOW_ALL_USERS",
@@ -3394,6 +3407,7 @@ class GatewayRunner:
         7. Return response
         """
         source = event.source
+        self._remember_line_input_modality(event)
 
         # Internal events (e.g. background-process completion notifications)
         # are system-generated and must skip user authorization.
@@ -4869,8 +4883,9 @@ class GatewayRunner:
             )
         
         # One-time prompt if no home channel is set for this platform
-        # Skip for webhooks - they deliver directly to configured targets (github_comment, etc.)
-        if not history and source.platform and source.platform != Platform.LOCAL and source.platform != Platform.WEBHOOK:
+        # Skip for webhook-style / direct-chat surfaces that deliver directly
+        # to the active conversation rather than a reusable home channel.
+        if not history and source.platform and source.platform not in (Platform.LOCAL, Platform.WEBHOOK, Platform.LINE):
             platform_name = source.platform.value
             env_key = f"{platform_name.upper()}_HOME_CHANNEL"
             if not os.getenv(env_key):
@@ -5228,8 +5243,11 @@ class GatewayRunner:
 
             # Auto voice reply: send TTS audio before the text response
             _already_sent = bool(agent_result.get("already_sent"))
+            _voice_reply_sent = False
             if self._should_send_voice_reply(event, response, agent_messages, already_sent=_already_sent):
-                await self._send_voice_reply(event, response)
+                _voice_reply_sent = await self._send_voice_reply(event, response)
+            if self._should_suppress_text_after_voice_reply(event, _voice_reply_sent):
+                return None
 
             # If streaming already delivered the response, extract and
             # deliver any MEDIA: files before returning None.  Streaming
@@ -6638,6 +6656,32 @@ class GatewayRunner:
 
         await adapter.handle_message(event)
 
+    def _remember_line_input_modality(self, event: MessageEvent) -> None:
+        if event.source.platform != Platform.LINE:
+            return
+        if event.message_type == MessageType.TEXT:
+            self._line_last_non_image_input_modality[self._line_modality_key(event)] = "text"
+        elif event.message_type in (MessageType.VOICE, MessageType.AUDIO):
+            self._line_last_non_image_input_modality[self._line_modality_key(event)] = "voice"
+
+    def _line_modality_key(self, event: MessageEvent) -> str:
+        chat_id = str(event.source.chat_id or "")
+        user_id = str(getattr(event.source, "user_id", None) or "")
+        if event.source.chat_type == "group" and user_id:
+            return f"{chat_id}:{user_id}"
+        return chat_id
+
+    def _line_desired_reply_modality(self, event: MessageEvent) -> str:
+        if event.source.platform != Platform.LINE:
+            return "voice" if event.message_type in (MessageType.VOICE, MessageType.AUDIO) else "text"
+        if event.message_type == MessageType.TEXT:
+            return "text"
+        if event.message_type in (MessageType.VOICE, MessageType.AUDIO):
+            return "voice"
+        if event.message_type == MessageType.PHOTO:
+            return self._line_last_non_image_input_modality.get(self._line_modality_key(event), "text")
+        return "text"
+
     def _should_send_voice_reply(
         self,
         event: MessageEvent,
@@ -6661,12 +6705,18 @@ class GatewayRunner:
 
         chat_id = event.source.chat_id
         voice_mode = self._voice_mode.get(self._voice_key(event.source.platform, chat_id), "off")
-        is_voice_input = (event.message_type == MessageType.VOICE)
-
-        should = (
-            (voice_mode == "all")
-            or (voice_mode == "voice_only" and is_voice_input)
-        )
+        if event.source.platform == Platform.LINE:
+            # LINE should reply in the user's last-used modality without requiring
+            # a separate /voice mode toggle. Text turns stay text; voice turns and
+            # image turns that inherit voice modality should emit exactly one voice
+            # reply when TTS is available.
+            should = self._line_desired_reply_modality(event) == "voice"
+        else:
+            is_voice_input = (event.message_type == MessageType.VOICE)
+            should = (
+                (voice_mode == "all")
+                or (voice_mode == "voice_only" and is_voice_input)
+            )
         if not should:
             return False
 
@@ -6682,17 +6732,39 @@ class GatewayRunner:
         if has_agent_tts:
             return False
 
-        # Dedup: base adapter auto-TTS already handles voice input
-        # (play_tts plays in VC when connected, so runner can skip).
-        # When streaming already delivered the text (already_sent=True),
-        # the base adapter will receive None and can't run auto-TTS,
-        # so the runner must take over.
-        if is_voice_input and not already_sent:
+        # Dedup: base adapter auto-TTS already handles voice input on most
+        # platforms. LINE is a special case: the adapter disables the generic
+        # voice+text fallback so the runner can enforce a single reply in the
+        # user's last-used modality.
+        if (
+            event.message_type == MessageType.VOICE
+            and not already_sent
+            and event.source.platform != Platform.LINE
+        ):
             return False
 
         return True
 
-    async def _send_voice_reply(self, event: MessageEvent, text: str) -> None:
+    def _should_suppress_text_after_voice_reply(
+        self,
+        event: MessageEvent,
+        voice_reply_sent: bool,
+    ) -> bool:
+        """Return True when a voice reply should replace the normal text reply.
+
+        LINE billing is per outbound bubble and reply-token usage is quota-sensitive.
+        Once a LINE voice reply has been sent successfully, suppress the normal text
+        response for turns whose effective reply modality is voice.
+        """
+        if not voice_reply_sent:
+            return False
+        if event.source.platform == Platform.LINE:
+            if event.message_type in (MessageType.VOICE, MessageType.AUDIO):
+                return True
+            return self._line_desired_reply_modality(event) == "voice"
+        return False
+
+    async def _send_voice_reply(self, event: MessageEvent, text: str) -> bool:
         """Generate TTS audio and send as a voice message before the text reply."""
         import uuid as _uuid
         audio_path = None
@@ -6702,7 +6774,7 @@ class GatewayRunner:
 
             tts_text = _strip_markdown_for_tts(text[:4000])
             if not tts_text:
-                return
+                return False
 
             # Use .mp3 extension so edge-tts conversion to opus works correctly.
             # The TTS tool may convert to .ogg — use file_path from result.
@@ -6721,7 +6793,7 @@ class GatewayRunner:
             actual_path = result.get("file_path", audio_path)
             if not result.get("success") or not os.path.isfile(actual_path):
                 logger.warning("Auto voice reply TTS failed: %s", result.get("error"))
-                return
+                return False
 
             adapter = self.adapters.get(event.source.platform)
 
@@ -6740,9 +6812,19 @@ class GatewayRunner:
                 }
                 if event.source.thread_id:
                     send_kwargs["metadata"] = {"thread_id": event.source.thread_id}
-                await adapter.send_voice(**send_kwargs)
+                send_result = await adapter.send_voice(**send_kwargs)
+                if not getattr(send_result, "success", False):
+                    logger.warning(
+                        "Auto voice reply delivery failed: %s",
+                        getattr(send_result, "error", "unknown error"),
+                    )
+                    return False
+            else:
+                return False
+            return True
         except Exception as e:
             logger.warning("Auto voice reply failed: %s", e, exc_info=True)
+            return False
         finally:
             for p in {audio_path, actual_path} - {None}:
                 try:
@@ -9715,8 +9797,14 @@ class GatewayRunner:
         # Natural assistant status messages are intentionally independent from
         # tool progress and token streaming. Users can keep tool_progress quiet
         # in chat platforms while opting into concise mid-turn updates.
+        #
+        # LINE is a special case: reply/push billing is quota-sensitive and
+        # each extra bubble is materially expensive, so prefer exactly one
+        # explicit outbound reply per user turn. Disable interim assistant
+        # commentary there unless the architecture is redesigned to fold it
+        # into the final reply payload.
         interim_assistant_messages_enabled = (
-            source.platform != Platform.WEBHOOK
+            source.platform not in (Platform.WEBHOOK, Platform.LINE)
             and is_truthy_value(
                 display_config.get("interim_assistant_messages"),
                 default=True,

@@ -221,6 +221,7 @@ def _handle_send(args):
         "wecom": Platform.WECOM,
         "wecom_callback": Platform.WECOM_CALLBACK,
         "weixin": Platform.WEIXIN,
+        "line": Platform.LINE,
         "email": Platform.EMAIL,
         "sms": Platform.SMS,
         "yuanbao": Platform.YUANBAO,
@@ -260,21 +261,37 @@ def _handle_send(args):
 
     used_home_channel = False
     if not chat_id:
-        home = config.get_home_channel(platform)
-        if not home and platform_name == "weixin":
-            wx_home = os.getenv("WEIXIN_HOME_CHANNEL", "").strip()
-            if wx_home:
-                from gateway.config import HomeChannel
-                home = HomeChannel(platform=platform, chat_id=wx_home, name="Weixin Home")
-        if home:
-            chat_id = home.chat_id
-            used_home_channel = True
+        from gateway.session_context import get_session_env
+
+        session_platform = get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower()
+        session_chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "").strip()
+        if platform_name == "line":
+            if session_platform == "line" and session_chat_id:
+                chat_id = session_chat_id
+            else:
+                return json.dumps({
+                    "error": (
+                        "LINE send_message requires an explicit target or an active LINE session. "
+                        "It does not support a generic fallback destination."
+                    )
+                })
         else:
-            return json.dumps({
-                "error": f"No home channel set for {platform_name} to determine where to send the message. "
-                f"Either specify a channel directly with '{platform_name}:CHANNEL_NAME', "
-                f"or set a home channel via: hermes config set {platform_name.upper()}_HOME_CHANNEL <channel_id>"
-            })
+            home = config.get_home_channel(platform)
+            if not home and platform_name == "weixin":
+                import os
+                wx_home = os.getenv("WEIXIN_HOME_CHANNEL", "").strip()
+                if wx_home:
+                    from gateway.config import HomeChannel
+                    home = HomeChannel(platform=platform, chat_id=wx_home, name="Weixin Home")
+            if home:
+                chat_id = home.chat_id
+                used_home_channel = True
+            else:
+                return json.dumps({
+                    "error": f"No home channel set for {platform_name} to determine where to send the message. "
+                    f"Either specify a channel directly with '{platform_name}:CHANNEL_NAME', "
+                    f"or set a home channel via: hermes config set {platform_name.upper()}_HOME_CHANNEL <channel_id>"
+                })
 
     duplicate_skip = _maybe_skip_cron_duplicate_send(platform_name, chat_id, thread_id)
     if duplicate_skip:
@@ -448,6 +465,13 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     except ImportError:
         _telegram_available = False
 
+    # LINE adapter import is optional (requires line-bot-sdk)
+    try:
+        from gateway.platforms.line import LineAdapter
+        _line_available = True
+    except ImportError:
+        _line_available = False
+
     # Feishu adapter import is optional (requires lark-oapi)
     try:
         from gateway.platforms.feishu import FeishuAdapter
@@ -472,6 +496,8 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     }
     if _feishu_available:
         _MAX_LENGTHS[Platform.FEISHU] = FeishuAdapter.MAX_MESSAGE_LENGTH
+    if _line_available:
+        _MAX_LENGTHS[Platform.LINE] = LineAdapter.MAX_MESSAGE_LENGTH
 
     # Smart-chunk the message to fit within platform limits.
     # For short messages or platforms without a known limit this is a no-op.
@@ -595,6 +621,8 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             result = await _send_feishu(pconfig, chat_id, chunk, thread_id=thread_id)
         elif platform == Platform.WECOM:
             result = await _send_wecom(pconfig.extra, chat_id, chunk)
+        elif platform == Platform.LINE:
+            result = await _send_line(pconfig, chat_id, chunk)
         elif platform == Platform.BLUEBUBBLES:
             result = await _send_bluebubbles(pconfig.extra, chat_id, chunk)
         elif platform == Platform.QQBOT:
@@ -1416,6 +1444,25 @@ async def _send_bluebubbles(extra, chat_id, message):
             await adapter.disconnect()
     except Exception as e:
         return _error(f"BlueBubbles send failed: {e}")
+
+
+async def _send_line(pconfig, chat_id, message):
+    """Send via LINE using the adapter's direct send path."""
+    try:
+        from gateway.platforms.line import LineAdapter, check_line_requirements
+        if not check_line_requirements():
+            return {"error": "LINE dependencies not installed (requires line-bot-sdk and aiohttp)"}
+    except ImportError:
+        return {"error": "LINE adapter not available."}
+
+    try:
+        adapter = LineAdapter(pconfig)
+        result = await adapter.send(chat_id=str(chat_id), content=message)
+        if not result.success:
+            return _error(f"LINE send failed: {result.error}")
+        return {"success": True, "platform": "line", "chat_id": str(chat_id), "message_id": result.message_id}
+    except Exception as e:
+        return _error(f"LINE send failed: {e}")
 
 
 async def _send_feishu(pconfig, chat_id, message, media_files=None, thread_id=None):
