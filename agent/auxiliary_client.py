@@ -44,6 +44,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, parse_qs, urlunparse
 
+import httpx
 from openai import OpenAI
 
 from agent.credential_pool import load_pool
@@ -216,6 +217,64 @@ _AUTH_JSON_PATH = get_hermes_home() / "auth.json"
 # vision via Responses.
 _CODEX_AUX_MODEL = "gpt-5.2-codex"
 _CODEX_AUX_BASE_URL = "https://chatgpt.com/backend-api/codex"
+
+# MiniMax operates two separate APIs (see issue #15715):
+#   /anthropic/v1/messages   — Anthropic-compatible text chat. Silently
+#                              strips image blocks, returning a useless
+#                              text-only reply for vision requests.
+#   /v1/coding_plan/vlm      — Dedicated VLM endpoint. Native body shape:
+#                              {"prompt": str, "image_url": "data:image/..."}
+#                              Response: {"content": str, "base_resp": {...}}
+#
+# MinimaxVlmAuxiliaryClient routes vision traffic through the second URL while
+# preserving the OpenAI-shape ``chat.completions.create()`` contract every
+# vision caller already uses.
+_MINIMAX_VLM_BASE_URLS: Dict[str, str] = {
+    "minimax": "https://api.minimax.io/v1/coding_plan/vlm",
+    "minimax-cn": "https://api.minimaxi.com/v1/coding_plan/vlm",
+}
+_MINIMAX_VLM_TIMEOUT = 120.0
+
+
+def _derive_minimax_vlm_endpoint(provider: str, base_url: Optional[str]) -> str:
+    """Derive the VLM endpoint URL from the configured base_url, falling back
+    to provider defaults. The VLM endpoint is the sibling of the Anthropic-
+    compat endpoint at /v1/coding_plan/vlm under the same host.
+
+    Honours user-configured base URLs (``MINIMAX_BASE_URL`` / ``MINIMAX_CN_BASE_URL``
+    env vars, or a corporate proxy). Without this, vision calls bypass the
+    proxy that text calls correctly use, breaking proxied/airgapped deployments.
+
+    Transformation rule (terminal-suffix only, applied to the rstrip'd base):
+      - Strip a trailing ``/anthropic`` suffix (the default Anthropic-compat
+        path) so the VLM path lands as a sibling, not a child.
+      - Strip a trailing ``/v1`` suffix as well — ``MINIMAX_BASE_URL`` is also
+        documented and supported as a chat-completions-style ``…/v1`` URL
+        (see ``hermes_cli/doctor.py:945``), so a config like
+        ``https://api.minimax.chat/v1`` must not double-stack into ``/v1/v1``.
+      - Only the *terminal* segment is stripped: an internal ``/v1`` like
+        ``https://proxy.com/api/v1/minimax`` is preserved (the proxy owns its
+        own prefix and is responsible for routing both endpoints).
+      - For custom proxies that match neither suffix (e.g.
+        ``https://proxy.example.com/minimax-shim``), append the VLM path
+        directly — the proxy routes both Anthropic and VLM traffic under the
+        same prefix.
+      - Strip trailing slashes before suffix detection so we never produce ``//``.
+      - Fall back to the hardcoded defaults when no base_url is resolved
+        (rare; user has no env config and provider has no default override).
+    """
+    if base_url:
+        base = base_url.rstrip("/")
+        # Suffix order is mutually exclusive in practice — neither ``/anthropic``
+        # nor ``/v1`` is a substring of the other — but check both so any
+        # documented MiniMax base_url shape resolves to a single, canonical
+        # ``/v1/coding_plan/vlm`` endpoint.
+        if base.endswith("/anthropic"):
+            base = base[: -len("/anthropic")]
+        elif base.endswith("/v1"):
+            base = base[: -len("/v1")]
+        return f"{base}/v1/coding_plan/vlm"
+    return _MINIMAX_VLM_BASE_URLS[provider]
 
 
 def _codex_cloudflare_headers(access_token: str) -> Dict[str, str]:
@@ -714,6 +773,180 @@ class AsyncAnthropicAuxiliaryClient:
         self.base_url = sync_wrapper.base_url
 
 
+# ── MiniMax VLM (vision) → chat.completions adapter ────────────────────────
+# MiniMax's Anthropic-compat endpoint silently drops image content blocks
+# (issue #15715). The dedicated /v1/coding_plan/vlm endpoint takes a native
+# {"prompt", "image_url"} body and returns {"content", "base_resp"}. This
+# adapter accepts an OpenAI-shape multimodal ``messages`` list, extracts the
+# text prompt + first image data URL, POSTs them to the right regional VLM
+# endpoint, and converts the response back into a chat.completions-shaped
+# object so callers (vision_analyze, async_call_llm) need no changes.
+
+
+def _extract_vision_parts(messages: list) -> Tuple[str, str]:
+    """Pull the text prompt and image data URL out of an OpenAI-shape
+    multimodal message list.
+
+    Returns ``(prompt, image_url)``. Raises ``ValueError`` if no image block
+    is present — the VLM endpoint exists specifically for vision traffic, so
+    a missing image is a programming error worth surfacing loudly.
+    """
+    text_parts: List[str] = []
+    image_url: Optional[str] = None
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, str):
+            if msg.get("role") != "system":
+                text_parts.append(content)
+            continue
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype == "text":
+                text_parts.append(str(block.get("text", "")))
+            elif btype == "image_url" and image_url is None:
+                raw = block.get("image_url")
+                if isinstance(raw, dict):
+                    image_url = str(raw.get("url", ""))
+                elif isinstance(raw, str):
+                    image_url = raw
+    if not image_url:
+        raise ValueError(
+            "MiniMax VLM endpoint requires an image_url block in messages "
+            "(none found). Use a text-only provider for plain chat."
+        )
+    return "\n\n".join(p for p in text_parts if p).strip(), image_url
+
+
+class _MinimaxVlmCompletionsAdapter:
+    """Translates ``chat.completions.create()`` calls to MiniMax /v1/coding_plan/vlm POSTs."""
+
+    def __init__(self, api_key: str, endpoint_url: str):
+        self._api_key = api_key
+        self._endpoint = endpoint_url
+
+    def create(self, **kwargs) -> Any:
+        messages = kwargs.get("messages") or []
+        model = kwargs.get("model", "MiniMax-M2.7")
+        timeout = kwargs.get("timeout") or _MINIMAX_VLM_TIMEOUT
+
+        prompt, image_url = _extract_vision_parts(messages)
+        body = {"prompt": prompt, "image_url": image_url}
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            resp = httpx.post(self._endpoint, headers=headers, json=body, timeout=timeout)
+        except httpx.TimeoutException as exc:
+            raise RuntimeError(
+                f"MiniMax VLM endpoint timed out after {timeout}s: {exc}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise RuntimeError(
+                f"MiniMax VLM endpoint request failed: {exc}"
+            ) from exc
+        if getattr(resp, "status_code", 0) >= 400:
+            text = getattr(resp, "text", "")
+            raise RuntimeError(
+                f"MiniMax VLM endpoint returned HTTP {resp.status_code}: {text[:200]}"
+            )
+        try:
+            payload = resp.json()
+        except Exception as exc:
+            raise RuntimeError(
+                f"MiniMax VLM endpoint returned non-JSON response: {exc}"
+            ) from exc
+
+        if "base_resp" not in payload:
+            logger.warning(
+                "MiniMax VLM: base_resp missing from response; proceeding optimistically"
+            )
+        base_resp = payload.get("base_resp") or {}
+        status_code = base_resp.get("status_code")
+        if status_code not in (0, None):
+            status_msg = base_resp.get("status_msg", "")
+            raise RuntimeError(
+                f"MiniMax VLM endpoint error {status_code}: {status_msg}"
+            )
+
+        content = payload.get("content") or ""
+        message = SimpleNamespace(role="assistant", content=content, tool_calls=None)
+        choice = SimpleNamespace(index=0, message=message, finish_reason="stop")
+        # MiniMax VLM does not return token counts; zero is the safest stand-in
+        # so callers reading prompt/completion/total don't crash.
+        usage = SimpleNamespace(prompt_tokens=0, completion_tokens=0, total_tokens=0)
+        return SimpleNamespace(choices=[choice], model=model, usage=usage)
+
+
+class _MinimaxVlmChatShim:
+    def __init__(self, adapter: _MinimaxVlmCompletionsAdapter):
+        self.completions = adapter
+
+
+class MinimaxVlmAuxiliaryClient:
+    """OpenAI-client-compatible wrapper that routes through MiniMax's
+    dedicated VLM endpoint (``/v1/coding_plan/vlm``) instead of the
+    Anthropic-compat text chat URL, which silently strips images.
+
+    Consumers can call ``client.chat.completions.create(**kwargs)`` as normal.
+    Also exposes ``.api_key`` and ``.base_url`` for introspection by async
+    wrappers (matching CodexAuxiliaryClient / AnthropicAuxiliaryClient).
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        provider: str = "minimax",
+        base_url: Optional[str] = None,
+    ):
+        if provider not in _MINIMAX_VLM_BASE_URLS:
+            raise ValueError(
+                f"Unknown MiniMax VLM provider {provider!r}; "
+                f"expected one of {sorted(_MINIMAX_VLM_BASE_URLS)}"
+            )
+        endpoint = _derive_minimax_vlm_endpoint(provider, base_url)
+        adapter = _MinimaxVlmCompletionsAdapter(api_key, endpoint)
+        self.chat = _MinimaxVlmChatShim(adapter)
+        self.api_key = api_key
+        self.base_url = endpoint
+        self._provider = provider
+
+    def close(self):  # symmetry with the OpenAI/Anthropic/Codex adapters
+        pass
+
+
+class _AsyncMinimaxVlmCompletionsAdapter:
+    """Async wrapper — runs the sync adapter via asyncio.to_thread()."""
+
+    def __init__(self, sync_adapter: _MinimaxVlmCompletionsAdapter):
+        self._sync = sync_adapter
+
+    async def create(self, **kwargs) -> Any:
+        import asyncio
+        return await asyncio.to_thread(self._sync.create, **kwargs)
+
+
+class _AsyncMinimaxVlmChatShim:
+    def __init__(self, adapter: _AsyncMinimaxVlmCompletionsAdapter):
+        self.completions = adapter
+
+
+class AsyncMinimaxVlmAuxiliaryClient:
+    """Async-compatible wrapper matching AsyncOpenAI.chat.completions.create()."""
+
+    def __init__(self, sync_wrapper: "MinimaxVlmAuxiliaryClient"):
+        sync_adapter = sync_wrapper.chat.completions
+        async_adapter = _AsyncMinimaxVlmCompletionsAdapter(sync_adapter)
+        self.chat = _AsyncMinimaxVlmChatShim(async_adapter)
+        self.api_key = sync_wrapper.api_key
+        self.base_url = sync_wrapper.base_url
+
+
 def _read_nous_auth() -> Optional[dict]:
     """Read and validate ~/.hermes/auth.json for an active Nous provider.
 
@@ -1052,6 +1285,28 @@ def _read_main_provider() -> str:
             provider = model_cfg.get("provider", "")
             if isinstance(provider, str) and provider.strip():
                 return provider.strip().lower()
+    except Exception:
+        pass
+    return ""
+
+
+def _read_main_base_url() -> str:
+    """Read the user's configured main model base_url from config.yaml.
+
+    Returns the configured ``model.base_url`` (trailing slash stripped) or ""
+    when unset. Used by the vision auto-resolver so MiniMax VLM calls land on
+    the same proxy as text traffic — mirrors the precedence in
+    ``hermes_cli/runtime_provider.py`` where ``model.base_url`` overrides the
+    pool-default URL when the configured provider matches.
+    """
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        model_cfg = cfg.get("model", {})
+        if isinstance(model_cfg, dict):
+            base_url = model_cfg.get("base_url", "")
+            if isinstance(base_url, str) and base_url.strip():
+                return base_url.strip().rstrip("/")
     except Exception:
         pass
     return ""
@@ -1634,6 +1889,8 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
         return AsyncCodexAuxiliaryClient(sync_client), model
     if isinstance(sync_client, AnthropicAuxiliaryClient):
         return AsyncAnthropicAuxiliaryClient(sync_client), model
+    if isinstance(sync_client, MinimaxVlmAuxiliaryClient):
+        return AsyncMinimaxVlmAuxiliaryClient(sync_client), model
     try:
         from agent.gemini_native_adapter import GeminiNativeClient, AsyncGeminiNativeClient
 
@@ -2225,6 +2482,114 @@ def get_available_vision_backends() -> List[str]:
     return available
 
 
+def _resolve_minimax_vlm_client(
+    provider: str,
+    explicit_api_key: Optional[str] = None,
+    main_model_base_url: Optional[str] = None,
+) -> Optional[MinimaxVlmAuxiliaryClient]:
+    """Build a MinimaxVlmAuxiliaryClient for a given MiniMax region.
+
+    MiniMax's Anthropic-compat endpoint silently strips images (#15715), so
+    vision traffic must hit ``/v1/coding_plan/vlm`` instead. Returns ``None``
+    when no API key is available so the resolver can fall through to other
+    backends.
+
+    Base URL precedence (matches ``hermes_cli/runtime_provider.py`` for text
+    traffic so vision lands on the same proxy):
+
+      1. ``MINIMAX_BASE_URL`` / ``MINIMAX_CN_BASE_URL`` env var (#6039).
+      2. Credential pool entry's ``runtime_base_url`` — pool credentials may
+         carry their own proxy URL, captured at credential-load time.
+      3. ``model.base_url`` from config.yaml — only when neither (1) nor (2)
+         supplied a non-default URL (i.e. the resolved URL is still the
+         provider default).
+      4. Provider default (``https://api.minimax.io/anthropic`` etc.).
+    """
+    if provider not in _MINIMAX_VLM_BASE_URLS:
+        return None
+    api_key = (explicit_api_key or "").strip()
+    # Capture the user's configured base_url (env override or proxy) so the
+    # VLM endpoint can be derived from the same root as their text endpoint
+    # — otherwise vision calls bypass the proxy that text calls use (#15715
+    # follow-up). resolve_api_key_provider_credentials() returns a dict with
+    # both ``api_key`` and ``base_url``; only the api_key was previously kept.
+    resolved_base_url: Optional[str] = None
+    try:
+        from hermes_cli.auth import (
+            PROVIDER_REGISTRY,
+            resolve_api_key_provider_credentials,
+        )
+    except ImportError:
+        PROVIDER_REGISTRY = None  # type: ignore[assignment]
+        resolve_api_key_provider_credentials = None  # type: ignore[assignment]
+
+    if not api_key and resolve_api_key_provider_credentials is None:
+        return None
+
+    if not api_key:
+        pool_present, entry = _select_pool_entry(provider)
+        if pool_present and entry is not None:
+            api_key = _pool_runtime_api_key(entry)
+            # Mirror the text-path pool branch (runtime_provider.py:196 and
+            # auxiliary_client.py:1099): when a pool entry is selected, its
+            # ``runtime_base_url`` is the canonical source for the API target
+            # (env-var overrides are baked into the pool entry at load time).
+            # Without this, vision falls back to the hardcoded provider default
+            # while text correctly uses the pool's proxy URL — same #15715
+            # symptom on a different code path.
+            if api_key:
+                pool_base = _pool_runtime_base_url(entry, "")
+                resolved_base_url = pool_base or None
+        if not api_key:
+            try:
+                creds = resolve_api_key_provider_credentials(provider)
+                api_key = str(creds.get("api_key", "")).strip()
+                candidate_base = str(creds.get("base_url", "")).strip()
+                resolved_base_url = candidate_base or None
+            except Exception:
+                api_key = ""
+        if not api_key and PROVIDER_REGISTRY is not None:
+            pconfig = PROVIDER_REGISTRY.get(provider)
+            if pconfig is not None:
+                for env_var in pconfig.api_key_env_vars:
+                    api_key = (os.getenv(env_var) or "").strip()
+                    if api_key:
+                        break
+    else:
+        # Even with an explicit api_key, still try to honour a configured
+        # base_url override so the VLM endpoint matches the text endpoint.
+        if resolve_api_key_provider_credentials is not None:
+            try:
+                creds = resolve_api_key_provider_credentials(provider)
+                candidate_base = str(creds.get("base_url", "")).strip()
+                resolved_base_url = candidate_base or None
+            except Exception:
+                resolved_base_url = None
+    if not api_key:
+        return None
+
+    # Precedence step 2: when the credential resolver returned the provider
+    # default (i.e. no env-var override), fall back to ``model.base_url`` from
+    # config.yaml. Same rule used by ``runtime_provider.py:243-248`` for text
+    # traffic — env var wins (#6039), then model.base_url, then default.
+    main_base = (main_model_base_url or "").strip().rstrip("/") or None
+    if main_base and PROVIDER_REGISTRY is not None:
+        pconfig = PROVIDER_REGISTRY.get(provider)
+        provider_default = (
+            pconfig.inference_base_url.rstrip("/") if pconfig is not None else ""
+        )
+        resolver_returned_default = (
+            not resolved_base_url
+            or resolved_base_url.rstrip("/") == provider_default
+        )
+        if resolver_returned_default:
+            resolved_base_url = main_base
+
+    return MinimaxVlmAuxiliaryClient(
+        api_key=api_key, provider=provider, base_url=resolved_base_url,
+    )
+
+
 def resolve_vision_provider_client(
     provider: Optional[str] = None,
     model: Optional[str] = None,
@@ -2253,6 +2618,36 @@ def resolve_vision_provider_client(
             async_client, async_model = _to_async_client(sync_client, final_model, is_vision=True)
             return resolved_provider, async_client, async_model
         return resolved_provider, sync_client, final_model
+
+    # MiniMax routes through a dedicated VLM endpoint, never through the
+    # Anthropic-compat URL (which drops images, #15715). This applies whether
+    # the caller explicitly requested minimax/minimax-cn or the auto-resolver
+    # landed on it as the user's main provider.
+    #
+    # Read ``model.base_url`` from config so vision honours the same proxy as
+    # text traffic — _resolve_task_provider_model only surfaces per-task
+    # overrides (auxiliary.vision.base_url), not the main-model setting. But
+    # only plumb it through when the main provider IS this MiniMax region:
+    # otherwise (e.g. main = openrouter, vision = minimax) we'd resolve the
+    # VLM endpoint from an unrelated host like
+    # ``https://openrouter.ai/api/v1/v1/coding_plan/vlm``. Mirrors the
+    # provider-match gate in ``hermes_cli/runtime_provider.py:1170-1173``.
+    if requested in _MINIMAX_VLM_BASE_URLS:
+        main_provider_for_vision = _read_main_provider()
+        main_base_for_vision = (
+            _read_main_base_url() or None
+            if main_provider_for_vision == requested
+            else None
+        )
+        vlm_client = _resolve_minimax_vlm_client(
+            requested,
+            resolved_api_key,
+            main_model_base_url=main_base_for_vision,
+        )
+        if vlm_client is not None:
+            return _finalize(requested, vlm_client, resolved_model or "MiniMax-M2.7")
+        # Fall through to the normal resolver if no key is configured —
+        # downstream code will surface a clean "no provider configured" error.
 
     if resolved_base_url:
         client, final_model = resolve_provider_client(
@@ -2293,6 +2688,24 @@ def resolve_vision_provider_client(
                         main_provider, default_model or resolved_model or main_model,
                     )
                     return _finalize(main_provider, sync_client, default_model)
+            elif main_provider in _MINIMAX_VLM_BASE_URLS:
+                # MiniMax requires its dedicated VLM endpoint (#15715). Plumb
+                # ``model.base_url`` through so a custom proxy configured for
+                # text traffic also routes vision (P2 follow-up — auto path
+                # was previously losing the main-model base_url).
+                vlm_client = _resolve_minimax_vlm_client(
+                    main_provider,
+                    resolved_api_key,
+                    main_model_base_url=_read_main_base_url() or None,
+                )
+                if vlm_client is not None:
+                    logger.info(
+                        "Vision auto-detect: using MiniMax VLM endpoint (%s)",
+                        main_provider,
+                    )
+                    return _finalize(
+                        main_provider, vlm_client, resolved_model or main_model or "MiniMax-M2.7",
+                    )
             else:
                 rpc_client, rpc_model = resolve_provider_client(
                     main_provider, vision_model,
@@ -3049,9 +3462,12 @@ def call_llm(
         tools=tools, timeout=effective_timeout, extra_body=effective_extra_body,
         base_url=_base_info or resolved_base_url)
 
-    # Convert image blocks for Anthropic-compatible endpoints (e.g. MiniMax)
+    # Convert image blocks for Anthropic-compatible endpoints (e.g. MiniMax
+    # text chat). The MiniMax VLM adapter handles its own native body shape
+    # so it must skip the Anthropic conversion.
     _client_base = str(getattr(client, "base_url", "") or "")
-    if _is_anthropic_compat_endpoint(resolved_provider, _client_base):
+    if (not isinstance(client, MinimaxVlmAuxiliaryClient)
+            and _is_anthropic_compat_endpoint(resolved_provider, _client_base)):
         kwargs["messages"] = _convert_openai_images_to_anthropic(kwargs["messages"])
 
     # Handle unsupported temperature, max_tokens vs max_completion_tokens retry,
@@ -3167,7 +3583,8 @@ def call_llm(
                         base_url=resolved_base_url,
                     )
                     _retry_base = str(getattr(retry_client, "base_url", "") or "")
-                    if _is_anthropic_compat_endpoint(resolved_provider, _retry_base):
+                    if (not isinstance(retry_client, MinimaxVlmAuxiliaryClient)
+                            and _is_anthropic_compat_endpoint(resolved_provider, _retry_base)):
                         retry_kwargs["messages"] = _convert_openai_images_to_anthropic(retry_kwargs["messages"])
                     return _validate_llm_response(
                         retry_client.chat.completions.create(**retry_kwargs), task)
@@ -3348,8 +3765,11 @@ async def async_call_llm(
         tools=tools, timeout=effective_timeout, extra_body=effective_extra_body,
         base_url=_client_base or resolved_base_url)
 
-    # Convert image blocks for Anthropic-compatible endpoints (e.g. MiniMax)
-    if _is_anthropic_compat_endpoint(resolved_provider, _client_base):
+    # Convert image blocks for Anthropic-compatible endpoints (e.g. MiniMax
+    # text chat). The MiniMax VLM adapter handles its own native body shape
+    # so it must skip the Anthropic conversion.
+    if (not isinstance(client, AsyncMinimaxVlmAuxiliaryClient)
+            and _is_anthropic_compat_endpoint(resolved_provider, _client_base)):
         kwargs["messages"] = _convert_openai_images_to_anthropic(kwargs["messages"])
 
     try:
@@ -3457,7 +3877,8 @@ async def async_call_llm(
                         base_url=resolved_base_url,
                     )
                     _retry_base = str(getattr(retry_client, "base_url", "") or "")
-                    if _is_anthropic_compat_endpoint(resolved_provider, _retry_base):
+                    if (not isinstance(retry_client, AsyncMinimaxVlmAuxiliaryClient)
+                            and _is_anthropic_compat_endpoint(resolved_provider, _retry_base)):
                         retry_kwargs["messages"] = _convert_openai_images_to_anthropic(retry_kwargs["messages"])
                     return _validate_llm_response(
                         await retry_client.chat.completions.create(**retry_kwargs), task)
