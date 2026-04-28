@@ -138,12 +138,19 @@ def _run_async(coro):
 
 discover_builtin_tools()
 
-# MCP tool discovery (external MCP servers from config)
-try:
-    from tools.mcp_tool import discover_mcp_tools
-    discover_mcp_tools()
-except Exception as e:
-    logger.debug("MCP tool discovery failed: %s", e)
+# MCP tool discovery (external MCP servers from config).
+# Skipped when HERMES_MCP_DISCOVERY=0 -- the TUI slash_worker sets this because
+# the TUI server already handles MCP; running it again would spawn duplicate
+# ``hermes mcp serve`` children per session (#15275).
+import os as _os_mod
+if _os_mod.environ.get("HERMES_MCP_DISCOVERY") != "0":
+    try:
+        from tools.mcp_tool import discover_mcp_tools
+        discover_mcp_tools()
+    except Exception as e:
+        logger.debug("MCP tool discovery failed: %s", e)
+else:
+    logger.debug("MCP tool discovery suppressed (HERMES_MCP_DISCOVERY=0)")
 
 # Plugin tool discovery (user/project/pip plugins)
 try:

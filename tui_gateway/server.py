@@ -186,6 +186,9 @@ class _SlashWorker:
         if model:
             argv += ["--model", model]
 
+        worker_env = os.environ.copy()
+        worker_env["HERMES_MCP_DISCOVERY"] = "0"
+
         self.proc = subprocess.Popen(
             argv,
             stdin=subprocess.PIPE,
@@ -194,7 +197,7 @@ class _SlashWorker:
             text=True,
             bufsize=1,
             cwd=os.getcwd(),
-            env=os.environ.copy(),
+            env=worker_env,
         )
         threading.Thread(target=self._drain_stdout, daemon=True).start()
         threading.Thread(target=self._drain_stderr, daemon=True).start()
