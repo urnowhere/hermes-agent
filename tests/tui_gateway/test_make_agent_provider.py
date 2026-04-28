@@ -6,6 +6,7 @@ provider/base_url/api_key empty in AIAgent, causing HTTP 404.
 """
 
 import os
+import types
 from unittest.mock import MagicMock, patch
 
 
@@ -58,6 +59,48 @@ def test_make_agent_passes_resolved_provider():
         assert call_kwargs.kwargs["base_url"] == "https://api.anthropic.com"
         assert call_kwargs.kwargs["api_key"] == "sk-test-key"
         assert call_kwargs.kwargs["api_mode"] == "anthropic_messages"
+
+
+def test_make_agent_pins_runtime_credential_label_on_agent():
+    """TUI status must show the label for the credential actually selected
+    during runtime resolution, not a later pool.current()/peek() guess."""
+
+    fake_runtime = {
+        "provider": "openai-codex",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+        "api_key": "codex-token-main",
+        "api_mode": "codex_responses",
+        "command": None,
+        "args": None,
+        "credential_pool": object(),
+        "credential_id": "cred-main",
+        "credential_label": "main",
+    }
+    fake_cfg = {
+        "model": {"default": "gpt-5.5", "provider": "openai-codex"},
+        "agent": {"system_prompt": ""},
+    }
+
+    with (
+        patch("tui_gateway.server._load_cfg", return_value=fake_cfg),
+        patch("tui_gateway.server._get_db", return_value=MagicMock()),
+        patch("tui_gateway.server._load_tool_progress_mode", return_value="compact"),
+        patch("tui_gateway.server._load_reasoning_config", return_value=None),
+        patch("tui_gateway.server._load_service_tier", return_value=None),
+        patch("tui_gateway.server._load_enabled_toolsets", return_value=None),
+        patch(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            return_value=fake_runtime,
+        ),
+        patch("run_agent.AIAgent", side_effect=lambda **kwargs: types.SimpleNamespace(**kwargs)),
+    ):
+        from tui_gateway.server import _make_agent
+
+        agent = _make_agent("sid-codex", "key-codex")
+
+    assert agent.api_key == "codex-token-main"
+    assert agent.credential_id == "cred-main"
+    assert agent.credential_label == "main"
 
 
 def test_make_agent_ignores_display_personality_without_system_prompt():

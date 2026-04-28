@@ -2426,7 +2426,8 @@ class HermesCLI:
                 return label
 
         pool = getattr(agent, "_credential_pool", None) or getattr(self, "_credential_pool", None)
-        if pool is None:
+        agent_api_key = str(getattr(agent, "api_key", None) or getattr(self, "api_key", None) or "")
+        if pool is None or not agent_api_key:
             return ""
         for method_name in ("current", "peek"):
             try:
@@ -2434,6 +2435,16 @@ class HermesCLI:
                 entry = method() if callable(method) else None
             except Exception:
                 entry = None
+            if entry is None:
+                continue
+            entry_api_key = str(
+                getattr(entry, "runtime_api_key", None)
+                or getattr(entry, "access_token", None)
+                or getattr(entry, "api_key", None)
+                or ""
+            )
+            if entry_api_key != agent_api_key:
+                continue
             label = self._compact_account_limit_credential_label(getattr(entry, "label", None))
             if label:
                 return label
@@ -3709,6 +3720,8 @@ class HermesCLI:
         self.acp_args = resolved_acp_args
         self._credential_pool = resolved_credential_pool
         self._provider_source = runtime.get("source")
+        self.credential_id = runtime.get("credential_id")
+        self.credential_label = runtime.get("credential_label")
         self.api_key = api_key
         self.base_url = base_url
 
@@ -3932,6 +3945,10 @@ class HermesCLI:
                 stream_delta_callback=self._stream_delta if self.streaming_enabled else None,
                 tool_gen_callback=self._on_tool_gen_start if self.streaming_enabled else None,
             )
+            for attr in ("credential_id", "credential_label"):
+                value = getattr(self, attr, None)
+                if value:
+                    setattr(self.agent, attr, value)
             # Store reference for atexit memory provider shutdown
             global _active_agent_ref
             _active_agent_ref = self.agent

@@ -2441,6 +2441,19 @@ def test_session_info_includes_account_limit_status(monkeypatch):
     assert info["account_limits"] == payload
 
 
+def test_active_credential_label_fallback_requires_matching_token():
+    class _Pool:
+        def current(self):
+            return types.SimpleNamespace(label="reserve00", access_token="other-token")
+
+        def peek(self):
+            return types.SimpleNamespace(label="main", access_token="active-token")
+
+    agent = types.SimpleNamespace(api_key="active-token", _credential_pool=_Pool())
+
+    assert server._active_credential_label(agent) == "main"
+
+
 def test_get_account_limit_status_fetches_with_runtime_credential_and_caches(monkeypatch):
     from datetime import datetime, timezone
 
@@ -2462,7 +2475,7 @@ def test_get_account_limit_status_fetches_with_runtime_credential_and_caches(mon
 
     class _Pool:
         def current(self):
-            return types.SimpleNamespace(label="main")
+            return types.SimpleNamespace(label="main", access_token="dummy")
 
         def peek(self):
             return None
@@ -2504,7 +2517,7 @@ def test_get_account_limit_status_uses_short_retry_ttl_for_missing_payload(monke
 
     class _Pool:
         def current(self):
-            return types.SimpleNamespace(label="main")
+            return types.SimpleNamespace(label="main", access_token="dummy")
 
         def peek(self):
             return None

@@ -1324,7 +1324,8 @@ def _active_credential_label(agent) -> Optional[str]:
             return label
 
     pool = getattr(agent, "_credential_pool", None)
-    if pool is None:
+    agent_api_key = str(getattr(agent, "api_key", "") or "")
+    if pool is None or not agent_api_key:
         return None
     for method_name in ("current", "peek"):
         try:
@@ -1332,7 +1333,17 @@ def _active_credential_label(agent) -> Optional[str]:
             entry = method() if callable(method) else None
         except Exception:
             entry = None
-        label = str(getattr(entry, "label", "") or "").strip() if entry is not None else ""
+        if entry is None:
+            continue
+        entry_api_key = str(
+            getattr(entry, "runtime_api_key", None)
+            or getattr(entry, "access_token", None)
+            or getattr(entry, "api_key", None)
+            or ""
+        )
+        if entry_api_key != agent_api_key:
+            continue
+        label = str(getattr(entry, "label", "") or "").strip()
         if label:
             return label
     return None
@@ -2011,7 +2022,7 @@ def _make_agent(sid: str, key: str, session_id: str | None = None):
         requested=requested_provider,
         target_model=model or None,
     )
-    return AIAgent(
+    agent = AIAgent(
         model=model,
         max_iterations=_cfg_max_turns(cfg, 90),
         provider=runtime.get("provider"),
@@ -2036,6 +2047,11 @@ def _make_agent(sid: str, key: str, session_id: str | None = None):
         skip_memory=is_truthy_value(os.environ.get("HERMES_IGNORE_RULES")),
         **_agent_cbs(sid),
     )
+    for attr in ("credential_id", "credential_label"):
+        value = runtime.get(attr)
+        if value:
+            setattr(agent, attr, value)
+    return agent
 
 
 def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):

@@ -193,12 +193,14 @@ class TestCLIStatusBar:
             context_length=200_000,
         )
         cli_obj.agent.provider = "openai-codex"
+        cli_obj.agent.api_key = "active-runtime-token"
         cli_obj.agent._credential_pool = SimpleNamespace(
-            current=lambda: SimpleNamespace(label="main"),
-            peek=lambda: SimpleNamespace(label="main"),
+            current=lambda: SimpleNamespace(label="main", access_token="active-runtime-token"),
+            peek=lambda: SimpleNamespace(label="main", access_token="active-runtime-token"),
         )
+        cache_key = cli_obj._account_limit_status_cache_key(cli_obj.agent)
         cli_obj._account_limit_status_cache = {
-            "key": ("openai-codex", "", "", "main"),
+            "key": cache_key,
             "expires_at": 9999999999.0,
             "text": "Codex main 5h 98% • weekly 43%",
             "level": "ok",
@@ -207,6 +209,19 @@ class TestCLIStatusBar:
         text = cli_obj._build_status_bar_text(width=140)
 
         assert "Codex main 5h 98% • weekly 43%" in text
+
+    def test_account_limit_credential_label_fallback_requires_matching_token(self):
+        cli_obj = _make_cli(model="gpt-5.3-codex")
+        cli_obj.api_key = "active-runtime-token"
+        agent = SimpleNamespace(
+            api_key="active-runtime-token",
+            _credential_pool=SimpleNamespace(
+                current=lambda: SimpleNamespace(label="reserve00", access_token="other-token"),
+                peek=lambda: SimpleNamespace(label="main", access_token="active-runtime-token"),
+            ),
+        )
+
+        assert cli_obj._account_limit_credential_label(agent) == "main"
 
     def test_account_limit_refresh_populates_compact_cache(self):
         cli_obj = _attach_agent(
@@ -221,8 +236,8 @@ class TestCLIStatusBar:
         cli_obj.agent.provider = "openai-codex"
         cli_obj.agent.api_key = "active-runtime-token"
         cli_obj.agent._credential_pool = SimpleNamespace(
-            current=lambda: SimpleNamespace(label="main"),
-            peek=lambda: SimpleNamespace(label="main"),
+            current=lambda: SimpleNamespace(label="main", access_token="active-runtime-token"),
+            peek=lambda: SimpleNamespace(label="main", access_token="active-runtime-token"),
         )
         reset_at = datetime.now(timezone.utc) + timedelta(minutes=25)
         snapshot = AccountUsageSnapshot(
