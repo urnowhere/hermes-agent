@@ -1118,6 +1118,8 @@ ENV_VARS_BY_VERSION: Dict[int, List[str]] = {
         "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "SLACK_ALLOWED_USERS"],
     10: ["TAVILY_API_KEY"],
     11: ["TERMINAL_MODAL_MODE"],
+    13: ["STEEL_API_KEY"],
+    14: ["FIRECRAWL_BROWSER_TTL"],
 }
 
 # Required environment variables with metadata for migration prompts.
@@ -1602,6 +1604,14 @@ OPTIONAL_ENV_VARS = {
         "description": "Browser Use API key for cloud browser (optional — local browser works without this)",
         "prompt": "Browser Use API key",
         "url": "https://browser-use.com/",
+        "tools": ["browser_navigate", "browser_click"],
+        "password": True,
+        "category": "tool",
+    },
+    "STEEL_API_KEY": {
+        "description": "Steel API key for cloud browser (optional — local browser works without this)",
+        "prompt": "Steel API key",
+        "url": "https://steel.dev/",
         "tools": ["browser_navigate", "browser_click"],
         "password": True,
         "category": "tool",
@@ -3964,6 +3974,7 @@ def show_config():
         ("TAVILY_API_KEY", "Tavily"),
         ("BROWSERBASE_API_KEY", "Browserbase"),
         ("BROWSER_USE_API_KEY", "Browser Use"),
+        ("STEEL_API_KEY", "Steel"),
         ("FAL_KEY", "FAL"),
     ]
     
@@ -4144,7 +4155,7 @@ def set_config_value(key: str, value: str):
         'EXA_API_KEY', 'PARALLEL_API_KEY', 'FIRECRAWL_API_KEY', 'FIRECRAWL_API_URL',
         'FIRECRAWL_GATEWAY_URL', 'TOOL_GATEWAY_DOMAIN', 'TOOL_GATEWAY_SCHEME',
         'TOOL_GATEWAY_USER_TOKEN', 'TAVILY_API_KEY',
-        'BROWSERBASE_API_KEY', 'BROWSERBASE_PROJECT_ID', 'BROWSER_USE_API_KEY',
+        'BROWSERBASE_API_KEY', 'BROWSERBASE_PROJECT_ID', 'BROWSER_USE_API_KEY', 'STEEL_API_KEY',
         'FAL_KEY', 'TELEGRAM_BOT_TOKEN', 'DISCORD_BOT_TOKEN',
         'TERMINAL_SSH_HOST', 'TERMINAL_SSH_USER', 'TERMINAL_SSH_KEY',
         'SUDO_PASSWORD', 'SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN',

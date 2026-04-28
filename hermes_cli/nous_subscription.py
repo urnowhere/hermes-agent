@@ -140,6 +140,7 @@ def _browser_label(current_provider: str) -> str:
     mapping = {
         "browserbase": "Browserbase",
         "browser-use": "Browser Use",
+        "steel": "Steel",
         "firecrawl": "Firecrawl",
         "camofox": "Camofox",
         "local": "Local browser",
@@ -168,6 +169,7 @@ def _resolve_browser_feature_state(
     direct_camofox: bool,
     direct_browserbase: bool,
     direct_browser_use: bool,
+    direct_steel: bool = False,
     direct_firecrawl: bool,
     managed_browser_available: bool,
 ) -> tuple[str, bool, bool, bool]:
@@ -194,6 +196,10 @@ def _resolve_browser_feature_state(
             return current_provider, available, active, managed
         if current_provider == "firecrawl":
             available = bool(browser_local_available and direct_firecrawl)
+            active = bool(browser_tool_enabled and available)
+            return current_provider, available, active, False
+        if current_provider == "steel":
+            available = bool(browser_local_available and direct_steel)
             active = bool(browser_tool_enabled and available)
             return current_provider, available, active, False
         if current_provider == "camofox":
@@ -286,6 +292,7 @@ def get_nous_subscription_features(
     direct_camofox = bool(get_env_value("CAMOFOX_URL"))
     direct_browserbase = bool(get_env_value("BROWSERBASE_API_KEY") and get_env_value("BROWSERBASE_PROJECT_ID"))
     direct_browser_use = bool(get_env_value("BROWSER_USE_API_KEY"))
+    direct_steel = bool(get_env_value("STEEL_API_KEY"))
     direct_modal = has_direct_modal_credentials()
 
     # When use_gateway is set, suppress direct credentials for managed detection
@@ -362,6 +369,7 @@ def get_nous_subscription_features(
         direct_camofox=direct_camofox,
         direct_browserbase=direct_browserbase,
         direct_browser_use=direct_browser_use,
+        direct_steel=direct_steel,
         direct_firecrawl=direct_firecrawl,
         managed_browser_available=managed_browser_available,
     )
@@ -525,6 +533,7 @@ def apply_nous_managed_defaults(
     if "browser" in selected_toolsets and not features.browser.explicit_configured and not (
         get_env_value("BROWSER_USE_API_KEY")
         or get_env_value("BROWSERBASE_API_KEY")
+        or get_env_value("STEEL_API_KEY")
     ):
         browser_cfg["cloud_provider"] = "browser-use"
         changed.add("browser")

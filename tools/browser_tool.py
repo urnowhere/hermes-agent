@@ -82,6 +82,7 @@ from tools.browser_providers.base import CloudBrowserProvider
 from tools.browser_providers.browserbase import BrowserbaseProvider
 from tools.browser_providers.browser_use import BrowserUseProvider
 from tools.browser_providers.firecrawl import FirecrawlProvider
+from tools.browser_providers.steel import SteelProvider
 from tools.tool_backend_helpers import normalize_browser_cloud_provider
 
 # Camofox local anti-detection browser backend (optional).
@@ -390,6 +391,7 @@ _PROVIDER_REGISTRY: Dict[str, type] = {
     "browserbase": BrowserbaseProvider,
     "browser-use": BrowserUseProvider,
     "firecrawl": FirecrawlProvider,
+    "steel": SteelProvider,
 }
 
 _cached_cloud_provider: Optional[CloudBrowserProvider] = None
@@ -1388,46 +1390,56 @@ def _run_browser_command(
     if timeout is None:
         timeout = _get_command_timeout()
     args = args or []
-    
-    # Build the command
-    try:
-        browser_cmd = _find_agent_browser()
-    except FileNotFoundError as e:
-        logger.warning("agent-browser CLI not found: %s", e)
-        return {"success": False, "error": str(e)}
 
-    if _requires_real_termux_browser_install(browser_cmd):
-        error = _termux_browser_install_error()
-        logger.warning("browser command blocked on Termux: %s", error)
-        return {"success": False, "error": error}
-    
     from tools.interrupt import is_interrupted
     if is_interrupted():
         return {"success": False, "error": "Interrupted"}
 
-    # Get session info (creates Browserbase session with proxies if needed)
+    # Get session info (creates Browserbase / Steel / etc. session if needed)
     try:
         session_info = _get_session_info(task_id)
     except Exception as e:
         logger.warning("Failed to create browser session for task=%s: %s", task_id, e)
         return {"success": False, "error": f"Failed to create browser session: {str(e)}"}
-    
-    # Build the command with the appropriate backend flag.
-    # Cloud mode: --cdp <websocket_url> connects to Browserbase.
-    # Local mode: --session <name> launches a local headless Chromium.
-    # The rest of the command (--json, command, args) is identical.
-    if session_info.get("cdp_url"):
-        # Cloud mode — connect to remote Browserbase browser via CDP
-        # IMPORTANT: Do NOT use --session with --cdp. In agent-browser >=0.13,
-        # --session creates a local browser instance and silently ignores --cdp.
-        backend_args = ["--cdp", session_info["cdp_url"]]
-    else:
-        # Local mode — launch a headless Chromium instance
-        backend_args = ["--session", session_info["session_name"]]
 
-    # Keep concrete executable paths intact, even when they contain spaces.
-    # Only the synthetic npx fallback needs to expand into multiple argv items.
-    cmd_prefix = ["npx", "agent-browser"] if browser_cmd == "npx agent-browser" else [browser_cmd]
+    # Steel takes a different binary entirely — agent-browser cannot speak
+    # Steel's CDP dialect, so SteelProvider hands us a session name and
+    # ``uses_steel_cli=True`` and we dispatch through the Steel CLI which
+    # exposes the same agent-browser-compatible command surface.
+    if session_info.get("uses_steel_cli"):
+        steel_cli = shutil.which("steel")
+        if not steel_cli:
+            from tools.browser_providers.steel import _STEEL_CLI_INSTALL_HINT
+            return {"success": False, "error": _STEEL_CLI_INSTALL_HINT}
+        cmd_prefix = [steel_cli, "browser"]
+        backend_args = ["--session", session_info["session_name"]]
+    else:
+        # Build the command for agent-browser. Cloud mode: --cdp <websocket_url>
+        # connects to Browserbase. Local mode: --session <name> launches a
+        # local headless Chromium. The rest is identical.
+        try:
+            browser_cmd = _find_agent_browser()
+        except FileNotFoundError as e:
+            logger.warning("agent-browser CLI not found: %s", e)
+            return {"success": False, "error": str(e)}
+
+        if _requires_real_termux_browser_install(browser_cmd):
+            error = _termux_browser_install_error()
+            logger.warning("browser command blocked on Termux: %s", error)
+            return {"success": False, "error": error}
+
+        if session_info.get("cdp_url"):
+            # Cloud mode — connect to remote Browserbase browser via CDP
+            # IMPORTANT: Do NOT use --session with --cdp. In agent-browser >=0.13,
+            # --session creates a local browser instance and silently ignores --cdp.
+            backend_args = ["--cdp", session_info["cdp_url"]]
+        else:
+            # Local mode — launch a headless Chromium instance
+            backend_args = ["--session", session_info["session_name"]]
+
+        # Keep concrete executable paths intact, even when they contain spaces.
+        # Only the synthetic npx fallback needs to expand into multiple argv items.
+        cmd_prefix = ["npx", "agent-browser"] if browser_cmd == "npx agent-browser" else [browser_cmd]
 
     cmd_parts = cmd_prefix + backend_args + [
         "--json",
@@ -1796,21 +1808,50 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         title_lower = title.lower()
         
         if any(pattern in title_lower for pattern in blocked_patterns):
+            provider = _get_cloud_provider()
+            provider_name = provider.provider_name() if provider else "cloud browser"
+            if provider_name == "Browserbase":
+                stealth_hint = "3) Enable advanced stealth (BROWSERBASE_ADVANCED_STEALTH=true, requires Scale plan), "
+            elif provider_name == "Steel":
+                stealth_hint = "3) Enable proxy (STEEL_USE_PROXY=true) or CAPTCHA solving (STEEL_SOLVE_CAPTCHA=true), "
+            else:
+                stealth_hint = "3) Check your cloud browser provider's stealth/proxy settings, "
             response["bot_detection_warning"] = (
                 f"Page title '{title}' suggests bot detection. The site may have blocked this request. "
                 "Options: 1) Try adding delays between actions, 2) Access different pages first, "
-                "3) Enable advanced stealth (BROWSERBASE_ADVANCED_STEALTH=true, requires Scale plan), "
+                f"{stealth_hint}"
                 "4) Some sites have very aggressive bot detection that may be unavoidable."
             )
+            if provider_name == "Steel":
+                response["bot_detection_steel_hint"] = (
+                    "Try using the steel_scrape tool instead — it uses Steel's server-side "
+                    "extraction which may bypass bot detection that blocks browser sessions."
+                )
         
+        # Include session viewer URL on first navigation (Steel provides this)
+        if is_first_nav and session_info.get("session_viewer_url"):
+            response["session_viewer_url"] = session_info["session_viewer_url"]
+            response["session_viewer_hint"] = (
+                "Share the session_viewer_url with the user so they can "
+                "watch the browser session live in their browser."
+            )
+
         # Include feature info on first navigation so model knows what's active
         if is_first_nav and "features" in session_info:
             features = session_info["features"]
             active_features = [k for k, v in features.items() if v]
-            if not features.get("proxies"):
+            has_proxies = features.get("proxies") or features.get("proxy")
+            if not has_proxies:
+                provider = _get_cloud_provider()
+                provider_name = provider.provider_name() if provider else "your cloud browser provider"
                 response["stealth_warning"] = (
                     "Running WITHOUT residential proxies. Bot detection may be more aggressive. "
-                    "Consider upgrading Browserbase plan for proxy support."
+                    f"Consider enabling proxy support in {provider_name}."
+                )
+            if features.get("steel"):
+                response["steel_hint"] = (
+                    "This session runs on Steel. You also have the steel_scrape tool "
+                    "available for fast content extraction without browser interaction."
                 )
             response["stealth_features"] = active_features
 

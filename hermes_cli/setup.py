@@ -381,7 +381,7 @@ def _print_setup_summary(config: dict, hermes_home):
     else:
         tool_status.append(("Web Search & Extract", False, "EXA_API_KEY, PARALLEL_API_KEY, FIRECRAWL_API_KEY/FIRECRAWL_API_URL, or TAVILY_API_KEY"))
 
-    # Browser tools (local Chromium, Camofox, Browserbase, Browser Use, or Firecrawl)
+    # Browser tools (local Chromium, Camofox, Browserbase, Browser Use, Firecrawl, or Steel)
     browser_provider = subscription_features.browser.current_provider
     if subscription_features.browser.managed_by_nous:
         tool_status.append(("Browser Automation (Nous Browser Use)", True, None))
@@ -391,7 +391,10 @@ def _print_setup_summary(config: dict, hermes_home):
             label = f"Browser Automation ({browser_provider})"
         tool_status.append((label, True, None))
     else:
-        missing_browser_hint = "npm install -g agent-browser, set CAMOFOX_URL, or configure Browser Use or Browserbase"
+        missing_browser_hint = (
+            "npm install -g agent-browser, set CAMOFOX_URL, or configure "
+            "Browser Use, Browserbase, Firecrawl, or Steel"
+        )
         if browser_provider == "Browserbase":
             missing_browser_hint = (
                 "npm install -g agent-browser and set "
@@ -400,6 +403,16 @@ def _print_setup_summary(config: dict, hermes_home):
         elif browser_provider == "Browser Use":
             missing_browser_hint = (
                 "npm install -g agent-browser and set BROWSER_USE_API_KEY"
+            )
+        elif browser_provider == "Firecrawl":
+            missing_browser_hint = (
+                "npm install -g agent-browser and set FIRECRAWL_API_KEY"
+            )
+        elif browser_provider == "Steel":
+            missing_browser_hint = (
+                "curl -fsS https://setup.steel.dev | sh and set STEEL_API_KEY "
+                "(steel_scrape works with just STEEL_API_KEY; the Steel CLI is "
+                "only needed for browser_navigate / browser_click / etc.)"
             )
         elif browser_provider == "Camofox":
             missing_browser_hint = "CAMOFOX_URL"
