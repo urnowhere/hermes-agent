@@ -5880,6 +5880,7 @@ class GatewayRunner:
         current_api_key = ""
         user_provs = None
         custom_provs = None
+        picker_providers = None
         config_path = _hermes_home / "config.yaml"
         try:
             if config_path.exists():
@@ -5890,6 +5891,9 @@ class GatewayRunner:
                     current_model = model_cfg.get("default", "")
                     current_provider = model_cfg.get("provider", current_provider)
                     current_base_url = model_cfg.get("base_url", "")
+                    raw_picker_providers = model_cfg.get("picker_providers")
+                    if isinstance(raw_picker_providers, list):
+                        picker_providers = raw_picker_providers
                 user_provs = cfg.get("providers")
                 try:
                     from hermes_cli.config import get_compatible_custom_providers
@@ -5925,6 +5929,7 @@ class GatewayRunner:
                         current_base_url=current_base_url,
                         user_providers=user_provs,
                         custom_providers=custom_provs,
+                        picker_providers=picker_providers,
                         max_models=50,
                     )
                 except Exception:
@@ -6046,6 +6051,7 @@ class GatewayRunner:
                     current_base_url=current_base_url,
                     user_providers=user_provs,
                     custom_providers=custom_provs,
+                    picker_providers=picker_providers,
                     max_models=5,
                 )
                 for p in providers:

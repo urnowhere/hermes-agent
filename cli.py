@@ -5441,11 +5441,18 @@ class HermesCLI:
         # Load providers for switch_model (picker path needs them below)
         user_provs = None
         custom_provs = None
+        picker_providers = None
         try:
             from hermes_cli.config import get_compatible_custom_providers, load_config
+
             cfg = load_config()
             user_provs = cfg.get("providers")
             custom_provs = get_compatible_custom_providers(cfg)
+            model_cfg = cfg.get("model")
+            if isinstance(model_cfg, dict):
+                raw_picker_providers = model_cfg.get("picker_providers")
+                if isinstance(raw_picker_providers, list):
+                    picker_providers = raw_picker_providers
         except Exception:
             pass
 
@@ -5459,6 +5466,7 @@ class HermesCLI:
                     current_provider=self.provider or "",
                     user_providers=user_provs,
                     custom_providers=custom_provs,
+                    picker_providers=picker_providers,
                     max_models=50,
                 )
             except Exception:

@@ -801,18 +801,21 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
         current_base_url = str(runtime.get("base_url", "") or "")
         current_api_key = str(runtime.get("api_key", "") or "")
 
-    # Load user-defined providers so switch_model can resolve named custom
-    # endpoints (e.g. "ollama-launch") and validate against saved model lists.
-    user_provs = None
-    custom_provs = None
+    cfg = _load_cfg()
+    user_providers = (
+        cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {}
+    )
+    custom_providers = (
+        cfg.get("custom_providers")
+        if isinstance(cfg.get("custom_providers"), list)
+        else []
+    )
     try:
-        from hermes_cli.config import get_compatible_custom_providers, load_config
+        from hermes_cli.config import get_compatible_custom_providers
 
-        cfg = load_config()
-        user_provs = [
-            {"provider": k, **v} for k, v in (cfg.get("providers") or {}).items()
-        ]
-        custom_provs = get_compatible_custom_providers(cfg)
+        compatible_custom_providers = get_compatible_custom_providers(cfg)
+        if isinstance(compatible_custom_providers, list):
+            custom_providers = compatible_custom_providers
     except Exception:
         pass
 
@@ -824,8 +827,8 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
         current_api_key=current_api_key,
         is_global=persist_global,
         explicit_provider=explicit_provider,
-        user_providers=user_provs,
-        custom_providers=custom_provs,
+        user_providers=user_providers,
+        custom_providers=custom_providers,
     )
     if not result.success:
         raise ValueError(result.error_message or "model switch failed")
@@ -1226,11 +1229,13 @@ def _agent_cbs(sid: str) -> dict:
         tool_complete_callback=lambda tc_id, name, args, result: _on_tool_complete(
             sid, tc_id, name, args, result
         ),
-        tool_progress_callback=lambda event_type, name=None, preview=None, args=None, **kwargs: _on_tool_progress(
-            sid, event_type, name, preview, args, **kwargs
+        tool_progress_callback=lambda event_type, name=None, preview=None, args=None, **kwargs: (
+            _on_tool_progress(sid, event_type, name, preview, args, **kwargs)
         ),
-        tool_gen_callback=lambda name: _tool_progress_enabled(sid)
-        and _emit("tool.generating", sid, {"name": name}),
+        tool_gen_callback=lambda name: (
+            _tool_progress_enabled(sid)
+            and _emit("tool.generating", sid, {"name": name})
+        ),
         thinking_callback=lambda text: _emit("thinking.delta", sid, {"text": text}),
         reasoning_callback=lambda text: _emit("reasoning.delta", sid, {"text": text}),
         status_callback=lambda kind, text=None: _status_update(
@@ -1276,9 +1281,9 @@ def _render_personality_prompt(value) -> str:
     if isinstance(value, dict):
         parts = [value.get("system_prompt", "")]
         if value.get("tone"):
-            parts.append(f'Tone: {value["tone"]}')
+            parts.append(f"Tone: {value['tone']}")
         if value.get("style"):
-            parts.append(f'Style: {value["style"]}')
+            parts.append(f"Style: {value['style']}")
         return "\n".join(p for p in parts if p)
     return str(value)
 
@@ -2520,7 +2525,9 @@ def _(rid, params: dict) -> dict:
                 status = (
                     "interrupted"
                     if result.get("interrupted")
-                    else "error" if result.get("error") else "complete"
+                    else "error"
+                    if result.get("error")
+                    else "complete"
                 )
                 lr = result.get("last_reasoning")
                 if isinstance(lr, str) and lr.strip():
@@ -4160,8 +4167,14 @@ def _(rid, params: dict) -> dict:
         session = _sessions.get(params.get("session_id", ""))
         agent = session.get("agent") if session else None
         cfg = _load_cfg()
+        model_cfg = cfg.get("model")
         current_provider = getattr(agent, "provider", "") or ""
         current_model = getattr(agent, "model", "") or _resolve_model()
+        picker_providers = None
+        if isinstance(model_cfg, dict):
+            raw_picker_providers = model_cfg.get("picker_providers")
+            if isinstance(raw_picker_providers, list):
+                picker_providers = raw_picker_providers
         # list_authenticated_providers already populates each provider's
         # "models" with the curated list (same source as `hermes model` and
         # classic CLI's /model picker). Do NOT overwrite with live
@@ -4178,6 +4191,7 @@ def _(rid, params: dict) -> dict:
                 if isinstance(cfg.get("custom_providers"), list)
                 else []
             ),
+            picker_providers=picker_providers,
             max_models=50,
         )
         return _ok(
