@@ -95,6 +95,7 @@ from gateway.platforms.base import (
     MessageEvent,
     MessageType,
     SendResult,
+    resolve_proxy_url,
 )
 
 logger = logging.getLogger(__name__)
