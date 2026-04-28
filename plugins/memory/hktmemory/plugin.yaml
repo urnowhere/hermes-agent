@@ -1,0 +1,4 @@
+name: hktmemory
+version: 0.1.0
+description: "Enterprise knowledge recall via HKTMemory vector store"
+pip_dependencies: []
