@@ -198,6 +198,7 @@ services:
     #   - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     #   - OPENAI_API_KEY=${OPENAI_API_KEY}
     #   - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+    #   - TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS}
     deploy:
       resources:
         limits:
@@ -208,7 +209,7 @@ services:
     image: nousresearch/hermes-agent:latest
     container_name: hermes-dashboard
     restart: unless-stopped
-    command: dashboard --host 0.0.0.0
+    command: dashboard --host 0.0.0.0 --insecure
     ports:
       - "9119:9119"
     volumes:
@@ -231,6 +232,14 @@ networks:
 ```
 
 Start with `docker compose up -d` and view logs with `docker compose logs -f`.
+
+`--insecure` is required here because the dashboard intentionally refuses
+non-localhost binds unless you opt in. Without it, the container starts,
+prints a refusal message, and exits before serving port `9119`.
+
+Platform allowlists such as `TELEGRAM_ALLOWED_USERS` can be kept in the
+mounted `~/.hermes/.env` file or forwarded explicitly through the Compose
+`environment:` section.
 
 ## Resource limits
 

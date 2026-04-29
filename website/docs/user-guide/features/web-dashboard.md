@@ -23,13 +23,14 @@ This starts a local web server and opens `http://127.0.0.1:9119` in your browser
 | `--port` | `9119` | Port to run the web server on |
 | `--host` | `127.0.0.1` | Bind address |
 | `--no-open` | — | Don't auto-open the browser |
+| `--insecure` | — | Allow non-localhost binds (dangerous: exposes secrets on the network) |
 
 ```bash
 # Custom port
 hermes dashboard --port 8080
 
-# Bind to all interfaces (use with caution on shared networks)
-hermes dashboard --host 0.0.0.0
+# Bind to all interfaces (requires explicit insecure opt-in)
+hermes dashboard --host 0.0.0.0 --insecure
 
 # Start without opening browser
 hermes dashboard --no-open
