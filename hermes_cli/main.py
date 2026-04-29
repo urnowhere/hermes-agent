@@ -1028,7 +1028,7 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
             p = Path(ext_dir)
             if (p / "dist" / "entry.js").exists() and not _tui_need_npm_install(p):
                 node = _node_bin("node")
-                return [node, str(p / "dist" / "entry.js")], p
+                return [node, "--expose-gc", str(p / "dist" / "entry.js")], p
 
     npm = _node_bin("npm")
     if _tui_need_npm_install(tui_dir):
@@ -1091,7 +1091,7 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
         sys.exit(1)
 
     node = _node_bin("node")
-    return [node, str(root / "dist" / "entry.js")], root
+    return [node, "--expose-gc", str(root / "dist" / "entry.js")], root
 
 
 def _launch_tui(
@@ -1123,16 +1123,16 @@ def _launch_tui(
     if provider:
         env["HERMES_TUI_PROVIDER"] = provider
         env["HERMES_INFERENCE_PROVIDER"] = provider
-    # Guarantee an 8GB V8 heap + exposed GC for the TUI. Default node cap is
-    # ~1.5–4GB depending on version and can fatal-OOM on long sessions with
-    # large transcripts / reasoning blobs. Token-level merge: respect any
-    # user-supplied --max-old-space-size (they may have set it higher) and
-    # avoid duplicating --expose-gc.
+    # Guarantee an 8GB V8 heap for the TUI. Default node cap is ~1.5–4GB
+    # depending on version and can fatal-OOM on long sessions with large
+    # transcripts / reasoning blobs. Respect any user-supplied
+    # --max-old-space-size (they may have set it higher).
+    # --expose-gc is a V8 flag that node refuses in NODE_OPTIONS
+    # ("--expose-gc is not allowed in NODE_OPTIONS"); it is passed as a CLI
+    # flag inside _make_tui_argv for node-direct invocations instead.
     _tokens = env.get("NODE_OPTIONS", "").split()
     if not any(t.startswith("--max-old-space-size=") for t in _tokens):
         _tokens.append("--max-old-space-size=8192")
-    if "--expose-gc" not in _tokens:
-        _tokens.append("--expose-gc")
     env["NODE_OPTIONS"] = " ".join(_tokens)
     if resume_session_id:
         env["HERMES_TUI_RESUME"] = resume_session_id
