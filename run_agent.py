@@ -7430,6 +7430,17 @@ class AIAgent:
                 self._transport_cache.clear()
             self._fallback_activated = True
 
+            # Keep the request-runtime snapshot aligned with the active fallback.
+            # The retry loop rebuilds request clients from _primary_runtime /
+            # _client_kwargs on the next attempt. If those still point at the
+            # exhausted primary, retries appear to "switch" but still hit the old
+            # backend.
+            if self._primary_runtime:
+                self._primary_runtime["model"] = fb_model
+                self._primary_runtime["provider"] = fb_provider
+                self._primary_runtime["base_url"] = fb_base_url
+                self._primary_runtime["api_mode"] = fb_api_mode
+
             # Honor per-provider / per-model request_timeout_seconds for the
             # fallback target (same knob the primary client uses).  None = use
             # SDK default.
@@ -7448,6 +7459,12 @@ class AIAgent:
                 self._is_anthropic_oauth = _is_oauth_token(effective_key) if fb_provider == "anthropic" else False
                 self.client = None
                 self._client_kwargs = {}
+                if self._primary_runtime:
+                    self._primary_runtime["api_key"] = effective_key
+                    self._primary_runtime["client_kwargs"] = {}
+                    self._primary_runtime["anthropic_api_key"] = effective_key
+                    self._primary_runtime["anthropic_base_url"] = self._anthropic_base_url
+                    self._primary_runtime["is_anthropic_oauth"] = self._is_anthropic_oauth
             else:
                 # Swap OpenAI client and config in-place
                 self.api_key = fb_client.api_key
@@ -7470,6 +7487,10 @@ class AIAgent:
                 }
                 if _fb_timeout is not None:
                     self._client_kwargs["timeout"] = _fb_timeout
+                if self._primary_runtime:
+                    self._primary_runtime["api_key"] = fb_client.api_key
+                    self._primary_runtime["client_kwargs"] = dict(self._client_kwargs)
+                if _fb_timeout is not None:
                     # Rebuild the shared OpenAI client so the configured
                     # timeout takes effect on the very next fallback request,
                     # not only after a later credential-rotation rebuild.

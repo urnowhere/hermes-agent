@@ -182,6 +182,37 @@ class TestFallbackChainAdvancement:
             assert agent._try_activate_fallback() is True
             assert mock_rpc.call_args.kwargs["explicit_api_key"] == "env-secret"
 
+    def test_openrouter_fallback_updates_runtime_snapshot(self):
+        fbs = [{"provider": "openrouter", "model": "google/gemini-2.5-flash"}]
+        agent = _make_agent(fallback_model=fbs)
+
+        mock_client = _mock_client(
+            base_url="https://openrouter.ai/api/v1",
+            api_key="sk-or-test",
+        )
+        mock_client._custom_headers = {
+            "HTTP-Referer": "https://hermes-agent.nousresearch.com",
+            "X-OpenRouter-Title": "Hermes Agent",
+        }
+
+        with patch(
+            "agent.auxiliary_client.resolve_provider_client",
+            return_value=(mock_client, None),
+        ):
+            assert agent._try_activate_fallback() is True
+
+        assert agent.provider == "openrouter"
+        assert agent.model == "google/gemini-2.5-flash"
+        assert agent.api_mode == "chat_completions"
+        assert agent._primary_runtime["provider"] == "openrouter"
+        assert agent._primary_runtime["model"] == "google/gemini-2.5-flash"
+        assert agent._primary_runtime["api_mode"] == "chat_completions"
+        assert agent._primary_runtime["base_url"] == "https://openrouter.ai/api/v1"
+        assert agent._primary_runtime["api_key"] == "sk-or-test"
+        assert agent._primary_runtime["client_kwargs"]["api_key"] == "sk-or-test"
+        assert agent._primary_runtime["client_kwargs"]["base_url"] == "https://openrouter.ai/api/v1"
+        assert agent._primary_runtime["client_kwargs"]["default_headers"] == mock_client._custom_headers
+
 
 # ── Pool-rotation vs fallback gating (#11314) ────────────────────────────
 
