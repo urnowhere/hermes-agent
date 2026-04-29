@@ -566,3 +566,136 @@ class TestSecurityScanGate:
 
         with patch("hermes_cli.config.load_config", side_effect=RuntimeError("boom")):
             assert _guard_agent_created_enabled() is False
+
+
+# ---------------------------------------------------------------------------
+# Skill protection / locking
+# ---------------------------------------------------------------------------
+
+
+LOCKED_SKILL_CONTENT = """\
+---
+name: locked-skill
+description: A locked skill that cannot be auto-edited.
+locked: true
+---
+
+# Locked Skill
+
+Step 1: Do the thing.
+"""
+
+
+class TestSkillProtection:
+    """Skills can be locked from agent edits via two independent layers:
+    frontmatter `locked: true` and the `skills.protected` config glob list."""
+
+    def test_frontmatter_locked_blocks_patch(self, tmp_path):
+        with _skill_dir(tmp_path), \
+             patch("hermes_cli.config.load_config", return_value={}):
+            _create_skill("locked-skill", LOCKED_SKILL_CONTENT)
+            result = _patch_skill("locked-skill", "Do the thing.", "Do something else.")
+        assert result["success"] is False
+        assert "locked" in result["error"].lower()
+
+    def test_frontmatter_locked_blocks_edit(self, tmp_path):
+        with _skill_dir(tmp_path), \
+             patch("hermes_cli.config.load_config", return_value={}):
+            _create_skill("locked-skill", LOCKED_SKILL_CONTENT)
+            result = _edit_skill("locked-skill", VALID_SKILL_CONTENT_2)
+        assert result["success"] is False
+        assert "locked" in result["error"].lower()
+
+    def test_frontmatter_locked_blocks_delete(self, tmp_path):
+        with _skill_dir(tmp_path), \
+             patch("hermes_cli.config.load_config", return_value={}):
+            _create_skill("locked-skill", LOCKED_SKILL_CONTENT)
+            result = _delete_skill("locked-skill")
+        assert result["success"] is False
+        assert "locked" in result["error"].lower()
+        # Skill still exists on disk
+        assert (tmp_path / "locked-skill" / "SKILL.md").exists()
+
+    def test_frontmatter_locked_blocks_write_file(self, tmp_path):
+        with _skill_dir(tmp_path), \
+             patch("hermes_cli.config.load_config", return_value={}):
+            _create_skill("locked-skill", LOCKED_SKILL_CONTENT)
+            result = _write_file("locked-skill", "references/note.md", "hello")
+        assert result["success"] is False
+        assert "locked" in result["error"].lower()
+
+    def test_frontmatter_locked_blocks_remove_file(self, tmp_path):
+        # Need to seed a supporting file outside the lock check, so create
+        # the skill unlocked first, add the file, then re-write SKILL.md
+        # with locked: true.
+        with _skill_dir(tmp_path), \
+             patch("hermes_cli.config.load_config", return_value={}):
+            _create_skill("locked-skill", VALID_SKILL_CONTENT)
+            _write_file("locked-skill", "references/note.md", "hello")
+            (tmp_path / "locked-skill" / "SKILL.md").write_text(
+                LOCKED_SKILL_CONTENT, encoding="utf-8"
+            )
+            result = _remove_file("locked-skill", "references/note.md")
+        assert result["success"] is False
+        assert "locked" in result["error"].lower()
+        assert (tmp_path / "locked-skill" / "references" / "note.md").exists()
+
+    def test_readonly_alias_also_blocks(self, tmp_path):
+        readonly_content = LOCKED_SKILL_CONTENT.replace("locked: true", "readonly: true")
+        with _skill_dir(tmp_path), \
+             patch("hermes_cli.config.load_config", return_value={}):
+            _create_skill("locked-skill", readonly_content)
+            result = _patch_skill("locked-skill", "Do the thing.", "Do something else.")
+        assert result["success"] is False
+        assert "locked" in result["error"].lower()
+
+    def test_unlocked_skill_can_be_patched(self, tmp_path):
+        with _skill_dir(tmp_path), \
+             patch("hermes_cli.config.load_config", return_value={}):
+            _create_skill("free-skill", VALID_SKILL_CONTENT)
+            result = _patch_skill("free-skill", "Do the thing.", "Do something else.")
+        assert result["success"] is True
+
+    def test_config_protected_blocks_by_name(self, tmp_path):
+        with _skill_dir(tmp_path), \
+             patch("hermes_cli.config.load_config",
+                   return_value={"skills": {"protected": ["important"]}}):
+            _create_skill("important", VALID_SKILL_CONTENT)
+            result = _patch_skill("important", "Do the thing.", "Do something else.")
+        assert result["success"] is False
+        assert "protected" in result["error"].lower()
+        assert "important" in result["error"]
+
+    def test_config_protected_blocks_by_glob(self, tmp_path):
+        with _skill_dir(tmp_path), \
+             patch("hermes_cli.config.load_config",
+                   return_value={"skills": {"protected": ["creative/*"]}}):
+            _create_skill("art-bot", VALID_SKILL_CONTENT, category="creative")
+            result = _delete_skill("art-bot")
+        assert result["success"] is False
+        assert "creative/*" in result["error"]
+
+    def test_config_protected_no_match(self, tmp_path):
+        with _skill_dir(tmp_path), \
+             patch("hermes_cli.config.load_config",
+                   return_value={"skills": {"protected": ["other-skill"]}}):
+            _create_skill("my-skill", VALID_SKILL_CONTENT)
+            result = _patch_skill("my-skill", "Do the thing.", "Do something else.")
+        assert result["success"] is True
+
+    def test_config_protected_handles_load_error(self, tmp_path):
+        """If load_config raises, the layer-2 check is skipped silently."""
+        with _skill_dir(tmp_path), \
+             patch("hermes_cli.config.load_config", side_effect=RuntimeError("boom")):
+            _create_skill("my-skill", VALID_SKILL_CONTENT)
+            result = _patch_skill("my-skill", "Do the thing.", "Do something else.")
+        assert result["success"] is True
+
+    def test_create_not_blocked_by_protection(self, tmp_path):
+        """Creating a brand-new skill is never blocked, even if its name
+        matches a `skills.protected` glob — the lock only guards modification."""
+        with _skill_dir(tmp_path), \
+             patch("hermes_cli.config.load_config",
+                   return_value={"skills": {"protected": ["my-skill"]}}):
+            result = _create_skill("my-skill", VALID_SKILL_CONTENT)
+        assert result["success"] is True

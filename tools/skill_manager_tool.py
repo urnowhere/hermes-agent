@@ -118,6 +118,60 @@ def _is_local_skill(skill_path: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _is_skill_protected(name: str, skill_dir: Path) -> Optional[str]:
+    """Return an error message if the skill is locked, else None.
+
+    Two independent layers (either one blocks):
+
+    1. Frontmatter ``locked: true`` (or ``readonly: true``) in SKILL.md —
+       authored by the skill owner, travels with the skill.
+    2. ``skills.protected`` config: a list of fnmatch globs matched against
+       both the skill name and its path relative to SKILLS_DIR — set by
+       the user to protect skills they didn't author.
+    """
+    # Layer 1: frontmatter flag
+    skill_md = skill_dir / "SKILL.md"
+    if skill_md.exists():
+        try:
+            from agent.skill_utils import parse_frontmatter
+            fm, _ = parse_frontmatter(skill_md.read_text(encoding="utf-8"))
+            if isinstance(fm, dict) and (fm.get("locked") or fm.get("readonly")):
+                return (
+                    f"Skill '{name}' is locked (frontmatter `locked: true`). "
+                    f"Remove that field from {skill_md} manually if you really "
+                    f"need to modify it."
+                )
+        except Exception:
+            pass
+
+    # Layer 2: config glob list
+    try:
+        import fnmatch
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        patterns = (cfg.get("skills", {}) or {}).get("protected", []) or []
+        if patterns:
+            try:
+                rel = str(skill_dir.resolve().relative_to(SKILLS_DIR.resolve()))
+            except ValueError:
+                rel = name
+            for pat in patterns:
+                if not isinstance(pat, str):
+                    continue
+                if fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(rel, pat):
+                    return (
+                        f"Skill '{name}' is protected by `skills.protected` "
+                        f"config (matched pattern '{pat}'). Remove the entry "
+                        f"with `hermes config` if you really need to modify it."
+                    )
+    except Exception:
+        pass
+
+    return None
+
+
 MAX_SKILL_CONTENT_CHARS = 100_000   # ~36k tokens at 2.75 chars/token
 MAX_SKILL_FILE_BYTES = 1_048_576    # 1 MiB per supporting file
 
@@ -399,6 +453,10 @@ def _edit_skill(name: str, content: str) -> Dict[str, Any]:
     if not _is_local_skill(existing["path"]):
         return {"success": False, "error": f"Skill '{name}' is in an external directory and cannot be modified. Copy it to your local skills directory first."}
 
+    err = _is_skill_protected(name, existing["path"])
+    if err:
+        return {"success": False, "error": err}
+
     skill_md = existing["path"] / "SKILL.md"
     # Back up original content for rollback
     original_content = skill_md.read_text(encoding="utf-8") if skill_md.exists() else None
@@ -441,6 +499,10 @@ def _patch_skill(
 
     if not _is_local_skill(existing["path"]):
         return {"success": False, "error": f"Skill '{name}' is in an external directory and cannot be modified. Copy it to your local skills directory first."}
+
+    err = _is_skill_protected(name, existing["path"])
+    if err:
+        return {"success": False, "error": err}
 
     skill_dir = existing["path"]
 
@@ -524,6 +586,10 @@ def _delete_skill(name: str) -> Dict[str, Any]:
     if not _is_local_skill(existing["path"]):
         return {"success": False, "error": f"Skill '{name}' is in an external directory and cannot be deleted."}
 
+    err = _is_skill_protected(name, existing["path"])
+    if err:
+        return {"success": False, "error": err}
+
     skill_dir = existing["path"]
     shutil.rmtree(skill_dir)
 
@@ -569,6 +635,10 @@ def _write_file(name: str, file_path: str, file_content: str) -> Dict[str, Any]:
     if not _is_local_skill(existing["path"]):
         return {"success": False, "error": f"Skill '{name}' is in an external directory and cannot be modified. Copy it to your local skills directory first."}
 
+    err = _is_skill_protected(name, existing["path"])
+    if err:
+        return {"success": False, "error": err}
+
     target, err = _resolve_skill_target(existing["path"], file_path)
     if err:
         return {"success": False, "error": err}
@@ -605,6 +675,10 @@ def _remove_file(name: str, file_path: str) -> Dict[str, Any]:
 
     if not _is_local_skill(existing["path"]):
         return {"success": False, "error": f"Skill '{name}' is in an external directory and cannot be modified."}
+
+    err = _is_skill_protected(name, existing["path"])
+    if err:
+        return {"success": False, "error": err}
 
     skill_dir = existing["path"]
 
@@ -735,6 +809,9 @@ SKILL_MANAGE_SCHEMA = {
         "Update when: instructions stale/wrong, OS-specific failures, "
         "missing steps or pitfalls found during use. "
         "If you used a skill and hit issues not covered by it, patch it immediately.\n\n"
+        "Skills with `locked: true` (or `readonly: true`) in their frontmatter, "
+        "or matching the `skills.protected` config glob list, cannot be edited, "
+        "patched, deleted, or written to — do not retry, just respect the lock.\n\n"
         "After difficult/iterative tasks, offer to save as a skill. "
         "Skip for simple one-offs. Confirm with user before creating/deleting.\n\n"
         "Good skills: trigger conditions, numbered steps with exact commands, "
