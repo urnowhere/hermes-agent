@@ -94,13 +94,17 @@ class TestKimiCodingSkipsAnthropicThinking:
         )
         assert "thinking" in kwargs
 
-    def test_kimi_root_endpoint_unaffected(self) -> None:
-        """Only the /coding route is special-cased — plain api.kimi.com is not.
+    def test_kimi_root_endpoint_on_anthropic_route_omits_thinking(self) -> None:
+        """If a Kimi-family model reaches the anthropic adapter on a non-/coding
+        URL, suppress thinking too (#17057).
 
-        ``api.kimi.com`` without ``/coding`` uses the chat_completions transport
-        (see runtime_provider._detect_api_mode_for_url); build_anthropic_kwargs
-        should never see it, but if it somehow does we should not suppress
-        thinking there — that path has different semantics.
+        ``api.kimi.com`` without ``/coding`` is normally routed through
+        chat_completions (see runtime_provider._detect_api_mode_for_url), but
+        nothing prevents an operator from forcing ``api_mode: anthropic_messages``
+        with that base_url.  The wire failure mode is identical to the official
+        /coding endpoint — Kimi requires reasoning_content on tool-call history
+        whenever thinking is enabled — so the suppression must follow the
+        protocol, not the URL path.
         """
         from agent.anthropic_adapter import build_anthropic_kwargs
 
@@ -112,4 +116,68 @@ class TestKimiCodingSkipsAnthropicThinking:
             reasoning_config={"enabled": True, "effort": "medium"},
             base_url="https://api.kimi.com/v1",
         )
+        assert "thinking" not in kwargs
+
+
+class TestKimiCustomEndpointSkipsAnthropicThinking:
+    """Custom / proxied Kimi-compatible endpoints must skip thinking too (#17057)."""
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "kimi-2.6",
+            "kimi-k2.6",
+            "kimi-coding",
+            "Moonshot-Kimi-Pro",  # case-insensitive model match
+        ],
+    )
+    def test_custom_proxy_with_kimi_model_omits_thinking(self, model: str) -> None:
+        from agent.anthropic_adapter import build_anthropic_kwargs
+
+        kwargs = build_anthropic_kwargs(
+            model=model,
+            messages=[{"role": "user", "content": "hello"}],
+            tools=None,
+            max_tokens=4096,
+            reasoning_config={"enabled": True, "effort": "medium"},
+            base_url="http://kimi-proxy.internal:8080",
+        )
+        assert "thinking" not in kwargs, (
+            "Custom Kimi-compatible endpoints replicate the /coding endpoint's "
+            "tool-call reasoning_content validation — thinking must be omitted "
+            "or the next turn after a tool call 400s."
+        )
+        assert "output_config" not in kwargs
+
+    def test_custom_proxy_without_kimi_model_keeps_thinking(self) -> None:
+        """Non-Kimi models on custom endpoints (e.g. MiniMax) keep thinking."""
+        from agent.anthropic_adapter import build_anthropic_kwargs
+
+        kwargs = build_anthropic_kwargs(
+            model="MiniMax-M2.7",
+            messages=[{"role": "user", "content": "hello"}],
+            tools=None,
+            max_tokens=4096,
+            reasoning_config={"enabled": True, "effort": "medium"},
+            base_url="http://anthropic-compat.internal:8080",
+        )
+        assert "thinking" in kwargs
+
+    def test_native_anthropic_with_kimi_substring_keeps_thinking(self) -> None:
+        """A model name containing 'kimi' on native Anthropic (no base_url)
+        must NOT trigger Kimi suppression — that's a fictional model path,
+        but the guard exists so user typos don't silently strip thinking
+        on the canonical Anthropic endpoint."""
+        from agent.anthropic_adapter import build_anthropic_kwargs
+
+        kwargs = build_anthropic_kwargs(
+            model="kimi-claude-fictional",
+            messages=[{"role": "user", "content": "hello"}],
+            tools=None,
+            max_tokens=4096,
+            reasoning_config={"enabled": True, "effort": "medium"},
+            base_url=None,
+        )
+        # No base_url => native Anthropic. Even though the model name contains
+        # "kimi", the suppression requires *both* signals.
         assert "thinking" in kwargs

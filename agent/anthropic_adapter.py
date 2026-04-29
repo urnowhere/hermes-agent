@@ -367,6 +367,34 @@ def _is_kimi_coding_endpoint(base_url: str | None) -> bool:
     return normalized.rstrip("/").lower().startswith("https://api.kimi.com/coding")
 
 
+def _is_kimi_anthropic_compat(base_url: str | None, model: str | None) -> bool:
+    """Detect Kimi-compatible Anthropic Messages endpoints (official + custom).
+
+    Kimi's ``/coding`` route speaks the Anthropic Messages protocol but has
+    its own thinking semantics: when ``thinking.enabled`` is sent, Kimi
+    validates the message history and requires every prior assistant
+    tool-call message to carry OpenAI-style ``reasoning_content``. The
+    Anthropic path doesn't populate that field, so the next request after a
+    tool call fails with::
+
+        HTTP 400: thinking is enabled but reasoning_content is missing in
+        assistant tool call message at index N
+
+    The official endpoint lives at ``api.kimi.com/coding``, and
+    :func:`_is_kimi_coding_endpoint` covers it. But users also configure
+    Hermes against proxied or self-hosted Kimi deployments — same wire
+    protocol, same failure mode, different base_url. Recognise those by
+    pairing any non-empty ``base_url`` with a Kimi-family model name; that
+    excludes native Anthropic (no base_url) and other custom Anthropic-
+    compatible endpoints (non-Kimi model). See #17057.
+    """
+    if _is_kimi_coding_endpoint(base_url):
+        return True
+    if not base_url or not isinstance(model, str):
+        return False
+    return "kimi" in model.lower()
+
+
 def _requires_bearer_auth(base_url: str | None) -> bool:
     """Return True for Anthropic-compatible providers that require Bearer auth.
 
@@ -1733,11 +1761,17 @@ def build_anthropic_kwargs(
     # for that host.  (Kimi on chat_completions enables thinking via
     # extra_body in the ChatCompletionsTransport — see #13503.)
     #
+    # The same failure mode hits proxied / self-hosted Kimi deployments
+    # whose base_url isn't ``api.kimi.com/coding`` — recognise them via
+    # ``_is_kimi_anthropic_compat`` (URL match OR base_url + kimi-family
+    # model name) so the thinking suppression covers custom endpoints too
+    # (#17057).
+    #
     # On 4.7+ the `thinking.display` field defaults to "omitted", which
     # silently hides reasoning text that Hermes surfaces in its CLI. We
     # request "summarized" so the reasoning blocks stay populated — matching
     # 4.6 behavior and preserving the activity-feed UX during long tool runs.
-    _is_kimi_coding = _is_kimi_coding_endpoint(base_url)
+    _is_kimi_coding = _is_kimi_anthropic_compat(base_url, model)
     if reasoning_config and isinstance(reasoning_config, dict) and not _is_kimi_coding:
         if reasoning_config.get("enabled") is not False and "haiku" not in model.lower():
             effort = str(reasoning_config.get("effort", "medium")).lower()
