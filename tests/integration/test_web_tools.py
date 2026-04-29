@@ -122,9 +122,9 @@ class WebToolsTester:
         """Test environment setup and API keys"""
         print_section("Environment Check")
         
-        # Check web backend API key (Parallel or Firecrawl)
+        # Check web backend API key (Brave / Exa / Parallel / Tavily / Firecrawl)
         if not check_web_api_key():
-            self.log_result("Web Backend API Key", "failed", "PARALLEL_API_KEY or FIRECRAWL_API_KEY not set")
+            self.log_result("Web Backend API Key", "failed", "BRAVE_SEARCH_API_KEY, EXA_API_KEY, PARALLEL_API_KEY, TAVILY_API_KEY, or FIRECRAWL_API_KEY not set")
             return False
         else:
             backend = _get_backend()

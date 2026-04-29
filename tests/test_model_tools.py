@@ -7,6 +7,7 @@ import pytest
 
 from model_tools import (
     handle_function_call,
+    get_tool_definitions,
     get_all_tool_names,
     get_toolset_for_tool,
     _AGENT_LOOP_TOOLS,
@@ -260,6 +261,30 @@ class TestBackwardCompat:
     def test_tool_to_toolset_map(self):
         assert isinstance(TOOL_TO_TOOLSET_MAP, dict)
         assert len(TOOL_TO_TOOLSET_MAP) > 0
+
+
+class TestDynamicBraveToolGuidance:
+    def test_adds_non_forceful_brave_tool_hints_when_available(self, monkeypatch):
+        defs = [
+            {"type": "function", "function": {"name": "web_search", "description": "Search the web."}},
+            {"type": "function", "function": {"name": "brave_news", "description": "Search the news."}},
+            {"type": "function", "function": {"name": "brave_suggest", "description": "Suggest queries."}},
+            {"type": "function", "function": {"name": "brave_answers", "description": "Answer questions."}},
+        ]
+
+        monkeypatch.setattr("model_tools.validate_toolset", lambda _name: True)
+        monkeypatch.setattr("model_tools.resolve_toolset", lambda _name: ["web_search", "brave_news", "brave_suggest", "brave_answers"])
+        monkeypatch.setattr("model_tools.registry.get_definitions", lambda names, quiet=False: defs)
+
+        result = get_tool_definitions(enabled_toolsets=["web"], quiet_mode=True)
+        by_name = {tool["function"]["name"]: tool["function"]["description"] for tool in result}
+
+        assert "prefer brave_news" in by_name["web_search"].lower()
+        assert "prefer brave_suggest" in by_name["web_search"].lower()
+        assert "prefer brave_answers" in by_name["web_search"].lower()
+        assert "latest headlines" in by_name["brave_news"].lower()
+        assert "autocomplete-style" in by_name["brave_suggest"].lower()
+        assert "concise grounded answer" in by_name["brave_answers"].lower()
 
 
 # =========================================================================

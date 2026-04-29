@@ -154,9 +154,46 @@ TTS settings are read from **two** OpenClaw config locations with this priority:
 | Command allowlist | `exec-approvals.json` | `config.yaml` → `command_allowlist` | Patterns merged and deduped |
 | Browser CDP URL | `browser.cdpUrl` | `config.yaml` → `browser.cdp_url` | |
 | Browser headless | `browser.headless` | `config.yaml` → `browser.headless` | |
-| Brave search key | `tools.web.search.brave.apiKey` | `.env` → `BRAVE_API_KEY` | Requires `--migrate-secrets` |
+| Brave search key | `tools.web.search.brave.apiKey` | `.env` → `BRAVE_API_KEY` (runtime fallback; `BRAVE_SEARCH_API_KEY` is the preferred user-facing key) | Requires `--migrate-secrets` |
 | Gateway auth token | `gateway.auth.token` | `.env` → `HERMES_GATEWAY_TOKEN` | Requires `--migrate-secrets` |
 | Working directory | `agents.defaults.workspace` | `.env` → `MESSAGING_CWD` | |
+
+> Brave Search accepts both key names at runtime. The setup wizard and status view prefer `BRAVE_SEARCH_API_KEY`, while migration currently writes `BRAVE_API_KEY` as the compatibility fallback. If you need to route Brave through a proxy or alternate gateway, set `BRAVE_API_URL` manually after migration — and only point it at a host you trust with your Brave token. Hermes requires a valid base URL, strips credentials/query/fragment in displays, requires `https` for non-local hosts, allows `http` only for localhost, and rejects direct private/internal IP literals.
+
+## Brave plan support
+
+Hermes' Brave integration is split by endpoint family so mixed Brave subscriptions degrade cleanly instead of failing with raw HTTP errors.
+
+### Supported now
+
+| Hermes tool | Preferred env var | Brave plan families Hermes can use | Notes |
+|-------------|-------------------|------------------------------------|-------|
+| `web_search` (Brave backend) | `BRAVE_SEARCH_API_KEY` or `BRAVE_FREE_API_KEY` | `Free`, `Search` | Hermes routes generic web search through Brave when the web backend is set to `brave`. |
+| `brave_search` | `BRAVE_SEARCH_API_KEY` or `BRAVE_FREE_API_KEY` | `Free`, `Search` | Web results plus Brave-specific sections already exposed by `/web/search`. |
+| `brave_news` | `BRAVE_SEARCH_API_KEY` or `BRAVE_FREE_API_KEY` | `Free`, `Search` | Native `/news/search` wrapper. |
+| `brave_images` | `BRAVE_SEARCH_API_KEY` or `BRAVE_FREE_API_KEY` | `Free`, `Search` | Native `/images/search` wrapper. |
+| `brave_videos` | `BRAVE_SEARCH_API_KEY` or `BRAVE_FREE_API_KEY` | `Free`, `Search` | Native `/videos/search` wrapper. |
+| `brave_local_pois` | `BRAVE_SEARCH_API_KEY` or `BRAVE_FREE_API_KEY` | `Free`, `Search` | Uses location ids returned by Brave web search. |
+| `brave_local_descriptions` | `BRAVE_SEARCH_API_KEY` or `BRAVE_FREE_API_KEY` | `Free`, `Search` | Uses location ids returned by Brave web search. |
+| `brave_answers` | `BRAVE_ANSWERS_API_KEY` | `Free AI`, `Answers` | Native `/chat/completions` wrapper. Falls back to `BRAVE_SEARCH_API_KEY` only for legacy single-key setups. |
+| `brave_suggest` | `BRAVE_AUTOSUGGEST_API_KEY` | `Free Autosuggest`, `Autosuggest` | Native `/suggest/search` wrapper. Falls back to `BRAVE_SEARCH_API_KEY` only for legacy setups. |
+
+### Explicitly not supported yet
+
+| Brave capability | Status in Hermes |
+|------------------|------------------|
+| `/spellcheck/search` | Not implemented as a Hermes tool yet |
+| `/summarizer/search` | Not implemented as a Hermes tool yet |
+| Dedicated `/web/rich` callback helper | Not implemented as a Hermes tool yet |
+| Place search endpoint separate from web-search location ids | Not implemented as a Hermes tool yet |
+
+### Graceful plan handling
+
+- If a configured Brave key does not cover a requested endpoint, Hermes now returns a structured tool error instead of a raw `httpx.HTTPStatusError` traceback.
+- Search-style tools (`web_search`, `brave_search`, `brave_news`, `brave_images`, `brave_videos`, `brave_local_pois`, `brave_local_descriptions`) use the Search key path only.
+- `brave_answers` uses the Answers key path.
+- `brave_suggest` uses the Autosuggest key path.
+- Legacy `BRAVE_API_KEY` remains accepted as a compatibility fallback for search-style tools.
 
 ### Archived (no direct Hermes equivalent)
 

@@ -21,6 +21,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
@@ -77,6 +78,7 @@ _EXTRA_ENV_KEYS = frozenset({
     "WHATSAPP_MODE", "WHATSAPP_ENABLED",
     "MATTERMOST_HOME_CHANNEL", "MATTERMOST_HOME_CHANNEL_NAME", "MATTERMOST_REPLY_MODE",
     "MATRIX_PASSWORD", "MATRIX_ENCRYPTION", "MATRIX_DEVICE_ID", "MATRIX_HOME_ROOM",
+    "BRAVE_SEARCH_API_KEY", "BRAVE_FREE_API_KEY", "BRAVE_ANSWERS_API_KEY", "BRAVE_AUTOSUGGEST_API_KEY", "BRAVE_API_KEY", "BRAVE_API_URL",
     "MATRIX_REQUIRE_MENTION", "MATRIX_FREE_RESPONSE_ROOMS", "MATRIX_AUTO_THREAD", "MATRIX_DM_AUTO_THREAD",
     "MATRIX_RECOVERY_KEY",
     # Langfuse observability plugin — optional tuning keys + standard SDK vars.
@@ -1171,7 +1173,7 @@ DEFAULT_CONFIG = {
     },
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 22,
+    "_config_version": 23,
 }
 
 # =============================================================================
@@ -1187,6 +1189,9 @@ ENV_VARS_BY_VERSION: Dict[int, List[str]] = {
         "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "SLACK_ALLOWED_USERS"],
     10: ["TAVILY_API_KEY"],
     11: ["TERMINAL_MODAL_MODE"],
+    12: ["BRAVE_SEARCH_API_KEY"],
+    22: ["BRAVE_ANSWERS_API_KEY", "BRAVE_AUTOSUGGEST_API_KEY"],
+    23: ["BRAVE_FREE_API_KEY"],
 }
 
 # Required environment variables with metadata for migration prompts.
@@ -1664,6 +1669,91 @@ OPTIONAL_ENV_VARS = {
         "prompt": "Tavily API key",
         "url": "https://app.tavily.com/home",
         "tools": ["web_search", "web_extract", "web_crawl"],
+        "password": True,
+        "category": "tool",
+    },
+    "BRAVE_SEARCH_API_KEY": {
+        "description": "Brave Search API key for native web, news, image, video, and local Brave tools. Expected shape: opaque Brave token string, typically starting with BSA...",
+        "prompt": "Brave Search API key",
+        "url": "https://api-dashboard.search.brave.com/",
+        "tools": [
+            "web_search",
+            "brave_search",
+            "brave_news",
+            "brave_images",
+            "brave_videos",
+            "brave_local_pois",
+            "brave_local_descriptions",
+        ],
+        "password": True,
+        "category": "tool",
+    },
+    "BRAVE_FREE_API_KEY": {
+        "description": "Brave Free API key for native web, news, image, video, and local Brave tools. Expected shape: opaque Brave token string, typically starting with BSA...",
+        "prompt": "Brave Free API key",
+        "url": "https://api-dashboard.search.brave.com/",
+        "tools": [
+            "web_search",
+            "brave_search",
+            "brave_news",
+            "brave_images",
+            "brave_videos",
+            "brave_local_pois",
+            "brave_local_descriptions",
+        ],
+        "password": True,
+        "category": "tool",
+    },
+    "BRAVE_API_KEY": {
+        "description": "Legacy Brave API key compatibility fallback for search-style Brave tools and shared Answers/Suggest fallback behavior.",
+        "prompt": "Brave legacy API key",
+        "url": "https://api-dashboard.search.brave.com/",
+        "tools": [
+            "web_search",
+            "brave_search",
+            "brave_news",
+            "brave_images",
+            "brave_videos",
+            "brave_local_pois",
+            "brave_local_descriptions",
+            "brave_suggest",
+            "brave_answers",
+        ],
+        "password": True,
+        "category": "tool",
+        "advanced": True,
+    },
+    "BRAVE_ANSWERS_API_KEY": {
+        "description": "Brave Answers API key for the native brave_answers tool (Free AI / Answers plans). Expected shape: opaque Brave token string, typically starting with BSA...",
+        "prompt": "Brave Answers API key",
+        "url": "https://api-dashboard.search.brave.com/",
+        "tools": ["brave_answers"],
+        "password": True,
+        "category": "tool",
+    },
+    "BRAVE_API_URL": {
+        "description": "Optional Brave API base URL override for proxies or alternate Brave-compatible gateways.",
+        "prompt": "Brave API base URL",
+        "url": "https://api.search.brave.com/res/v1",
+        "tools": [
+            "web_search",
+            "brave_search",
+            "brave_news",
+            "brave_images",
+            "brave_videos",
+            "brave_local_pois",
+            "brave_local_descriptions",
+            "brave_suggest",
+            "brave_answers",
+        ],
+        "password": False,
+        "category": "tool",
+    },
+    "BRAVE_AUTOSUGGEST_API_KEY": {
+        "description": "Brave Autosuggest API key for the native brave_suggest tool (Free Autosuggest / Autosuggest plans). Expected shape: opaque Brave token string, typically starting with BSA...",
+        "prompt": "Brave Autosuggest API key",
+        "url": "https://api-dashboard.search.brave.com/",
+        "tools": ["brave_suggest"],
         "password": True,
         "category": "tool",
     },
@@ -4117,6 +4207,26 @@ def redact_key(key: str) -> str:
     return mask_secret(key, empty=color("(not set)", Colors.DIM))
 
 
+def sanitize_url_for_display(url: str) -> str:
+    """Return a display-safe URL with credentials/query/fragment stripped."""
+    if not url:
+        return color("(not set)", Colors.DIM)
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return "(invalid URL)"
+        host = parsed.hostname or ""
+        if not host:
+            return "(invalid URL)"
+        netloc = host
+        if parsed.port:
+            netloc = f"{host}:{parsed.port}"
+        path = parsed.path or ""
+        return urllib.parse.urlunparse((parsed.scheme, netloc, path, "", "", ""))
+    except Exception:
+        return "(invalid URL)"
+
+
 def show_config():
     """Display current configuration."""
     config = load_config()
@@ -4144,6 +4254,11 @@ def show_config():
         ("PARALLEL_API_KEY", "Parallel"),
         ("FIRECRAWL_API_KEY", "Firecrawl"),
         ("TAVILY_API_KEY", "Tavily"),
+        ("BRAVE_SEARCH_API_KEY", "Brave Search"),
+        ("BRAVE_FREE_API_KEY", "Brave Free"),
+        ("BRAVE_ANSWERS_API_KEY", "Brave Answers"),
+        ("BRAVE_AUTOSUGGEST_API_KEY", "Brave Autosuggest"),
+        ("BRAVE_API_KEY", "Brave Legacy"),
         ("BROWSERBASE_API_KEY", "Browserbase"),
         ("BROWSER_USE_API_KEY", "Browser Use"),
         ("FAL_KEY", "FAL"),
@@ -4152,6 +4267,8 @@ def show_config():
     for env_key, name in keys:
         value = get_env_value(env_key)
         print(f"  {name:<14} {redact_key(value)}")
+    brave_api_url = sanitize_url_for_display(get_env_value("BRAVE_API_URL") or "")
+    print(f"  {'Brave API URL':<14} {brave_api_url}")
     from hermes_cli.auth import get_anthropic_key
     anthropic_value = get_anthropic_key()
     print(f"  {'Anthropic':<14} {redact_key(anthropic_value)}")

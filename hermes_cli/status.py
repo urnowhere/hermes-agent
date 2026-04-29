@@ -14,7 +14,7 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
 from hermes_cli.auth import AuthError, resolve_provider
 from hermes_cli.colors import Colors, color
-from hermes_cli.config import get_env_path, get_env_value, get_hermes_home, load_config
+from hermes_cli.config import get_env_path, get_env_value, get_hermes_home, load_config, sanitize_url_for_display
 from hermes_cli.models import provider_label
 from hermes_cli.nous_subscription import get_nous_subscription_features
 from hermes_cli.runtime_provider import resolve_requested_provider
@@ -146,6 +146,30 @@ def show_status(args):
         has_key = bool(value)
         display = redact_key(value) if not show_all else value
         print(f"  {name:<12}  {check_mark(has_key)} {display}")
+
+    brave_value = get_env_value("BRAVE_SEARCH_API_KEY") or get_env_value("BRAVE_FREE_API_KEY") or get_env_value("BRAVE_API_KEY")
+    brave_display = redact_key(brave_value) if not show_all else brave_value
+    print(f"  {'Brave Search':<12}  {check_mark(bool(brave_value))} {brave_display}")
+
+    brave_free_value = get_env_value("BRAVE_FREE_API_KEY")
+    brave_free_display = redact_key(brave_free_value) if not show_all else brave_free_value
+    print(f"  {'Brave Free':<12}  {check_mark(bool(brave_free_value))} {brave_free_display}")
+
+    brave_answers_value = get_env_value("BRAVE_ANSWERS_API_KEY") or get_env_value("BRAVE_SEARCH_API_KEY") or get_env_value("BRAVE_API_KEY")
+    brave_answers_display = redact_key(brave_answers_value) if not show_all else brave_answers_value
+    print(f"  {'Brave Answers':<12}  {check_mark(bool(brave_answers_value))} {brave_answers_display}")
+
+    brave_autosuggest_value = get_env_value("BRAVE_AUTOSUGGEST_API_KEY") or get_env_value("BRAVE_SEARCH_API_KEY") or get_env_value("BRAVE_API_KEY")
+    brave_autosuggest_display = redact_key(brave_autosuggest_value) if not show_all else brave_autosuggest_value
+    print(f"  {'Brave Suggest':<12}  {check_mark(bool(brave_autosuggest_value))} {brave_autosuggest_display}")
+
+    brave_legacy_value = get_env_value("BRAVE_API_KEY")
+    brave_legacy_display = redact_key(brave_legacy_value) if not show_all else brave_legacy_value
+    print(f"  {'Brave Legacy':<12}  {check_mark(bool(brave_legacy_value))} {brave_legacy_display}")
+
+    brave_api_url = get_env_value("BRAVE_API_URL") or ""
+    brave_api_url_display = sanitize_url_for_display(brave_api_url)
+    print(f"  {'Brave API URL':<12}  {check_mark(bool(brave_api_url))} {brave_api_url_display}")
 
     from hermes_cli.auth import get_anthropic_key
     anthropic_value = get_anthropic_key()

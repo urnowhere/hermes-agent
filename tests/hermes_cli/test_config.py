@@ -410,6 +410,73 @@ class TestOptionalEnvVarsRegistry:
             all_vars.extend(vars_list)
         assert "TAVILY_API_KEY" in all_vars
 
+    def test_brave_search_api_key_lists_native_brave_tools(self):
+        """BRAVE_SEARCH_API_KEY advertises the Brave search-style tool surface."""
+        from hermes_cli.config import OPTIONAL_ENV_VARS
+
+        tools = set(OPTIONAL_ENV_VARS["BRAVE_SEARCH_API_KEY"]["tools"])
+        assert {
+            "web_search",
+            "brave_search",
+            "brave_news",
+            "brave_images",
+            "brave_videos",
+            "brave_local_pois",
+            "brave_local_descriptions",
+        }.issubset(tools)
+
+    def test_brave_free_api_key_lists_native_brave_tools(self):
+        """BRAVE_FREE_API_KEY advertises the Brave search-style tool surface."""
+        from hermes_cli.config import OPTIONAL_ENV_VARS
+
+        tools = set(OPTIONAL_ENV_VARS["BRAVE_FREE_API_KEY"]["tools"])
+        assert {
+            "web_search",
+            "brave_search",
+            "brave_news",
+            "brave_images",
+            "brave_videos",
+            "brave_local_pois",
+            "brave_local_descriptions",
+        }.issubset(tools)
+
+    def test_brave_answers_api_key_lists_answers_tool(self):
+        """BRAVE_ANSWERS_API_KEY advertises the native Brave answers tool."""
+        from hermes_cli.config import OPTIONAL_ENV_VARS
+
+        assert OPTIONAL_ENV_VARS["BRAVE_ANSWERS_API_KEY"]["tools"] == ["brave_answers"]
+
+    def test_brave_legacy_api_key_lists_compatibility_surface(self):
+        """BRAVE_API_KEY remains visible as an advanced compatibility fallback."""
+        from hermes_cli.config import OPTIONAL_ENV_VARS
+
+        info = OPTIONAL_ENV_VARS["BRAVE_API_KEY"]
+        tools = set(info["tools"])
+        assert info["advanced"] is True
+        assert info["category"] == "tool"
+        assert {"web_search", "brave_search", "brave_suggest", "brave_answers"}.issubset(tools)
+
+    def test_brave_autosuggest_api_key_lists_suggest_tool(self):
+        """BRAVE_AUTOSUGGEST_API_KEY advertises the native Brave suggest tool."""
+        from hermes_cli.config import OPTIONAL_ENV_VARS
+
+        assert OPTIONAL_ENV_VARS["BRAVE_AUTOSUGGEST_API_KEY"]["tools"] == ["brave_suggest"]
+
+    def test_brave_api_url_is_registered_as_tool_override(self):
+        """BRAVE_API_URL is registered as a non-secret Brave tool override."""
+        from hermes_cli.config import OPTIONAL_ENV_VARS
+
+        info = OPTIONAL_ENV_VARS["BRAVE_API_URL"]
+        assert info["category"] == "tool"
+        assert info["password"] is False
+        assert "brave_answers" in info["tools"]
+        assert "brave_search" in info["tools"]
+
+    def test_env_var_version_map_does_not_exceed_current_config_version(self):
+        """New env var version metadata must stay aligned with the active config schema."""
+        from hermes_cli.config import DEFAULT_CONFIG, ENV_VARS_BY_VERSION
+
+        assert max(ENV_VARS_BY_VERSION) <= DEFAULT_CONFIG["_config_version"]
 
 class TestAnthropicTokenMigration:
     """Test that config version 8→9 clears ANTHROPIC_TOKEN."""

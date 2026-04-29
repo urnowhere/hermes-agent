@@ -5,13 +5,53 @@ from hermes_cli.status import show_status
 
 def test_show_status_includes_tavily_key(monkeypatch, capsys, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    monkeypatch.setenv("TAVILY_API_KEY", "tvly-1234567890abcdef")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-1...cdef")
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "brve-1...cdef")
+    monkeypatch.setenv("BRAVE_FREE_API_KEY", "brvf-1...cdef")
+    monkeypatch.setenv("BRAVE_ANSWERS_API_KEY", "brva-1...cdef")
+    monkeypatch.setenv("BRAVE_AUTOSUGGEST_API_KEY", "brvs-1...cdef")
+    monkeypatch.setenv("BRAVE_API_KEY", "brlg-1...cdef")
+    monkeypatch.setenv("BRAVE_API_URL", "https://user:pass@proxy.example.com/custom/res/v1?token=abc#frag")
 
     show_status(SimpleNamespace(all=False, deep=False))
 
     output = capsys.readouterr().out
     assert "Tavily" in output
+    assert "Brave Search" in output
+    assert "Brave Free" in output
+    assert "Brave Answers" in output
+    assert "Brave Suggest" in output
+    assert "Brave Legacy" in output
+    assert "Brave API URL" in output
     assert "tvly...cdef" in output
+    assert "brve...cdef" in output
+    assert "brvf...cdef" in output
+    assert "brva...cdef" in output
+    assert "brvs...cdef" in output
+    assert "brlg...cdef" in output
+    assert "https://proxy.example.com/custom/res/v1" in output
+    assert "user:pass" not in output
+    assert "token=abc" not in output
+
+
+def test_show_status_free_key_only_does_not_claim_answers_or_suggest(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("BRAVE_FREE_API_KEY", "brvf-1...cdef")
+
+    show_status(SimpleNamespace(all=False, deep=False))
+
+    output = capsys.readouterr().out
+    lines = output.splitlines()
+
+    brave_search_line = next(line for line in lines if "Brave Search" in line)
+    brave_free_line = next(line for line in lines if "Brave Free" in line)
+    brave_answers_line = next(line for line in lines if "Brave Answers" in line)
+    brave_suggest_line = next(line for line in lines if "Brave Suggest" in line)
+
+    assert "✓" in brave_search_line
+    assert "✓" in brave_free_line
+    assert "✗" in brave_answers_line
+    assert "✗" in brave_suggest_line
 
 
 def test_show_status_termux_gateway_section_skips_systemctl(monkeypatch, capsys, tmp_path):

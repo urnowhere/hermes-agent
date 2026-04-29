@@ -259,6 +259,11 @@ class TestBackendSelection:
         "TOOL_GATEWAY_SCHEME",
         "TOOL_GATEWAY_USER_TOKEN",
         "TAVILY_API_KEY",
+        "BRAVE_SEARCH_API_KEY",
+        "BRAVE_FREE_API_KEY",
+        "BRAVE_ANSWERS_API_KEY",
+        "BRAVE_AUTOSUGGEST_API_KEY",
+        "BRAVE_API_KEY",
     )
 
     def setup_method(self):
@@ -324,6 +329,49 @@ class TestBackendSelection:
         with patch("tools.web_tools._load_web_config", return_value={"backend": "Tavily"}):
             assert _get_backend() == "tavily"
 
+    def test_config_brave(self):
+        """web.backend=brave in config → 'brave' when Brave key is present."""
+        from tools.web_tools import _get_backend
+        with patch("tools.web_tools._load_web_config", return_value={"backend": "brave"}), \
+             patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "brave-test"}):
+            assert _get_backend() == "brave"
+
+    def test_config_brave_case_insensitive(self):
+        """web.backend=Brave (mixed case) → 'brave'."""
+        from tools.web_tools import _get_backend
+        with patch("tools.web_tools._load_web_config", return_value={"backend": "Brave"}), \
+             patch.dict(os.environ, {"BRAVE_API_KEY": "brave-test"}):
+            assert _get_backend() == "brave"
+
+    def test_config_brave_accepts_free_key_alias(self):
+        """web.backend=brave works when only BRAVE_FREE_API_KEY is configured."""
+        from tools.web_tools import _get_backend
+        with patch("tools.web_tools._load_web_config", return_value={"backend": "brave"}), \
+             patch.dict(os.environ, {"BRAVE_FREE_API_KEY": "brave-free-test"}):
+            assert _get_backend() == "brave"
+
+    def test_config_brave_without_search_key_falls_back_to_default_backend(self):
+        """Configured brave should fall back when Brave Search itself is unavailable."""
+        from tools.web_tools import _get_backend
+        with patch("tools.web_tools._load_web_config", return_value={"backend": "brave"}), \
+             patch.dict(os.environ, {}, clear=False):
+            assert _get_backend() == "firecrawl"
+
+    def test_config_brave_with_parallel_key_falls_back_to_parallel(self):
+        """Configured brave should still use another available backend when search key is absent."""
+        from tools.web_tools import _get_backend
+        with patch("tools.web_tools._load_web_config", return_value={"backend": "brave"}), \
+             patch.dict(os.environ, {"PARALLEL_API_KEY": "par-test"}, clear=False):
+            assert _get_backend() == "parallel"
+
+    def test_config_brave_keeps_content_backend_on_firecrawl(self):
+        """Configured brave only affects search; content should still resolve to a content backend."""
+        from tools.web_tools import _get_backend
+        with patch("tools.web_tools._load_web_config", return_value={"backend": "brave"}), \
+             patch.dict(os.environ, {"BRAVE_FREE_API_KEY": "brave-free-test"}):
+            assert _get_backend("search") == "brave"
+            assert _get_backend("content") == "firecrawl"
+
     # ── Fallback (no web.backend in config) ───────────────────────────
 
     def test_fallback_parallel_only_key(self):
@@ -353,6 +401,27 @@ class TestBackendSelection:
         with patch("tools.web_tools._load_web_config", return_value={}), \
              patch.dict(os.environ, {"TAVILY_API_KEY": "tvly-test"}):
             assert _get_backend() == "tavily"
+
+    def test_fallback_brave_only_key(self):
+        """Only Brave key set → 'brave'."""
+        from tools.web_tools import _get_backend
+        with patch("tools.web_tools._load_web_config", return_value={}), \
+             patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "brave-test"}):
+            assert _get_backend() == "brave"
+
+    def test_fallback_answers_key_only_does_not_enable_brave_search_backend(self):
+        """Answers-only Brave credentials should not satisfy the web search backend."""
+        from tools.web_tools import _get_backend
+        with patch("tools.web_tools._load_web_config", return_value={}), \
+             patch.dict(os.environ, {"BRAVE_ANSWERS_API_KEY": "answers-test"}):
+            assert _get_backend() == "firecrawl"
+
+    def test_fallback_autosuggest_key_only_does_not_enable_brave_search_backend(self):
+        """Autosuggest-only Brave credentials should not satisfy the web search backend."""
+        from tools.web_tools import _get_backend
+        with patch("tools.web_tools._load_web_config", return_value={}), \
+             patch.dict(os.environ, {"BRAVE_AUTOSUGGEST_API_KEY": "autosuggest-test"}):
+            assert _get_backend() == "firecrawl"
 
     def test_fallback_tavily_with_firecrawl_prefers_firecrawl(self):
         """Tavily + Firecrawl keys, no config → 'firecrawl' (backward compat)."""
@@ -525,7 +594,7 @@ class TestWebSearchErrorHandling:
 
 
 class TestCheckWebApiKey:
-    """Test suite for check_web_api_key() unified availability check."""
+    """Test suite for check_web_api_key() search availability check."""
 
     _ENV_KEYS = (
         "EXA_API_KEY",
@@ -537,6 +606,11 @@ class TestCheckWebApiKey:
         "TOOL_GATEWAY_SCHEME",
         "TOOL_GATEWAY_USER_TOKEN",
         "TAVILY_API_KEY",
+        "BRAVE_SEARCH_API_KEY",
+        "BRAVE_FREE_API_KEY",
+        "BRAVE_ANSWERS_API_KEY",
+        "BRAVE_AUTOSUGGEST_API_KEY",
+        "BRAVE_API_KEY",
     )
 
     def setup_method(self):
@@ -580,6 +654,39 @@ class TestCheckWebApiKey:
             from tools.web_tools import check_web_api_key
             assert check_web_api_key() is True
 
+    def test_brave_key_only(self):
+        with patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "brave-test"}):
+            from tools.web_tools import check_web_api_key
+            assert check_web_api_key() is True
+
+    def test_brave_free_key_only(self):
+        with patch.dict(os.environ, {"BRAVE_FREE_API_KEY": "brave-free-test"}):
+            from tools.web_tools import check_web_api_key
+            assert check_web_api_key() is True
+
+    def test_brave_free_key_only_does_not_enable_content_check(self):
+        with patch.dict(os.environ, {"BRAVE_FREE_API_KEY": "brave-free-test"}):
+            from tools.web_tools import check_web_content_api_key
+            assert check_web_content_api_key() is False
+
+    def test_web_extract_registry_stays_unavailable_with_brave_free_key_only(self):
+        with patch.dict(os.environ, {"BRAVE_FREE_API_KEY": "brave-free-test"}):
+            from tools.registry import registry
+
+            entry = registry.get_entry("web_extract")
+            assert entry is not None
+            assert entry.check_fn() is False
+
+    def test_answers_key_only_is_not_enough_for_web_backend(self):
+        with patch.dict(os.environ, {"BRAVE_ANSWERS_API_KEY": "answers-test"}):
+            from tools.web_tools import check_web_api_key
+            assert check_web_api_key() is False
+
+    def test_autosuggest_key_only_is_not_enough_for_web_backend(self):
+        with patch.dict(os.environ, {"BRAVE_AUTOSUGGEST_API_KEY": "autosuggest-test"}):
+            from tools.web_tools import check_web_api_key
+            assert check_web_api_key() is False
+
     def test_no_keys_returns_false(self):
         from tools.web_tools import check_web_api_key
         assert check_web_api_key() is False
@@ -619,6 +726,26 @@ class TestCheckWebApiKey:
                 with patch.dict(os.environ, {"FIRECRAWL_GATEWAY_URL": "http://127.0.0.1:3002"}, clear=False):
                     from tools.web_tools import check_web_api_key
                     assert check_web_api_key() is True
+
+    def test_configured_brave_backend_uses_parallel_fallback_for_search_availability(self):
+        with patch("tools.web_tools._load_web_config", return_value={"backend": "brave"}):
+            with patch.dict(os.environ, {"PARALLEL_API_KEY": "par-test"}, clear=False):
+                from tools.registry import registry
+                from tools.web_tools import check_web_api_key
+
+                assert check_web_api_key() is True
+                entry = registry.get_entry("web_search")
+                assert entry is not None
+                assert entry.check_fn() is True
+
+
+def test_web_requires_env_includes_brave_keys():
+    from tools.web_tools import _web_requires_env
+
+    envs = _web_requires_env()
+    assert "BRAVE_SEARCH_API_KEY" in envs
+    assert "BRAVE_FREE_API_KEY" in envs
+    assert "BRAVE_API_KEY" in envs
 
 
 def test_web_requires_env_includes_exa_key():

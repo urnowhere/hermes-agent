@@ -459,6 +459,23 @@ def test_local_browser_provider_is_saved_explicitly(monkeypatch):
     assert config["browser"]["cloud_provider"] == "local"
 
 
+def test_brave_provider_lists_split_key_layout():
+    brave_provider = next(
+        provider
+        for provider in TOOL_CATEGORIES["web"]["providers"]
+        if provider.get("web_backend") == "brave"
+    )
+
+    env_keys = [entry["key"] for entry in brave_provider["env_vars"]]
+    assert env_keys == [
+        "BRAVE_SEARCH_API_KEY",
+        "BRAVE_FREE_API_KEY",
+        "BRAVE_ANSWERS_API_KEY",
+        "BRAVE_AUTOSUGGEST_API_KEY",
+        "BRAVE_API_URL",
+    ]
+
+
 def test_first_install_nous_auto_configures_managed_defaults(monkeypatch):
     monkeypatch.setattr("hermes_cli.tools_config.managed_nous_tools_enabled", lambda: True)
     monkeypatch.setattr("hermes_cli.nous_subscription.managed_nous_tools_enabled", lambda: True)

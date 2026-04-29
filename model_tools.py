@@ -450,6 +450,38 @@ def _compute_tool_definitions(
                     }
                     break
 
+    # Add light-touch guidance for when to use the Brave-native tools versus
+    # generic web_search.  This is done dynamically here (not in static schema
+    # text) so we only reference tools that actually exist in the session.
+    brave_hints = {
+        "web_search": [],
+        "brave_news": "Prefer this over web_search when the user explicitly wants latest headlines, current events, or a news-focused roundup.",
+        "brave_suggest": "Prefer this for raw autocomplete-style suggestions, likely next queries, and search-box completions.",
+        "brave_answers": "Prefer this when the user wants one concise grounded answer with sources rather than a broad result list.",
+    }
+    if "brave_news" in available_tool_names:
+        brave_hints["web_search"].append("For latest headlines or news-specific requests, prefer brave_news.")
+    if "brave_suggest" in available_tool_names:
+        brave_hints["web_search"].append("For raw autocomplete-style suggestions or likely next queries, prefer brave_suggest.")
+    if "brave_answers" in available_tool_names:
+        brave_hints["web_search"].append("For one concise grounded answer, prefer brave_answers.")
+
+    if any(name in available_tool_names for name in ("web_search", "brave_news", "brave_suggest", "brave_answers")):
+        for i, td in enumerate(filtered_tools):
+            name = td.get("function", {}).get("name")
+            if name not in brave_hints:
+                continue
+            desc = td["function"].get("description", "")
+            if name == "web_search":
+                if brave_hints["web_search"]:
+                    desc = f"{desc} {' '.join(brave_hints['web_search'])}"
+            else:
+                desc = f"{desc} {brave_hints[name]}"
+            filtered_tools[i] = {
+                "type": "function",
+                "function": {**td["function"], "description": desc},
+            }
+
     if not quiet_mode:
         if filtered_tools:
             tool_names = [t["function"]["name"] for t in filtered_tools]

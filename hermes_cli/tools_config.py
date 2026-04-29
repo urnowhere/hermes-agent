@@ -230,7 +230,7 @@ TOOL_CATEGORIES = {
         ],
     },
     "web": {
-        "name": "Web Search & Extract",
+        "name": "Web Search",
         "setup_title": "Select Search Provider",
         "setup_note": "A free DuckDuckGo search skill is also included — skip this if you don't need a premium provider.",
         "icon": "🔍",
@@ -279,6 +279,19 @@ TOOL_CATEGORIES = {
                 "web_backend": "tavily",
                 "env_vars": [
                     {"key": "TAVILY_API_KEY", "prompt": "Tavily API key", "url": "https://app.tavily.com/home"},
+                ],
+            },
+            {
+                "name": "Brave Search",
+                "badge": "free tier",
+                "tag": "Native web/news/images/videos/local with optional separate Answers and Autosuggest keys",
+                "web_backend": "brave",
+                "env_vars": [
+                    {"key": "BRAVE_SEARCH_API_KEY", "prompt": "Brave Search API key", "url": "https://api-dashboard.search.brave.com/"},
+                    {"key": "BRAVE_FREE_API_KEY", "prompt": "Brave Free API key (optional alias)", "url": "https://api-dashboard.search.brave.com/"},
+                    {"key": "BRAVE_ANSWERS_API_KEY", "prompt": "Brave Answers API key (optional)", "url": "https://api-dashboard.search.brave.com/"},
+                    {"key": "BRAVE_AUTOSUGGEST_API_KEY", "prompt": "Brave Autosuggest API key (optional)", "url": "https://api-dashboard.search.brave.com/"},
+                    {"key": "BRAVE_API_URL", "prompt": "Brave API base URL (optional override)", "url": "https://api.search.brave.com/res/v1"},
                 ],
             },
             {

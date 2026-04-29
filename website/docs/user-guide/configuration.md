@@ -73,6 +73,93 @@ Multiple references in a single value work: `url: "${HOST}:${PORT}"`. If a refer
 
 For AI provider setup (OpenRouter, Anthropic, Copilot, custom endpoints, self-hosted LLMs, fallback models, etc.), see [AI Providers](/docs/integrations/providers).
 
+## Brave API Key Layout
+
+Hermes supports Brave as a split integration. Different Brave endpoint families can require different subscribed keys, so Hermes exposes them as separate environment variables instead of assuming one token covers everything.
+
+| Env var | Used by Hermes for | Brave plan families | Expected shape |
+|---------|--------------------|---------------------|----------------|
+| `BRAVE_SEARCH_API_KEY` | `web_search` with Brave backend, `brave_search`, `brave_news`, `brave_images`, `brave_videos`, `brave_local_pois`, `brave_local_descriptions` | `Search` | Opaque Brave token string, typically starting with `BSA...` |
+| `BRAVE_FREE_API_KEY` | `web_search` with Brave backend, `brave_search`, `brave_news`, `brave_images`, `brave_videos`, `brave_local_pois`, `brave_local_descriptions` | `Free` | Opaque Brave token string, typically starting with `BSA...` |
+| `BRAVE_ANSWERS_API_KEY` | `brave_answers` | `Free AI`, `Answers` | Opaque Brave token string, typically starting with `BSA...` |
+| `BRAVE_AUTOSUGGEST_API_KEY` | `brave_suggest` | `Free Autosuggest`, `Autosuggest` | Opaque Brave token string, typically starting with `BSA...` |
+| `BRAVE_API_KEY` | Legacy fallback only | Legacy / backward-compat only | Same opaque Brave token shape |
+| `BRAVE_API_URL` | Optional base URL override for Brave-backed tools | n/a | Full Brave-compatible base URL like `https://api.search.brave.com/res/v1` |
+
+### Example `.env`
+
+```bash
+# Use one search-style key for Brave-backed search surfaces:
+BRAVE_SEARCH_API_KEY=***
+# or
+# BRAVE_FREE_API_KEY=***
+
+# Optional, only for these endpoint families:
+BRAVE_ANSWERS_API_KEY=***
+BRAVE_AUTOSUGGEST_API_KEY=***
+
+# Optional proxy / gateway override. Only use a host you trust with your Brave token.
+BRAVE_API_URL=https://api.search.brave.com/res/v1
+```
+
+### Supported vs unsupported
+
+- Supported now: Brave web search, news, images, videos, local POIs, local descriptions, answers, and autosuggest.
+- `web_search` can use Brave when the web backend is set to `brave`, but Brave is still a **search** backend in Hermes — `web_extract` / `web_crawl` still require a content backend such as Firecrawl, Exa, Parallel, or Tavily.
+- `BRAVE_API_URL` is an advanced override. Hermes enforces a real base URL, strips credentials/query/fragment in displays, requires `https` for non-local hosts, allows `http` only for localhost, and rejects direct private/internal IP literals.
+- Graceful degradation: if a key is present but the Brave plan does not cover an endpoint, Hermes returns a structured tool error instead of a raw traceback.
+- `web_search` is not a hard blocker: if Brave is configured but Brave Search itself is unavailable, Hermes falls back to the normal backend-selection path instead of failing the whole search tool.
+- Not supported yet: Brave spellcheck, summarizer search, dedicated rich-callback helper, and separate place-search tooling.
+
+## Expected Web Search Improvements
+
+When Hermes uses Brave as the web backend, the improvement is not just "different results". The main gains are structured search coverage, first-class follow-up tools, and cleaner failure handling.
+
+### Before vs after: local search example
+
+Using a live local-intent query like `greek restaurants in san francisco`:
+
+**Before this Brave integration**
+
+- Hermes could use generic `web_search` and return ordinary web links and snippets.
+- Location-heavy queries were flattened into normal search results.
+- There was no native follow-up path from Brave location ids into POI details or AI-generated place descriptions.
+- If a Brave endpoint was called with the wrong plan/key, Hermes surfaced a raw transport failure instead of a clean capability message.
+
+**After this Brave integration**
+
+- `web_search` can run on Brave's native index when the backend is set to `brave`.
+- `brave_search` can preserve Brave-native response sections already returned by `/web/search`, including richer query metadata.
+- `brave_local_pois` can fetch structured POI details from Brave location ids returned by web search.
+- `brave_local_descriptions` can fetch the corresponding location descriptions.
+- Hermes can now tell the difference between "missing key", "wrong Brave plan", and "endpoint worked but returned no results".
+
+### Before vs after: multi-surface search
+
+Using a live general-interest query like `OpenAI news` or `Python tutorial`:
+
+**Before this Brave integration**
+
+- Hermes mainly had one search-shaped path: generic `web_search`.
+- News, image, and video exploration required either manual browsing, external providers, or repeated generic searches.
+- Brave answers and autosuggest assumed one credential path, which made mixed Brave subscriptions awkward.
+
+**After this Brave integration**
+
+- `brave_news` gives a native news-specific result surface.
+- `brave_images` gives a native image-specific result surface.
+- `brave_videos` gives a native video-specific result surface.
+- `brave_answers` uses its own key path for `Free AI` / `Answers` plans.
+- `brave_suggest` uses its own key path for `Free Autosuggest` / `Autosuggest` plans.
+- Hermes degrades gracefully with structured plan-aware errors when a subscribed key does not cover a requested endpoint.
+
+### What to expect in practice
+
+- Better result typing: Hermes can ask Brave for the exact surface it wants instead of approximating everything through generic web search.
+- Better follow-up flows: web search can lead into local POI/detail lookups instead of stopping at links.
+- Better operational clarity: users can configure separate Brave keys without guessing which one powers which Hermes tool.
+- Better debugging: plan mismatches now come back as structured tool errors instead of opaque tracebacks.
+
 ### Provider Timeouts
 
 You can set `providers.<id>.request_timeout_seconds` for a provider-wide request timeout, plus `providers.<id>.models.<model>.timeout_seconds` for a model-specific override. Applies to the primary turn client on every transport (OpenAI-wire, native Anthropic, Anthropic-compatible), the fallback chain, rebuilds after credential rotation, and (for OpenAI-wire) the per-request timeout kwarg — so the configured value wins over the legacy `HERMES_API_TIMEOUT` env var.
