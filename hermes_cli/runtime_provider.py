@@ -41,6 +41,26 @@ def _loopback_hostname(host: str) -> bool:
     return h in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 
 
+def _is_local_address(base_url: str) -> bool:
+    host = base_url_hostname(base_url)
+    if _loopback_hostname(host):
+        return True
+    if not host:
+        return False
+    if host.startswith("10.") or host.startswith("192.168."):
+        return True
+    if host.startswith("100."):
+        return True
+    match = re.match(r"^172\.(\d{1,3})\.", host)
+    if match:
+        try:
+            second_octet = int(match.group(1))
+        except ValueError:
+            return False
+        return 16 <= second_octet <= 31
+    return False
+
+
 def _config_base_url_trustworthy_for_bare_custom(cfg_base_url: str, cfg_provider: str) -> bool:
     """Decide whether ``model.base_url`` may back bare ``custom`` runtime resolution.
 
@@ -298,19 +318,30 @@ def _resolve_runtime_from_pool_entry(
 
 def resolve_requested_provider(requested: Optional[str] = None) -> str:
     """Resolve provider request from explicit arg, config, then env."""
+    def _normalize_provider_name(value: str) -> str:
+        normalized = value.strip().lower()
+        if not normalized:
+            return normalized
+        if normalized == "auto":
+            return normalized
+        try:
+            return auth_mod.resolve_provider(normalized)
+        except AuthError:
+            return normalized
+
     if requested and requested.strip():
-        return requested.strip().lower()
+        return _normalize_provider_name(requested)
 
     model_cfg = _get_model_config()
     cfg_provider = model_cfg.get("provider")
     if isinstance(cfg_provider, str) and cfg_provider.strip():
-        return cfg_provider.strip().lower()
+        return _normalize_provider_name(cfg_provider)
 
     # Prefer the persisted config selection over any stale shell/.env
     # provider override so chat uses the endpoint the user last saved.
     env_provider = os.getenv("HERMES_INFERENCE_PROVIDER", "").strip().lower()
     if env_provider:
-        return env_provider
+        return _normalize_provider_name(env_provider)
 
     return "auto"
 
@@ -478,7 +509,7 @@ def _resolve_named_custom_runtime(
         api_key_candidates = [
             (explicit_api_key or "").strip(),
             os.getenv("OPENAI_API_KEY", "").strip(),
-            os.getenv("OPENROUTER_API_KEY", "").strip(),
+            os.getenv("OPENROUTER_API_KEY", "").strip()
         ]
         api_key = next(
             (c for c in api_key_candidates if has_usable_secret(c)),
@@ -518,6 +549,7 @@ def _resolve_named_custom_runtime(
         (explicit_api_key or "").strip(),
         str(custom_provider.get("api_key", "") or "").strip(),
         os.getenv(str(custom_provider.get("key_env", "") or "").strip(), "").strip(),
+        os.getenv("LM_STUDIO_API_KEY", "").strip(),
         os.getenv("OPENAI_API_KEY", "").strip(),
         os.getenv("OPENROUTER_API_KEY", "").strip(),
     ]
@@ -575,6 +607,7 @@ def _resolve_openrouter_runtime(
 
     base_url = (
         (explicit_base_url or "").strip()
+        or os.getenv("LM_STUDIO_BASE_URL", "").strip()
         or env_custom_base_url
         or (cfg_base_url.strip() if use_config_base_url else "")
         or env_openrouter_base_url
@@ -587,6 +620,7 @@ def _resolve_openrouter_runtime(
     # OPENAI_API_KEY so the OpenRouter key doesn't leak to an unrelated
     # provider (issues #420, #560).
     _is_openrouter_url = base_url_host_matches(base_url, "openrouter.ai")
+    is_local_url = _is_local_address(base_url)
     if _is_openrouter_url:
         api_key_candidates = [
             explicit_api_key,
@@ -602,13 +636,14 @@ def _resolve_openrouter_runtime(
         # hostname is a look-alike (ollama.com.attacker.test) must not
         # receive the Ollama credential. See GHSA-76xc-57q6-vm5m.
         _is_ollama_url = base_url_host_matches(base_url, "ollama.com")
-        api_key_candidates = [
-            explicit_api_key,
-            (cfg_api_key if use_config_base_url else ""),
-            (os.getenv("OLLAMA_API_KEY") if _is_ollama_url else ""),
-            os.getenv("OPENAI_API_KEY"),
-            os.getenv("OPENROUTER_API_KEY"),
-        ]
+        api_key_candidates = [explicit_api_key, (cfg_api_key if use_config_base_url else "")]
+        if is_local_url:
+            api_key_candidates.append(os.getenv("LM_STUDIO_API_KEY"))
+        if _is_ollama_url and not is_local_url:
+            api_key_candidates.append(os.getenv("OLLAMA_API_KEY"))
+        api_key_candidates.append(os.getenv("OPENAI_API_KEY"))
+        if not is_local_url:
+            api_key_candidates.append(os.getenv("OPENROUTER_API_KEY"))
     api_key = next(
         (str(candidate or "").strip() for candidate in api_key_candidates if has_usable_secret(candidate)),
         "",
@@ -630,7 +665,9 @@ def _resolve_openrouter_runtime(
         if pool_result:
             return pool_result
 
-    if effective_provider == "custom" and not api_key and not _is_openrouter_url:
+    if is_local_url and not api_key:
+        api_key = "no-key-required"
+    elif effective_provider == "custom" and not api_key and not _is_openrouter_url:
         api_key = "no-key-required"
 
     return {

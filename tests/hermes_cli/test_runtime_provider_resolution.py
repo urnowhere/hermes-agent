@@ -584,6 +584,95 @@ def test_custom_endpoint_uses_saved_config_base_url_when_env_missing(monkeypatch
     assert resolved["api_key"] == "local-key"
 
 
+def test_custom_endpoint_uses_lm_studio_base_url_env(monkeypatch):
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "openrouter")
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {"provider": "auto"})
+    monkeypatch.setenv("LM_STUDIO_BASE_URL", "http://192.168.1.10:1234/v1")
+    monkeypatch.delenv("CUSTOM_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+    resolved = rp.resolve_runtime_provider(requested="custom")
+
+    assert resolved["provider"] == "custom"
+    assert resolved["base_url"] == "http://192.168.1.10:1234/v1"
+    assert resolved["api_key"] == "no-key-required"
+
+
+def test_custom_endpoint_prefers_lm_studio_api_key_for_local_url(monkeypatch):
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "openrouter")
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {"provider": "auto"})
+    monkeypatch.setenv("LM_STUDIO_BASE_URL", "http://192.168.1.10:1234/v1")
+    monkeypatch.setenv("LM_STUDIO_API_KEY", "lmstudio-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    monkeypatch.delenv("CUSTOM_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
+
+    resolved = rp.resolve_runtime_provider(requested="custom")
+
+    assert resolved["provider"] == "custom"
+    assert resolved["base_url"] == "http://192.168.1.10:1234/v1"
+    assert resolved["api_key"] == "lmstudio-key"
+
+
+def test_custom_endpoint_local_base_url_blocks_openrouter_key_fallback(monkeypatch):
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "openrouter")
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "custom",
+            "base_url": "http://127.0.0.1:1234/v1",
+        },
+    )
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    monkeypatch.delenv("LM_STUDIO_BASE_URL", raising=False)
+    monkeypatch.delenv("CUSTOM_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
+
+    resolved = rp.resolve_runtime_provider(requested="custom")
+
+    assert resolved["provider"] == "custom"
+    assert resolved["base_url"] == "http://127.0.0.1:1234/v1"
+    assert resolved["api_key"] == "no-key-required"
+
+
+def test_named_custom_provider_uses_lm_studio_api_key_env(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("LM_STUDIO_API_KEY", "lmstudio-key")
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "custom_providers": [
+                {
+                    "name": "lmstudio",
+                    "base_url": "http://192.168.1.10:1234/v1",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        rp,
+        "resolve_provider",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError(
+                "resolve_provider should not be called for named custom providers"
+            )
+        ),
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="custom:lmstudio")
+
+    assert resolved["provider"] == "custom"
+    assert resolved["base_url"] == "http://192.168.1.10:1234/v1"
+    assert resolved["api_key"] == "lmstudio-key"
+
+
 def test_custom_endpoint_uses_config_api_key_over_env(monkeypatch):
     """provider: custom with base_url and api_key in config uses them (#1760)."""
     monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "openrouter")
@@ -957,6 +1046,14 @@ def test_resolve_requested_provider_precedence(monkeypatch):
 
     monkeypatch.delenv("HERMES_INFERENCE_PROVIDER", raising=False)
     assert rp.resolve_requested_provider() == "auto"
+
+
+def test_resolve_requested_provider_normalizes_lm_studio_aliases(monkeypatch):
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {"provider": "lm-studio"})
+    monkeypatch.delenv("HERMES_INFERENCE_PROVIDER", raising=False)
+
+    assert rp.resolve_requested_provider("lm-studio") == "custom"
+    assert rp.resolve_requested_provider() == "custom"
 
 
 # ── api_mode config override tests ──────────────────────────────────────
@@ -2167,4 +2264,3 @@ class TestTencentTokenhubRuntimeResolution:
         assert resolved["api_key"] == "explicit-tokenhub-key"
         assert resolved["base_url"] == "https://explicit-proxy.example.com/v1"
         assert resolved["source"] == "explicit"
-
