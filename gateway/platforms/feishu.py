@@ -3918,13 +3918,26 @@ class FeishuAdapter(BasePlatformAdapter):
             request = self._build_reply_message_request(reply_to, body)
             return await asyncio.to_thread(self._client.im.v1.message.reply, request)
 
-        body = self._build_create_message_body(
-            receive_id=chat_id,
-            msg_type=msg_type,
-            content=payload,
-            uuid_value=str(uuid.uuid4()),
-        )
-        request = self._build_create_message_request("chat_id", body)
+        # For topic/thread messages that fell back from reply→create, use
+        # thread_id as receive_id so the message lands in the topic instead of
+        # the main chat.
+        _thread_id = (metadata or {}).get("thread_id")
+        if _thread_id:
+            body = self._build_create_message_body(
+                receive_id=_thread_id,
+                msg_type=msg_type,
+                content=payload,
+                uuid_value=str(uuid.uuid4()),
+            )
+            request = self._build_create_message_request("thread_id", body)
+        else:
+            body = self._build_create_message_body(
+                receive_id=chat_id,
+                msg_type=msg_type,
+                content=payload,
+                uuid_value=str(uuid.uuid4()),
+            )
+            request = self._build_create_message_request("chat_id", body)
         return await asyncio.to_thread(self._client.im.v1.message.create, request)
 
     @staticmethod
