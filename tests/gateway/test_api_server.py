@@ -318,6 +318,8 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
     app.router.add_post("/v1/responses", adapter._handle_responses)
     app.router.add_get("/v1/responses/{response_id}", adapter._handle_get_response)
     app.router.add_delete("/v1/responses/{response_id}", adapter._handle_delete_response)
+    app.router.add_post("/v1/runs", adapter._handle_runs)
+    app.router.add_get("/v1/runs/{run_id}/events", adapter._handle_run_events)
     return app
 
 
@@ -2315,3 +2317,160 @@ class TestSessionIdHeader:
             call_kwargs = mock_run.call_args.kwargs
             assert call_kwargs["conversation_history"] == []
             assert call_kwargs["session_id"] == "some-session"
+
+
+class TestRunsEndpointSessionReplay:
+    @pytest.mark.asyncio
+    async def test_runs_with_session_id_loads_history_from_db(self, auth_adapter):
+        """`/v1/runs` should replay persisted session history when session_id is provided."""
+        db_history = [
+            {"role": "user", "content": "stored message 1"},
+            {"role": "assistant", "content": "stored reply 1"},
+        ]
+        mock_db = MagicMock()
+        mock_db.get_messages_as_conversation.return_value = db_history
+        auth_adapter._session_db = mock_db
+
+        mock_agent = MagicMock()
+        mock_agent.run_conversation.return_value = {
+            "final_response": "OK",
+            "messages": [],
+            "api_calls": 1,
+        }
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(auth_adapter, "_create_agent", return_value=mock_agent):
+                resp = await cli.post(
+                    "/v1/runs",
+                    headers={"Authorization": "Bearer sk-secret"},
+                    json={
+                        "input": "new question",
+                        "session_id": "existing-session",
+                    },
+                )
+
+                assert resp.status == 202
+                await asyncio.sleep(0.05)
+
+        mock_db.get_messages_as_conversation.assert_called_once_with("existing-session")
+        call_kwargs = mock_agent.run_conversation.call_args.kwargs
+        assert call_kwargs["conversation_history"] == db_history
+        assert call_kwargs["user_message"] == "new question"
+
+    @pytest.mark.asyncio
+    async def test_runs_without_session_id_does_not_probe_db(self, auth_adapter):
+        """`/v1/runs` should not treat its generated run_id as a persisted session lookup key."""
+        mock_db = MagicMock()
+        auth_adapter._session_db = mock_db
+
+        mock_agent = MagicMock()
+        mock_agent.run_conversation.return_value = {
+            "final_response": "OK",
+            "messages": [],
+            "api_calls": 1,
+        }
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(auth_adapter, "_create_agent", return_value=mock_agent):
+                resp = await cli.post(
+                    "/v1/runs",
+                    headers={"Authorization": "Bearer sk-secret"},
+                    json={"input": "new question"},
+                )
+
+                assert resp.status == 202
+                await asyncio.sleep(0.05)
+
+        mock_db.get_messages_as_conversation.assert_not_called()
+        call_kwargs = mock_agent.run_conversation.call_args.kwargs
+        assert call_kwargs["conversation_history"] == []
+        assert call_kwargs["user_message"] == "new question"
+
+    @pytest.mark.asyncio
+    async def test_runs_previous_response_id_reuses_stored_session_id(self, auth_adapter):
+        """`/v1/runs` should preserve response-chain session continuity when previous_response_id is provided."""
+        stored_history = [
+            {"role": "user", "content": "stored message"},
+            {"role": "assistant", "content": "stored reply"},
+        ]
+        auth_adapter._response_store.put("resp_prev", {
+            "response": {"id": "resp_prev", "object": "response"},
+            "conversation_history": stored_history,
+            "instructions": "stored instructions",
+            "session_id": "stored-session",
+        })
+        mock_db = MagicMock()
+        auth_adapter._session_db = mock_db
+
+        mock_agent = MagicMock()
+        mock_agent.run_conversation.return_value = {
+            "final_response": "OK",
+            "messages": [],
+            "api_calls": 1,
+        }
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(auth_adapter, "_create_agent", return_value=mock_agent) as create_agent:
+                resp = await cli.post(
+                    "/v1/runs",
+                    headers={"Authorization": "Bearer sk-secret"},
+                    json={"input": "new question", "previous_response_id": "resp_prev"},
+                )
+
+                assert resp.status == 202
+                await asyncio.sleep(0.05)
+
+        mock_db.get_messages_as_conversation.assert_not_called()
+        create_agent.assert_called_once()
+        assert create_agent.call_args.kwargs["session_id"] == "stored-session"
+        assert create_agent.call_args.kwargs["ephemeral_system_prompt"] == "stored instructions"
+        call_kwargs = mock_agent.run_conversation.call_args.kwargs
+        assert call_kwargs["conversation_history"] == stored_history
+        assert call_kwargs["user_message"] == "new question"
+
+    @pytest.mark.asyncio
+    async def test_runs_db_failure_falls_back_to_empty_history(self, auth_adapter):
+        """`/v1/runs` should still work if session history lookup fails."""
+        auth_adapter._session_db = None
+
+        mock_agent = MagicMock()
+        mock_agent.run_conversation.return_value = {
+            "final_response": "OK",
+            "messages": [],
+            "api_calls": 1,
+        }
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+
+        app = _create_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(auth_adapter, "_create_agent", return_value=mock_agent), \
+                 patch("hermes_state.SessionDB", side_effect=Exception("DB unavailable")):
+                resp = await cli.post(
+                    "/v1/runs",
+                    headers={"Authorization": "Bearer sk-secret"},
+                    json={
+                        "input": "new question",
+                        "session_id": "existing-session",
+                    },
+                )
+
+                assert resp.status == 202
+                await asyncio.sleep(0.05)
+
+        call_kwargs = mock_agent.run_conversation.call_args.kwargs
+        assert call_kwargs["conversation_history"] == []
+        assert call_kwargs["user_message"] == "new question"

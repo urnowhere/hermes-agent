@@ -2434,7 +2434,21 @@ class APIServerAdapter(BasePlatformAdapter):
                         )
                     conversation_history.append({"role": msg["role"], "content": str(content)})
 
-        session_id = body.get("session_id") or stored_session_id or run_id
+        requested_session_id = body.get("session_id")
+        session_id = requested_session_id or stored_session_id or run_id
+        if requested_session_id and not conversation_history:
+            if re.search(r'[\r\n\x00]', requested_session_id):
+                return web.json_response(
+                    _openai_error("Invalid session ID"),
+                    status=400,
+                )
+            try:
+                db = self._ensure_session_db()
+                if db is not None:
+                    conversation_history = db.get_messages_as_conversation(requested_session_id)
+            except Exception as e:
+                logger.warning("Failed to load run session history for %s: %s", requested_session_id, e)
+                conversation_history = []
         ephemeral_system_prompt = instructions
 
         async def _run_and_close():
