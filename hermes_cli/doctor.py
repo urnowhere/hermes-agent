@@ -1311,6 +1311,46 @@ def run_doctor(args):
             check_warn(f"{_active_memory_provider} check failed", str(_e))
 
     # =========================================================================
+    # PowerMem memory
+    # =========================================================================
+    print()
+    print(color("◆ PowerMem Memory", Colors.CYAN, Colors.BOLD))
+
+    try:
+        from plugins.memory.powermem import _load_config as _load_powermem_config
+
+        pm_cfg = _load_powermem_config()
+        if pm_cfg.get("enabled") is False:
+            check_info("PowerMem disabled in powermem.json")
+        else:
+            try:
+                import importlib.util as _ilu
+
+                if _ilu.find_spec("powermem") is None:
+                    check_warn(
+                        "powermem package not installed",
+                        "uv pip install powermem  or  pip install 'hermes-agent[powermem]'",
+                    )
+                else:
+                    check_ok("powermem package importable")
+                    check_info(
+                        f"user_id={pm_cfg.get('user_id', '?')}  agent_id={pm_cfg.get('agent_id', '?')}"
+                    )
+                    pm_json = HERMES_HOME / "powermem.json"
+                    if pm_json.exists():
+                        check_ok(f"powermem.json present ({pm_json.name})")
+                    else:
+                        check_info(
+                            "No powermem.json — using env defaults; configure PowerMem in .env",
+                        )
+            except Exception as _e:
+                check_warn("PowerMem check failed", str(_e))
+    except ImportError:
+        check_warn("PowerMem plugin not loadable", "(optional)")
+    except Exception as _e:
+        check_warn("PowerMem check failed", str(_e))
+
+    # =========================================================================
     # Profiles
     # =========================================================================
     try:

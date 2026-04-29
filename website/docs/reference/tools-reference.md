@@ -94,6 +94,8 @@ Scoped to the Feishu document-comment handler. Drives comment read/write operati
 
 :::note
 **Honcho tools** (`honcho_profile`, `honcho_search`, `honcho_context`, `honcho_reasoning`, `honcho_conclude`) are no longer built-in. They are available via the Honcho memory provider plugin at `plugins/memory/honcho/`. See [Memory Providers](../user-guide/features/memory-providers.md) for installation and usage.
+
+**PowerMem tools** (`powermem_search`, `powermem_profile`, `powermem_add`) are provided by the PowerMem memory provider plugin at `plugins/memory/powermem/` when `memory.provider` is set to `powermem`. See [Memory Providers](../user-guide/features/memory-providers.md#powermem).
 :::
 
 ## `image_gen` toolset

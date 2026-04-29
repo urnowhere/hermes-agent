@@ -1,0 +1,5 @@
+name: powermem
+version: 1.0.0
+description: "PowerMem — hybrid vector + full-text + graph memory with LLM extraction, Ebbinghaus decay, and multi-agent scoping."
+pip_dependencies:
+  - powermem
