@@ -580,6 +580,7 @@ def test_offer_launch_chat_execs_fresh_process(monkeypatch):
 
     monkeypatch.setattr(setup_mod, "prompt_yes_no", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(setup_mod, "_resolve_hermes_chat_argv", lambda: ["/usr/local/bin/hermes", "chat"])
+    monkeypatch.setattr(setup_mod, "is_interactive_stdin", lambda: True)
 
     exec_calls = []
 
@@ -593,6 +594,23 @@ def test_offer_launch_chat_execs_fresh_process(monkeypatch):
         setup_mod._offer_launch_chat()
 
     assert exec_calls == [("/usr/local/bin/hermes", ["/usr/local/bin/hermes", "chat"])]
+
+
+def test_offer_launch_chat_skips_auto_launch_without_interactive_stdin(monkeypatch, capsys):
+    from hermes_cli import setup as setup_mod
+
+    monkeypatch.setattr(setup_mod, "prompt_yes_no", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(setup_mod, "_resolve_hermes_chat_argv", lambda: ["/usr/local/bin/hermes", "chat"])
+    monkeypatch.setattr(setup_mod, "is_interactive_stdin", lambda: False)
+
+    exec_calls = []
+    monkeypatch.setattr(setup_mod.os, "execvp", lambda path, argv: exec_calls.append((path, argv)))
+
+    setup_mod._offer_launch_chat()
+
+    captured = capsys.readouterr()
+    assert exec_calls == []
+    assert "Run 'hermes chat' manually" in captured.out
 
 
 def test_offer_launch_chat_manual_fallback_when_unresolvable(monkeypatch, capsys):

@@ -3275,6 +3275,13 @@ def _offer_launch_chat():
         print_info("Could not relaunch Hermes automatically. Run 'hermes chat' manually.")
         return
 
+    if not is_interactive_stdin():
+        print_info(
+            "Setup finished without an interactive terminal. "
+            "Run 'hermes chat' manually in a terminal window."
+        )
+        return
+
     os.execvp(chat_argv[0], chat_argv)
 
 
