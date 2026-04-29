@@ -305,6 +305,72 @@ def _redact_form_body(text: str) -> str:
     return _redact_query_string(text.strip())
 
 
+def _redact_query_string(query: str) -> str:
+    """Redact sensitive parameter values in a URL query string.
+
+    Handles `k=v&k=v` format. Sensitive keys (case-insensitive) have values
+    replaced with `***`. Non-sensitive keys pass through unchanged.
+    Empty or malformed pairs are preserved as-is.
+    """
+    if not query:
+        return query
+    parts = []
+    for pair in query.split("&"):
+        if "=" not in pair:
+            parts.append(pair)
+            continue
+        key, _, value = pair.partition("=")
+        if key.lower() in _SENSITIVE_QUERY_PARAMS:
+            parts.append(f"{key}=***")
+        else:
+            parts.append(pair)
+    return "&".join(parts)
+
+
+def _redact_url_query_params(text: str) -> str:
+    """Scan text for URLs with query strings and redact sensitive params.
+
+    Catches opaque tokens that don't match vendor prefix regexes, e.g.
+    `https://example.com/cb?code=ABC123&state=xyz` → `...?code=***&state=xyz`.
+    """
+    def _sub(m: re.Match) -> str:
+        scheme = m.group(1)
+        authority = m.group(2)
+        path = m.group(3)
+        query = _redact_query_string(m.group(4))
+        fragment = m.group(5) or ""
+        return f"{scheme}://{authority}{path}?{query}{fragment}"
+    return _URL_WITH_QUERY_RE.sub(_sub, text)
+
+
+def _redact_url_userinfo(text: str) -> str:
+    """Strip `user:password@` from HTTP/WS/FTP URLs.
+
+    DB protocols (postgres, mysql, mongodb, redis, amqp) are handled
+    separately by `_DB_CONNSTR_RE`.
+    """
+    return _URL_USERINFO_RE.sub(
+        lambda m: f"{m.group(1)}://{m.group(2)}:***@",
+        text,
+    )
+
+
+def _redact_form_body(text: str) -> str:
+    """Redact sensitive values in a form-urlencoded body.
+
+    Only applies when the entire input looks like a pure form body
+    (k=v&k=v with no newlines, no other text). Single-line non-form
+    text passes through unchanged. This is a conservative pass — the
+    `_redact_url_query_params` function handles embedded query strings.
+    """
+    if not text or "\n" in text or "&" not in text:
+        return text
+    # The body-body form check is strict: only trigger on clean k=v&k=v.
+    if not _FORM_BODY_RE.match(text.strip()):
+        return text
+    return _redact_query_string(text.strip())
+
+
 def redact_sensitive_text(text: str) -> str:
     """Apply all redaction patterns to a block of text.
 
