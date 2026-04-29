@@ -10,6 +10,7 @@ import codecs
 import json
 import logging
 import os
+import platform
 import select
 import shlex
 import subprocess
@@ -24,6 +25,8 @@ from hermes_constants import get_hermes_home
 from tools.interrupt import is_interrupted
 
 logger = logging.getLogger(__name__)
+
+_IS_WINDOWS = platform.system() == "Windows"
 
 # Opt-in debug tracing for the interrupt/activity/poll machinery.  Set
 # HERMES_DEBUG_INTERRUPT=1 to log loop entry/exit, periodic heartbeats, and
@@ -109,6 +112,65 @@ def _pipe_stdin(proc: subprocess.Popen, data: str) -> None:
             pass
 
     threading.Thread(target=_write, daemon=True).start()
+
+
+def _poll_pipe_chunk(fd: int) -> tuple[str, bytes]:
+    """Poll a subprocess stdout pipe and return one chunk when available.
+
+    Returns ``("data", bytes)`` when output was read, ``("empty", b"")`` when
+    the pipe is still open but currently has no bytes ready, and
+    ``("closed", b"")`` when the read end is no longer usable.
+
+    Unix uses ``select.select()`` on the pipe FD. Windows can't do that for
+    regular subprocess pipes, so it uses ``PeekNamedPipe`` on the underlying
+    HANDLE instead.
+    """
+    if not _IS_WINDOWS:
+        try:
+            ready, _, _ = select.select([fd], [], [], 0.1)
+        except (ValueError, OSError):
+            return ("closed", b"")
+        if not ready:
+            return ("empty", b"")
+        try:
+            chunk = os.read(fd, 4096)
+        except (ValueError, OSError):
+            return ("closed", b"")
+        return ("closed", b"") if not chunk else ("data", chunk)
+
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+    except Exception:
+        return ("closed", b"")
+
+    handle = msvcrt.get_osfhandle(fd)
+    available = wintypes.DWORD(0)
+    kernel32 = ctypes.windll.kernel32
+    ok = kernel32.PeekNamedPipe(
+        wintypes.HANDLE(handle),
+        None,
+        0,
+        None,
+        ctypes.byref(available),
+        None,
+    )
+    if not ok:
+        error = ctypes.get_last_error()
+        # ERROR_BROKEN_PIPE / ERROR_NO_DATA: writer closed the pipe.
+        if error in {109, 232}:
+            return ("closed", b"")
+        return ("empty", b"")
+
+    if available.value == 0:
+        return ("empty", b"")
+
+    try:
+        chunk = os.read(fd, min(4096, int(available.value)))
+    except (ValueError, OSError):
+        return ("closed", b"")
+    return ("closed", b"") if not chunk else ("data", chunk)
 
 
 def _popen_bash(
@@ -491,17 +553,10 @@ class BaseEnvironment(ABC):
             idle_after_exit = 0
             try:
                 while True:
-                    try:
-                        ready, _, _ = select.select([fd], [], [], 0.1)
-                    except (ValueError, OSError):
-                        break  # fd already closed
-                    if ready:
-                        try:
-                            chunk = os.read(fd, 4096)
-                        except (ValueError, OSError):
-                            break
-                        if not chunk:
-                            break  # true EOF — all writers closed
+                    status, chunk = _poll_pipe_chunk(fd)
+                    if status == "closed":
+                        break
+                    if status == "data":
                         output_chunks.append(decoder.decode(chunk))
                         idle_after_exit = 0
                     elif proc.poll() is not None:

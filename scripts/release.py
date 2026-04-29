@@ -180,6 +180,7 @@ AUTHOR_MAP = {
     "ben.burtenshaw@gmail.com": "burtenshaw",
     "roopaknijhara@gmail.com": "rnijhara",
     "josephzcan@gmail.com": "j0sephz",
+    "3483421977@qq.com":"xy200303",
     # contributors (manual mapping from git names)
     "ahmedsherif95@gmail.com": "asheriif",
     "dyxushuai@gmail.com": "dyxushuai",

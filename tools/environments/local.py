@@ -2,6 +2,7 @@
 
 import os
 import platform
+import re
 import shutil
 import signal
 import subprocess
@@ -153,14 +154,43 @@ def _find_bash() -> str:
     if custom and os.path.isfile(custom):
         return custom
 
+    def _is_windows_system_bash(path: str | None) -> bool:
+        if not path:
+            return False
+        normalized = os.path.normcase(os.path.abspath(path))
+        system_root = os.path.normcase(os.environ.get("SystemRoot", r"C:\Windows"))
+        return normalized in {
+            os.path.join(system_root, "system32", "bash.exe"),
+            os.path.join(system_root, "sysnative", "bash.exe"),
+        }
+
+    def _git_install_bash_candidates() -> list[str]:
+        candidates: list[str] = []
+        git_exe = shutil.which("git")
+        if not git_exe:
+            return candidates
+
+        git_dir = os.path.dirname(os.path.abspath(git_exe))
+        install_root = os.path.dirname(git_dir)
+        for rel in (
+            os.path.join("bin", "bash.exe"),
+            os.path.join("usr", "bin", "bash.exe"),
+        ):
+            candidates.append(os.path.join(install_root, rel))
+        return candidates
+
     found = shutil.which("bash")
-    if found:
+    if found and not _is_windows_system_bash(found):
         return found
 
     for candidate in (
+        *_git_install_bash_candidates(),
         os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "bin", "bash.exe"),
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "usr", "bin", "bash.exe"),
         os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Git", "bin", "bash.exe"),
+        os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Git", "usr", "bin", "bash.exe"),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Git", "bin", "bash.exe"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Git", "usr", "bin", "bash.exe"),
     ):
         if candidate and os.path.isfile(candidate):
             return candidate
@@ -174,6 +204,77 @@ def _find_bash() -> str:
 
 # Backward compat — process_registry.py imports this name
 _find_shell = _find_bash
+
+
+_WINDOWS_DRIVE_RE = re.compile(r"^(?P<drive>[A-Za-z]):[\\/]*(?P<rest>.*)$")
+_BASH_DRIVE_RE = re.compile(r"^/(?P<drive>[A-Za-z])(?:/(?P<rest>.*))?$")
+_SHELL_VAR_RE = re.compile(r"\$(\w+)|\$\{([^}]+)\}")
+
+
+def _windows_path_to_bash(path: str) -> str:
+    """Convert a Windows host path into Git Bash/MSYS form when needed."""
+    if not _IS_WINDOWS or not path:
+        return path
+
+    if path == "~" or path.startswith("~/"):
+        return path
+
+    normalized = path.replace("\\", "/")
+    if normalized.startswith("//"):
+        return normalized
+
+    match = _WINDOWS_DRIVE_RE.match(path)
+    if match:
+        drive = match.group("drive").lower()
+        rest = match.group("rest").replace("\\", "/").lstrip("/")
+        return f"/{drive}/{rest}" if rest else f"/{drive}"
+
+    return normalized
+
+
+def _bash_path_to_windows(path: str) -> str:
+    """Convert a Git Bash/MSYS path back into a native Windows path."""
+    if not _IS_WINDOWS or not path:
+        return path
+
+    if _WINDOWS_DRIVE_RE.match(path):
+        return os.path.normpath(path)
+
+    if path.startswith("//"):
+        unc = "\\\\" + path.lstrip("/").replace("/", "\\")
+        return os.path.normpath(unc)
+
+    match = _BASH_DRIVE_RE.match(path)
+    if match:
+        drive = match.group("drive").upper()
+        rest = (match.group("rest") or "").replace("/", "\\")
+        native = f"{drive}:\\{rest}" if rest else f"{drive}:\\"
+        return os.path.normpath(native)
+
+    return path
+
+
+def _expand_shell_like_path(path: str) -> str:
+    """Expand ~ and shell-style env vars consistently across platforms."""
+    if not path:
+        return path
+
+    def _replace_var(match: re.Match[str]) -> str:
+        name = match.group(1) or match.group(2) or ""
+        return os.environ.get(name, match.group(0))
+
+    expanded = _SHELL_VAR_RE.sub(_replace_var, path)
+
+    if expanded == "~":
+        home = os.environ.get("HOME")
+        if home:
+            expanded = home
+    elif expanded.startswith("~/"):
+        home = os.environ.get("HOME")
+        if home:
+            expanded = os.path.join(home, expanded[2:])
+
+    return os.path.normpath(os.path.expanduser(expanded))
 
 
 # Standard PATH entries for environments with minimal PATH.
@@ -246,7 +347,7 @@ def _resolve_shell_init_files() -> list[str]:
     candidates: list[str] = []
     if explicit:
         candidates.extend(explicit)
-    elif auto_bashrc and not _IS_WINDOWS:
+    elif auto_bashrc:
         # Build a login-shell-ish source list so tools like n / nvm / asdf /
         # pyenv that self-install into the user's shell rc land on PATH in
         # the captured snapshot.
@@ -267,7 +368,7 @@ def _resolve_shell_init_files() -> list[str]:
     resolved: list[str] = []
     for raw in candidates:
         try:
-            path = os.path.expandvars(os.path.expanduser(raw))
+            path = _expand_shell_like_path(raw)
         except Exception:
             continue
         if path and os.path.isfile(path):
@@ -287,10 +388,11 @@ def _prepend_shell_init(cmd_string: str, files: list[str]) -> str:
 
     prelude_parts = ["set +e"]
     for path in files:
+        shell_path = _windows_path_to_bash(path)
         # shlex.quote isn't available here without an import; the files list
         # comes from os.path.expanduser output so it's a concrete absolute
         # path.  Escape single quotes defensively anyway.
-        safe = path.replace("'", "'\\''")
+        safe = shell_path.replace("'", "'\\''")
         prelude_parts.append(f"[ -r '{safe}' ] && . '{safe}' 2>/dev/null || true")
     prelude = "\n".join(prelude_parts) + "\n"
     return prelude + cmd_string
@@ -352,6 +454,7 @@ class LocalEnvironment(BaseEnvironment):
                 cmd_string = _prepend_shell_init(cmd_string, init_files)
         args = [bash, "-l", "-c", cmd_string] if login else [bash, "-c", cmd_string]
         run_env = _make_run_env(self.env)
+        host_cwd = _bash_path_to_windows(self.cwd) if _IS_WINDOWS else self.cwd
 
         proc = subprocess.Popen(
             args,
@@ -363,13 +466,27 @@ class LocalEnvironment(BaseEnvironment):
             stderr=subprocess.STDOUT,
             stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
             preexec_fn=None if _IS_WINDOWS else os.setsid,
-            cwd=self.cwd,
+            cwd=host_cwd,
         )
 
         if stdin_data is not None:
             _pipe_stdin(proc, stdin_data)
 
         return proc
+
+    def _wrap_command(self, command: str, cwd: str) -> str:
+        shell_cwd = _windows_path_to_bash(cwd)
+        wrapped = super()._wrap_command(command, shell_cwd)
+        if not _IS_WINDOWS:
+            return wrapped
+
+        snapshot_path = _windows_path_to_bash(self._snapshot_path)
+        cwd_file = _windows_path_to_bash(self._cwd_file)
+        return (
+            wrapped
+            .replace(self._snapshot_path, snapshot_path)
+            .replace(self._cwd_file, cwd_file)
+        )
 
     def _kill_process(self, proc):
         """Kill the entire process group (all children)."""
@@ -392,9 +509,10 @@ class LocalEnvironment(BaseEnvironment):
     def _update_cwd(self, result: dict):
         """Read CWD from temp file (local-only, no round-trip needed)."""
         try:
-            cwd_path = open(self._cwd_file).read().strip()
+            cwd_file = _bash_path_to_windows(self._cwd_file)
+            cwd_path = open(cwd_file).read().strip()
             if cwd_path:
-                self.cwd = cwd_path
+                self.cwd = _bash_path_to_windows(cwd_path)
         except (OSError, FileNotFoundError):
             pass
 
