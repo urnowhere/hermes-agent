@@ -119,6 +119,26 @@ def _is_local_skill(skill_path: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _is_locked(skill_path: Path) -> bool:
+    """Return True if the skill's SKILL.md declares locked: true in frontmatter.
+
+    Locked skills cannot be modified or deleted by the agent's self-improvement
+    loop, preserving manual edits and tuned workflows.
+    """
+    try:
+        from tools.skills_tool import _parse_frontmatter
+        skill_md = skill_path / "SKILL.md"
+        if not skill_md.exists():
+            return False
+        content = skill_md.read_text(encoding="utf-8")
+        frontmatter, _ = _parse_frontmatter(content)
+        return bool(frontmatter.get("locked", False))
+    except Exception:
+        return False
+
+
 MAX_SKILL_CONTENT_CHARS = 100_000   # ~36k tokens at 2.75 chars/token
 MAX_SKILL_FILE_BYTES = 1_048_576    # 1 MiB per supporting file
 
@@ -400,6 +420,9 @@ def _edit_skill(name: str, content: str) -> Dict[str, Any]:
     if not _is_local_skill(existing["path"]):
         return {"success": False, "error": f"Skill '{name}' is in an external directory and cannot be modified. Copy it to your local skills directory first."}
 
+    if _is_locked(existing["path"]):
+        return {"success": False, "error": f"Skill '{name}' is locked (locked: true in frontmatter). Remove the 'locked' field to allow modifications."}
+
     skill_md = existing["path"] / "SKILL.md"
     # Back up original content for rollback
     original_content = skill_md.read_text(encoding="utf-8") if skill_md.exists() else None
@@ -442,6 +465,9 @@ def _patch_skill(
 
     if not _is_local_skill(existing["path"]):
         return {"success": False, "error": f"Skill '{name}' is in an external directory and cannot be modified. Copy it to your local skills directory first."}
+
+    if _is_locked(existing["path"]):
+        return {"success": False, "error": f"Skill '{name}' is locked (locked: true in frontmatter). Remove the 'locked' field to allow modifications."}
 
     skill_dir = existing["path"]
 
@@ -524,6 +550,9 @@ def _delete_skill(name: str) -> Dict[str, Any]:
 
     if not _is_local_skill(existing["path"]):
         return {"success": False, "error": f"Skill '{name}' is in an external directory and cannot be deleted."}
+
+    if _is_locked(existing["path"]):
+        return {"success": False, "error": f"Skill '{name}' is locked (locked: true in frontmatter). Remove the 'locked' field to allow modifications."}
 
     skill_dir = existing["path"]
     shutil.rmtree(skill_dir)

@@ -270,6 +270,27 @@ class TestEditSkill:
         content = (tmp_path / "my-skill" / "SKILL.md").read_text()
         assert "A test skill" in content
 
+    def test_edit_locked_skill_blocked(self, tmp_path):
+        locked_content = """\
+---
+name: test-skill
+description: A locked skill.
+locked: true
+---
+
+# Locked Skill
+
+Do not modify.
+"""
+        with _skill_dir(tmp_path):
+            _create_skill("my-skill", locked_content)
+            result = _edit_skill("my-skill", VALID_SKILL_CONTENT_2)
+        assert result["success"] is False
+        assert "locked" in result["error"]
+        # Original content must be untouched
+        content = (tmp_path / "my-skill" / "SKILL.md").read_text()
+        assert "Do not modify." in content
+
 
 class TestPatchSkill:
     def test_patch_unique_match(self, tmp_path):
@@ -332,6 +353,26 @@ word word
             result = _patch_skill("nonexistent", "old", "new")
         assert result["success"] is False
 
+    def test_patch_locked_skill_blocked(self, tmp_path):
+        locked_content = """\
+---
+name: test-skill
+description: A locked skill.
+locked: true
+---
+
+# Locked Skill
+
+Original text here.
+"""
+        with _skill_dir(tmp_path):
+            _create_skill("my-skill", locked_content)
+            result = _patch_skill("my-skill", "Original text", "Modified text")
+        assert result["success"] is False
+        assert "locked" in result["error"]
+        content = (tmp_path / "my-skill" / "SKILL.md").read_text()
+        assert "Original text here." in content
+
     def test_patch_supporting_file_symlink_escape_blocked(self, tmp_path):
         outside_file = tmp_path / "outside.txt"
         outside_file.write_text("old text here")
@@ -364,6 +405,23 @@ class TestDeleteSkill:
         with _skill_dir(tmp_path):
             result = _delete_skill("nonexistent")
         assert result["success"] is False
+
+    def test_delete_locked_skill_blocked(self, tmp_path):
+        locked_content = """\
+---
+name: test-skill
+description: A locked skill.
+locked: true
+---
+
+# Locked Skill
+"""
+        with _skill_dir(tmp_path):
+            _create_skill("my-skill", locked_content)
+            result = _delete_skill("my-skill")
+        assert result["success"] is False
+        assert "locked" in result["error"]
+        assert (tmp_path / "my-skill").exists()
 
     def test_delete_cleans_empty_category_dir(self, tmp_path):
         with _skill_dir(tmp_path):
