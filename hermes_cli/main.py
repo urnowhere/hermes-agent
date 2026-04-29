@@ -9212,26 +9212,7 @@ Examples:
     plugins_parser.set_defaults(func=cmd_plugins)
 
     # =========================================================================
-    # Plugin CLI commands — dynamically registered by memory/general plugins.
-    # Plugins provide a register_cli(subparser) function that builds their
-    # own argparse tree.  No hardcoded plugin commands in main.py.
-    # =========================================================================
-    try:
-        from plugins.memory import discover_plugin_cli_commands
-
-        for cmd_info in discover_plugin_cli_commands():
-            plugin_parser = subparsers.add_parser(
-                cmd_info["name"],
-                help=cmd_info["help"],
-                description=cmd_info.get("description", ""),
-                formatter_class=__import__("argparse").RawDescriptionHelpFormatter,
-            )
-            cmd_info["setup_fn"](plugin_parser)
-    except Exception as _exc:
-        logging.getLogger(__name__).debug("Plugin CLI discovery failed: %s", _exc)
-
-    # =========================================================================
-    # memory command
+    # Built-in memory command
     # =========================================================================
     memory_parser = subparsers.add_parser(
         "memory",
@@ -10145,6 +10126,44 @@ Examples:
         # Unreachable: os.execvp never returns on success (process is replaced)
         # and raises OSError on failure (which propagates as a traceback).
         sys.exit(1)
+
+    # Dynamic plugin CLI commands.
+    # - General plugins register via ctx.register_cli_command(...).
+    # - Memory provider plugins still use discover_plugin_cli_commands().
+    # This runs after built-in subparsers are defined so we can safely detect
+    # and skip command-name collisions with built-ins.
+    def _add_dynamic_plugin_cli_command(cmd_info):
+        name = str((cmd_info or {}).get("name") or "").strip()
+        if not name:
+            logging.getLogger(__name__).warning("Skipping plugin CLI command with empty name")
+            return
+        if name in getattr(subparsers, "choices", {}):
+            logging.getLogger(__name__).warning(
+                "Skipping plugin CLI command '%s' because a built-in or previously registered command already uses that name.",
+                name,
+            )
+            return
+        plugin_parser = subparsers.add_parser(
+            name,
+            help=cmd_info["help"],
+            description=cmd_info.get("description", ""),
+            formatter_class=__import__("argparse").RawDescriptionHelpFormatter,
+        )
+        cmd_info["setup_fn"](plugin_parser)
+        if cmd_info.get("handler_fn") is not None and "func" not in getattr(plugin_parser, "_defaults", {}):
+            plugin_parser.set_defaults(func=cmd_info["handler_fn"])
+
+    try:
+        from hermes_cli.plugins import get_plugin_cli_commands
+        from plugins.memory import discover_plugin_cli_commands
+
+        for cmd_info in get_plugin_cli_commands().values():
+            _add_dynamic_plugin_cli_command(cmd_info)
+
+        for cmd_info in discover_plugin_cli_commands():
+            _add_dynamic_plugin_cli_command(cmd_info)
+    except Exception as _exc:
+        logging.getLogger(__name__).debug("Plugin CLI discovery failed: %s", _exc)
 
     _processed_argv = _coalesce_session_name_args(sys.argv[1:])
 

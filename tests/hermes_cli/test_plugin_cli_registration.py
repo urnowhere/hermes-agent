@@ -51,16 +51,126 @@ class TestRegisterCliCommand:
         assert entry["handler_fn"] is handler
         assert entry["plugin"] == "test-plugin"
 
-    def test_overwrites_on_duplicate(self):
+    def test_normalizes_name(self):
         ctx, mgr = self._make_ctx()
-        ctx.register_cli_command("x", "first", MagicMock())
-        ctx.register_cli_command("x", "second", MagicMock())
-        assert mgr._cli_commands["x"]["help"] == "second"
+        ctx.register_cli_command(" /My Cmd ", "Do something", MagicMock())
+        assert "my-cmd" in mgr._cli_commands
+        assert "/My Cmd " not in mgr._cli_commands
+
+    def test_empty_name_rejected(self, caplog):
+        ctx, mgr = self._make_ctx()
+        with caplog.at_level("WARNING", logger="hermes_cli.plugins"):
+            ctx.register_cli_command(" / ", "Do something", MagicMock())
+        assert mgr._cli_commands == {}
+        assert "empty name" in caplog.text
+
+    def test_duplicate_rejected_preserves_first(self, caplog):
+        ctx, mgr = self._make_ctx()
+        first = MagicMock()
+        second = MagicMock()
+        ctx.register_cli_command("x", "first", first)
+        with caplog.at_level("WARNING", logger="hermes_cli.plugins"):
+            ctx.register_cli_command("x", "second", second)
+        assert mgr._cli_commands["x"]["help"] == "first"
+        assert mgr._cli_commands["x"]["setup_fn"] is first
+        assert "already registered" in caplog.text.lower()
 
     def test_handler_optional(self):
         ctx, mgr = self._make_ctx()
         ctx.register_cli_command("nocb", "test", MagicMock())
         assert mgr._cli_commands["nocb"]["handler_fn"] is None
+
+
+class TestGeneralPluginCliDiscovery:
+    def test_get_plugin_cli_commands_discovers_plugins_lazily(self):
+        import hermes_cli.plugins as plugins_mod
+
+        mgr = PluginManager()
+        manifest = PluginManifest(name="test-plugin", source="user")
+        ctx = PluginContext(manifest, mgr)
+        setup = MagicMock()
+        handler = MagicMock()
+        ctx.register_cli_command(
+            name="mycmd",
+            help="Do something",
+            setup_fn=setup,
+            handler_fn=handler,
+            description="Full description",
+        )
+
+        original = getattr(plugins_mod, "_plugin_manager", None)
+        plugins_mod._plugin_manager = mgr
+        try:
+            cmds = plugins_mod.get_plugin_cli_commands()
+        finally:
+            plugins_mod._plugin_manager = original
+
+        assert "mycmd" in cmds
+        entry = cmds["mycmd"]
+        assert entry["setup_fn"] is setup
+        assert entry["handler_fn"] is handler
+        assert entry["plugin"] == "test-plugin"
+
+    def test_main_registers_general_plugin_cli_commands(self, monkeypatch):
+        import hermes_cli.main as main_mod
+
+        received = {}
+
+        def setup_fn(subparser):
+            subparser.add_argument("--value", required=True)
+
+        def handler_fn(args):
+            received["value"] = args.value
+
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_plugin_cli_commands",
+            lambda: {
+                "plugcmd": {
+                    "name": "plugcmd",
+                    "help": "Plugin command",
+                    "description": "Plugin command description",
+                    "setup_fn": setup_fn,
+                    "handler_fn": handler_fn,
+                    "plugin": "test-plugin",
+                }
+            },
+            raising=False,
+        )
+        monkeypatch.setattr("plugins.memory.discover_plugin_cli_commands", lambda: [], raising=False)
+        monkeypatch.setattr(sys, "argv", ["hermes", "plugcmd", "--value", "ok"])
+
+        main_mod.main()
+
+        assert received == {"value": "ok"}
+
+    def test_main_skips_builtin_name_collision(self, monkeypatch):
+        import hermes_cli.main as main_mod
+
+        handler = MagicMock()
+
+        def setup_fn(subparser):
+            subparser.add_argument("--value")
+
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_plugin_cli_commands",
+            lambda: {
+                "version": {
+                    "name": "version",
+                    "help": "Plugin command",
+                    "description": "Plugin command description",
+                    "setup_fn": setup_fn,
+                    "handler_fn": handler,
+                    "plugin": "test-plugin",
+                }
+            },
+            raising=False,
+        )
+        monkeypatch.setattr("plugins.memory.discover_plugin_cli_commands", lambda: [], raising=False)
+        monkeypatch.setattr(sys, "argv", ["hermes", "version"])
+
+        main_mod.main()
+
+        handler.assert_not_called()
 
 
 # ── Memory plugin CLI discovery ───────────────────────────────────────────

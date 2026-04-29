@@ -288,15 +288,31 @@ class PluginContext:
         The *setup_fn* receives an argparse subparser and should add any
         arguments/sub-subparsers.  If *handler_fn* is provided it is set
         as the default dispatch function via ``set_defaults(func=...)``."""
-        self._manager._cli_commands[name] = {
-            "name": name,
+        clean = name.lower().strip().lstrip("/").replace(" ", "-")
+        if not clean:
+            logger.warning(
+                "Plugin '%s' tried to register a CLI command with an empty name.",
+                self.manifest.name,
+            )
+            return
+        if clean in self._manager._cli_commands:
+            existing = self._manager._cli_commands[clean]
+            logger.warning(
+                "Plugin '%s' tried to register CLI command '%s' which is already registered by plugin '%s'. Skipping.",
+                self.manifest.name,
+                clean,
+                existing.get("plugin"),
+            )
+            return
+        self._manager._cli_commands[clean] = {
+            "name": clean,
             "help": help,
             "description": description,
             "setup_fn": setup_fn,
             "handler_fn": handler_fn,
             "plugin": self.manifest.name,
         }
-        logger.debug("Plugin %s registered CLI command: %s", self.manifest.name, name)
+        logger.debug("Plugin %s registered CLI command: %s", self.manifest.name, clean)
 
     # -- slash command registration -------------------------------------------
 
@@ -1149,6 +1165,15 @@ def get_plugin_commands() -> Dict[str, dict]:
     before any explicit discover_plugins() call.
     """
     return _ensure_plugins_discovered()._plugin_commands
+
+
+def get_plugin_cli_commands() -> Dict[str, dict]:
+    """Return plugin-registered terminal CLI commands.
+
+    Triggers idempotent plugin discovery so argparse setup can include
+    general plugin commands without requiring a separate manual discovery pass.
+    """
+    return _ensure_plugins_discovered()._cli_commands
 
 
 def get_plugin_toolsets() -> List[tuple]:
