@@ -3709,9 +3709,17 @@ def _sanitize_env_lines(lines: list) -> list:
             continue
 
         # Detect concatenated KEY=VALUE pairs on one line.
-        # Search for known KEY= patterns at any position in the line.
+        # Search for known KEY= patterns at any position in the line,
+        # but skip 'suffix traps' — known keys that are suffixes of
+        # other known keys (e.g. LM_API_KEY inside GLM_API_KEY).
+        # Pre-compute the trap set once per line for efficiency.
+        _suffix_traps = {k for k in known_keys if any(
+            lk != k and lk.endswith(k) for lk in known_keys
+        )}
         split_positions = []
         for key_name in known_keys:
+            if key_name in _suffix_traps:
+                continue  # skip known substring false-positives
             needle = key_name + "="
             idx = stripped.find(needle)
             while idx >= 0:
