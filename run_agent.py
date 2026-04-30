@@ -7203,13 +7203,30 @@ class AIAgent:
                 if request_client is not None:
                     self._close_request_openai_client(request_client, reason="stream_request_complete")
 
-        _stream_stale_timeout_base = float(os.getenv("HERMES_STREAM_STALE_TIMEOUT", 180.0))
-        # Local providers (Ollama, oMLX, llama-cpp) can take 300+ seconds
-        # for prefill on large contexts.  Disable the stale detector unless
-        # the user explicitly set HERMES_STREAM_STALE_TIMEOUT.
-        if _stream_stale_timeout_base == 180.0 and self.base_url and is_local_endpoint(self.base_url):
+        _stream_stale_timeout_env = os.getenv("HERMES_STREAM_STALE_TIMEOUT")
+        _stream_stale_timeout_base = float(_stream_stale_timeout_env) if _stream_stale_timeout_env else 180.0
+        _user_set_stale_timeout = _stream_stale_timeout_env is not None
+        # Only disable the stale detector for *known* local inference servers,
+        # matched by parsed port (not substring — a cloud proxy listening on
+        # :8080 of a local relay should not be misread as llama.cpp).
+        # is_local_endpoint() already gates the host; generic local proxies
+        # that fan out to cloud providers keep the normal timeout so real
+        # network hangs still surface.
+        _is_known_local_inference = False
+        if self.base_url and is_local_endpoint(self.base_url):
+            try:
+                _parsed_port = urlparse(self.base_url).port
+            except Exception:
+                _parsed_port = None
+            _is_known_local_inference = (
+                _parsed_port in (11434, 8080, 1234)  # Ollama, llama.cpp, LM Studio
+                or "omlx" in self.base_url.lower()
+            )
+        if not _user_set_stale_timeout and _is_known_local_inference:
             _stream_stale_timeout = float("inf")
-            logger.debug("Local provider detected (%s) — stale stream timeout disabled", self.base_url)
+            logger.debug("Local inference provider detected (%s) — stale stream timeout disabled", self.base_url)
+        elif _user_set_stale_timeout:
+            _stream_stale_timeout = _stream_stale_timeout_base
         else:
             # Scale the stale timeout for large contexts: slow models (like Opus)
             # can legitimately think for minutes before producing the first token
@@ -7404,7 +7421,7 @@ class AIAgent:
             # Pass base_url and api_key from fallback config so custom
             # endpoints (e.g. Ollama Cloud) resolve correctly instead of
             # falling through to OpenRouter defaults.
-            fb_base_url_hint = (fb.get("base_url") or "").strip() or None
+            fb_base_url_hint = os.path.expandvars((fb.get("base_url") or "").strip()) or None
             fb_api_key_hint = (fb.get("api_key") or "").strip() or None
             if not fb_api_key_hint:
                 fb_key_env = (fb.get("key_env") or "").strip()
@@ -7646,6 +7663,7 @@ class AIAgent:
         "ReadTimeout", "ConnectTimeout", "PoolTimeout",
         "ConnectError", "RemoteProtocolError",
         "APIConnectionError", "APITimeoutError",
+        "BrokenPipeError", "ConnectionResetError",
     })
 
     def _try_recover_primary_transport(
