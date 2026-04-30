@@ -45,6 +45,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from openai import OpenAI
 
+from agent.concurrency import get_configured_max_concurrent, get_semaphore
 from agent.credential_pool import load_pool
 from hermes_cli.config import get_hermes_home
 from hermes_constants import OPENROUTER_BASE_URL
@@ -2786,95 +2787,103 @@ def call_llm(
                      task, resolved_provider or "auto", final_model or "default",
                      f" at {_base_info}" if _base_info and "openrouter" not in _base_info else "")
 
-    # Pass the client's actual base_url (not just resolved_base_url) so
-    # endpoint-specific temperature overrides can distinguish
-    # api.moonshot.ai vs api.kimi.com/coding even on auto-detected routes.
-    kwargs = _build_call_kwargs(
-        resolved_provider, final_model, messages,
-        temperature=temperature, max_tokens=max_tokens,
-        tools=tools, timeout=effective_timeout, extra_body=effective_extra_body,
-        base_url=_base_info or resolved_base_url)
+    _max_concurrent = get_configured_max_concurrent(
+        provider=resolved_provider,
+        model=final_model,
+        base_url=_base_info or resolved_base_url,
+    )
+    _sem = get_semaphore(
+        resolved_provider or "",
+        resolved_api_key or "",
+        max_concurrent=_max_concurrent,
+        model=final_model,
+    )
+    _is_critical = task in ("compression", "context_compression")
+    _sem_timeout = 5.0 if _is_critical else 30.0
 
-    # Convert image blocks for Anthropic-compatible endpoints (e.g. MiniMax)
-    _client_base = str(getattr(client, "base_url", "") or "")
-    if _is_anthropic_compat_endpoint(resolved_provider, _client_base):
-        kwargs["messages"] = _convert_openai_images_to_anthropic(kwargs["messages"])
-
-    # Handle max_tokens vs max_completion_tokens retry, then payment fallback.
-    try:
-        return _validate_llm_response(
-            client.chat.completions.create(**kwargs), task)
-    except Exception as first_err:
-        err_str = str(first_err)
-        if "max_tokens" in err_str or "unsupported_parameter" in err_str:
-            kwargs.pop("max_tokens", None)
-            kwargs["max_completion_tokens"] = max_tokens
-            try:
-                return _validate_llm_response(
-                    client.chat.completions.create(**kwargs), task)
-            except Exception as retry_err:
-                # If the max_tokens retry also hits a payment or connection
-                # error, fall through to the fallback chain below.
-                if not (_is_payment_error(retry_err) or _is_connection_error(retry_err)):
-                    raise
-                first_err = retry_err
-
-        # ── Nous auth refresh parity with main agent ──────────────────
-        client_is_nous = (
-            resolved_provider == "nous"
-            or base_url_host_matches(_base_info, "inference-api.nousresearch.com")
-        )
-        if _is_auth_error(first_err) and client_is_nous:
-            refreshed_client, refreshed_model = _refresh_nous_auxiliary_client(
-                cache_provider=resolved_provider or "nous",
-                model=final_model,
-                async_mode=False,
-                base_url=resolved_base_url,
-                api_key=resolved_api_key,
-                api_mode=resolved_api_mode,
-                main_runtime=main_runtime,
+    with _sem.slot(priority=False, timeout=_sem_timeout) as _acquired:
+        if not _acquired and not _is_critical:
+            logger.info("concurrency: auxiliary %s skipped (semaphore busy)", task or "call")
+            raise RuntimeError(
+                f"Concurrency semaphore busy, skipping auxiliary {task or 'call'}"
             )
-            if refreshed_client is not None:
-                logger.info("Auxiliary %s: refreshed Nous runtime credentials after 401, retrying",
-                            task or "call")
-                if refreshed_model and refreshed_model != kwargs.get("model"):
-                    kwargs["model"] = refreshed_model
-                return _validate_llm_response(
-                    refreshed_client.chat.completions.create(**kwargs), task)
+        if not _acquired:
+            logger.warning("concurrency: %s proceeding without slot (critical)", task or "call")
 
-        # ── Payment / credit exhaustion fallback ──────────────────────
-        # When the resolved provider returns 402 or a credit-related error,
-        # try alternative providers instead of giving up.  This handles the
-        # common case where a user runs out of OpenRouter credits but has
-        # Codex OAuth or another provider available.
-        #
-        # ── Connection error fallback ────────────────────────────────
-        # When a provider endpoint is unreachable (DNS failure, connection
-        # refused, timeout), try alternative providers.  This handles stale
-        # Codex/OAuth tokens that authenticate but whose endpoint is down,
-        # and providers the user never configured that got picked up by
-        # the auto-detection chain.
-        should_fallback = _is_payment_error(first_err) or _is_connection_error(first_err)
-        # Only try alternative providers when the user didn't explicitly
-        # configure this task's provider.  Explicit provider = hard constraint;
-        # auto (the default) = best-effort fallback chain.  (#7559)
-        is_auto = resolved_provider in ("auto", "", None)
-        if should_fallback and is_auto:
-            reason = "payment error" if _is_payment_error(first_err) else "connection error"
-            logger.info("Auxiliary %s: %s on %s (%s), trying fallback",
-                        task or "call", reason, resolved_provider, first_err)
-            fb_client, fb_model, fb_label = _try_payment_fallback(
-                resolved_provider, task, reason=reason)
-            if fb_client is not None:
-                fb_kwargs = _build_call_kwargs(
-                    fb_label, fb_model, messages,
-                    temperature=temperature, max_tokens=max_tokens,
-                    tools=tools, timeout=effective_timeout,
-                    extra_body=effective_extra_body,
-                    base_url=str(getattr(fb_client, "base_url", "") or ""))
-                return _validate_llm_response(
-                    fb_client.chat.completions.create(**fb_kwargs), task)
-        raise
+        # Pass the client's actual base_url (not just resolved_base_url) so
+        # endpoint-specific temperature overrides can distinguish
+        # api.moonshot.ai vs api.kimi.com/coding even on auto-detected routes.
+        kwargs = _build_call_kwargs(
+            resolved_provider, final_model, messages,
+            temperature=temperature, max_tokens=max_tokens,
+            tools=tools, timeout=effective_timeout, extra_body=effective_extra_body,
+            base_url=_base_info or resolved_base_url)
+
+        # Convert image blocks for Anthropic-compatible endpoints (e.g. MiniMax)
+        _client_base = str(getattr(client, "base_url", "") or "")
+        if _is_anthropic_compat_endpoint(resolved_provider, _client_base):
+            kwargs["messages"] = _convert_openai_images_to_anthropic(kwargs["messages"])
+
+        # Handle max_tokens vs max_completion_tokens retry, then payment fallback.
+        try:
+            return _validate_llm_response(
+                client.chat.completions.create(**kwargs), task)
+        except Exception as first_err:
+            err_str = str(first_err)
+            if "max_tokens" in err_str or "unsupported_parameter" in err_str:
+                kwargs.pop("max_tokens", None)
+                kwargs["max_completion_tokens"] = max_tokens
+                try:
+                    return _validate_llm_response(
+                        client.chat.completions.create(**kwargs), task)
+                except Exception as retry_err:
+                    # If the max_tokens retry also hits a payment or connection
+                    # error, fall through to the fallback chain below.
+                    if not (_is_payment_error(retry_err) or _is_connection_error(retry_err)):
+                        raise
+                    first_err = retry_err
+
+            # ── Nous auth refresh parity with main agent ──────────────────
+            client_is_nous = (
+                resolved_provider == "nous"
+                or base_url_host_matches(_base_info, "inference-api.nousresearch.com")
+            )
+            if _is_auth_error(first_err) and client_is_nous:
+                refreshed_client, refreshed_model = _refresh_nous_auxiliary_client(
+                    cache_provider=resolved_provider or "nous",
+                    model=final_model,
+                    async_mode=False,
+                    base_url=resolved_base_url,
+                    api_key=resolved_api_key,
+                    api_mode=resolved_api_mode,
+                    main_runtime=main_runtime,
+                )
+                if refreshed_client is not None:
+                    logger.info("Auxiliary %s: refreshed Nous runtime credentials after 401, retrying",
+                                task or "call")
+                    if refreshed_model and refreshed_model != kwargs.get("model"):
+                        kwargs["model"] = refreshed_model
+                    return _validate_llm_response(
+                        refreshed_client.chat.completions.create(**kwargs), task)
+
+            should_fallback = _is_payment_error(first_err) or _is_connection_error(first_err)
+            is_auto = resolved_provider in ("auto", "", None)
+            if should_fallback and is_auto:
+                reason = "payment error" if _is_payment_error(first_err) else "connection error"
+                logger.info("Auxiliary %s: %s on %s (%s), trying fallback",
+                            task or "call", reason, resolved_provider, first_err)
+                fb_client, fb_model, fb_label = _try_payment_fallback(
+                    resolved_provider, task, reason=reason)
+                if fb_client is not None:
+                    fb_kwargs = _build_call_kwargs(
+                        fb_label, fb_model, messages,
+                        temperature=temperature, max_tokens=max_tokens,
+                        tools=tools, timeout=effective_timeout,
+                        extra_body=effective_extra_body,
+                        base_url=str(getattr(fb_client, "base_url", "") or ""))
+                    return _validate_llm_response(
+                        fb_client.chat.completions.create(**fb_kwargs), task)
+            raise
 
 
 def extract_content_or_reasoning(response) -> str:
@@ -3008,80 +3017,106 @@ async def async_call_llm(
 
     effective_timeout = timeout if timeout is not None else _get_task_timeout(task)
 
-    # Pass the client's actual base_url (not just resolved_base_url) so
-    # endpoint-specific temperature overrides can distinguish
-    # api.moonshot.ai vs api.kimi.com/coding even on auto-detected routes.
     _client_base = str(getattr(client, "base_url", "") or "")
-    kwargs = _build_call_kwargs(
-        resolved_provider, final_model, messages,
-        temperature=temperature, max_tokens=max_tokens,
-        tools=tools, timeout=effective_timeout, extra_body=effective_extra_body,
-        base_url=_client_base or resolved_base_url)
+    _max_concurrent = get_configured_max_concurrent(
+        provider=resolved_provider,
+        model=final_model,
+        base_url=_client_base or resolved_base_url,
+    )
+    _sem = get_semaphore(
+        resolved_provider or "",
+        resolved_api_key or "",
+        max_concurrent=_max_concurrent,
+        model=final_model,
+    )
+    _is_critical = task in ("compression", "context_compression")
+    _sem_timeout = 5.0 if _is_critical else 30.0
 
-    # Convert image blocks for Anthropic-compatible endpoints (e.g. MiniMax)
-    if _is_anthropic_compat_endpoint(resolved_provider, _client_base):
-        kwargs["messages"] = _convert_openai_images_to_anthropic(kwargs["messages"])
-
-    try:
-        return _validate_llm_response(
-            await client.chat.completions.create(**kwargs), task)
-    except Exception as first_err:
-        err_str = str(first_err)
-        if "max_tokens" in err_str or "unsupported_parameter" in err_str:
-            kwargs.pop("max_tokens", None)
-            kwargs["max_completion_tokens"] = max_tokens
-            try:
-                return _validate_llm_response(
-                    await client.chat.completions.create(**kwargs), task)
-            except Exception as retry_err:
-                # If the max_tokens retry also hits a payment or connection
-                # error, fall through to the fallback chain below.
-                if not (_is_payment_error(retry_err) or _is_connection_error(retry_err)):
-                    raise
-                first_err = retry_err
-
-        # ── Nous auth refresh parity with main agent ──────────────────
-        client_is_nous = (
-            resolved_provider == "nous"
-            or base_url_host_matches(_client_base, "inference-api.nousresearch.com")
-        )
-        if _is_auth_error(first_err) and client_is_nous:
-            refreshed_client, refreshed_model = _refresh_nous_auxiliary_client(
-                cache_provider=resolved_provider or "nous",
-                model=final_model,
-                async_mode=True,
-                base_url=resolved_base_url,
-                api_key=resolved_api_key,
-                api_mode=resolved_api_mode,
+    async with _sem.async_slot(priority=False, timeout=_sem_timeout) as _acquired:
+        if not _acquired and not _is_critical:
+            logger.info("concurrency: async %s skipped (semaphore busy)", task or "call")
+            raise RuntimeError(
+                f"Concurrency semaphore busy, skipping async auxiliary {task or 'call'}"
             )
-            if refreshed_client is not None:
-                logger.info("Auxiliary %s (async): refreshed Nous runtime credentials after 401, retrying",
-                            task or "call")
-                if refreshed_model and refreshed_model != kwargs.get("model"):
-                    kwargs["model"] = refreshed_model
-                return _validate_llm_response(
-                    await refreshed_client.chat.completions.create(**kwargs), task)
+        if not _acquired:
+            logger.warning(
+                "concurrency: async %s proceeding without slot (critical)",
+                task or "call",
+            )
 
-        # ── Payment / connection fallback (mirrors sync call_llm) ─────
-        should_fallback = _is_payment_error(first_err) or _is_connection_error(first_err)
-        is_auto = resolved_provider in ("auto", "", None)
-        if should_fallback and is_auto:
-            reason = "payment error" if _is_payment_error(first_err) else "connection error"
-            logger.info("Auxiliary %s (async): %s on %s (%s), trying fallback",
-                        task or "call", reason, resolved_provider, first_err)
-            fb_client, fb_model, fb_label = _try_payment_fallback(
-                resolved_provider, task, reason=reason)
-            if fb_client is not None:
-                fb_kwargs = _build_call_kwargs(
-                    fb_label, fb_model, messages,
-                    temperature=temperature, max_tokens=max_tokens,
-                    tools=tools, timeout=effective_timeout,
-                    extra_body=effective_extra_body,
-                    base_url=str(getattr(fb_client, "base_url", "") or ""))
-                # Convert sync fallback client to async
-                async_fb, async_fb_model = _to_async_client(fb_client, fb_model or "")
-                if async_fb_model and async_fb_model != fb_kwargs.get("model"):
-                    fb_kwargs["model"] = async_fb_model
-                return _validate_llm_response(
-                    await async_fb.chat.completions.create(**fb_kwargs), task)
-        raise
+        # Pass the client's actual base_url (not just resolved_base_url) so
+        # endpoint-specific temperature overrides can distinguish
+        # api.moonshot.ai vs api.kimi.com/coding even on auto-detected routes.
+        kwargs = _build_call_kwargs(
+            resolved_provider, final_model, messages,
+            temperature=temperature, max_tokens=max_tokens,
+            tools=tools, timeout=effective_timeout, extra_body=effective_extra_body,
+            base_url=_client_base or resolved_base_url)
+
+        # Convert image blocks for Anthropic-compatible endpoints (e.g. MiniMax)
+        if _is_anthropic_compat_endpoint(resolved_provider, _client_base):
+            kwargs["messages"] = _convert_openai_images_to_anthropic(kwargs["messages"])
+
+        try:
+            return _validate_llm_response(
+                await client.chat.completions.create(**kwargs), task)
+        except Exception as first_err:
+            err_str = str(first_err)
+            if "max_tokens" in err_str or "unsupported_parameter" in err_str:
+                kwargs.pop("max_tokens", None)
+                kwargs["max_completion_tokens"] = max_tokens
+                try:
+                    return _validate_llm_response(
+                        await client.chat.completions.create(**kwargs), task)
+                except Exception as retry_err:
+                    # If the max_tokens retry also hits a payment or connection
+                    # error, fall through to the fallback chain below.
+                    if not (_is_payment_error(retry_err) or _is_connection_error(retry_err)):
+                        raise
+                    first_err = retry_err
+
+            # ── Nous auth refresh parity with main agent ──────────────────
+            client_is_nous = (
+                resolved_provider == "nous"
+                or base_url_host_matches(_client_base, "inference-api.nousresearch.com")
+            )
+            if _is_auth_error(first_err) and client_is_nous:
+                refreshed_client, refreshed_model = _refresh_nous_auxiliary_client(
+                    cache_provider=resolved_provider or "nous",
+                    model=final_model,
+                    async_mode=True,
+                    base_url=resolved_base_url,
+                    api_key=resolved_api_key,
+                    api_mode=resolved_api_mode,
+                )
+                if refreshed_client is not None:
+                    logger.info("Auxiliary %s (async): refreshed Nous runtime credentials after 401, retrying",
+                                task or "call")
+                    if refreshed_model and refreshed_model != kwargs.get("model"):
+                        kwargs["model"] = refreshed_model
+                    return _validate_llm_response(
+                        await refreshed_client.chat.completions.create(**kwargs), task)
+
+            # ── Payment / connection fallback (mirrors sync call_llm) ─────
+            should_fallback = _is_payment_error(first_err) or _is_connection_error(first_err)
+            is_auto = resolved_provider in ("auto", "", None)
+            if should_fallback and is_auto:
+                reason = "payment error" if _is_payment_error(first_err) else "connection error"
+                logger.info("Auxiliary %s (async): %s on %s (%s), trying fallback",
+                            task or "call", reason, resolved_provider, first_err)
+                fb_client, fb_model, fb_label = _try_payment_fallback(
+                    resolved_provider, task, reason=reason)
+                if fb_client is not None:
+                    fb_kwargs = _build_call_kwargs(
+                        fb_label, fb_model, messages,
+                        temperature=temperature, max_tokens=max_tokens,
+                        tools=tools, timeout=effective_timeout,
+                        extra_body=effective_extra_body,
+                        base_url=str(getattr(fb_client, "base_url", "") or ""))
+                    # Convert sync fallback client to async
+                    async_fb, async_fb_model = _to_async_client(fb_client, fb_model or "")
+                    if async_fb_model and async_fb_model != fb_kwargs.get("model"):
+                        fb_kwargs["model"] = async_fb_model
+                    return _validate_llm_response(
+                        await async_fb.chat.completions.create(**fb_kwargs), task)
+            raise

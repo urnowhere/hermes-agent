@@ -63,7 +63,13 @@ model:
   #   Leave unset to use the model's native output ceiling (recommended).
   #   Set only if you want to deliberately limit individual response length.
   #
-# max_tokens: 8192
+  # max_tokens: 8192
+  #
+  # max_concurrent: maximum simultaneous requests for this provider/API key.
+  # Leave unset unless your provider enforces low concurrency limits.
+  # Hermes ships conservative defaults for z.ai GLM-5.1 and Kimi.
+  #
+  # max_concurrent: 1
 
 # Named provider overrides (optional)
 # Use this for per-provider request timeouts, non-stream stale timeouts,

@@ -104,6 +104,7 @@ from agent.codex_responses_adapter import (
     _split_responses_tool_id as _codex_split_responses_tool_id,
     _summarize_user_message_for_log,
 )
+from agent.concurrency import get_configured_max_concurrent, get_semaphore
 from agent.display import (
     KawaiiSpinner, build_tool_preview as _build_tool_preview,
     get_cute_tool_message as _get_cute_tool_message_impl,
@@ -5220,7 +5221,35 @@ class AIAgent:
             self._try_refresh_anthropic_client_credentials()
         return self._anthropic_client.messages.create(**api_kwargs)
 
-    def _interruptible_api_call(self, api_kwargs: dict):
+    def _interruptible_api_call(self, api_kwargs: dict, *, _skip_sem: bool = False):
+        """Run a non-streaming API call behind the provider concurrency gate."""
+        if _skip_sem:
+            return self._interruptible_api_call_inner(api_kwargs)
+
+        _api_key = self.api_key or ""
+        if self._credential_pool:
+            _current = self._credential_pool.current()
+            if _current:
+                _api_key = (
+                    getattr(_current, "runtime_api_key", None)
+                    or getattr(_current, "access_token", None)
+                    or _api_key
+                )
+        _max_concurrent = get_configured_max_concurrent(
+            provider=self.provider,
+            model=self.model,
+            base_url=self.base_url,
+        )
+        _sem = get_semaphore(
+            self.provider or "",
+            _api_key,
+            max_concurrent=_max_concurrent,
+            model=self.model,
+        )
+        with _sem.slot(priority=True):
+            return self._interruptible_api_call_inner(api_kwargs)
+
+    def _interruptible_api_call_inner(self, api_kwargs: dict):
         """
         Run the API call in a background thread so the main conversation loop
         can detect interrupts without waiting for the full HTTP round-trip.
@@ -5468,6 +5497,35 @@ class AIAgent:
     def _interruptible_streaming_api_call(
         self, api_kwargs: dict, *, on_first_delta: callable = None
     ):
+        _api_key = self.api_key or ""
+        if self._credential_pool:
+            _current = self._credential_pool.current()
+            if _current:
+                _api_key = (
+                    getattr(_current, "runtime_api_key", None)
+                    or getattr(_current, "access_token", None)
+                    or _api_key
+                )
+        _max_concurrent = get_configured_max_concurrent(
+            provider=self.provider,
+            model=self.model,
+            base_url=self.base_url,
+        )
+        _sem = get_semaphore(
+            self.provider or "",
+            _api_key,
+            max_concurrent=_max_concurrent,
+            model=self.model,
+        )
+        with _sem.slot(priority=True):
+            return self._interruptible_streaming_api_call_inner(
+                api_kwargs,
+                on_first_delta=on_first_delta,
+            )
+
+    def _interruptible_streaming_api_call_inner(
+        self, api_kwargs: dict, *, on_first_delta: callable = None
+    ):
         """Streaming variant of _interruptible_api_call for real-time token delivery.
 
         Handles all three api_modes:
@@ -5490,7 +5548,7 @@ class AIAgent:
             # temporarily so _run_codex_stream can pick it up.
             self._codex_on_first_delta = on_first_delta
             try:
-                return self._interruptible_api_call(api_kwargs)
+                return self._interruptible_api_call(api_kwargs, _skip_sem=True)
             finally:
                 self._codex_on_first_delta = None
 

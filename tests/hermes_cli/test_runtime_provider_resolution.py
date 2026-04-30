@@ -572,6 +572,32 @@ def test_named_custom_provider_uses_saved_credentials(monkeypatch):
     assert resolved["source"] == "custom_provider:Local"
 
 
+def test_named_custom_provider_preserves_max_concurrent(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "custom_providers": [
+                {
+                    "name": "Local",
+                    "base_url": "http://1.2.3.4:1234/v1",
+                    "api_key": "local-provider-key",
+                    "max_concurrent": 2,
+                }
+            ]
+        },
+    )
+
+    custom_provider = rp._get_named_custom_provider("local")
+    resolved = rp.resolve_runtime_provider(requested="local")
+
+    assert custom_provider["max_concurrent"] == 2
+    assert resolved["max_concurrent"] == 2
+    assert resolved["base_url"] == "http://1.2.3.4:1234/v1"
+
+
 def test_named_custom_provider_uses_providers_dict_when_list_missing(monkeypatch):
     """After v11→v12 migration deletes custom_providers, resolution should
     still find entries in the providers dict via get_compatible_custom_providers."""

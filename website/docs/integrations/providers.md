@@ -1040,6 +1040,36 @@ custom_providers:
 - You're running behind a proxy that doesn't expose `/v1/models`
 :::
 
+### Provider Concurrency Limits
+
+Some providers limit the number of simultaneous requests per API key. Hermes coordinates main-agent and auxiliary model calls with a per-provider/API-key concurrency semaphore so auxiliary work does not starve the main conversation.
+
+Hermes ships conservative defaults for providers with known low concurrency limits, including z.ai GLM-5.1 and Kimi/Moonshot. Most RPM/TPM-limited providers are effectively unchanged.
+
+To override the primary model limit:
+
+```yaml
+model:
+  provider: zai
+  default: glm-5.1
+  max_concurrent: 2
+```
+
+For named custom providers:
+
+```yaml
+custom_providers:
+  - name: my-zai
+    base_url: https://api.z.ai/api/coding/paas/v4
+    api_key: sk-...
+    max_concurrent: 2
+    models:
+      glm-5.1:
+        max_concurrent: 1
+```
+
+Set this only when your provider documents a concurrency cap or you are seeing transient concurrency-related 429s. It is not a replacement for RPM/TPM rate limiting.
+
 ---
 
 ### Named Custom Providers

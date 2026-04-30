@@ -382,6 +382,12 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
             result["key_env"] = key_env
         if provider_key:
             result["provider_key"] = provider_key
+        try:
+            max_concurrent = int(entry.get("max_concurrent"))
+        except (TypeError, ValueError):
+            max_concurrent = None
+        if max_concurrent is not None and max_concurrent >= 1:
+            result["max_concurrent"] = max_concurrent
         api_mode = _parse_api_mode(entry.get("api_mode"))
         if api_mode:
             result["api_mode"] = api_mode
@@ -418,6 +424,8 @@ def _resolve_named_custom_runtime(
         model_name = custom_provider.get("model")
         if model_name:
             pool_result["model"] = model_name
+        if custom_provider.get("max_concurrent") is not None:
+            pool_result["max_concurrent"] = custom_provider["max_concurrent"]
         return pool_result
 
     api_key_candidates = [
@@ -442,6 +450,8 @@ def _resolve_named_custom_runtime(
     # provider name differs from the actual model string the API expects.
     if custom_provider.get("model"):
         result["model"] = custom_provider["model"]
+    if custom_provider.get("max_concurrent") is not None:
+        result["max_concurrent"] = custom_provider["max_concurrent"]
     return result
 
 

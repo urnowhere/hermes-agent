@@ -1994,11 +1994,12 @@ def _normalize_custom_provider_entry(
         "defaultModel": "default_model",
         "contextLength": "context_length",
         "rateLimitDelay": "rate_limit_delay",
+        "maxConcurrent": "max_concurrent",
     }
     _KNOWN_KEYS = {
         "name", "api", "url", "base_url", "api_key", "key_env",
         "api_mode", "transport", "model", "default_model", "models",
-        "context_length", "rate_limit_delay",
+        "context_length", "rate_limit_delay", "max_concurrent",
     }
     for camel, snake in _CAMEL_ALIASES.items():
         if camel in entry and snake not in entry:
@@ -2088,6 +2089,10 @@ def _normalize_custom_provider_entry(
     rate_limit_delay = entry.get("rate_limit_delay")
     if isinstance(rate_limit_delay, (int, float)) and rate_limit_delay >= 0:
         normalized["rate_limit_delay"] = rate_limit_delay
+
+    max_concurrent = entry.get("max_concurrent")
+    if isinstance(max_concurrent, int) and max_concurrent >= 1:
+        normalized["max_concurrent"] = max_concurrent
 
     return normalized
 
@@ -2184,11 +2189,13 @@ _KNOWN_ROOT_KEYS = {
 # Valid fields inside a custom_providers list entry
 _VALID_CUSTOM_PROVIDER_FIELDS = {
     "name", "base_url", "api_key", "api_mode", "model", "models",
-    "context_length", "rate_limit_delay",
+    "context_length", "rate_limit_delay", "max_concurrent",
 }
 
 # Fields that look like they should be inside custom_providers, not at root
-_CUSTOM_PROVIDER_LIKE_FIELDS = {"base_url", "api_key", "rate_limit_delay", "api_mode"}
+_CUSTOM_PROVIDER_LIKE_FIELDS = {
+    "base_url", "api_key", "rate_limit_delay", "api_mode", "max_concurrent",
+}
 
 
 @dataclass

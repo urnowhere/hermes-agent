@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import uuid
+from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from types import SimpleNamespace
@@ -44,6 +45,28 @@ def _make_tool_defs(*names: str) -> list:
     ]
 
 
+class _RecordingSemaphore:
+    def __init__(self):
+        self.acquired = []
+        self.released = 0
+
+    def acquire(self, *, priority=False, timeout=None):
+        self.acquired.append({"priority": priority, "timeout": timeout})
+        return True
+
+    def release(self):
+        self.released += 1
+
+    @contextmanager
+    def slot(self, *, priority=False, timeout=None):
+        acquired = self.acquire(priority=priority, timeout=timeout)
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                self.release()
+
+
 @pytest.fixture()
 def agent():
     """Minimal AIAgent with mocked OpenAI client and tool loading."""
@@ -63,6 +86,43 @@ def agent():
         )
         a.client = MagicMock()
         return a
+
+
+def test_interruptible_api_call_uses_priority_semaphore():
+    agent = AIAgent.__new__(AIAgent)
+    agent.api_key = "test-key"
+    agent._credential_pool = None
+    agent.provider = "zai"
+    agent.model = "glm-5.1"
+    agent.base_url = "https://api.z.ai/api/coding/paas/v4"
+    agent.api_mode = "chat_completions"
+    agent._interrupt_requested = False
+    agent._compute_non_stream_stale_timeout = MagicMock(return_value=30.0)
+    agent._touch_activity = MagicMock()
+    agent._emit_status = MagicMock()
+
+    client = MagicMock()
+    response = object()
+    client.chat.completions.create.return_value = response
+    agent._create_request_openai_client = MagicMock(return_value=client)
+    agent._close_request_openai_client = MagicMock()
+
+    sem = _RecordingSemaphore()
+    with (
+        patch("run_agent.get_configured_max_concurrent", return_value=1),
+        patch("run_agent.get_semaphore", return_value=sem) as get_sem,
+    ):
+        result = AIAgent._interruptible_api_call(agent, {"model": "glm-5.1"})
+
+    assert result is response
+    get_sem.assert_called_once_with(
+        "zai",
+        "test-key",
+        max_concurrent=1,
+        model="glm-5.1",
+    )
+    assert sem.acquired == [{"priority": True, "timeout": None}]
+    assert sem.released == 1
 
 
 @pytest.fixture()
