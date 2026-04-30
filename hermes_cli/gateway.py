@@ -6,6 +6,7 @@ Handles: hermes gateway [run|start|stop|restart|status|install|uninstall|setup]
 
 import asyncio
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -59,7 +60,69 @@ class GatewayRuntimeSnapshot:
     def has_process_service_mismatch(self) -> bool:
         return self.service_installed and self.running and not self.service_running
 
-def _get_service_pids() -> set:
+# ``launchctl list <label>`` on macOS returns a plist-dict line that looks
+# like ``\t"PID" = 855;``.  The only integer that must be on that line is
+# the PID, so a narrow regex is safer than string-splitting on quotes and
+# semicolons (which breaks when keys get new spacing or quoting in future
+# macOS releases).  Anchored to ``"PID"`` so sibling keys like
+# ``LastExitStatus`` can't match.
+_LAUNCHD_PLIST_PID_RE = re.compile(r'"PID"\s*=\s*(\d+)\s*;')
+
+
+def _parse_launchd_list_output(stdout: str, label: str) -> set[int]:
+    """Extract PIDs for ``label`` from ``launchctl list`` output.
+
+    macOS ``launchctl list`` has two distinct output formats and which one
+    you get depends on whether a label is passed:
+
+    * **No label argument** → tab-separated table ``PID\\tStatus\\tLabel``,
+      one row per service, header line first.
+    * **With label argument** → plist-dict dump of the single service,
+      e.g. ``"PID" = 855;\\n"Label" = "ai.hermes.gateway";`` (#15225).
+
+    The original implementation only handled the first format, so when
+    called with a label the data line parsed as a dict key/value and
+    ``parts[2]`` (``'"ai.hermes.gateway";'``) never equalled the bare
+    label string — no PID ever got extracted.  This helper accepts both
+    formats and returns the extracted PIDs as a set.  Filtering on
+    ``label`` (to avoid grabbing an unrelated service's PID from a
+    no-arg dump) is done only when the tab-separated path is taken,
+    because the plist-dict dump is already scoped to the label the
+    caller requested.
+    """
+    pids: set[int] = set()
+    if not stdout:
+        return pids
+
+    # Plist-dict format: ``"PID" = NNN;`` lines.  ``findall`` returns all
+    # matches as strings — we trust ``int()`` since the regex capture is
+    # ``\d+``.
+    for match in _LAUNCHD_PLIST_PID_RE.findall(stdout):
+        try:
+            pid = int(match)
+        except ValueError:
+            continue
+        if pid > 0:
+            pids.add(pid)
+    if pids:
+        return pids
+
+    # Tab-separated fallback (no-label dump).  Header line starts with
+    # ``PID\tStatus\tLabel`` so only rows whose third column matches our
+    # label contribute.
+    for line in stdout.strip().splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[2] == label:
+            try:
+                pid = int(parts[0])
+            except ValueError:
+                continue
+            if pid > 0:
+                pids.add(pid)
+    return pids
+
+
+def _get_service_pids() -> set[int]:
     """Return PIDs currently managed by systemd or launchd gateway services.
 
     Used to avoid killing freshly-restarted service processes when sweeping
@@ -67,7 +130,7 @@ def _get_service_pids() -> set:
     service manager having committed the new PID before the restart command
     returns (true for both systemd and launchd in practice).
     """
-    pids: set = set()
+    pids: set[int] = set()
 
     # --- systemd (Linux): user and system scopes ---
     if supports_systemd_services():
@@ -106,16 +169,7 @@ def _get_service_pids() -> set:
                 capture_output=True, text=True, timeout=5,
             )
             if result.returncode == 0:
-                # Output: "PID\tStatus\tLabel" header, then one data line
-                for line in result.stdout.strip().splitlines():
-                    parts = line.split()
-                    if len(parts) >= 3 and parts[2] == label:
-                        try:
-                            pid = int(parts[0])
-                            if pid > 0:
-                                pids.add(pid)
-                        except ValueError:
-                            pass
+                pids |= _parse_launchd_list_output(result.stdout, label)
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
 
@@ -301,8 +355,16 @@ def _scan_gateway_pids(exclude_pids: set[int], all_profiles: bool = False) -> li
                             pass
                     current_cmd = ""
         else:
+            # ``-A -ww`` (listing every process, unlimited line width) is
+            # portable across Linux/procps, BSD/Darwin, and busybox.  The
+            # old invocation passed ``eww`` as a positional argument — on
+            # Darwin that's rejected as "illegal argument" (#15225) and on
+            # FreeBSD the embedded ``e`` prepended environment variables
+            # to the command column, which broke ``split(None, 1)`` there
+            # (#9069).  Dropping the ``e`` also stops leaking env vars
+            # (API keys, tokens) into the command string we parse.
             result = subprocess.run(
-                ["ps", "-A", "eww", "-o", "pid=,command="],
+                ["ps", "-A", "-ww", "-o", "pid=,command="],
                 capture_output=True,
                 text=True,
                 timeout=10,

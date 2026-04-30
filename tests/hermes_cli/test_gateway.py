@@ -308,7 +308,9 @@ def test_find_gateway_pids_falls_back_to_pid_file_when_process_scan_fails(monkey
     monkeypatch.setattr("gateway.status.get_running_pid", lambda: 321)
 
     def fake_run(cmd, **kwargs):
-        if cmd[:4] == ["ps", "-A", "eww", "-o"]:
+        # ``-A -ww`` is the portable form since #15225 — earlier revisions
+        # passed ``eww`` which Darwin rejects as illegal.
+        if cmd[:4] == ["ps", "-A", "-ww", "-o"]:
             return SimpleNamespace(returncode=1, stdout="", stderr="ps failed")
         raise AssertionError(f"Unexpected command: {cmd}")
 
