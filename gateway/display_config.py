@@ -79,9 +79,7 @@ _PLATFORM_DEFAULTS: dict[str, dict[str, Any]] = {
     "discord":     _TIER_HIGH,
 
     # Tier 2 — edit support, often customer/workspace channels
-    # Slack: tool_progress off by default — Bolt posts cannot be edited like CLI;
-    # "new"/"all" spam permanent lines in channels (hermes-agent#14663).
-    "slack":           {**_TIER_MEDIUM, "tool_progress": "off"},
+    "slack":           _TIER_MEDIUM,
     "mattermost":      _TIER_MEDIUM,
     "matrix":          _TIER_MEDIUM,
     "feishu":          _TIER_MEDIUM,

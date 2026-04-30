@@ -1,7 +1,7 @@
 """Unit tests for tools/tool_backend_helpers.py.
 
 Tests cover:
-- managed_nous_tools_enabled() subscription-based gate
+- managed_nous_tools_enabled() feature flag
 - normalize_browser_cloud_provider() coercion
 - coerce_modal_mode() / normalize_modal_mode() validation
 - has_direct_modal_credentials() detection
@@ -22,57 +22,29 @@ from tools.tool_backend_helpers import (
     managed_nous_tools_enabled,
     normalize_browser_cloud_provider,
     normalize_modal_mode,
-    prefers_gateway,
     resolve_modal_backend_state,
     resolve_openai_audio_api_key,
 )
-
-
-def _raise_import():
-    raise ImportError("simulated missing module")
 
 
 # ---------------------------------------------------------------------------
 # managed_nous_tools_enabled
 # ---------------------------------------------------------------------------
 class TestManagedNousToolsEnabled:
-    """Subscription-based gate: True for paid Nous subscribers."""
+    """Feature flag driven by HERMES_ENABLE_NOUS_MANAGED_TOOLS."""
 
-    def test_disabled_when_not_logged_in(self, monkeypatch):
-        monkeypatch.setattr(
-            "hermes_cli.auth.get_nous_auth_status",
-            lambda: {},
-        )
+    def test_disabled_by_default(self, monkeypatch):
+        monkeypatch.delenv("HERMES_ENABLE_NOUS_MANAGED_TOOLS", raising=False)
         assert managed_nous_tools_enabled() is False
 
-    def test_disabled_for_free_tier(self, monkeypatch):
-        monkeypatch.setattr(
-            "hermes_cli.auth.get_nous_auth_status",
-            lambda: {"logged_in": True},
-        )
-        monkeypatch.setattr(
-            "hermes_cli.models.check_nous_free_tier",
-            lambda: True,
-        )
-        assert managed_nous_tools_enabled() is False
-
-    def test_enabled_for_paid_subscriber(self, monkeypatch):
-        monkeypatch.setattr(
-            "hermes_cli.auth.get_nous_auth_status",
-            lambda: {"logged_in": True},
-        )
-        monkeypatch.setattr(
-            "hermes_cli.models.check_nous_free_tier",
-            lambda: False,
-        )
+    @pytest.mark.parametrize("val", ["1", "true", "True", "yes"])
+    def test_enabled_when_truthy(self, monkeypatch, val):
+        monkeypatch.setenv("HERMES_ENABLE_NOUS_MANAGED_TOOLS", val)
         assert managed_nous_tools_enabled() is True
 
-    def test_returns_false_on_exception(self, monkeypatch):
-        """Should never crash — returns False on any exception."""
-        monkeypatch.setattr(
-            "hermes_cli.auth.get_nous_auth_status",
-            _raise_import,
-        )
+    @pytest.mark.parametrize("val", ["0", "false", "no", ""])
+    def test_disabled_when_falsy(self, monkeypatch, val):
+        monkeypatch.setenv("HERMES_ENABLE_NOUS_MANAGED_TOOLS", val)
         assert managed_nous_tools_enabled() is False
 
 
@@ -191,27 +163,6 @@ class TestHasDirectModalCredentials:
 
 
 # ---------------------------------------------------------------------------
-# prefers_gateway
-# ---------------------------------------------------------------------------
-class TestPrefersGateway:
-    """Honor bool-ish config values for tool gateway routing."""
-
-    def test_returns_false_for_quoted_false(self, monkeypatch):
-        monkeypatch.setattr(
-            "hermes_cli.config.load_config",
-            lambda: {"web": {"use_gateway": "false"}},
-        )
-        assert prefers_gateway("web") is False
-
-    def test_returns_true_for_quoted_true(self, monkeypatch):
-        monkeypatch.setattr(
-            "hermes_cli.config.load_config",
-            lambda: {"web": {"use_gateway": "true"}},
-        )
-        assert prefers_gateway("web") is True
-
-
-# ---------------------------------------------------------------------------
 # resolve_modal_backend_state
 # ---------------------------------------------------------------------------
 class TestResolveModalBackendState:
@@ -220,10 +171,10 @@ class TestResolveModalBackendState:
     @staticmethod
     def _resolve(monkeypatch, mode, *, has_direct, managed_ready, nous_enabled=False):
         """Helper to call resolve_modal_backend_state with feature flag control."""
-        monkeypatch.setattr(
-            "tools.tool_backend_helpers.managed_nous_tools_enabled",
-            lambda: nous_enabled,
-        )
+        if nous_enabled:
+            monkeypatch.setenv("HERMES_ENABLE_NOUS_MANAGED_TOOLS", "1")
+        else:
+            monkeypatch.setenv("HERMES_ENABLE_NOUS_MANAGED_TOOLS", "")
         return resolve_modal_backend_state(
             mode, has_direct=has_direct, managed_ready=managed_ready
         )

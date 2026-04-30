@@ -38,7 +38,6 @@ from typing import Any, Awaitable, Dict, Optional
 from urllib.parse import urlparse
 import httpx
 from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
-from hermes_constants import get_hermes_dir
 from tools.debug_helpers import DebugSession
 from tools.website_policy import check_website_access
 
@@ -57,9 +56,9 @@ def _resolve_download_timeout() -> float:
         except ValueError:
             pass
     try:
-        from hermes_cli.config import cfg_get, load_config
+        from hermes_cli.config import load_config
         cfg = load_config()
-        val = cfg_get(cfg, "auxiliary", "vision", "download_timeout")
+        val = cfg.get("auxiliary", {}).get("vision", {}).get("download_timeout")
         if val is not None:
             return float(val)
     except Exception:
@@ -436,7 +435,7 @@ async def vision_analyze_tool(
         Exception: If download fails, analysis fails, or API key is not set
         
     Note:
-        - For URLs, temporary images are stored under $HERMES_HOME/cache/vision/ and cleaned up
+        - For URLs, temporary images are stored in ./temp_vision_images/ and cleaned up
         - For local file paths, the file is used directly and NOT deleted
         - Supports common image formats (JPEG, PNG, GIF, WebP, etc.)
     """
@@ -484,7 +483,7 @@ async def vision_analyze_tool(
             if blocked:
                 raise PermissionError(blocked["message"])
             logger.info("Downloading image from URL...")
-            temp_dir = get_hermes_dir("cache/vision", "temp_vision_images")
+            temp_dir = Path("./temp_vision_images")
             temp_image_path = temp_dir / f"temp_image_{uuid.uuid4()}.jpg"
             await _download_image(image_url, temp_image_path)
             should_cleanup = True
@@ -554,23 +553,18 @@ async def vision_analyze_tool(
         # Read timeout from config.yaml (auxiliary.vision.timeout), default 120s.
         # Local vision models (llama.cpp, ollama) can take well over 30s.
         vision_timeout = 120.0
-        vision_temperature = 0.1
         try:
-            from hermes_cli.config import cfg_get, load_config
+            from hermes_cli.config import load_config
             _cfg = load_config()
-            _vision_cfg = cfg_get(_cfg, "auxiliary", "vision", default={})
-            _vt = _vision_cfg.get("timeout")
+            _vt = _cfg.get("auxiliary", {}).get("vision", {}).get("timeout")
             if _vt is not None:
                 vision_timeout = float(_vt)
-            _vtemp = _vision_cfg.get("temperature")
-            if _vtemp is not None:
-                vision_temperature = float(_vtemp)
         except Exception:
             pass
         call_kwargs = {
             "task": "vision",
             "messages": messages,
-            "temperature": vision_temperature,
+            "temperature": 0.1,
             "max_tokens": 2000,
             "timeout": vision_timeout,
         }
@@ -755,15 +749,7 @@ from tools.registry import registry, tool_error
 
 VISION_ANALYZE_SCHEMA = {
     "name": "vision_analyze",
-    "description": (
-        "Inspect an image from a URL, file path, or tool output when you need "
-        "closer detail than what's visible in the conversation. If the user's "
-        "image is already attached to the conversation and you can see it, "
-        "just answer directly — only call this tool for images referenced by "
-        "URL/path, images returned inside other tool results (browser "
-        "screenshots, search thumbnails), or when you need a deeper look at "
-        "a specific region the main model's vision may have missed."
-    ),
+    "description": "Analyze images using AI vision. Provides a comprehensive description and answers a specific question about the image content.",
     "parameters": {
         "type": "object",
         "properties": {

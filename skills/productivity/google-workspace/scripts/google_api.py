@@ -31,14 +31,7 @@ from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from pathlib import Path
 
-# Ensure sibling modules (_hermes_home) are importable when run standalone.
-_SCRIPTS_DIR = str(Path(__file__).resolve().parent)
-if _SCRIPTS_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPTS_DIR)
-
-from _hermes_home import get_hermes_home
-
-HERMES_HOME = get_hermes_home()
+HERMES_HOME = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes"))
 TOKEN_PATH = HERMES_HOME / "google_token.json"
 CLIENT_SECRET_PATH = HERMES_HOME / "google_client_secret.json"
 
@@ -52,13 +45,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/documents.readonly",
 ]
-
-
-def _normalize_authorized_user_payload(payload: dict) -> dict:
-    normalized = dict(payload)
-    if not normalized.get("type"):
-        normalized["type"] = "authorized_user"
-    return normalized
 
 
 def _ensure_authenticated():
@@ -184,12 +170,7 @@ def get_credentials():
     creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), _stored_token_scopes())
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
-        TOKEN_PATH.write_text(
-            json.dumps(
-                _normalize_authorized_user_payload(json.loads(creds.to_json())),
-                indent=2,
-            )
-        )
+        TOKEN_PATH.write_text(creds.to_json())
     if not creds.valid:
         print("Token is invalid. Re-run setup.", file=sys.stderr)
         sys.exit(1)

@@ -10,9 +10,8 @@ lifecycle instead of read-only search endpoints.
 Config via environment variables (profile-scoped via each profile's .env):
   OPENVIKING_ENDPOINT  — Server URL (default: http://127.0.0.1:1933)
   OPENVIKING_API_KEY   — API key (required for authenticated servers)
-  OPENVIKING_ACCOUNT   — Tenant account (default: default)
+  OPENVIKING_ACCOUNT   — Tenant account (default: root)
   OPENVIKING_USER      — Tenant user (default: default)
-  OPENVIKING_AGENT   — Tenant agent (default: hermes)
 
 Capabilities:
   - Automatic memory extraction on session commit (6 categories)
@@ -43,7 +42,7 @@ _TIMEOUT = 30.0
 # ---------------------------------------------------------------------------
 # Process-level atexit safety net — ensures pending sessions are committed
 # even if shutdown_memory_provider is never called (e.g. gateway crash,
-# SIGKILL, or exception in the session expiry watcher preventing shutdown).
+# SIGKILL, or exception in _async_flush_memories preventing shutdown).
 # ---------------------------------------------------------------------------
 _last_active_provider: Optional["OpenVikingMemoryProvider"] = None
 
@@ -81,12 +80,11 @@ class _VikingClient:
     """Thin HTTP client for the OpenViking REST API."""
 
     def __init__(self, endpoint: str, api_key: str = "",
-                 account: str = "", user: str = "", agent: str = ""):
+                 account: str = "", user: str = ""):
         self._endpoint = endpoint.rstrip("/")
         self._api_key = api_key
-        self._account = account or os.environ.get("OPENVIKING_ACCOUNT", "default")
+        self._account = account or os.environ.get("OPENVIKING_ACCOUNT", "root")
         self._user = user or os.environ.get("OPENVIKING_USER", "default")
-        self._agent = agent or os.environ.get("OPENVIKING_AGENT", "hermes")
         self._httpx = _get_httpx()
         if self._httpx is None:
             raise ImportError("httpx is required for OpenViking: pip install httpx")
@@ -96,7 +94,6 @@ class _VikingClient:
             "Content-Type": "application/json",
             "X-OpenViking-Account": self._account,
             "X-OpenViking-User": self._user,
-            "X-OpenViking-Agent": self._agent,
         }
         if self._api_key:
             h["X-API-Key"] = self._api_key
@@ -285,44 +282,20 @@ class OpenVikingMemoryProvider(MemoryProvider):
             },
             {
                 "key": "api_key",
-                "description": "OpenViking API key (leave blank for local dev mode)",
+                "description": "OpenViking API key",
                 "secret": True,
                 "env_var": "OPENVIKING_API_KEY",
-            },
-            {
-                "key": "account",
-                "description": "OpenViking tenant account ID ([default], used when local mode, OPENVIKING_API_KEY is empty)",
-                "default": "default",
-                "env_var": "OPENVIKING_ACCOUNT",
-            },
-            {
-                "key": "user",
-                "description": "OpenViking user ID within the account ([default], used when local mode, OPENVIKING_API_KEY is empty)",
-                "default": "default",
-                "env_var": "OPENVIKING_USER",
-            },
-            {
-                "key": "agent",
-                "description": "OpenViking agent ID within the account ([hermes], useful in multi-agent mode)",
-                "default": "hermes",
-                "env_var": "OPENVIKING_AGENT",
             },
         ]
 
     def initialize(self, session_id: str, **kwargs) -> None:
         self._endpoint = os.environ.get("OPENVIKING_ENDPOINT", _DEFAULT_ENDPOINT)
         self._api_key = os.environ.get("OPENVIKING_API_KEY", "")
-        self._account = os.environ.get("OPENVIKING_ACCOUNT", "default")
-        self._user = os.environ.get("OPENVIKING_USER", "default")
-        self._agent = os.environ.get("OPENVIKING_AGENT", "hermes")
         self._session_id = session_id
         self._turn_count = 0
 
         try:
-            self._client = _VikingClient(
-                self._endpoint, self._api_key,
-                account=self._account, user=self._user, agent=self._agent,
-            )
+            self._client = _VikingClient(self._endpoint, self._api_key)
             if not self._client.health():
                 logger.warning("OpenViking server at %s is not reachable", self._endpoint)
                 self._client = None
@@ -352,8 +325,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 "(abstract/overview/full), viking_browse to explore.\n"
                 "Use viking_remember to store facts, viking_add_resource to index URLs/docs."
             )
-        except Exception as e:
-            logger.warning("OpenViking system_prompt_block failed: %s", e)
+        except Exception:
             return (
                 "# OpenViking Knowledge Base\n"
                 f"Active. Endpoint: {self._endpoint}\n"
@@ -379,10 +351,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
 
         def _run():
             try:
-                client = _VikingClient(
-                    self._endpoint, self._api_key,
-                    account=self._account, user=self._user, agent=self._agent,
-                )
+                client = _VikingClient(self._endpoint, self._api_key)
                 resp = client.post("/api/v1/search/find", {
                     "query": query,
                     "top_k": 5,
@@ -417,10 +386,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
 
         def _sync():
             try:
-                client = _VikingClient(
-                    self._endpoint, self._api_key,
-                    account=self._account, user=self._user, agent=self._agent,
-                )
+                client = _VikingClient(self._endpoint, self._api_key)
                 sid = self._session_id
 
                 # Add user message
@@ -476,10 +442,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
 
         def _write():
             try:
-                client = _VikingClient(
-                    self._endpoint, self._api_key,
-                    account=self._account, user=self._user, agent=self._agent,
-                )
+                client = _VikingClient(self._endpoint, self._api_key)
                 # Add as a user message with memory context so the commit
                 # picks it up as an explicit memory during extraction
                 client.post(f"/api/v1/sessions/{self._session_id}/messages", {
@@ -527,46 +490,6 @@ class OpenVikingMemoryProvider(MemoryProvider):
             _last_active_provider = None
 
     # -- Tool implementations ------------------------------------------------
-
-    @staticmethod
-    def _unwrap_result(resp: Any) -> Any:
-        """Return OpenViking payload body regardless of wrapped/unwrapped shape."""
-        if isinstance(resp, dict) and "result" in resp:
-            return resp.get("result")
-        return resp
-
-    @staticmethod
-    def _normalize_summary_uri(uri: str) -> str:
-        """Map pseudo summary files to their parent directory URI for L0/L1 reads."""
-        if not uri:
-            return uri
-        for suffix in ("/.abstract.md", "/.overview.md", "/.read.md", "/.full.md"):
-            if uri.endswith(suffix):
-                return uri[: -len(suffix)] or "viking://"
-        return uri
-
-    def _is_directory_uri(self, uri: str) -> bool | None:
-        """Probe fs/stat to decide if a URI is a directory.
-
-        Returns True/False when the server answers cleanly, and None when the
-        probe itself fails (network error, unexpected shape). Callers should
-        treat None as "unknown" and fall back to the exception-based path.
-        """
-        try:
-            resp = self._client.get("/api/v1/fs/stat", params={"uri": uri})
-        except Exception:
-            return None
-        result = self._unwrap_result(resp)
-        if isinstance(result, dict):
-            if "isDir" in result:
-                return bool(result.get("isDir"))
-            if "is_dir" in result:
-                return bool(result.get("is_dir"))
-            if result.get("type") == "dir":
-                return True
-            if result.get("type") == "file":
-                return False
-        return None
 
     def _tool_search(self, args: dict) -> str:
         query = args.get("query", "")
@@ -616,72 +539,27 @@ class OpenVikingMemoryProvider(MemoryProvider):
             return tool_error("uri is required")
 
         level = args.get("level", "overview")
-
-        summary_level = level in ("abstract", "overview")
-        # OpenViking expects directory URIs for pseudo summary files
-        # (e.g. viking://user/hermes/.overview.md).
-        resolved_uri = self._normalize_summary_uri(uri) if summary_level else uri
-        used_fallback = False
-
-        # abstract/overview endpoints are directory-only on OpenViking
-        # (v0.3.x returns 500/412 for file URIs). When the caller asks for a
-        # summary level on a non-pseudo URI, probe fs/stat first and route
-        # file URIs straight to /content/read instead of eating a failing
-        # round-trip. The pseudo-URI path already points at a directory, so
-        # skip the probe there.
-        if summary_level and resolved_uri == uri:
-            is_dir = self._is_directory_uri(uri)
-            if is_dir is False:
-                resolved_uri = uri
-                used_fallback = True
-
-        # Map our level names to OpenViking GET endpoints.
-        endpoint = "/api/v1/content/read"
-        if not used_fallback:
-            if level == "abstract":
-                endpoint = "/api/v1/content/abstract"
-            elif level == "overview":
-                endpoint = "/api/v1/content/overview"
-
-        try:
-            resp = self._client.get(endpoint, params={"uri": resolved_uri})
-        except Exception:
-            # OpenViking may return HTTP 500 for abstract/overview reads on normal
-            # file URIs (mem_*.md). For those, gracefully fallback to full read.
-            if not summary_level or resolved_uri != uri or used_fallback:
-                raise
+        # Map our level names to OpenViking GET endpoints
+        if level == "abstract":
+            resp = self._client.get("/api/v1/content/abstract", params={"uri": uri})
+        elif level == "full":
             resp = self._client.get("/api/v1/content/read", params={"uri": uri})
-            used_fallback = True
+        else:  # overview
+            resp = self._client.get("/api/v1/content/overview", params={"uri": uri})
 
-        result = self._unwrap_result(resp)
-        # Content endpoints may return either plain strings or objects.
-        if isinstance(result, str):
-            content = result
-        elif isinstance(result, dict):
-            content = result.get("content", "") or result.get("text", "")
-        else:
-            content = ""
+        result = resp.get("result", "")
+        # result is a plain string from the content endpoints
+        content = result if isinstance(result, str) else result.get("content", "")
 
-        # Truncate long content to avoid flooding context.
-        max_len = 8000
-        if level == "overview":
-            max_len = 4000
-        elif level == "abstract":
-            max_len = 1200
+        # Truncate very long content to avoid flooding the context
+        if len(content) > 8000:
+            content = content[:8000] + "\n\n[... truncated, use a more specific URI or abstract level]"
 
-        if len(content) > max_len:
-            content = content[:max_len] + "\n\n[... truncated, use a more specific URI or full level]"
-
-        payload = {
+        return json.dumps({
             "uri": uri,
-            "resolved_uri": resolved_uri,
             "level": level,
             "content": content,
-        }
-        if used_fallback:
-            payload["fallback"] = "content/read"
-
-        return json.dumps(payload, ensure_ascii=False)
+        }, ensure_ascii=False)
 
     def _tool_browse(self, args: dict) -> str:
         action = args.get("action", "list")
@@ -691,27 +569,19 @@ class OpenVikingMemoryProvider(MemoryProvider):
         endpoint_map = {"tree": "/api/v1/fs/tree", "list": "/api/v1/fs/ls", "stat": "/api/v1/fs/stat"}
         endpoint = endpoint_map.get(action, "/api/v1/fs/ls")
         resp = self._client.get(endpoint, params={"uri": path})
-        result = self._unwrap_result(resp)
+        result = resp.get("result", {})
 
         # Format list/tree results for readability
-        if action in ("list", "tree"):
-            raw_entries = result
-            if isinstance(result, dict):
-                raw_entries = result.get("entries") or result.get("items") or result.get("children") or []
-
-            if isinstance(raw_entries, list):
-                entries = []
-                for e in raw_entries[:50]:  # cap at 50 entries
-                    uri = e.get("uri", "")
-                    name = e.get("rel_path") or e.get("name") or (uri.rsplit("/", 1)[-1] if uri else "")
-                    is_dir = bool(e.get("isDir") or e.get("is_dir") or e.get("type") == "dir")
-                    entries.append({
-                        "name": name,
-                        "uri": uri,
-                        "type": "dir" if is_dir else "file",
-                        "abstract": e.get("abstract", ""),
-                    })
-                return json.dumps({"path": path, "entries": entries}, ensure_ascii=False)
+        if action in ("list", "tree") and isinstance(result, list):
+            entries = []
+            for e in result[:50]:  # cap at 50 entries
+                entries.append({
+                    "name": e.get("rel_path", e.get("name", "")),
+                    "uri": e.get("uri", ""),
+                    "type": "dir" if e.get("isDir") else "file",
+                    "abstract": e.get("abstract", ""),
+                })
+            return json.dumps({"path": path, "entries": entries}, ensure_ascii=False)
 
         return json.dumps(result, ensure_ascii=False)
 

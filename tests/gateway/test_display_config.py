@@ -186,17 +186,11 @@ class TestPlatformDefaults:
             assert resolve_display_setting({}, plat, "tool_progress") == "all", plat
 
     def test_medium_tier_platforms(self):
-        """Mattermost, Matrix, Feishu, WhatsApp default to 'new' tool progress."""
+        """Slack, Mattermost, Matrix default to 'new' tool progress."""
         from gateway.display_config import resolve_display_setting
 
-        for plat in ("mattermost", "matrix", "feishu", "whatsapp"):
+        for plat in ("slack", "mattermost", "matrix", "feishu", "whatsapp"):
             assert resolve_display_setting({}, plat, "tool_progress") == "new", plat
-
-    def test_slack_defaults_tool_progress_off(self):
-        """Slack defaults to quiet tool progress (permanent chat noise otherwise)."""
-        from gateway.display_config import resolve_display_setting
-
-        assert resolve_display_setting({}, "slack", "tool_progress") == "off"
 
     def test_low_tier_platforms(self):
         """Signal, BlueBubbles, etc. default to 'off' tool progress."""
@@ -247,7 +241,7 @@ class TestConfigMigration:
                 },
             },
         }
-        config_path.write_text(yaml.dump(config), encoding="utf-8")
+        config_path.write_text(yaml.dump(config))
 
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         # Re-import to pick up the new HERMES_HOME
@@ -257,7 +251,7 @@ class TestConfigMigration:
 
         result = cfg_mod.migrate_config(interactive=False, quiet=True)
         # Re-read config
-        updated = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        updated = yaml.safe_load(config_path.read_text())
         platforms = updated.get("display", {}).get("platforms", {})
         assert platforms.get("signal", {}).get("tool_progress") == "off"
         assert platforms.get("telegram", {}).get("tool_progress") == "all"
@@ -274,7 +268,7 @@ class TestConfigMigration:
                 "platforms": {"telegram": {"tool_progress": "verbose"}},
             },
         }
-        config_path.write_text(yaml.dump(config), encoding="utf-8")
+        config_path.write_text(yaml.dump(config))
 
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         import importlib
@@ -282,7 +276,7 @@ class TestConfigMigration:
         importlib.reload(cfg_mod)
 
         cfg_mod.migrate_config(interactive=False, quiet=True)
-        updated = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        updated = yaml.safe_load(config_path.read_text())
         # Existing "verbose" should NOT be overwritten by legacy "off"
         assert updated["display"]["platforms"]["telegram"]["tool_progress"] == "verbose"
 

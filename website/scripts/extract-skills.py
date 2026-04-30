@@ -26,6 +26,7 @@ CATEGORY_LABELS = {
     "dogfood": "Dogfood",
     "domain": "Domain",
     "email": "Email",
+    "feeds": "Feeds",
     "gaming": "Gaming",
     "gifs": "GIFs",
     "github": "GitHub",

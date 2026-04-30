@@ -11,10 +11,10 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict
+from typing import TYPE_CHECKING, Dict, Optional
 
 if TYPE_CHECKING:
-    from gateway.platforms.base import MessageEvent
+    from gateway.platforms.base import BasePlatformAdapter, MessageEvent
 
 logger = logging.getLogger(__name__)
 
@@ -49,23 +49,11 @@ class MessageDeduplicator:
             return False
         now = time.time()
         if msg_id in self._seen:
-            if now - self._seen[msg_id] < self._ttl:
-                return True
-            # Entry has expired — remove it and treat as new
-            del self._seen[msg_id]
+            return True
         self._seen[msg_id] = now
         if len(self._seen) > self._max_size:
             cutoff = now - self._ttl
             self._seen = {k: v for k, v in self._seen.items() if v > cutoff}
-            if len(self._seen) > self._max_size:
-                # TTL pruning alone does not cap the cache when every entry is
-                # still fresh. Keep the newest entries so the helper's
-                # max_size bound is enforced under sustained traffic.
-                newest = sorted(
-                    self._seen.items(),
-                    key=lambda item: item[1],
-                )[-self._max_size:]
-                self._seen = dict(newest)
         return False
 
     def clear(self):
