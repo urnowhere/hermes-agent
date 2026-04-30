@@ -841,6 +841,11 @@ _NPM_LOCK_RUNTIME_KEYS = frozenset({"ideallyInert"})
 def _tui_need_npm_install(root: Path) -> bool:
     """True when @hermes/ink is missing or node_modules is behind package-lock.json.
 
+    Prebuilt bundle mode: when ``dist/entry.js`` exists and there is no
+    ``package-lock.json`` (nix install layout only ships ``dist/`` +
+    ``package.json``), skip reinstall entirely — the bundle is self-contained
+    and there is nothing to install.
+
     Compares ``package-lock.json`` against ``node_modules/.package-lock.json``
     (npm's hidden lockfile) by **content**, not mtime: git checkouts and npm
     rewrites can bump the root lockfile's timestamp even when installed deps
@@ -858,10 +863,16 @@ def _tui_need_npm_install(root: Path) -> bool:
     we'd rather not force a reinstall for them. Falls back to mtime
     comparison if either lockfile is unparseable.
     """
+    lock = root / "package-lock.json"
+    entry = root / "dist" / "entry.js"
+    # Prebuilt self-contained bundle (nix / packaged release): no lockfile
+    # shipped, dist/entry.js is the single runtime artefact.
+    if entry.is_file() and not lock.is_file():
+        return False
+
     ink = root / "node_modules" / "@hermes" / "ink" / "package.json"
     if not ink.is_file():
         return True
-    lock = root / "package-lock.json"
     if not lock.is_file():
         return False
     marker = root / "node_modules" / ".package-lock.json"
@@ -911,9 +922,39 @@ def _find_bundled_tui(tui_dir: Path) -> Optional[Path]:
 
 
 def _tui_build_needed(tui_dir: Path) -> bool:
+    entry = tui_dir / "dist" / "entry.js"
+    # In the esbuild pipeline, ink is bundled into dist/entry.js directly.
+    # If the main bundle exists and is up to date with all source files,
+    # no separate ink rebuild is needed.
+    if entry.exists():
+        dist_m = entry.stat().st_mtime
+        skip = frozenset({"node_modules", "dist"})
+        stale = False
+        for dirpath, dirnames, filenames in os.walk(tui_dir, topdown=True):
+            dirnames[:] = [d for d in dirnames if d not in skip]
+            for fn in filenames:
+                if fn.endswith((".ts", ".tsx")):
+                    if os.path.getmtime(os.path.join(dirpath, fn)) > dist_m:
+                        stale = True
+                        break
+            if stale:
+                break
+        if not stale:
+            for meta in (
+                "package.json",
+                "package-lock.json",
+                "tsconfig.json",
+                "tsconfig.build.json",
+            ):
+                mp = tui_dir / meta
+                if mp.exists() and mp.stat().st_mtime > dist_m:
+                    stale = True
+                    break
+        if not stale:
+            return False
+
     if _hermes_ink_bundle_stale(tui_dir):
         return True
-    entry = tui_dir / "dist" / "entry.js"
     if not entry.exists():
         return True
     dist_m = entry.stat().st_mtime
