@@ -290,9 +290,21 @@ class TelegramAdapter(BasePlatformAdapter):
         # and any other slash-confirm prompts; see GatewayRunner._request_slash_confirm).
         self._slash_confirm_state: Dict[str, str] = {}
 
-    @staticmethod
-    def _is_callback_user_authorized(user_id: str) -> bool:
-        """Return whether a Telegram inline-button caller may perform gated actions."""
+    def _is_callback_user_authorized(self, user_id: str) -> bool:
+        """
+        Return whether a Telegram inline-button caller may perform gated actions.
+
+        Prefers the gateway's shared authorizer (which also consults the pairing
+        store and global allowlists) so button auth matches text-message auth.
+        Falls back to an env-only check when no authorizer is wired — the adapter
+        can be instantiated without a gateway in tests.
+        """
+        if self._user_authorizer is not None:
+            try:
+                return bool(self._user_authorizer(Platform.TELEGRAM, user_id))
+            except Exception:
+                logger.exception("Telegram callback authorizer raised; falling back to env check")
+
         allowed_csv = os.getenv("TELEGRAM_ALLOWED_USERS", "").strip()
         if not allowed_csv:
             return True

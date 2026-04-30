@@ -1177,7 +1177,8 @@ class BasePlatformAdapter(ABC):
         self._fatal_error_message: Optional[str] = None
         self._fatal_error_retryable = True
         self._fatal_error_handler: Optional[Callable[["BasePlatformAdapter"], Awaitable[None] | None]] = None
-        
+        self._user_authorizer: Optional[Callable[[Platform, str], bool]] = None
+
         # Track active message handlers per session for interrupt support.
         # _active_sessions stores the per-session interrupt Event; _session_tasks
         # maps session → the specific Task currently processing it so that
@@ -1353,12 +1354,24 @@ class BasePlatformAdapter(ABC):
     def set_session_store(self, session_store: Any) -> None:
         """
         Set the session store for checking active sessions.
-        
+
         Used by adapters that need to check if a thread/conversation
         has an active session before processing messages (e.g., Slack
         thread replies without explicit mentions).
         """
         self._session_store = session_store
+
+    def set_user_authorizer(self, authorizer: Callable[[Platform, str], bool]) -> None:
+        """
+        Set the shared authorization function used by gated interactive
+        elements (inline-button callbacks, slash commands on callback data).
+
+        Without this, adapters fall back to adapter-local env-only checks,
+        which can diverge from the main message-path auth (pairing store,
+        global allowlists, platform allow-all flags). Keeping a single
+        authorizer for both paths prevents that drift.
+        """
+        self._user_authorizer = authorizer
     
     @abstractmethod
     async def connect(self) -> bool:

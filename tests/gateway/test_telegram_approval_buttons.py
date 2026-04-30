@@ -358,3 +358,44 @@ class TestTelegramApprovalCallback:
         query.answer.assert_called_once()
         query.edit_message_text.assert_called_once()
         assert (tmp_path / ".update_response").read_text() == "n"
+
+    @pytest.mark.asyncio
+    async def test_callback_auth_delegates_to_injected_authorizer(self, tmp_path):
+        """
+        When the gateway injects an authorizer via set_user_authorizer, the
+        callback auth must delegate to it — not the env-only check. This
+        prevents button-auth from diverging from message-path auth (pairing
+        store + global allowlists live only on the gateway's check).
+        """
+        adapter = _make_adapter()
+        # Env says user 111 is the only authorized one — but the authorizer
+        # below will approve user 222 instead (simulating pairing-store approval).
+        calls = []
+
+        def fake_authorizer(platform, user_id):
+            calls.append((platform, user_id))
+            return user_id == "222"
+
+        adapter.set_user_authorizer(fake_authorizer)
+
+        query = AsyncMock()
+        query.data = "update_prompt:n"
+        query.message = MagicMock()
+        query.message.chat_id = 12345
+        query.from_user = MagicMock()
+        query.from_user.id = 222
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+
+        update = MagicMock()
+        update.callback_query = query
+        context = MagicMock()
+
+        with patch("hermes_constants.get_hermes_home", return_value=tmp_path):
+            with patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "111"}):
+                await adapter._handle_callback_query(update, context)
+
+        assert calls and calls[0][1] == "222"
+        query.answer.assert_called_once()
+        query.edit_message_text.assert_called_once()
+        assert (tmp_path / ".update_response").read_text() == "n"

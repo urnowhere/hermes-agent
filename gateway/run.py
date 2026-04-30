@@ -2564,6 +2564,7 @@ class GatewayRunner:
             adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
             adapter.set_session_store(self.session_store)
             adapter.set_busy_session_handler(self._handle_active_session_busy_message)
+            adapter.set_user_authorizer(self._is_user_id_authorized)
             
             # Try to connect
             logger.info("Connecting to %s...", platform.value)
@@ -2964,6 +2965,7 @@ class GatewayRunner:
                     adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
                     adapter.set_session_store(self.session_store)
                     adapter.set_busy_session_handler(self._handle_active_session_busy_message)
+                    adapter.set_user_authorizer(self._is_user_id_authorized)
 
                     success = await self._connect_adapter_with_timeout(adapter, platform)
                     if success:
@@ -3677,6 +3679,19 @@ class GatewayRunner:
                 check_ids.add(normalized_user_id)
 
         return bool(check_ids & allowed_ids)
+
+    def _is_user_id_authorized(self, platform: Platform, user_id: str) -> bool:
+        """
+        Auth check callable from platform adapter callbacks (inline button
+        clicks, etc.) that lack a full MessageEvent. Mirrors the main
+        message-path check in ``_is_user_authorized`` so gated interactive
+        elements can't diverge from text-message auth (pairing store,
+        global allowlists, platform allow-all flags).
+        """
+        if not user_id:
+            return False
+        source = SessionSource(platform=platform, chat_id="", user_id=str(user_id))
+        return self._is_user_authorized(source)
 
     def _get_unauthorized_dm_behavior(self, platform: Optional[Platform]) -> str:
         """Return how unauthorized DMs should be handled for a platform.
