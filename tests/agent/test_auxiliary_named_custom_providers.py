@@ -162,6 +162,62 @@ class TestResolveProviderClientNamedCustom:
         assert client is not None
         # no-key-required should be used
 
+    def test_named_custom_codex_wins_over_builtin_alias(self, tmp_path):
+        """A saved provider named codex should not be rewritten to openai-codex."""
+        _write_config(tmp_path, {
+            "model": {"default": "gpt-5.4", "provider": "codex"},
+            "custom_providers": [
+                {
+                    "name": "codex",
+                    "base_url": "http://127.0.0.1:8317/api/provider/codex",
+                    "api_key": "ccs-internal-managed",
+                    "model": "gpt-5.4",
+                },
+            ],
+        })
+        from agent.auxiliary_client import resolve_provider_client
+
+        client, model = resolve_provider_client("codex")
+
+        assert client is not None
+        assert model == "gpt-5.4"
+        assert "127.0.0.1:8317" in str(client.base_url)
+
+    def test_custom_prefixed_codex_preserves_custom_namespace(self, tmp_path):
+        """custom:codex is an explicit custom provider, not a Codex OAuth alias."""
+        _write_config(tmp_path, {
+            "model": {"default": "gpt-5.4", "provider": "custom:codex"},
+            "custom_providers": [
+                {
+                    "name": "codex",
+                    "base_url": "http://127.0.0.1:8317/api/provider/codex",
+                    "api_key": "ccs-internal-managed",
+                    "model": "gpt-5.4",
+                },
+            ],
+        })
+        from agent.auxiliary_client import resolve_provider_client
+
+        client, model = resolve_provider_client("custom:codex")
+
+        assert client is not None
+        assert model == "gpt-5.4"
+        assert "127.0.0.1:8317" in str(client.base_url)
+
+    def test_codex_alias_still_uses_builtin_without_custom_provider(self, tmp_path):
+        _write_config(tmp_path, {
+            "model": {"default": "gpt-5.4", "provider": "openai-codex"},
+        })
+        mock_client = MagicMock()
+        with patch("agent.auxiliary_client._try_codex",
+                   return_value=(mock_client, "gpt-5.2-codex")):
+            from agent.auxiliary_client import resolve_provider_client
+
+            client, model = resolve_provider_client("codex")
+
+        assert client is mock_client
+        assert model == "gpt-5.2-codex"
+
     def test_nonexistent_named_custom_falls_through(self, tmp_path):
         _write_config(tmp_path, {
             "model": {"default": "test"},

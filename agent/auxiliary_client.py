@@ -1944,6 +1944,7 @@ def resolve_provider_client(
     """
     _validate_proxy_env_urls()
     # Normalise aliases
+    requested_provider = (provider or "").strip()
     provider = _normalize_aux_provider(provider)
 
     def _needs_codex_wrap(client_obj, base_url_str: str, model_str: str) -> bool:
@@ -1995,6 +1996,98 @@ def resolve_provider_client(
             client_obj, final_model_str, api_key_str, base_url_str, api_mode,
         )
 
+    def _resolve_named_custom(provider_name: str):
+        """Resolve user-defined providers before built-in aliases win.
+
+        A saved custom provider can legitimately be named the same as a
+        convenient alias such as ``codex``.  The raw provider string must get a
+        chance to match config before the normalized ``openai-codex`` branch
+        looks for OAuth credentials.
+        """
+        try:
+            from hermes_cli.runtime_provider import _get_named_custom_provider
+            custom_entry = _get_named_custom_provider(provider_name)
+            if not custom_entry:
+                return None
+            custom_base = custom_entry.get("base_url", "").strip()
+            custom_key = custom_entry.get("api_key", "").strip()
+            custom_key_env = custom_entry.get("key_env", "").strip()
+            if not custom_key and custom_key_env:
+                custom_key = os.getenv(custom_key_env, "").strip()
+            custom_key = custom_key or "no-key-required"
+            # An explicit per-task api_mode override (from _resolve_task_provider_model)
+            # wins; otherwise fall back to what the provider entry declared.
+            entry_api_mode = (api_mode or custom_entry.get("api_mode") or "").strip()
+            if custom_base:
+                final_model = _normalize_resolved_model(
+                    model
+                    or custom_entry.get("model")
+                    or (main_runtime.get("model") if main_runtime else None)
+                    or _read_main_model()
+                    or "gpt-4o-mini",
+                    provider_name,
+                )
+                # anthropic_messages talks to the /anthropic surface directly;
+                # OpenAI-wire paths (chat_completions / codex_responses) need the
+                # /v1 equivalent.  Rewrite only on the OpenAI-wire path so the
+                # Anthropic fallback SDK still sees the original URL.
+                if entry_api_mode == "anthropic_messages":
+                    openai_base = custom_base
+                else:
+                    openai_base = _to_openai_base_url(custom_base)
+                _clean_base2, _dq2 = _extract_url_query_params(openai_base)
+                _extra2 = {"default_query": _dq2} if _dq2 else {}
+                logger.debug(
+                    "resolve_provider_client: named custom provider %r (%s, api_mode=%s)",
+                    provider_name, final_model, entry_api_mode or "chat_completions")
+                # anthropic_messages: route through the Anthropic Messages API
+                # via AnthropicAuxiliaryClient. Mirrors the anonymous-custom
+                # branch in _try_custom_endpoint(). See #15033.
+                if entry_api_mode == "anthropic_messages":
+                    try:
+                        from agent.anthropic_adapter import build_anthropic_client
+                        real_client = build_anthropic_client(custom_key, custom_base)
+                    except ImportError:
+                        logger.warning(
+                            "Named custom provider %r declares api_mode="
+                            "anthropic_messages but the anthropic SDK is not "
+                            "installed — falling back to OpenAI-wire.",
+                            provider_name,
+                        )
+                        # Fallback went OpenAI-wire after all — redo the query
+                        # extraction against the rewritten /v1 URL.
+                        _fallback_base = _to_openai_base_url(custom_base)
+                        _fb_clean, _fb_dq = _extract_url_query_params(_fallback_base)
+                        _fb_extra = {"default_query": _fb_dq} if _fb_dq else {}
+                        client = OpenAI(api_key=custom_key, base_url=_fb_clean, **_fb_extra)
+                        return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
+                                else (client, final_model))
+                    sync_anthropic = AnthropicAuxiliaryClient(
+                        real_client, final_model, custom_key, custom_base, is_oauth=False,
+                    )
+                    if async_mode:
+                        return AsyncAnthropicAuxiliaryClient(sync_anthropic), final_model
+                    return sync_anthropic, final_model
+                client = OpenAI(api_key=custom_key, base_url=_clean_base2, **_extra2)
+                # codex_responses or inherited auto-detect (via _wrap_if_needed).
+                # _wrap_if_needed reads the closed-over `api_mode` (the task-level
+                # override). Named-provider entry api_mode=codex_responses also
+                # flows through here.
+                if entry_api_mode == "codex_responses" and not isinstance(
+                    client, CodexAuxiliaryClient
+                ):
+                    client = CodexAuxiliaryClient(client, final_model)
+                else:
+                    client = _wrap_if_needed(client, final_model, openai_base, custom_key)
+                return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
+                        else (client, final_model))
+            logger.warning(
+                "resolve_provider_client: named custom provider %r has no base_url",
+                provider_name)
+            return None, None
+        except ImportError:
+            return None
+
     # ── Auto: try all providers in priority order ────────────────────
     if provider == "auto":
         client, resolved = _resolve_auto(main_runtime=main_runtime)
@@ -2042,6 +2135,13 @@ def resolve_provider_client(
         final_model = _normalize_resolved_model(model or default, provider)
         return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
                 else (client, final_model))
+
+    # Named custom providers must be resolved before built-in aliases such as
+    # ``codex`` route to OAuth-backed providers.  Using the raw request keeps
+    # explicit namespaced providers (``custom:codex``) authoritative.
+    named_custom = _resolve_named_custom(requested_provider)
+    if named_custom is not None:
+        return named_custom
 
     # ── OpenAI Codex (OAuth → Responses API) ─────────────────────────
     if provider == "openai-codex":
@@ -2120,88 +2220,9 @@ def resolve_provider_client(
         return None, None
 
     # ── Named custom providers (config.yaml providers dict / custom_providers list) ───
-    try:
-        from hermes_cli.runtime_provider import _get_named_custom_provider
-        custom_entry = _get_named_custom_provider(provider)
-        if custom_entry:
-            custom_base = custom_entry.get("base_url", "").strip()
-            custom_key = custom_entry.get("api_key", "").strip()
-            custom_key_env = custom_entry.get("key_env", "").strip()
-            if not custom_key and custom_key_env:
-                custom_key = os.getenv(custom_key_env, "").strip()
-            custom_key = custom_key or "no-key-required"
-            # An explicit per-task api_mode override (from _resolve_task_provider_model)
-            # wins; otherwise fall back to what the provider entry declared.
-            entry_api_mode = (api_mode or custom_entry.get("api_mode") or "").strip()
-            if custom_base:
-                final_model = _normalize_resolved_model(
-                    model
-                    or custom_entry.get("model")
-                    or (main_runtime.get("model") if main_runtime else None)
-                    or _read_main_model()
-                    or "gpt-4o-mini",
-                    provider,
-                )
-                # anthropic_messages talks to the /anthropic surface directly;
-                # OpenAI-wire paths (chat_completions / codex_responses) need the
-                # /v1 equivalent.  Rewrite only on the OpenAI-wire path so the
-                # Anthropic fallback SDK still sees the original URL.
-                if entry_api_mode == "anthropic_messages":
-                    openai_base = custom_base
-                else:
-                    openai_base = _to_openai_base_url(custom_base)
-                _clean_base2, _dq2 = _extract_url_query_params(openai_base)
-                _extra2 = {"default_query": _dq2} if _dq2 else {}
-                logger.debug(
-                    "resolve_provider_client: named custom provider %r (%s, api_mode=%s)",
-                    provider, final_model, entry_api_mode or "chat_completions")
-                # anthropic_messages: route through the Anthropic Messages API
-                # via AnthropicAuxiliaryClient. Mirrors the anonymous-custom
-                # branch in _try_custom_endpoint(). See #15033.
-                if entry_api_mode == "anthropic_messages":
-                    try:
-                        from agent.anthropic_adapter import build_anthropic_client
-                        real_client = build_anthropic_client(custom_key, custom_base)
-                    except ImportError:
-                        logger.warning(
-                            "Named custom provider %r declares api_mode="
-                            "anthropic_messages but the anthropic SDK is not "
-                            "installed — falling back to OpenAI-wire.",
-                            provider,
-                        )
-                        # Fallback went OpenAI-wire after all — redo the query
-                        # extraction against the rewritten /v1 URL.
-                        _fallback_base = _to_openai_base_url(custom_base)
-                        _fb_clean, _fb_dq = _extract_url_query_params(_fallback_base)
-                        _fb_extra = {"default_query": _fb_dq} if _fb_dq else {}
-                        client = OpenAI(api_key=custom_key, base_url=_fb_clean, **_fb_extra)
-                        return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
-                                else (client, final_model))
-                    sync_anthropic = AnthropicAuxiliaryClient(
-                        real_client, final_model, custom_key, custom_base, is_oauth=False,
-                    )
-                    if async_mode:
-                        return AsyncAnthropicAuxiliaryClient(sync_anthropic), final_model
-                    return sync_anthropic, final_model
-                client = OpenAI(api_key=custom_key, base_url=_clean_base2, **_extra2)
-                # codex_responses or inherited auto-detect (via _wrap_if_needed).
-                # _wrap_if_needed reads the closed-over `api_mode` (the task-level
-                # override). Named-provider entry api_mode=codex_responses also
-                # flows through here.
-                if entry_api_mode == "codex_responses" and not isinstance(
-                    client, CodexAuxiliaryClient
-                ):
-                    client = CodexAuxiliaryClient(client, final_model)
-                else:
-                    client = _wrap_if_needed(client, final_model, openai_base, custom_key)
-                return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
-                        else (client, final_model))
-            logger.warning(
-                "resolve_provider_client: named custom provider %r has no base_url",
-                provider)
-            return None, None
-    except ImportError:
-        pass
+    named_custom = _resolve_named_custom(provider)
+    if named_custom is not None:
+        return named_custom
 
     # ── API-key providers from PROVIDER_REGISTRY ─────────────────────
     try:
