@@ -225,6 +225,77 @@ class TestSessionOps:
         assert resp is None
 
     @pytest.mark.asyncio
+    async def test_load_session_replays_text_history_before_returning(self, agent):
+        mock_conn = MagicMock(spec=acp.Client)
+        mock_conn.session_update = AsyncMock()
+        agent._conn = mock_conn
+
+        new_resp = await agent.new_session(cwd="/tmp/project")
+        state = agent.session_manager.get_session(new_resp.session_id)
+        state.history.extend([
+            {"role": "user", "content": "What changed in the parser?"},
+            {"role": "assistant", "content": "The parser now accepts nested arrays."},
+        ])
+        agent.session_manager.save_session(new_resp.session_id)
+        mock_conn.session_update.reset_mock()
+
+        resp = await agent.load_session(cwd="/tmp/project", session_id=new_resp.session_id)
+
+        assert isinstance(resp, LoadSessionResponse)
+        assert mock_conn.session_update.await_count == 2
+        updates = [call.kwargs["update"] for call in mock_conn.session_update.await_args_list]
+        assert updates[0].session_update == "user_message_chunk"
+        assert updates[0].content.text == "What changed in the parser?"
+        assert updates[1].session_update == "agent_message_chunk"
+        assert updates[1].content.text == "The parser now accepts nested arrays."
+
+    @pytest.mark.asyncio
+    async def test_load_session_restores_history_for_next_prompt(self, tmp_path):
+        db = SessionDB(tmp_path / "state.db")
+        first_manager = SessionManager(agent_factory=lambda: MagicMock(name="FirstAgent"), db=db)
+        original = first_manager.create_session(cwd="/tmp/project")
+        original_history = [
+            {"role": "user", "content": "Yesterday I told you the parser accepts TOML."},
+            {"role": "assistant", "content": "I will remember that parser detail."},
+        ]
+        original.history.extend(original_history)
+        first_manager.save_session(original.session_id)
+
+        db.close()
+        restored_db = SessionDB(tmp_path / "state.db")
+        second_manager = SessionManager(agent_factory=lambda: MagicMock(name="RestoredAgent"), db=restored_db)
+        acp_agent = HermesACPAgent(session_manager=second_manager)
+        mock_conn = MagicMock(spec=acp.Client)
+        mock_conn.session_update = AsyncMock()
+        acp_agent._conn = mock_conn
+
+        resp = await acp_agent.load_session(cwd="/tmp/project", session_id=original.session_id)
+
+        assert isinstance(resp, LoadSessionResponse)
+        replayed = [call.kwargs["update"] for call in mock_conn.session_update.await_args_list]
+        assert [update.content.text for update in replayed] == [
+            "Yesterday I told you the parser accepts TOML.",
+            "I will remember that parser detail.",
+        ]
+
+        restored = second_manager.get_session(original.session_id)
+        assert restored.history == original_history
+        restored.agent.run_conversation = MagicMock(return_value={
+            "final_response": "You told me the parser accepts TOML.",
+            "messages": original_history + [
+                {"role": "user", "content": "Do you remember what I told you yesterday?"},
+                {"role": "assistant", "content": "You told me the parser accepts TOML."},
+            ],
+        })
+        mock_conn.session_update.reset_mock()
+
+        prompt = [TextContentBlock(type="text", text="Do you remember what I told you yesterday?")]
+        await acp_agent.prompt(prompt=prompt, session_id=original.session_id)
+
+        restored.agent.run_conversation.assert_called_once()
+        assert restored.agent.run_conversation.call_args.kwargs["conversation_history"] == original_history
+
+    @pytest.mark.asyncio
     async def test_resume_session_creates_new_if_missing(self, agent):
         resume_resp = await agent.resume_session(cwd="/tmp", session_id="nonexistent")
         assert isinstance(resume_resp, ResumeSessionResponse)

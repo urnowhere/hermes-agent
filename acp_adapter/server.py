@@ -404,9 +404,28 @@ class HermesACPAgent(acp.Agent):
             logger.warning("load_session: session %s not found", session_id)
             return None
         await self._register_session_mcp_servers(state, mcp_servers)
+        await self._replay_session_history(state)
         logger.info("Loaded session %s", session_id)
         self._schedule_available_commands_update(session_id)
         return LoadSessionResponse(models=self._build_model_state(state))
+
+    async def _replay_session_history(self, state: SessionState) -> None:
+        """Replay text conversation history to the ACP client during session/load."""
+        if not self._conn:
+            return
+
+        for msg in state.history:
+            role = msg.get("role")
+            content = msg.get("content")
+            if not isinstance(content, str) or not content:
+                continue
+            if role == "user":
+                update = acp.update_user_message_text(content)
+            elif role == "assistant":
+                update = acp.update_agent_message_text(content)
+            else:
+                continue
+            await self._conn.session_update(session_id=state.session_id, update=update)
 
     async def resume_session(
         self,
