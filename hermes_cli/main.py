@@ -7714,11 +7714,10 @@ def cmd_profile(args):
             if collision:
                 print(f"Error: {collision}")
                 sys.exit(1)
-            wrapper_path = create_wrapper_script(alias_name)
+            wrapper_path = create_wrapper_script(
+                alias_name, profile=name if custom_name else None
+            )
             if wrapper_path:
-                # If custom name, write the profile name into the wrapper
-                if custom_name:
-                    wrapper_path.write_text(f'#!/bin/sh\nexec hermes -p {name} "$@"\n')
                 print(f"✓ Alias created: {wrapper_path}")
                 if not _is_wrapper_dir_in_path():
                     print(f"⚠ {_get_wrapper_dir()} is not in your PATH.")
@@ -7834,48 +7833,60 @@ def cmd_logs(args):
     )
 
 
+def _cli_prog() -> str:
+    """Return the program name to use in help output.
+
+    Profile wrappers set HERMES_CLI_NAME so that ``june --help`` shows
+    ``usage: june`` instead of ``usage: hermes``.  Falls back to the
+    basename of ``sys.argv[0]`` (handles ``python -m hermes_cli`` etc.),
+    then to the literal string ``"hermes"``.
+    """
+    return os.environ.get("HERMES_CLI_NAME") or Path(sys.argv[0]).name or "hermes"
+
+
 def main():
     """Main entry point for hermes CLI."""
+    _prog = _cli_prog()
     parser = argparse.ArgumentParser(
-        prog="hermes",
+        prog=_prog,
         description="Hermes Agent - AI assistant with tool-calling capabilities",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        epilog=f"""
 Examples:
-    hermes                        Start interactive chat
-    hermes chat -q "Hello"        Single query mode
-    hermes -c                     Resume the most recent session
-    hermes -c "my project"        Resume a session by name (latest in lineage)
-    hermes --resume <session_id>  Resume a specific session by ID
-    hermes setup                  Run setup wizard
-    hermes logout                 Clear stored authentication
-    hermes auth add <provider>    Add a pooled credential
-    hermes auth list              List pooled credentials
-    hermes auth remove <p> <t>    Remove pooled credential by index, id, or label
-    hermes auth reset <provider>  Clear exhaustion status for a provider
-    hermes model                  Select default model
-    hermes fallback [list]        Show fallback provider chain
-    hermes fallback add           Add a fallback provider (same picker as `hermes model`)
-    hermes fallback remove        Remove a fallback provider from the chain
-    hermes config                 View configuration
-    hermes config edit            Edit config in $EDITOR
-    hermes config set model gpt-4 Set a config value
-    hermes gateway                Run messaging gateway
-    hermes -s hermes-agent-dev,github-auth
-    hermes -w                     Start in isolated git worktree
-    hermes gateway install        Install gateway background service
-    hermes sessions list          List past sessions
-    hermes sessions browse        Interactive session picker
-    hermes sessions rename ID T   Rename/title a session
-    hermes logs                   View agent.log (last 50 lines)
-    hermes logs -f                Follow agent.log in real time
-    hermes logs errors            View errors.log
-    hermes logs --since 1h        Lines from the last hour
-    hermes debug share             Upload debug report for support
-    hermes update                 Update to latest version
+    {_prog}                        Start interactive chat
+    {_prog} chat -q "Hello"        Single query mode
+    {_prog} -c                     Resume the most recent session
+    {_prog} -c "my project"        Resume a session by name (latest in lineage)
+    {_prog} --resume <session_id>  Resume a specific session by ID
+    {_prog} setup                  Run setup wizard
+    {_prog} logout                 Clear stored authentication
+    {_prog} auth add <provider>    Add a pooled credential
+    {_prog} auth list              List pooled credentials
+    {_prog} auth remove <p> <t>    Remove pooled credential by index, id, or label
+    {_prog} auth reset <provider>  Clear exhaustion status for a provider
+    {_prog} model                  Select default model
+    {_prog} fallback [list]        Show fallback provider chain
+    {_prog} fallback add           Add a fallback provider (same picker as `{_prog} model`)
+    {_prog} fallback remove        Remove a fallback provider from the chain
+    {_prog} config                 View configuration
+    {_prog} config edit            Edit config in $EDITOR
+    {_prog} config set model gpt-4 Set a config value
+    {_prog} gateway                Run messaging gateway
+    {_prog} -s hermes-agent-dev,github-auth
+    {_prog} -w                     Start in isolated git worktree
+    {_prog} gateway install        Install gateway background service
+    {_prog} sessions list          List past sessions
+    {_prog} sessions browse        Interactive session picker
+    {_prog} sessions rename ID T   Rename/title a session
+    {_prog} logs                   View agent.log (last 50 lines)
+    {_prog} logs -f                Follow agent.log in real time
+    {_prog} logs errors            View errors.log
+    {_prog} logs --since 1h        Lines from the last hour
+    {_prog} debug share             Upload debug report for support
+    {_prog} update                 Update to latest version
 
 For more help on a command:
-    hermes <command> --help
+    {_prog} <command> --help
 """,
     )
 

@@ -30,6 +30,8 @@ from hermes_cli.profiles import (
     import_profile,
     generate_bash_completion,
     generate_zsh_completion,
+    create_wrapper_script,
+    remove_wrapper_script,
     _get_profiles_root,
     _get_default_hermes_home,
 )
@@ -985,3 +987,83 @@ class TestEdgeCases:
             delete_profile("coder", yes=True)
 
         assert get_active_profile() == "default"
+
+
+# ===================================================================
+# TestWrapperScriptContent (#15698)
+# ===================================================================
+
+class TestWrapperScriptContent:
+    """Wrapper scripts must set HERMES_CLI_NAME so --help shows the alias."""
+
+    def test_wrapper_contains_hermes_cli_name(self, profile_env, tmp_path):
+        wrapper_dir = tmp_path / ".local" / "bin"
+        with patch("hermes_cli.profiles._get_wrapper_dir", return_value=wrapper_dir):
+            path = create_wrapper_script("june")
+
+        assert path is not None
+        content = path.read_text()
+        assert 'HERMES_CLI_NAME="$(basename "$0")"' in content
+        assert 'exec hermes -p june' in content
+
+    def test_wrapper_is_self_aware_for_remove(self, profile_env, tmp_path):
+        """remove_wrapper_script must still identify wrappers created by the new template."""
+        wrapper_dir = tmp_path / ".local" / "bin"
+        with patch("hermes_cli.profiles._get_wrapper_dir", return_value=wrapper_dir):
+            path = create_wrapper_script("luna")
+            assert path is not None
+            removed = remove_wrapper_script("luna")
+
+        assert removed is True
+        assert not path.exists()
+
+    def test_wrapper_shebang_is_sh(self, profile_env, tmp_path):
+        wrapper_dir = tmp_path / ".local" / "bin"
+        with patch("hermes_cli.profiles._get_wrapper_dir", return_value=wrapper_dir):
+            path = create_wrapper_script("cid")
+
+        assert path.read_text().startswith("#!/bin/sh\n")
+
+    def test_custom_alias_includes_hermes_cli_name(self, profile_env, tmp_path):
+        """Custom alias (--name) must still set HERMES_CLI_NAME for --help to work."""
+        wrapper_dir = tmp_path / ".local" / "bin"
+        with patch("hermes_cli.profiles._get_wrapper_dir", return_value=wrapper_dir):
+            path = create_wrapper_script("myalias", profile="june")
+
+        assert path is not None
+        content = path.read_text()
+        assert 'HERMES_CLI_NAME="$(basename "$0")"' in content
+        assert "hermes -p june" in content
+        assert "myalias" not in content  # alias name is only the file name, not in script body
+
+    def test_custom_alias_targets_correct_profile(self, profile_env, tmp_path):
+        """When profile differs from alias name, exec must reference the profile, not the alias."""
+        wrapper_dir = tmp_path / ".local" / "bin"
+        with patch("hermes_cli.profiles._get_wrapper_dir", return_value=wrapper_dir):
+            path = create_wrapper_script("ws", profile="workstation")
+
+        content = path.read_text()
+        assert "hermes -p workstation" in content
+        assert "hermes -p ws " not in content
+
+    def test_wrapper_name_path_traversal_rejected(self, profile_env, tmp_path):
+        """Names with path separators must be rejected to prevent directory traversal."""
+        wrapper_dir = tmp_path / ".local" / "bin"
+        with patch("hermes_cli.profiles._get_wrapper_dir", return_value=wrapper_dir):
+            result_slash = create_wrapper_script("../evil")
+            result_abs = create_wrapper_script("/etc/cron.d/pwned")
+            result_dot = create_wrapper_script(".hidden")
+
+        assert result_slash is None
+        assert result_abs is None
+        assert result_dot is None
+
+    def test_profile_name_with_spaces_is_shell_quoted(self, profile_env, tmp_path):
+        """Profile names with whitespace or metacharacters must be shell-quoted in the script."""
+        wrapper_dir = tmp_path / ".local" / "bin"
+        with patch("hermes_cli.profiles._get_wrapper_dir", return_value=wrapper_dir):
+            path = create_wrapper_script("mybot", profile="my profile")
+
+        assert path is not None
+        content = path.read_text()
+        assert "'my profile'" in content  # shlex.quote wraps in single quotes

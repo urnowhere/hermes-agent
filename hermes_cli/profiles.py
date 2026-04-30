@@ -22,6 +22,7 @@ Usage::
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -247,11 +248,22 @@ def _is_wrapper_dir_in_path() -> bool:
     return wrapper_dir in os.environ.get("PATH", "").split(os.pathsep)
 
 
-def create_wrapper_script(name: str) -> Optional[Path]:
+def create_wrapper_script(name: str, profile: Optional[str] = None) -> Optional[Path]:
     """Create a shell wrapper script at ~/.local/bin/<name>.
+
+    ``profile`` is the Hermes profile passed to ``hermes -p``; defaults to
+    ``name`` when not provided.  The alias file name (``name``) must not
+    contain path separators or shell metacharacters.
 
     Returns the path to the created wrapper, or None if creation failed.
     """
+    if "/" in name or "\\" in name or name.startswith("."):
+        print(f"⚠ Invalid wrapper name {name!r}: must not contain path separators or start with '.'")
+        return None
+
+    target_profile = profile or name
+    quoted_profile = shlex.quote(target_profile)
+
     wrapper_dir = _get_wrapper_dir()
     try:
         wrapper_dir.mkdir(parents=True, exist_ok=True)
@@ -261,7 +273,9 @@ def create_wrapper_script(name: str) -> Optional[Path]:
 
     wrapper_path = wrapper_dir / name
     try:
-        wrapper_path.write_text(f'#!/bin/sh\nexec hermes -p {name} "$@"\n')
+        wrapper_path.write_text(
+            f'#!/bin/sh\nHERMES_CLI_NAME="$(basename "$0")" exec hermes -p {quoted_profile} "$@"\n'
+        )
         wrapper_path.chmod(wrapper_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
         return wrapper_path
     except OSError as e:
