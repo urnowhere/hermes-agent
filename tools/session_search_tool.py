@@ -263,13 +263,14 @@ async def _summarize_session(
 _HIDDEN_SESSION_SOURCES = ("tool",)
 
 
-def _list_recent_sessions(db, limit: int, current_session_id: str = None) -> str:
+def _list_recent_sessions(db, limit: int, current_session_id: str = None, user_id: str = None) -> str:
     """Return metadata for the most recent sessions (no LLM calls)."""
     try:
         sessions = db.list_sessions_rich(
             limit=limit + 5,
             exclude_sources=list(_HIDDEN_SESSION_SOURCES),
             order_by_last_active=True,
+            user_id=user_id,
         )  # fetch extra to skip current
 
         # Resolve current session lineage to exclude it
@@ -326,6 +327,7 @@ def session_search(
     limit: int = 3,
     db=None,
     current_session_id: str = None,
+    user_id: str = None,
 ) -> str:
     """
     Search past sessions and return focused summaries of matching conversations.
@@ -349,7 +351,7 @@ def session_search(
     # Recent sessions mode: when query is empty, return metadata for recent sessions.
     # No LLM calls — just DB queries for titles, previews, timestamps.
     if not query or not query.strip():
-        return _list_recent_sessions(db, limit, current_session_id)
+        return _list_recent_sessions(db, limit, current_session_id, user_id=user_id)
 
     query = query.strip()
 
@@ -364,6 +366,7 @@ def session_search(
             query=query,
             role_filter=role_list,
             exclude_sources=list(_HIDDEN_SESSION_SOURCES),
+            user_id=user_id,
             limit=50,  # Get more matches to find unique sessions
             offset=0,
         )

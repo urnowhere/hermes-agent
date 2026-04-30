@@ -1712,6 +1712,7 @@ class AIAgent:
                     self._memory_store = MemoryStore(
                         memory_char_limit=mem_config.get("memory_char_limit", 2200),
                         user_char_limit=mem_config.get("user_char_limit", 1375),
+                        user_id=getattr(self, '_user_id', None),
                     )
                     self._memory_store.load_from_disk()
             except Exception:
@@ -9300,6 +9301,7 @@ class AIAgent:
                 limit=function_args.get("limit", 3),
                 db=self._session_db,
                 current_session_id=self.session_id,
+                user_id=self._user_id,
             )
         elif function_name == "memory":
             target = function_args.get("target", "memory")
@@ -9901,6 +9903,7 @@ class AIAgent:
                         limit=function_args.get("limit", 3),
                         db=self._session_db,
                         current_session_id=self.session_id,
+                        user_id=self._user_id,
                     )
                 tool_duration = time.time() - tool_start_time
                 if self._should_emit_quiet_tool_messages():
