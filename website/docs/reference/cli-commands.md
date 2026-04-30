@@ -46,7 +46,7 @@ hermes [global-options] <command> [subcommand/options]
 | `hermes auth` | Manage credentials — add, list, remove, reset, set strategy. Handles OAuth flows for Codex/Nous/Anthropic. |
 | `hermes login` / `logout` | **Deprecated** — use `hermes auth` instead. |
 | `hermes status` | Show agent, auth, and platform status. |
-| `hermes cron` | Inspect and tick the cron scheduler. |
+| `hermes cron` | Inspect, preview, and tick the cron scheduler. |
 | `hermes webhook` | Manage dynamic webhook subscriptions for event-driven activation. |
 | `hermes hooks` | Inspect, approve, or remove shell-script hooks declared in `config.yaml`. |
 | `hermes doctor` | Diagnose config and dependency issues. |
@@ -321,7 +321,7 @@ hermes status [--all] [--deep]
 ## `hermes cron`
 
 ```bash
-hermes cron <list|create|edit|pause|resume|run|remove|status|tick>
+hermes cron <list|create|edit|pause|resume|preview|run|remove|status|tick>
 ```
 
 | Subcommand | Description |
@@ -331,6 +331,7 @@ hermes cron <list|create|edit|pause|resume|run|remove|status|tick>
 | `edit` | Update a job's schedule, prompt, name, delivery, repeat count, or attached skills. Supports `--clear-skills`, `--add-skill`, and `--remove-skill`. |
 | `pause` | Pause a job without deleting it. |
 | `resume` | Resume a paused job and compute its next future run. |
+| `preview` | Preview upcoming run times for a raw schedule or existing job without mutating state; pass exactly one of `--schedule` or `--job-id`, with `--next` defaulting to 5 (range: 1-20). |
 | `run` | Trigger a job on the next scheduler tick. |
 | `remove` | Delete a scheduled job. |
 | `status` | Check whether the cron scheduler is running. |
