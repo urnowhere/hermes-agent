@@ -6,8 +6,9 @@ from pathlib import Path
 from unittest.mock import patch, call
 
 import pytest
+import yaml
 
-from hermes_cli.config import set_config_value, config_command
+from hermes_cli.config import set_config_value, config_command, _set_nested
 
 
 @pytest.fixture(autouse=True)
@@ -172,3 +173,124 @@ class TestFalsyValues:
         config_command(args)
         config = _read_config(_isolated_hermes_home)
         assert "model" in config
+
+
+# ---------------------------------------------------------------------------
+# List-typed config fields — regression for #17876
+#
+# `hermes config set custom_providers.0.api_key X` used to overwrite the entire
+# `custom_providers` list with `{"0": {"api_key": "X"}}`, destroying every
+# other provider entry and every other field on the targeted provider. The fix
+# teaches `_set_nested` to navigate into existing lists by integer index.
+# ---------------------------------------------------------------------------
+
+class TestListNavigation:
+    def _seed_yaml(self, tmp_path: Path, payload: dict) -> Path:
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(yaml.safe_dump(payload, sort_keys=False))
+        return config_path
+
+    def test_set_nested_helper_indexes_into_existing_list(self):
+        config = {
+            "custom_providers": [
+                {"name": "a", "api_key": "old_a", "base_url": "https://a"},
+                {"name": "b", "api_key": "old_b", "base_url": "https://b"},
+            ]
+        }
+        _set_nested(config, "custom_providers.0.api_key", "new_a")
+
+        assert isinstance(config["custom_providers"], list)
+        assert len(config["custom_providers"]) == 2
+        assert config["custom_providers"][0] == {
+            "name": "a",
+            "api_key": "new_a",
+            "base_url": "https://a",
+        }
+        assert config["custom_providers"][1]["api_key"] == "old_b"
+
+    def test_set_nested_helper_replaces_whole_list_element(self):
+        config = {"custom_providers": [{"name": "a"}, {"name": "b"}]}
+        _set_nested(config, "custom_providers.1", {"name": "c", "api_key": "k"})
+
+        assert config["custom_providers"][0] == {"name": "a"}
+        assert config["custom_providers"][1] == {"name": "c", "api_key": "k"}
+
+    def test_set_nested_helper_preserves_dict_only_paths(self):
+        config = {"tts": {"provider": "old"}}
+        _set_nested(config, "tts.provider", "new")
+        assert config == {"tts": {"provider": "new"}}
+
+    def test_set_config_value_updates_list_element_field(self, _isolated_hermes_home):
+        self._seed_yaml(_isolated_hermes_home, {
+            "custom_providers": [
+                {"name": "a", "api_key": "old_a", "base_url": "https://a"},
+                {"name": "b", "api_key": "old_b", "base_url": "https://b"},
+            ],
+        })
+
+        set_config_value("custom_providers.0.api_key", "new_a")
+
+        result = yaml.safe_load((_isolated_hermes_home / "config.yaml").read_text())
+        assert isinstance(result["custom_providers"], list), \
+            "list-typed field must remain a list, not be flattened to a dict"
+        assert len(result["custom_providers"]) == 2, \
+            "second provider entry must survive the update"
+        assert result["custom_providers"][0] == {
+            "name": "a",
+            "api_key": "new_a",
+            "base_url": "https://a",
+        }
+        assert result["custom_providers"][1] == {
+            "name": "b",
+            "api_key": "old_b",
+            "base_url": "https://b",
+        }
+
+    def test_set_config_value_does_not_collapse_list_to_dict(self, _isolated_hermes_home):
+        """Regression guard: pre-fix behavior produced ``{"0": {...}}``."""
+        self._seed_yaml(_isolated_hermes_home, {
+            "custom_providers": [{"name": "a", "api_key": "old"}],
+        })
+
+        set_config_value("custom_providers.0.api_key", "new")
+
+        raw = (_isolated_hermes_home / "config.yaml").read_text()
+        assert "custom_providers:\n- " in raw or "custom_providers:\n  - " in raw, \
+            f"YAML must keep list syntax, got:\n{raw}"
+
+    def test_set_nested_rejects_non_integer_list_index(self):
+        config = {"custom_providers": [{"name": "a"}]}
+        with pytest.raises(ValueError, match="invalid list index 'foo'"):
+            _set_nested(config, "custom_providers.foo.api_key", "x")
+
+    def test_set_nested_rejects_setting_under_scalar(self):
+        config = {"custom_providers": ["just_a_string"]}
+        with pytest.raises(ValueError, match="cannot set 'api_key'"):
+            _set_nested(config, "custom_providers.0.api_key", "x")
+
+    def test_set_nested_rejects_deep_descent_into_scalar(self):
+        config = {"custom_providers": ["just_a_string"]}
+        with pytest.raises(ValueError, match="cannot descend into 'foo'"):
+            _set_nested(config, "custom_providers.0.foo.bar", "x")
+
+    def test_set_nested_out_of_range_index_raises_index_error(self):
+        config = {"custom_providers": [{"name": "a"}]}
+        with pytest.raises(IndexError):
+            _set_nested(config, "custom_providers.5.api_key", "x")
+
+    def test_set_config_value_invalid_index_exits_with_clean_message(
+        self, _isolated_hermes_home, capsys
+    ):
+        self._seed_yaml(_isolated_hermes_home, {
+            "custom_providers": [{"name": "a", "api_key": "old"}],
+        })
+
+        with pytest.raises(SystemExit):
+            set_config_value("custom_providers.foo.api_key", "x")
+
+        captured = capsys.readouterr()
+        assert "Error setting custom_providers.foo.api_key" in captured.out
+        assert "list components must be integers" in captured.out
+        # Original config must remain intact on error.
+        result = yaml.safe_load((_isolated_hermes_home / "config.yaml").read_text())
+        assert result["custom_providers"][0]["api_key"] == "old"
