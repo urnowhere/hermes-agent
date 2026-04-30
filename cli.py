@@ -2570,6 +2570,10 @@ class HermesCLI:
         cache_key = (provider, base_url, key[2] if len(key) > 2 else "", credential_label)
         api_key = getattr(agent, "api_key", None) or getattr(self, "api_key", None)
         try:
+            # Lazy import keeps CLI startup fast; account-limit status only needs
+            # the usage fetcher when the status cache refreshes.
+            from agent.account_usage import fetch_account_usage
+
             snapshot = fetch_account_usage(provider, base_url=base_url, api_key=api_key or None)
             formatted = self._format_account_limit_status(snapshot, credential_label=credential_label)
         except Exception:

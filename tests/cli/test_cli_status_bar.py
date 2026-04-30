@@ -250,7 +250,7 @@ class TestCLIStatusBar:
             ),
         )
 
-        with patch("cli.fetch_account_usage", return_value=snapshot) as fetch_mock:
+        with patch("agent.account_usage.fetch_account_usage", return_value=snapshot) as fetch_mock:
             key = cli_obj._account_limit_status_cache_key(cli_obj.agent)
             cli_obj._refresh_account_limit_status(cli_obj.agent, key)
 

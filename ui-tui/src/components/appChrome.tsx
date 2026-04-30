@@ -187,15 +187,15 @@ function AccountLimitHud({ accountLimits, t }: { accountLimits?: AccountLimitSta
   const credentialLabel = accountLimitCredentialLabel(accountLimits.credential_label)
 
   return (
-    <Text color={t.color.dim}>
+    <Text color={t.color.muted}>
       {' │ '}
-      {providerLabel ? <Text color={t.color.dim}>{providerLabel} </Text> : null}
-      {credentialLabel ? <Text color={t.color.dim}>{credentialLabel} </Text> : null}
+      {providerLabel ? <Text color={t.color.muted}>{providerLabel} </Text> : null}
+      {credentialLabel ? <Text color={t.color.muted}>{credentialLabel} </Text> : null}
       {accountLimits.windows.slice(0, 4).map((window, index) => {
         const color = accountLimitColor(window.level, t)
 
         return (
-          <Text color={t.color.dim} key={`${window.label}-${window.full_label ?? ''}`}>
+          <Text color={t.color.muted} key={`${window.label}-${window.full_label ?? ''}`}>
             {index > 0 ? ' • ' : ''}
             {window.label} <Text color={color}>{window.remaining_percent}%</Text>
           </Text>
