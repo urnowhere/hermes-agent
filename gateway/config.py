@@ -584,6 +584,17 @@ def load_gateway_config() -> GatewayConfig:
     4. Built-in defaults
     """
     _home = get_hermes_home()
+
+    # Ensure gateway config reads the same user-managed env file regardless of
+    # entrypoint. Without this, standalone cron delivery can see Telegram as
+    # disabled even when ~/.hermes/.env has a valid token, making delivery
+    # depend on whether some earlier startup path happened to source the env.
+    try:
+        from hermes_cli.env_loader import load_hermes_dotenv
+        load_hermes_dotenv(hermes_home=_home)
+    except Exception:
+        pass
+
     gw_data: dict = {}
 
     # Legacy fallback: gateway.json provides the base layer.
