@@ -18,6 +18,9 @@ All variables go in `~/.hermes/.env`. You can also set them with `hermes config 
 | `NOUS_INFERENCE_BASE_URL` | Override Nous inference endpoint directly |
 | `AI_GATEWAY_API_KEY` | Vercel AI Gateway API key ([ai-gateway.vercel.sh](https://ai-gateway.vercel.sh)) |
 | `AI_GATEWAY_BASE_URL` | Override AI Gateway base URL (default: `https://ai-gateway.vercel.sh/v1`) |
+| `LLM_GATEWAY_API_KEY` | LLM Gateway API key ([llmgateway.io](https://llmgateway.io)) |
+| `LLMGATEWAY_API_KEY` | Alias for `LLM_GATEWAY_API_KEY` |
+| `LLM_GATEWAY_BASE_URL` | Override LLM Gateway base URL (default: `https://api.llmgateway.io/v1`) |
 | `OPENAI_API_KEY` | API key for custom OpenAI-compatible endpoints (used with `OPENAI_BASE_URL`) |
 | `OPENAI_BASE_URL` | Base URL for custom endpoint (VLLM, SGLang, etc.) |
 | `COPILOT_GITHUB_TOKEN` | GitHub token for Copilot API — first priority (OAuth `gho_*` or fine-grained PAT `github_pat_*`; classic PATs `ghp_*` are **not supported**) |

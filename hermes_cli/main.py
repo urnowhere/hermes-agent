@@ -221,7 +221,7 @@ import time as _time
 from datetime import datetime
 
 from hermes_cli import __version__, __release_date__
-from hermes_constants import AI_GATEWAY_BASE_URL, OPENROUTER_BASE_URL
+from hermes_constants import AI_GATEWAY_BASE_URL, LLMGATEWAY_BASE_URL, OPENROUTER_BASE_URL
 
 logger = logging.getLogger(__name__)
 
@@ -1799,6 +1799,8 @@ def select_provider_and_model(args=None):
         _model_flow_openrouter(config, current_model)
     elif selected_provider == "ai-gateway":
         _model_flow_ai_gateway(config, current_model)
+    elif selected_provider == "llmgateway":
+        _model_flow_llmgateway(config, current_model)
     elif selected_provider == "nous":
         _model_flow_nous(config, current_model, args=args)
     elif selected_provider == "openai-codex":
@@ -2381,6 +2383,62 @@ def _model_flow_ai_gateway(config, current_model=""):
         save_config(cfg)
         deactivate_provider()
         print(f"Default model set to: {selected} (via Vercel AI Gateway)")
+    else:
+        print("No change.")
+
+
+def _model_flow_llmgateway(config, current_model=""):
+    """LLM Gateway provider: ensure API key, then pick model."""
+    from hermes_cli.auth import (
+        _prompt_model_selection,
+        _save_model_choice,
+        deactivate_provider,
+    )
+    from hermes_cli.config import get_env_value, save_env_value
+
+    api_key = (
+        get_env_value("LLM_GATEWAY_API_KEY")
+        or get_env_value("LLMGATEWAY_API_KEY")
+    )
+    if not api_key:
+        print("No LLM Gateway API key configured.")
+        print("Create an API key at https://llmgateway.io (Dashboard → Projects).")
+        print()
+        try:
+            import getpass
+
+            key = getpass.getpass("LLM Gateway API key (or Enter to cancel): ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            return
+        if not key:
+            print("Cancelled.")
+            return
+        save_env_value("LLM_GATEWAY_API_KEY", key)
+        print("API key saved.")
+        print()
+
+    from hermes_cli.models import llmgateway_model_ids
+
+    models_list = llmgateway_model_ids(force_refresh=True)
+
+    selected = _prompt_model_selection(models_list, current_model=current_model)
+    if selected:
+        _save_model_choice(selected)
+
+        from hermes_cli.config import load_config, save_config
+
+        cfg = load_config()
+        model = cfg.get("model")
+        if not isinstance(model, dict):
+            model = {"default": model} if model else {}
+            cfg["model"] = model
+        model["provider"] = "llmgateway"
+        model["base_url"] = LLMGATEWAY_BASE_URL
+        model["api_mode"] = "chat_completions"
+        save_config(cfg)
+        deactivate_provider()
+        print(f"Default model set to: {selected} (via LLM Gateway)")
     else:
         print("No change.")
 

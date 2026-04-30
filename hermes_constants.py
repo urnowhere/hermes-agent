@@ -293,3 +293,6 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MODELS_URL = f"{OPENROUTER_BASE_URL}/models"
 
 AI_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh/v1"
+
+LLMGATEWAY_BASE_URL = "https://api.llmgateway.io/v1"
+LLMGATEWAY_MODELS_URL = f"{LLMGATEWAY_BASE_URL}/models"

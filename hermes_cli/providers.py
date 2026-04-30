@@ -136,6 +136,13 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         transport="openai_chat",
         is_aggregator=True,
     ),
+    "llmgateway": HermesOverlay(
+        transport="openai_chat",
+        is_aggregator=True,
+        extra_env_vars=("LLM_GATEWAY_API_KEY", "LLMGATEWAY_API_KEY"),
+        base_url_override="https://api.llmgateway.io/v1",
+        base_url_env_var="LLM_GATEWAY_BASE_URL",
+    ),
     "opencode": HermesOverlay(
         transport="openai_chat",
         is_aggregator=True,
@@ -274,6 +281,11 @@ ALIASES: Dict[str, str] = {
     "aigateway": "vercel",
     "vercel-ai-gateway": "vercel",
 
+    # llmgateway.io (OpenAI-compatible aggregator)
+    "llm-gateway": "llmgateway",
+    "llmgateway.io": "llmgateway",
+    "llm_gateway": "llmgateway",
+
     # opencode (models.dev ID for OpenCode Zen)
     "opencode-zen": "opencode",
     "zen": "opencode",
@@ -361,6 +373,7 @@ _LABEL_OVERRIDES: Dict[str, str] = {
     "local": "Local endpoint",
     "bedrock": "AWS Bedrock",
     "ollama-cloud": "Ollama Cloud",
+    "llmgateway": "LLM Gateway",
 }
 
 
