@@ -5,7 +5,14 @@ without risk of circular imports.
 """
 
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
+
+_hermes_home_override: ContextVar[str | None] = ContextVar(
+    "hermes_home_override",
+    default=None,
+)
 
 
 def get_hermes_home() -> Path:
@@ -14,8 +21,31 @@ def get_hermes_home() -> Path:
     Reads HERMES_HOME env var, falls back to ~/.hermes.
     This is the single source of truth — all other copies should import this.
     """
+    override = _hermes_home_override.get()
+    if override:
+        return Path(override)
     val = os.environ.get("HERMES_HOME", "").strip()
     return Path(val) if val else Path.home() / ".hermes"
+
+
+def set_hermes_home_override(path: str | Path | None):
+    """Temporarily override HERMES_HOME for the current context only."""
+    return _hermes_home_override.set(str(path) if path else None)
+
+
+def reset_hermes_home_override(token) -> None:
+    """Reset a token returned by set_hermes_home_override()."""
+    _hermes_home_override.reset(token)
+
+
+@contextmanager
+def hermes_home_context(path: str | Path | None):
+    """Context manager for task/thread-local Hermes home routing."""
+    token = set_hermes_home_override(path)
+    try:
+        yield
+    finally:
+        reset_hermes_home_override(token)
 
 
 def get_default_hermes_root() -> Path:
@@ -35,12 +65,12 @@ def get_default_hermes_root() -> Path:
     Import-safe — no dependencies beyond stdlib.
     """
     native_home = Path.home() / ".hermes"
+    active_home = get_hermes_home()
     env_home = os.environ.get("HERMES_HOME", "")
-    if not env_home:
+    if not env_home and _hermes_home_override.get() is None:
         return native_home
-    env_path = Path(env_home)
     try:
-        env_path.resolve().relative_to(native_home.resolve())
+        active_home.resolve().relative_to(native_home.resolve())
         # HERMES_HOME is under ~/.hermes (normal or profile mode)
         return native_home
     except ValueError:
@@ -50,11 +80,11 @@ def get_default_hermes_root() -> Path:
     # Check if this is a profile path: <root>/profiles/<name>
     # If the immediate parent dir is named "profiles", the root is
     # the grandparent — this covers Docker profiles correctly.
-    if env_path.parent.name == "profiles":
-        return env_path.parent.parent
+    if active_home.parent.name == "profiles":
+        return active_home.parent.parent
 
     # Not a profile path — HERMES_HOME itself is the root
-    return env_path
+    return active_home
 
 
 def get_optional_skills_dir(default: Path | None = None) -> Path:

@@ -288,7 +288,12 @@ _ensure_ssl_certs()
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Resolve Hermes home directory (respects HERMES_HOME override)
-from hermes_constants import get_hermes_home
+from hermes_constants import (
+    get_hermes_home,
+    hermes_home_context,
+    reset_hermes_home_override,
+    set_hermes_home_override,
+)
 from utils import atomic_json_write, atomic_yaml_write, base_url_host_matches, is_truthy_value
 _hermes_home = get_hermes_home()
 
@@ -726,14 +731,15 @@ def _platform_config_key(platform: "Platform") -> str:
     return "cli" if platform == Platform.LOCAL else platform.value
 
 
-def _load_gateway_config() -> dict:
+def _load_gateway_config(hermes_home: Path | None = None) -> dict:
     """Load and parse ~/.hermes/config.yaml, returning {} on any error.
 
-    Uses the module-level ``_hermes_home`` (so tests that monkeypatch it
-    still see their fixture) and shares the mtime-keyed raw-yaml cache
-    from ``hermes_cli.config.read_raw_config`` when the paths match.
+    Uses the active ``get_hermes_home()`` value so topic-routed profile
+    contexts can read their own config while the gateway process stays in
+    its original home.
     """
-    config_path = _hermes_home / 'config.yaml'
+    active_home = hermes_home or get_hermes_home()
+    config_path = active_home / 'config.yaml'
     try:
         from hermes_cli.config import get_config_path, read_raw_config
         # Fast path: if _hermes_home agrees with the canonical config
@@ -1328,7 +1334,49 @@ class GatewayRunner:
             source,
             group_sessions_per_user=getattr(config, "group_sessions_per_user", True),
             thread_sessions_per_user=getattr(config, "thread_sessions_per_user", False),
+            profile=getattr(source, "agent_profile", None),
         )
+
+    def _profile_home_for_source(self, source: SessionSource) -> Optional[Path]:
+        profile = str(getattr(source, "agent_profile", None) or "").strip()
+        if not profile or profile == "default":
+            return None
+        try:
+            from hermes_cli.profiles import get_profile_dir, validate_profile_name
+            validate_profile_name(profile)
+        except Exception:
+            logger.warning("Ignoring invalid routed profile name: %r", profile)
+            return None
+
+        explicit = getattr(source, "agent_hermes_home", None)
+        if explicit:
+            explicit_path = Path(str(explicit)).expanduser()
+            if explicit_path.is_absolute() and not explicit_path.is_symlink():
+                try:
+                    return explicit_path.resolve(strict=False)
+                except OSError:
+                    return explicit_path
+            logger.warning(
+                "Ignoring unsafe profile_home %r for routed profile %s; using named profile directory",
+                explicit,
+                profile,
+            )
+
+        return get_profile_dir(profile)
+
+    def _session_store_for_source(self, source: SessionSource):
+        profile_home = self._profile_home_for_source(source)
+        if profile_home is None:
+            return self.session_store
+        cache = getattr(self, "_profile_session_stores", None)
+        if cache is None:
+            self._profile_session_stores = {}
+            cache = self._profile_session_stores
+        key = str(profile_home)
+        if key not in cache:
+            with hermes_home_context(profile_home):
+                cache[key] = SessionStore(profile_home / "sessions", self.config)
+        return cache[key]
 
     def _resolve_session_agent_runtime(
         self,
@@ -4308,6 +4356,10 @@ class GatewayRunner:
         7. Return response
         """
         source = event.source
+        if getattr(event, "agent_profile", None) and not getattr(source, "agent_profile", None):
+            source.agent_profile = event.agent_profile
+        if getattr(event, "agent_hermes_home", None) and not getattr(source, "agent_hermes_home", None):
+            source.agent_hermes_home = event.agent_hermes_home
 
         # Stale-code self-check (Issue #17648).  A gateway that survives
         # ``hermes update`` keeps old modules cached in sys.modules; the
@@ -5471,17 +5523,32 @@ class GatewayRunner:
 
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
         """Inner handler that runs under the _running_agents sentinel guard."""
+        _session_env_tokens = []
+        if getattr(event, "agent_profile", None) and not getattr(source, "agent_profile", None):
+            source.agent_profile = event.agent_profile
+        if getattr(event, "agent_hermes_home", None) and not getattr(source, "agent_hermes_home", None):
+            source.agent_hermes_home = event.agent_hermes_home
+        _profile_home = self._profile_home_for_source(source)
+        _profile_home_token = (
+            set_hermes_home_override(_profile_home)
+            if _profile_home is not None
+            else None
+        )
+        session_store = self._session_store_for_source(source)
+        session_db = getattr(session_store, "_db", None)
         _msg_start_time = time.time()
         _platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
         _msg_preview = (event.text or "")[:80].replace("\n", " ")
         logger.info(
-            "inbound message: platform=%s user=%s chat=%s msg=%r",
+            "inbound message: platform=%s user=%s chat=%s profile=%s msg=%r",
             _platform_name, source.user_name or source.user_id or "unknown",
-            source.chat_id or "unknown", _msg_preview,
+            source.chat_id or "unknown",
+            getattr(source, "agent_profile", None) or "main",
+            _msg_preview,
         )
 
         # Get or create session
-        session_entry = self.session_store.get_or_create_session(source)
+        session_entry = session_store.get_or_create_session(source)
         session_key = session_entry.session_key
         if getattr(session_entry, "was_auto_reset", False):
             # Treat auto-reset as a full conversation boundary — drop every
@@ -5545,7 +5612,7 @@ class GatewayRunner:
             # - the platform is excluded (e.g. api_server, webhook)
             # - the expired session had no activity (nothing was cleared)
             try:
-                policy = self.session_store.config.get_reset_policy(
+                policy = session_store.config.get_reset_policy(
                     platform=source.platform,
                     session_type=getattr(source, 'chat_type', 'dm'),
                 )
@@ -5629,7 +5696,7 @@ class GatewayRunner:
                 logger.warning("[Gateway] Failed to auto-load skill(s) %s: %s", _skill_names, e)
 
         # Load conversation history from transcript
-        history = self.session_store.load_transcript(session_entry.session_id)
+        history = session_store.load_transcript(session_entry.session_id)
         
         # -----------------------------------------------------------------
         # Session hygiene: auto-compress pathologically large transcripts
@@ -5853,9 +5920,9 @@ class GatewayRunner:
                                     _hyg_new_sid = _hyg_agent.session_id
                                     if _hyg_new_sid != session_entry.session_id:
                                         session_entry.session_id = _hyg_new_sid
-                                        self.session_store._save()
+                                        session_store._save()
 
-                                    self.session_store.rewrite_transcript(
+                                    session_store.rewrite_transcript(
                                         session_entry.session_id, _compressed
                                     )
                                     # Reset stored token count — transcript was rewritten
@@ -5940,7 +6007,7 @@ class GatewayRunner:
                         )
 
         # First-message onboarding -- only on the very first interaction ever
-        if not history and not self.session_store.has_any_sessions():
+        if not history and not session_store.has_any_sessions():
             context_prompt += (
                 "\n\n[System note: This is the user's very first message ever. "
                 "Briefly introduce yourself and mention that /help shows available commands. "
@@ -6035,6 +6102,7 @@ class GatewayRunner:
                 run_generation=run_generation,
                 event_message_id=event.message_id,
                 channel_prompt=event.channel_prompt,
+                session_db=session_db,
             )
 
             # Stop persistent typing indicator now that the agent is done
@@ -6095,7 +6163,7 @@ class GatewayRunner:
             if session_key:
                 self._clear_restart_failure_count(session_key)
                 try:
-                    self.session_store.clear_resume_pending(session_key)
+                    session_store.clear_resume_pending(session_key)
                 except Exception as _e:
                     logger.debug(
                         "clear_resume_pending failed for %s: %s",
@@ -6278,7 +6346,7 @@ class GatewayRunner:
                     "Auto-resetting session %s after compression exhaustion.",
                     session_entry.session_id,
                 )
-                self.session_store.reset_session(session_key)
+                session_store.reset_session(session_key)
                 self._evict_cached_agent(session_key)
                 self._session_model_overrides.pop(session_key, None)
                 self._set_session_reasoning_override(session_key, None)
@@ -6299,7 +6367,7 @@ class GatewayRunner:
                 pass  # Skip all transcript writes — don't grow a broken session
             elif not history:
                 tool_defs = agent_result.get("tools", [])
-                self.session_store.append_to_transcript(
+                session_store.append_to_transcript(
                     session_entry.session_id,
                     {
                         "role": "session_meta",
@@ -6321,7 +6389,7 @@ class GatewayRunner:
                 # message so the next message can load a transcript that
                 # reflects what was said.  Skip the assistant error text since
                 # it's a gateway-generated hint, not model output. (#7100)
-                self.session_store.append_to_transcript(
+                session_store.append_to_transcript(
                     session_entry.session_id,
                     {"role": "user", "content": message_text, "timestamp": ts},
                 )
@@ -6331,12 +6399,12 @@ class GatewayRunner:
 
                 # If no new messages found (edge case), fall back to simple user/assistant
                 if not new_messages:
-                    self.session_store.append_to_transcript(
+                    session_store.append_to_transcript(
                         session_entry.session_id,
                         {"role": "user", "content": message_text, "timestamp": ts}
                     )
                     if response:
-                        self.session_store.append_to_transcript(
+                        session_store.append_to_transcript(
                             session_entry.session_id,
                             {"role": "assistant", "content": response, "timestamp": ts}
                         )
@@ -6345,14 +6413,14 @@ class GatewayRunner:
                     # _flush_messages_to_session_db(), so skip the DB write here
                     # to prevent the duplicate-write bug (#860).  We still write
                     # to JSONL for backward compatibility and as a backup.
-                    agent_persisted = self._session_db is not None
+                    agent_persisted = session_db is not None
                     for msg in new_messages:
                         # Skip system messages (they're rebuilt each run)
                         if msg.get("role") == "system":
                             continue
                         # Add timestamp to each message for debugging
                         entry = {**msg, "timestamp": ts}
-                        self.session_store.append_to_transcript(
+                        session_store.append_to_transcript(
                             session_entry.session_id, entry,
                             skip_db=agent_persisted,
                         )
@@ -6360,7 +6428,7 @@ class GatewayRunner:
             # Token counts and model are now persisted by the agent directly.
             # Keep only last_prompt_tokens here for context-window tracking and
             # compression decisions.
-            self.session_store.update_session(
+            session_store.update_session(
                 session_entry.session_key,
                 last_prompt_tokens=agent_result.get("last_prompt_tokens", 0),
             )
@@ -6463,6 +6531,8 @@ class GatewayRunner:
         finally:
             # Restore session context variables to their pre-handler state
             self._clear_session_env(_session_env_tokens)
+            if _profile_home_token is not None:
+                reset_hermes_home_override(_profile_home_token)
 
     def _format_session_info(self) -> str:
         """Resolve current model config and return a formatted info block.
@@ -11579,6 +11649,7 @@ class GatewayRunner:
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None,
+        session_db: Any = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -12079,9 +12150,9 @@ class GatewayRunner:
             # Re-read .env and config for fresh credentials (gateway is long-lived,
             # keys may change without restart).
             try:
-                load_dotenv(_env_path, override=True, encoding="utf-8")
+                load_dotenv(get_hermes_home() / ".env", override=True, encoding="utf-8")
             except UnicodeDecodeError:
-                load_dotenv(_env_path, override=True, encoding="latin-1")
+                load_dotenv(get_hermes_home() / ".env", override=True, encoding="latin-1")
             except Exception:
                 pass
 
@@ -12272,7 +12343,7 @@ class GatewayRunner:
                     chat_type=source.chat_type,
                     thread_id=source.thread_id,
                     gateway_session_key=session_key,
-                    session_db=self._session_db,
+                    session_db=session_db if session_db is not None else self._session_db,
                     fallback_model=self._fallback_model,
                 )
                 if _cache_lock and _cache is not None:
@@ -13301,6 +13372,7 @@ class GatewayRunner:
                     _interrupt_depth=_interrupt_depth + 1,
                     event_message_id=next_message_id,
                     channel_prompt=next_channel_prompt,
+                    session_db=session_db,
                 )
         finally:
             # Stop progress sender, interrupt monitor, and notification task

@@ -32,6 +32,7 @@ _AUDIO_EXTS = frozenset({'.ogg', '.opus', '.mp3', '.wav', '.m4a', '.flac'})
 # delivered as a regular document.
 _TELEGRAM_AUDIO_ATTACHMENT_EXTS = frozenset({'.mp3', '.m4a'})
 _TELEGRAM_VOICE_EXTS = frozenset({'.ogg', '.opus'})
+_PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
 def _platform_name(platform) -> str:
@@ -909,6 +910,10 @@ class MessageEvent:
     # Per-channel ephemeral system prompt (e.g. Discord channel_prompts).
     # Applied at API call time and never persisted to transcript history.
     channel_prompt: Optional[str] = None
+
+    # Optional profile routing chosen by a platform adapter.
+    agent_profile: Optional[str] = None
+    agent_hermes_home: Optional[str] = None
     
     # Internal flag — set for synthetic events (e.g. background process
     # completion notifications) that must bypass user authorization checks.
@@ -1145,6 +1150,43 @@ def resolve_channel_prompt(
         prompt = str(prompt).strip()
         if prompt:
             return prompt
+    return None
+
+
+def resolve_topic_profile(
+    config_extra: dict,
+    chat_id: str,
+    thread_id: str | None,
+) -> dict | None:
+    """Resolve Telegram topic-to-profile routing from platform config."""
+    routes = config_extra.get("topic_profiles") or []
+    if not isinstance(routes, list):
+        return None
+
+    chat_id_s = str(chat_id)
+    thread_id_s = str(thread_id) if thread_id is not None else None
+    for route in routes:
+        if not isinstance(route, dict):
+            continue
+        match = route.get("match") or {}
+        if not isinstance(match, dict):
+            continue
+        if str(match.get("chat_id", "")) != chat_id_s:
+            continue
+        expected_thread = match.get("thread_id")
+        if expected_thread is not None and str(expected_thread) != thread_id_s:
+            continue
+        if expected_thread is None and thread_id_s is not None:
+            continue
+        profile = str(route.get("profile") or "").strip()
+        if not profile or (profile != "default" and not _PROFILE_ID_RE.match(profile)):
+            logger.warning("Ignoring invalid topic profile route: %r", profile)
+            continue
+        result = {"profile": profile}
+        home = route.get("profile_home") or route.get("home") or route.get("hermes_home")
+        if home:
+            result["profile_home"] = str(home)
+        return result
     return None
 
 
