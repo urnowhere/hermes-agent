@@ -29,6 +29,9 @@ class TestParseServiceTierConfig(unittest.TestCase):
         self.assertEqual(self._parse("fast"), "priority")
         self.assertEqual(self._parse("priority"), "priority")
 
+    def test_flex_maps_to_flex(self):
+        self.assertEqual(self._parse("flex"), "flex")
+
     def test_normal_disables_service_tier(self):
         self.assertIsNone(self._parse("normal"))
         self.assertIsNone(self._parse("off"))
@@ -240,6 +243,46 @@ class TestFastModeRouting(unittest.TestCase):
         route = cli_mod.HermesCLI._resolve_turn_agent_config(stub, "hi")
 
         assert route["runtime"]["provider"] == "openrouter"
+        assert route.get("request_overrides") is None
+
+
+    def test_turn_route_injects_direct_openai_flex_without_changing_runtime(self):
+        cli_mod = _import_cli()
+        stub = SimpleNamespace(
+            model="gpt-5.5",
+            api_key="primary-key",
+            base_url="https://api.openai.com/v1",
+            provider="custom",
+            api_mode="codex_responses",
+            acp_command=None,
+            acp_args=[],
+            _credential_pool=None,
+            service_tier="flex",
+        )
+
+        route = cli_mod.HermesCLI._resolve_turn_agent_config(stub, "hi")
+
+        assert route["runtime"]["provider"] == "custom"
+        assert route["runtime"]["api_mode"] == "codex_responses"
+        assert route["request_overrides"] == {"service_tier": "flex"}
+
+    def test_turn_route_does_not_send_flex_to_codex_oauth(self):
+        cli_mod = _import_cli()
+        stub = SimpleNamespace(
+            model="gpt-5.4",
+            api_key="primary-key",
+            base_url="https://chatgpt.com/backend-api/codex",
+            provider="openai-codex",
+            api_mode="codex_responses",
+            acp_command=None,
+            acp_args=[],
+            _credential_pool=None,
+            service_tier="flex",
+        )
+
+        route = cli_mod.HermesCLI._resolve_turn_agent_config(stub, "hi")
+
+        assert route["runtime"]["provider"] == "openai-codex"
         assert route.get("request_overrides") is None
 
 

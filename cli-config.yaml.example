@@ -547,6 +547,12 @@ agent:
   # primaries (default 3). The OpenAI SDK does its own low-level retries
   # underneath this wrapper — this is the Hermes-level loop.
   # api_max_retries: 3
+
+  # Request service tier for supported providers.
+  # Options: normal/standard/off (omit service_tier), fast/priority (priority),
+  # flex (OpenAI Flex Processing on direct api.openai.com routes only).
+  # Codex OAuth does not support flex; use fast/priority there.
+  # service_tier: normal
   
   # Enable verbose logging
   verbose: false

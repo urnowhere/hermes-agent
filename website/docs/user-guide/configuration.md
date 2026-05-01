@@ -704,7 +704,36 @@ Budget pressure is enabled by default. The agent sees warnings naturally as part
 
 When the iteration budget is fully exhausted, the CLI shows a notification to the user: `⚠ Iteration budget reached (90/90) — response may be incomplete`. If the budget runs out during active work, the agent generates a summary of what was accomplished before stopping.
 
-`agent.api_max_retries` controls how many times Hermes retries a provider API call on transient errors (rate limits, connection drops, 5xx) **before** fallback-provider switching engages. The default is `2` — three attempts total, matching the OpenAI SDK default. If you have [fallback providers](/docs/user-guide/features/fallback-providers) configured and want to fail over faster, drop this to `0` so the first transient error on your primary immediately hands off to the fallback instead of churning retries against the flaky endpoint.
+`agent.api_max_retries` controls how many times Hermes retries a provider API call on transient errors (rate limits, connection drops, 5xx) **before** fallback-provider switching engages. The default is `2` — three attempts total, matching the OpenAI SDK default. If you have [fallback providers](/docs/user-guide/features/fallback-providers) configured and want to fail over faster, drop this to `0` so the first transient error on your primary immediately hands off to the fallback instead of churning through retries on the failing provider.
+
+### Service Tier
+
+`agent.service_tier` controls provider-specific paid/priority request tiers when supported:
+
+```yaml
+agent:
+  service_tier: normal   # normal/standard/off = omit service_tier
+```
+
+Supported values:
+
+| Value | Behavior |
+|-------|----------|
+| `normal`, `standard`, `off`, unset | Omit request service tier. |
+| `fast`, `priority`, `on` | Use priority/fast mode on supported OpenAI or Anthropic routes. This is what `/fast` toggles. |
+| `flex` | Send `service_tier: flex` for direct `https://api.openai.com` routes. Codex OAuth (`chatgpt.com/backend-api/codex`) does not support Flex; use `fast`/`priority` there. |
+
+For Flex Processing on a direct OpenAI-compatible route, configure a direct OpenAI custom endpoint and set:
+
+```yaml
+model:
+  provider: custom
+  default: gpt-5.5
+  base_url: https://api.openai.com/v1
+  api_mode: codex_responses
+agent:
+  service_tier: flex
+```
 
 ### API Timeouts
 

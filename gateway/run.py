@@ -473,6 +473,7 @@ from gateway.whatsapp_identity import (
 
 
 logger = logging.getLogger(__name__)
+_UNSUPPORTED_FLEX_SERVICE_TIER_WARNED: set[str] = set()
 
 
 # Sentinel placed into _running_agents immediately when a session starts
@@ -1368,6 +1369,14 @@ class GatewayRunner:
             route["request_overrides"] = {}
             return route
 
+        if service_tier == "flex":
+            if base_url_host_matches(runtime.get("base_url") or "", "api.openai.com"):
+                route["request_overrides"] = {"service_tier": "flex"}
+            else:
+                self._warn_unsupported_flex_service_tier_once(runtime.get("base_url") or "")
+                route["request_overrides"] = {}
+            return route
+
         try:
             overrides = resolve_fast_mode_overrides(route["model"])
         except Exception:
@@ -1707,11 +1716,25 @@ class GatewayRunner:
             self._session_reasoning_overrides[session_key] = dict(reasoning_config)
 
     @staticmethod
+    def _warn_unsupported_flex_service_tier_once(base_url: str) -> None:
+        """Warn once when agent.service_tier=flex targets a non-direct-OpenAI route."""
+        key = (base_url or "").strip() or "<empty>"
+        if key in _UNSUPPORTED_FLEX_SERVICE_TIER_WARNED:
+            return
+        _UNSUPPORTED_FLEX_SERVICE_TIER_WARNED.add(key)
+        logger.warning(
+            "agent.service_tier=flex is only supported for direct api.openai.com routes; "
+            "omitting service_tier for base_url=%s",
+            key,
+        )
+
+    @staticmethod
     def _load_service_tier() -> str | None:
         """Load Priority Processing setting from config.yaml.
 
         Reads agent.service_tier from config.yaml. Accepted values mirror the CLI:
-        "fast"/"priority"/"on" => "priority", while "normal"/"off" disables it.
+        "fast"/"priority"/"on" => "priority", "flex" => "flex",
+        while "normal"/"off" disables it.
         Returns None when unset or unsupported.
         """
         raw = ""
@@ -1730,6 +1753,8 @@ class GatewayRunner:
             return None
         if value in {"fast", "priority", "on"}:
             return "priority"
+        if value == "flex":
+            return "flex"
         logger.warning("Unknown service_tier '%s', ignoring", raw)
         return None
 
@@ -8296,7 +8321,10 @@ class GatewayRunner:
                 return False
 
         if not args or args == "status":
-            status = "fast" if self._service_tier == "priority" else "normal"
+            if self._service_tier == "flex":
+                status = "flex"
+            else:
+                status = "fast" if self._service_tier == "priority" else "normal"
             return (
                 "⚡ Priority Processing\n\n"
                 f"Current mode: `{status}`\n\n"

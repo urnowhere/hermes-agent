@@ -34,6 +34,7 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
+_UNSUPPORTED_FLEX_SERVICE_TIER_WARNED: set[str] = set()
 
 # Suppress startup messages for clean CLI experience
 os.environ["HERMES_QUIET"] = "1"  # Our own modules
@@ -241,8 +242,24 @@ def _parse_service_tier_config(raw: str) -> str | None:
         return None
     if value in {"fast", "priority", "on"}:
         return "priority"
+    if value == "flex":
+        return "flex"
     logger.warning("Unknown service_tier '%s', ignoring", raw)
     return None
+
+
+def _warn_unsupported_flex_service_tier_once(base_url: str) -> None:
+    """Warn once when agent.service_tier=flex targets a non-direct-OpenAI route."""
+    key = (base_url or "").strip() or "<empty>"
+    if key in _UNSUPPORTED_FLEX_SERVICE_TIER_WARNED:
+        return
+    _UNSUPPORTED_FLEX_SERVICE_TIER_WARNED.add(key)
+    logger.warning(
+        "agent.service_tier=flex is only supported for direct api.openai.com routes; "
+        "omitting service_tier for base_url=%s",
+        key,
+    )
+
 
 def load_cli_config() -> Dict[str, Any]:
     """
@@ -3462,6 +3479,14 @@ class HermesCLI:
         service_tier = getattr(self, "service_tier", None)
         if not service_tier:
             route["request_overrides"] = None
+            return route
+
+        if service_tier == "flex":
+            if base_url_host_matches(runtime.get("base_url") or "", "api.openai.com"):
+                route["request_overrides"] = {"service_tier": "flex"}
+            else:
+                _warn_unsupported_flex_service_tier_once(runtime.get("base_url") or "")
+                route["request_overrides"] = None
             return route
 
         try:
@@ -7280,7 +7305,10 @@ class HermesCLI:
 
         parts = cmd.strip().split(maxsplit=1)
         if len(parts) < 2 or parts[1].strip().lower() == "status":
-            status = "fast" if self.service_tier == "priority" else "normal"
+            if self.service_tier == "flex":
+                status = "flex"
+            else:
+                status = "fast" if self.service_tier == "priority" else "normal"
             _cprint(f"  {_ACCENT}{feature_name}: {status}{_RST}")
             _cprint(f"  {_DIM}Usage: /fast [normal|fast|status]{_RST}")
             return

@@ -121,6 +121,52 @@ def test_turn_route_skips_priority_processing_for_unsupported_models():
     assert route["request_overrides"] == {}
 
 
+def test_turn_route_injects_direct_openai_flex_without_changing_runtime():
+    runner = _make_runner()
+    runner._service_tier = "flex"
+    runtime_kwargs = {
+        "api_key": "***",
+        "base_url": "https://api.openai.com/v1",
+        "provider": "custom",
+        "api_mode": "codex_responses",
+        "command": None,
+        "args": [],
+        "credential_pool": None,
+    }
+
+    route = gateway_run.GatewayRunner._resolve_turn_agent_config(runner, "hi", "gpt-5.5", runtime_kwargs)
+
+    assert route["runtime"]["provider"] == "custom"
+    assert route["runtime"]["api_mode"] == "codex_responses"
+    assert route["request_overrides"] == {"service_tier": "flex"}
+
+
+def test_turn_route_does_not_send_flex_to_codex_oauth():
+    runner = _make_runner()
+    runner._service_tier = "flex"
+    runtime_kwargs = {
+        "api_key": "***",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+        "provider": "openai-codex",
+        "api_mode": "codex_responses",
+        "command": None,
+        "args": [],
+        "credential_pool": None,
+    }
+
+    route = gateway_run.GatewayRunner._resolve_turn_agent_config(runner, "hi", "gpt-5.4", runtime_kwargs)
+
+    assert route["runtime"]["provider"] == "openai-codex"
+    assert route["request_overrides"] == {}
+
+
+def test_load_service_tier_accepts_flex(monkeypatch, tmp_path):
+    (tmp_path / "config.yaml").write_text("agent:\n  service_tier: flex\n", encoding="utf-8")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+
+    assert gateway_run.GatewayRunner._load_service_tier() == "flex"
+
+
 @pytest.mark.asyncio
 async def test_handle_fast_command_persists_config(monkeypatch, tmp_path):
     runner = _make_runner()
