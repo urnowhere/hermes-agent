@@ -127,6 +127,27 @@ class TestGeneratedSystemdUnits:
 
         assert "/home/test/.nvm/versions/node/v24.14.0/bin" in unit
 
+    def test_user_unit_includes_ld_library_path_when_set(self, monkeypatch):
+        monkeypatch.setenv("LD_LIBRARY_PATH", "/opt/cuda/lib64:/usr/local/cuda/lib64")
+
+        unit = gateway_cli.generate_systemd_unit(system=False)
+
+        assert 'Environment="LD_LIBRARY_PATH=/opt/cuda/lib64:/usr/local/cuda/lib64"' in unit
+
+    def test_user_unit_omits_ld_library_path_when_unset(self, monkeypatch):
+        monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+
+        unit = gateway_cli.generate_systemd_unit(system=False)
+
+        assert "LD_LIBRARY_PATH" not in unit
+
+    def test_system_unit_includes_ld_library_path_when_set(self, monkeypatch):
+        monkeypatch.setenv("LD_LIBRARY_PATH", "/opt/cuda/lib64")
+
+        unit = gateway_cli.generate_systemd_unit(system=True)
+
+        assert 'Environment="LD_LIBRARY_PATH=/opt/cuda/lib64"' in unit
+
     def test_system_unit_avoids_recursive_execstop_and_uses_extended_stop_timeout(self):
         unit = gateway_cli.generate_systemd_unit(system=True)
 
