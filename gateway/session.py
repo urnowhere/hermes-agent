@@ -632,7 +632,7 @@ def build_session_key(
       - Without identifiers, messages fall back to one session per platform/chat_type.
     """
     resolved_profile = str(profile or getattr(source, "agent_profile", None) or "").strip()
-    if resolved_profile != "default" and not _PROFILE_ID_RE.match(resolved_profile):
+    if resolved_profile and resolved_profile != "default" and not _PROFILE_ID_RE.match(resolved_profile):
         logger.warning("Ignoring invalid agent profile for session key: %r", resolved_profile)
         resolved_profile = ""
     prefix = (

@@ -249,6 +249,13 @@ def test_session_key_includes_valid_profile_and_ignores_invalid_profile():
     assert invalid == "agent:main:telegram:group:-1001:101"
 
 
+def test_session_key_treats_empty_profile_as_main_without_warning(caplog):
+    source = _source(agent_profile="")
+
+    assert build_session_key(source) == "agent:main:telegram:group:-1001:101"
+    assert "Ignoring invalid agent profile" not in caplog.text
+
+
 def test_session_source_roundtrip_preserves_agent_profile_fields(tmp_path):
     source = _source(
         agent_profile="vault-test",
