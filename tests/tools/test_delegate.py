@@ -111,8 +111,9 @@ class TestJudgeBestOfN(unittest.TestCase):
             {"task_index": 1, "summary": "Implementation B"},
             {"task_index": 2, "summary": "Implementation C"},
         ]
-        winner_idx = _judge_best_of_n(results, "Select best error handling")
+        winner_idx, winner_reasoning = _judge_best_of_n(results, "Select best error handling")
         self.assertEqual(winner_idx, 1)
+        self.assertEqual(winner_reasoning, "Better error handling")
         mock_call_llm.assert_called_once()
 
     @patch("agent.auxiliary_client.call_llm")
@@ -121,7 +122,7 @@ class TestJudgeBestOfN(unittest.TestCase):
             {"task_index": 0, "summary": "Implementation A"},
             {"task_index": 1, "summary": "Implementation B"},
         ]
-        winner_idx = _judge_best_of_n(results, "")
+        winner_idx, _ = _judge_best_of_n(results, "")
         self.assertIsNone(winner_idx)
         mock_call_llm.assert_not_called()
 
@@ -133,13 +134,13 @@ class TestJudgeBestOfN(unittest.TestCase):
             {"task_index": 0, "summary": "Implementation A"},
             {"task_index": 1, "summary": "Implementation B"},
         ]
-        winner_idx = _judge_best_of_n(results, "Select best")
+        winner_idx, _ = _judge_best_of_n(results, "Select best")
         self.assertIsNone(winner_idx)
         mock_call_llm.assert_called_once()
 
     def test_best_of_n_single_task_ignores_evaluator(self):
         results = [{"task_index": 0, "summary": "Only one"}]
-        winner_idx = _judge_best_of_n(results, "Select best")
+        winner_idx, _ = _judge_best_of_n(results, "Select best")
         self.assertIsNone(winner_idx)
 
     @patch("agent.auxiliary_client.call_llm")
@@ -153,7 +154,7 @@ class TestJudgeBestOfN(unittest.TestCase):
             {"task_index": 0, "summary": "Implementation A"},
             {"task_index": 1, "summary": "Implementation B"},
         ]
-        winner_idx = _judge_best_of_n(results, "Select best")
+        winner_idx, _ = _judge_best_of_n(results, "Select best")
         self.assertIsNone(winner_idx)
 
 
