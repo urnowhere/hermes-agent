@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Tool Call Display Test</title>
+    <style>
+        body { font-family: monospace; padding: 20px; }
+        .test { margin: 20px 0; padding: 10px; border: 1px solid #ccc; }
+        .before { background: #fee; }
+        .after { background: #efe; }
+    </style>
+</head>
+<body>
+    <h1>Tool Call Display Test</h1>
+
+    <div class="test before">
+        <h3>修复前（显示原始 XML）：</h3>
+        <pre>&lt;tool_call&gt;
+&lt;function=bash&gt;
+&lt;function=command&gt;
+ls -la /media/liu/文件/IDEWorkplaces/HermesAgent/douyin
+&lt;/function&gt;
+&lt;/function&gt;
+&lt;/tool_call&gt;</pre>
+    </div>
+
+    <div class="test after">
+        <h3>修复后（应该为空或显示结果）：</h3>
+        <div id="result"></div>
+    </div>
+
+    <script>
+        // 复制修复后的函数
+        function _stripXmlToolCallsDisplay(s){
+          if(!s) return s;
+          const hasToolCalls = s.toLowerCase().indexOf('<function_calls>') !== -1 || s.toLowerCase().indexOf('<tool_call>') !== -1;
+          if(!hasToolCalls) return s;
+          s=s.replace(/<function_calls>[\s\S]*?<\/function_calls>/gi,'');
+          s=s.replace(/<function_calls>[\s\S]*$/i,'');
+          s=s.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi,'');
+          s=s.replace(/<tool_call>[\s\S]*$/i,'');
+          return s.trim();
+        }
+
+        const testInput = `<tool_call>
+<function=bash>
+<function=command>
+ls -la /media/liu/文件/IDEWorkplaces/HermesAgent/douyin
+</function>
+</function>
+</tool_call>`;
+
+        const result = _stripXmlToolCallsDisplay(testInput);
+        document.getElementById('result').innerHTML = result ? `<pre>${result}</pre>` : '<p style="color: green;">✅ 成功过滤！内容为空。</p>';
+    </script>
+</body>
+</html>

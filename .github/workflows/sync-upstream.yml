@@ -1,0 +1,146 @@
+name: Sync Upstream Daily
+
+on:
+  schedule:
+    - cron: '17 2 * * *'  # 每天 02:17 UTC (北京时间 10:17)
+  workflow_dispatch:      # 允许手动触发
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add remotes
+        run: |
+          git remote add upstream https://github.com/NousResearch/hermes-agent.git || true
+          git remote add webui https://github.com/nesquena/hermes-webui.git || true
+          git fetch --all
+
+      - name: Check for updates
+        id: check
+        run: |
+          UPSTREAM_COMMITS=$(git rev-list HEAD..upstream/main --count 2>/dev/null || echo "0")
+          echo "upstream_commits=$UPSTREAM_COMMITS" >> $GITHUB_OUTPUT
+
+          # 检查 webui 是否有更新（通过比较本地 web_chat_dist 和 webui 仓库）
+          WEBUI_LOCAL="/tmp/hermes-webui"
+          if [ ! -d "$WEBUI_LOCAL" ]; then
+            git clone --depth 1 https://github.com/nesquena/hermes-webui.git "$WEBUI_LOCAL"
+            echo "webui_has_updates=true" >> $GITHUB_OUTPUT
+          else
+            cd "$WEBUI_LOCAL"
+            git pull origin master --quiet
+            cd -
+            # 简单检查：如果 webui 仓库有新提交，就认为有更新
+            echo "webui_has_updates=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run sync script
+        if: steps.check.outputs.upstream_commits > 0 || steps.check.outputs.webui_has_updates == 'true'
+        id: sync
+        continue-on-error: true
+        run: |
+          chmod +x scripts/sync-upstream.sh
+
+          # 克隆 webui 到临时目录（脚本需要）
+          WEBUI_LOCAL="/tmp/hermes-webui"
+          if [ ! -d "$WEBUI_LOCAL" ]; then
+            git clone https://github.com/nesquena/hermes-webui.git "$WEBUI_LOCAL"
+          fi
+
+          # 修改脚本中的 WEBUI_LOCAL 路径
+          sed -i 's|WEBUI_LOCAL="/media/liu/文件/IDEWorkplaces/GitHub/hermes-webui"|WEBUI_LOCAL="/tmp/hermes-webui"|g' scripts/sync-upstream.sh
+
+          # 运行同步脚本
+          ./scripts/sync-upstream.sh 2>&1 | tee sync.log
+
+          # 检查是否成功
+          if [ $? -eq 0 ]; then
+            echo "sync_success=true" >> $GITHUB_OUTPUT
+          else
+            echo "sync_success=false" >> $GITHUB_OUTPUT
+            cat sync.log
+          fi
+
+      - name: Create success notification
+        if: steps.sync.outputs.sync_success == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const upstreamCommits = '${{ steps.check.outputs.upstream_commits }}';
+
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '✅ 上游同步成功 - ' + new Date().toISOString().split('T')[0],
+              body: `自动同步已完成：
+
+              - **上游提交**: ${upstreamCommits} 个新提交
+              - **WebUI**: 已同步最新版本
+              - **分支**: ${context.ref.replace('refs/heads/', '')}
+              - **提交**: ${context.sha.substring(0, 7)}
+
+              查看更改：${context.payload.repository.html_url}/commits/${context.ref.replace('refs/heads/', '')}`,
+              labels: ['sync', 'automated', 'success']
+            });
+
+      - name: Create failure notification
+        if: steps.sync.outputs.sync_success == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let logContent = '';
+            try {
+              logContent = fs.readFileSync('sync.log', 'utf8');
+            } catch (e) {
+              logContent = '无法读取日志文件';
+            }
+
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '⚠️ 上游同步失败 - ' + new Date().toISOString().split('T')[0],
+              body: `自动同步遇到问题，需要手动处理：
+
+              **错误日志**：
+              \`\`\`
+              ${logContent.substring(0, 2000)}
+              \`\`\`
+
+              **可能的原因**：
+              - 合并冲突
+              - 测试失败
+              - 网络问题
+
+              **手动修复步骤**：
+              1. 本地运行 \`./scripts/sync-upstream.sh\`
+              2. 解决冲突（如果有）
+              3. 手动推送
+
+              **分支**: ${context.ref.replace('refs/heads/', '')}`,
+              labels: ['sync', 'automated', 'needs-attention']
+            });
+
+      - name: Upload sync log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-log-${{ github.run_number }}
+          path: sync.log
+          retention-days: 30

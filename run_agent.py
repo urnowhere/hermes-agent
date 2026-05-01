@@ -1553,15 +1553,16 @@ class AIAgent:
             disabled_toolsets=disabled_toolsets,
             quiet_mode=self.quiet_mode,
         )
-        
+
         # Show tool configuration and store valid tool names for validation
         self.valid_tool_names = set()
         if self.tools:
             self.valid_tool_names = {tool["function"]["name"] for tool in self.tools}
             tool_names = sorted(self.valid_tool_names)
+            print(f"[RUN_AGENT] Loaded {len(self.tools)} tools: {', '.join(tool_names[:10])}...", flush=True)
             if not self.quiet_mode:
                 print(f"🛠️  Loaded {len(self.tools)} tools: {', '.join(tool_names)}")
-                
+
                 # Show filtering info if applied
                 if enabled_toolsets:
                     print(f"   ✅ Enabled toolsets: {', '.join(enabled_toolsets)}")
@@ -9436,9 +9437,11 @@ class AIAgent:
             if self.tool_progress_callback:
                 try:
                     preview = _build_tool_preview(name, args)
+                    print(f"[RUN_AGENT] tool_progress_callback: tool.started name={name}", flush=True)
                     self.tool_progress_callback("tool.started", name, preview, args)
                 except Exception as cb_err:
                     logging.debug(f"Tool progress callback error: {cb_err}")
+                    print(f"[RUN_AGENT] tool_progress_callback error: {cb_err}", flush=True)
 
         for tc, name, args, block_result, blocked_by_guardrail in parsed_calls:
             if block_result is not None:
@@ -9648,12 +9651,14 @@ class AIAgent:
 
                 if not blocked and self.tool_progress_callback:
                     try:
+                        print(f"[RUN_AGENT] tool_progress_callback: tool.completed name={function_name}", flush=True)
                         self.tool_progress_callback(
                             "tool.completed", function_name, None, None,
                             duration=tool_duration, is_error=is_error,
                         )
                     except Exception as cb_err:
                         logging.debug(f"Tool progress callback error: {cb_err}")
+                        print(f"[RUN_AGENT] tool_progress_callback error: {cb_err}", flush=True)
 
                 if self.verbose_logging:
                     logging.debug(f"Tool {function_name} completed in {tool_duration:.2f}s")
@@ -9676,9 +9681,11 @@ class AIAgent:
 
             if not blocked and self.tool_complete_callback:
                 try:
+                    print(f"[RUN_AGENT] tool_complete_callback: name={name}, result_len={len(function_result) if function_result else 0}", flush=True)
                     self.tool_complete_callback(tc.id, name, args, function_result)
                 except Exception as cb_err:
                     logging.debug(f"Tool complete callback error: {cb_err}")
+                    print(f"[RUN_AGENT] tool_complete_callback error: {cb_err}", flush=True)
 
             function_result = maybe_persist_tool_result(
                 content=function_result,
@@ -12962,7 +12969,9 @@ class AIAgent:
                     self._codex_incomplete_retries = 0
                 
                 # Check for tool calls
+                print(f"[RUN_AGENT] assistant_message.tool_calls={getattr(assistant_message, 'tool_calls', None)}", flush=True)
                 if assistant_message.tool_calls:
+                    print(f"[RUN_AGENT] Processing {len(assistant_message.tool_calls)} tool call(s)", flush=True)
                     if not self.quiet_mode:
                         self._vprint(f"{self.log_prefix}🔧 Processing {len(assistant_message.tool_calls)} tool call(s)...")
                     
