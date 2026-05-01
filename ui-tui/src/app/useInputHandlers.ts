@@ -205,7 +205,13 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
       // fall through to the component-level handlers.
       if (overlay.approval || overlay.clarify || overlay.confirm) {
         if (isCtrl(key, ch, 'c')) {
-          cancelOverlayFromCtrlC()
+          // Selection-aware: copy beats deny when the user has text selected,
+          // matching the unblocked-path precedent (isCopyShortcut + clearSelection).
+          if (terminal.hasSelection) {
+            copySelection()
+          } else {
+            cancelOverlayFromCtrlC()
+          }
         }
 
         return
