@@ -133,7 +133,14 @@ Register a **Desktop app** OAuth client at
 with the Generative Language API enabled.
 
 :::info Codex Note
-The OpenAI Codex provider authenticates via device code (open a URL, enter a code). Hermes stores the resulting credentials in its own auth store under `~/.hermes/auth.json` and can import existing Codex CLI credentials from `~/.codex/auth.json` when present. No Codex CLI installation is required.
+The OpenAI Codex provider authenticates via OAuth. Two login methods are supported:
+
+- **Device code (default)** — `hermes auth add openai-codex`. Open a URL in any browser, enter a short code.
+- **Browser** — `hermes auth add openai-codex --method browser`. Runs an oauth-cli-kit browser redirect + local callback. Use this when you can't type a device code (e.g. the device-code page is blocked) or just prefer the redirect UX. Requires an interactive terminal.
+
+Both methods produce a Hermes-owned session: credentials are stored in `~/.hermes/auth.json` under `providers.openai-codex` and refreshed by Hermes. `hermes auth remove openai-codex` clears the credential from local Hermes state — it does not revoke the underlying OAuth grant server-side; revoke that separately at [chat.openai.com → Settings → Connected apps](https://chat.openai.com/) if needed.
+
+At runtime, neither method reads or writes `~/.codex/auth.json` (the Codex CLI's file). Separately, the interactive device-code login can prompt for a one-time, user-gated import of existing Codex CLI credentials when present. No Codex CLI installation is required.
 :::
 
 :::warning
