@@ -1764,21 +1764,30 @@ class GatewayRunner:
             pass
 
     @staticmethod
-    def _load_prefill_messages() -> List[Dict[str, Any]]:
+    def _load_prefill_messages(
+        *,
+        config: Optional[dict] = None,
+        hermes_home: Optional[Path] = None,
+        include_env: bool = True,
+    ) -> List[Dict[str, Any]]:
         """Load ephemeral prefill messages from config or env var.
         
-        Checks HERMES_PREFILL_MESSAGES_FILE env var first, then falls back to
-        the prefill_messages_file key in ~/.hermes/config.yaml.
-        Relative paths are resolved from ~/.hermes/.
+        Checks HERMES_PREFILL_MESSAGES_FILE env var first when ``include_env``
+        is true, then falls back to the prefill_messages_file key in the active
+        profile's config. Relative paths are resolved from that profile home.
         """
-        file_path = os.getenv("HERMES_PREFILL_MESSAGES_FILE", "")
+        base_home = Path(hermes_home) if hermes_home is not None else _hermes_home
+        file_path = os.getenv("HERMES_PREFILL_MESSAGES_FILE", "") if include_env else ""
         if not file_path:
             try:
-                import yaml as _y
-                cfg_path = _hermes_home / "config.yaml"
-                if cfg_path.exists():
-                    with open(cfg_path, encoding="utf-8") as _f:
-                        cfg = _y.safe_load(_f) or {}
+                cfg = config
+                if cfg is None:
+                    import yaml as _y
+                    cfg_path = base_home / "config.yaml"
+                    if cfg_path.exists():
+                        with open(cfg_path, encoding="utf-8") as _f:
+                            cfg = _y.safe_load(_f) or {}
+                if isinstance(cfg, dict):
                     file_path = cfg.get("prefill_messages_file", "")
             except Exception:
                 pass
@@ -1786,7 +1795,7 @@ class GatewayRunner:
             return []
         path = Path(file_path).expanduser()
         if not path.is_absolute():
-            path = _hermes_home / path
+            path = base_home / path
         if not path.exists():
             logger.warning("Prefill messages file not found: %s", path)
             return []
@@ -1802,28 +1811,42 @@ class GatewayRunner:
             return []
 
     @staticmethod
-    def _load_ephemeral_system_prompt() -> str:
+    def _load_ephemeral_system_prompt(
+        *,
+        config: Optional[dict] = None,
+        hermes_home: Optional[Path] = None,
+        include_env: bool = True,
+    ) -> str:
         """Load ephemeral system prompt from config or env var.
         
-        Checks HERMES_EPHEMERAL_SYSTEM_PROMPT env var first, then falls back to
-        agent.system_prompt in ~/.hermes/config.yaml.
+        Checks HERMES_EPHEMERAL_SYSTEM_PROMPT env var first when ``include_env``
+        is true, then falls back to agent.system_prompt in the active profile's
+        config.
         """
-        prompt = os.getenv("HERMES_EPHEMERAL_SYSTEM_PROMPT", "")
+        prompt = os.getenv("HERMES_EPHEMERAL_SYSTEM_PROMPT", "") if include_env else ""
         if prompt:
             return prompt
         try:
-            import yaml as _y
-            cfg_path = _hermes_home / "config.yaml"
-            if cfg_path.exists():
-                with open(cfg_path, encoding="utf-8") as _f:
-                    cfg = _y.safe_load(_f) or {}
+            cfg = config
+            if cfg is None:
+                import yaml as _y
+                base_home = Path(hermes_home) if hermes_home is not None else _hermes_home
+                cfg_path = base_home / "config.yaml"
+                if cfg_path.exists():
+                    with open(cfg_path, encoding="utf-8") as _f:
+                        cfg = _y.safe_load(_f) or {}
+            if isinstance(cfg, dict):
                 return (cfg_get(cfg, "agent", "system_prompt", default="") or "").strip()
         except Exception:
             pass
         return ""
 
     @staticmethod
-    def _load_reasoning_config() -> dict | None:
+    def _load_reasoning_config(
+        *,
+        config: Optional[dict] = None,
+        hermes_home: Optional[Path] = None,
+    ) -> dict | None:
         """Load reasoning effort from config.yaml.
 
         Reads agent.reasoning_effort from config.yaml. Valid: "none",
@@ -1833,11 +1856,15 @@ class GatewayRunner:
         from hermes_constants import parse_reasoning_effort
         effort = ""
         try:
-            import yaml as _y
-            cfg_path = _hermes_home / "config.yaml"
-            if cfg_path.exists():
-                with open(cfg_path, encoding="utf-8") as _f:
-                    cfg = _y.safe_load(_f) or {}
+            cfg = config
+            if cfg is None:
+                import yaml as _y
+                base_home = Path(hermes_home) if hermes_home is not None else _hermes_home
+                cfg_path = base_home / "config.yaml"
+                if cfg_path.exists():
+                    with open(cfg_path, encoding="utf-8") as _f:
+                        cfg = _y.safe_load(_f) or {}
+            if isinstance(cfg, dict):
                 effort = str(cfg_get(cfg, "agent", "reasoning_effort", default="") or "").strip()
         except Exception:
             pass
@@ -1877,6 +1904,8 @@ class GatewayRunner:
         *,
         source: Optional[SessionSource] = None,
         session_key: Optional[str] = None,
+        user_config: Optional[dict] = None,
+        hermes_home: Optional[Path] = None,
     ) -> dict | None:
         """Resolve reasoning effort for a session, honoring session overrides."""
         resolved_session_key = session_key
@@ -1889,7 +1918,7 @@ class GatewayRunner:
         overrides = getattr(self, "_session_reasoning_overrides", {}) or {}
         if resolved_session_key and resolved_session_key in overrides:
             return overrides[resolved_session_key]
-        return self._load_reasoning_config()
+        return self._load_reasoning_config(config=user_config, hermes_home=hermes_home)
 
     def _set_session_reasoning_override(
         self,
@@ -1907,7 +1936,11 @@ class GatewayRunner:
             self._session_reasoning_overrides[session_key] = dict(reasoning_config)
 
     @staticmethod
-    def _load_service_tier() -> str | None:
+    def _load_service_tier(
+        *,
+        config: Optional[dict] = None,
+        hermes_home: Optional[Path] = None,
+    ) -> str | None:
         """Load Priority Processing setting from config.yaml.
 
         Reads agent.service_tier from config.yaml. Accepted values mirror the CLI:
@@ -1916,11 +1949,15 @@ class GatewayRunner:
         """
         raw = ""
         try:
-            import yaml as _y
-            cfg_path = _hermes_home / "config.yaml"
-            if cfg_path.exists():
-                with open(cfg_path, encoding="utf-8") as _f:
-                    cfg = _y.safe_load(_f) or {}
+            cfg = config
+            if cfg is None:
+                import yaml as _y
+                base_home = Path(hermes_home) if hermes_home is not None else _hermes_home
+                cfg_path = base_home / "config.yaml"
+                if cfg_path.exists():
+                    with open(cfg_path, encoding="utf-8") as _f:
+                        cfg = _y.safe_load(_f) or {}
+            if isinstance(cfg, dict):
                 raw = str(cfg_get(cfg, "agent", "service_tier", default="") or "").strip()
         except Exception:
             pass
@@ -2032,14 +2069,22 @@ class GatewayRunner:
         return mode
 
     @staticmethod
-    def _load_provider_routing() -> dict:
+    def _load_provider_routing(
+        *,
+        config: Optional[dict] = None,
+        hermes_home: Optional[Path] = None,
+    ) -> dict:
         """Load OpenRouter provider routing preferences from config.yaml."""
         try:
-            import yaml as _y
-            cfg_path = _hermes_home / "config.yaml"
-            if cfg_path.exists():
-                with open(cfg_path, encoding="utf-8") as _f:
-                    cfg = _y.safe_load(_f) or {}
+            cfg = config
+            if cfg is None:
+                import yaml as _y
+                base_home = Path(hermes_home) if hermes_home is not None else _hermes_home
+                cfg_path = base_home / "config.yaml"
+                if cfg_path.exists():
+                    with open(cfg_path, encoding="utf-8") as _f:
+                        cfg = _y.safe_load(_f) or {}
+            if isinstance(cfg, dict):
                 return cfg.get("provider_routing", {}) or {}
         except Exception:
             pass
@@ -8812,7 +8857,11 @@ class GatewayRunner:
         config_path = _hermes_home / "config.yaml"
         self._service_tier = self._load_service_tier()
 
-        user_config = _load_gateway_config()
+        user_config = (
+            _load_gateway_config(_profile_home)
+            if _profile_home is not None
+            else _load_gateway_config()
+        )
         model = _resolve_gateway_model(user_config)
         if not model_supports_fast_mode(model):
             return "⚡ /fast is only available for OpenAI models that support Priority Processing."
@@ -11021,6 +11070,17 @@ class GatewayRunner:
         return out
 
     @staticmethod
+    def _stable_config_digest(value: Any) -> str:
+        """Return a stable short digest for cache-sensitive config fragments."""
+        import hashlib
+
+        try:
+            payload = json.dumps(value, sort_keys=True, default=str)
+        except Exception:
+            payload = repr(value)
+        return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+    @staticmethod
     def _agent_config_signature(
         model: str,
         runtime: dict,
@@ -11763,7 +11823,18 @@ class GatewayRunner:
             if run_generation is None or not session_key:
                 return True
             return self._is_session_run_current(session_key, run_generation)
-        
+
+        try:
+            _profile_home = self._profile_home_for_source(source)
+        except TopicProfileRoutingError as exc:
+            logger.error("Topic profile routing failed closed before agent run: %s", exc)
+            return {
+                "final_response": f"⚠️ Topic profile routing failed: {exc}",
+                "messages": [],
+                "api_calls": 0,
+                "tools": [],
+            }
+
         user_config = _load_gateway_config()
         platform_key = _platform_config_key(source.platform)
 
@@ -12224,8 +12295,30 @@ class GatewayRunner:
             event_channel_prompt = (channel_prompt or "").strip()
             if event_channel_prompt:
                 combined_ephemeral = (combined_ephemeral + "\n\n" + event_channel_prompt).strip()
-            if self._ephemeral_system_prompt:
-                combined_ephemeral = (combined_ephemeral + "\n\n" + self._ephemeral_system_prompt).strip()
+            turn_ephemeral_prompt = self._ephemeral_system_prompt
+            if _profile_home is not None:
+                turn_ephemeral_prompt = self._load_ephemeral_system_prompt(
+                    config=user_config,
+                    hermes_home=_profile_home,
+                    include_env=True,
+                )
+            if turn_ephemeral_prompt:
+                combined_ephemeral = (combined_ephemeral + "\n\n" + turn_ephemeral_prompt).strip()
+
+            pr = (
+                self._load_provider_routing(config=user_config, hermes_home=_profile_home)
+                if _profile_home is not None
+                else self._provider_routing
+            )
+            turn_prefill_messages = (
+                self._load_prefill_messages(
+                    config=user_config,
+                    hermes_home=_profile_home,
+                    include_env=False,
+                )
+                if _profile_home is not None
+                else self._prefill_messages
+            )
 
             runtime_env = None
             if _profile_home is not None:
@@ -12277,13 +12370,18 @@ class GatewayRunner:
                     "tools": [],
                 }
 
-            pr = self._provider_routing
             reasoning_config = self._resolve_session_reasoning_config(
                 source=source,
                 session_key=session_key,
+                user_config=user_config if _profile_home is not None else None,
+                hermes_home=_profile_home,
             )
             self._reasoning_config = reasoning_config
-            self._service_tier = self._load_service_tier()
+            self._service_tier = (
+                self._load_service_tier(config=user_config, hermes_home=_profile_home)
+                if _profile_home is not None
+                else self._load_service_tier()
+            )
             # Set up stream consumer for token streaming or interim commentary.
             _stream_consumer = None
             _stream_delta_cb = None
@@ -12387,6 +12485,11 @@ class GatewayRunner:
                     logger.debug("interim_assistant_callback error: %s", _e)
 
             turn_route = self._resolve_turn_agent_config(message, model, runtime_kwargs)
+            cache_keys = self._extract_cache_busting_config(user_config)
+            cache_keys["provider_routing.digest"] = self._stable_config_digest(pr)
+            cache_keys["prefill_messages.digest"] = self._stable_config_digest(
+                turn_prefill_messages or []
+            )
 
             # Check agent cache — reuse the AIAgent from the previous message
             # in this session to preserve the frozen system prompt and tool
@@ -12396,7 +12499,7 @@ class GatewayRunner:
                 turn_route["runtime"],
                 enabled_toolsets,
                 combined_ephemeral,
-                cache_keys=self._extract_cache_busting_config(user_config),
+                cache_keys=cache_keys,
             )
             agent = None
             _cache_lock = getattr(self, "_agent_cache_lock", None)
@@ -12427,7 +12530,7 @@ class GatewayRunner:
                     enabled_toolsets=enabled_toolsets,
                     disabled_toolsets=disabled_toolsets,
                     ephemeral_system_prompt=combined_ephemeral or None,
-                    prefill_messages=self._prefill_messages or None,
+                    prefill_messages=turn_prefill_messages or None,
                     reasoning_config=reasoning_config,
                     service_tier=self._service_tier,
                     request_overrides=turn_route.get("request_overrides"),
