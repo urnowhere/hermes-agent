@@ -410,6 +410,24 @@ class TestOptionalEnvVarsRegistry:
             all_vars.extend(vars_list)
         assert "TAVILY_API_KEY" in all_vars
 
+    def test_slack_thread_followups_require_mention_registered(self):
+        """SLACK_THREAD_FOLLOWUPS_REQUIRE_MENTION is listed in OPTIONAL_ENV_VARS."""
+        from hermes_cli.config import OPTIONAL_ENV_VARS
+        assert "SLACK_THREAD_FOLLOWUPS_REQUIRE_MENTION" in OPTIONAL_ENV_VARS
+
+    def test_slack_thread_followups_require_mention_is_messaging_category(self):
+        """SLACK_THREAD_FOLLOWUPS_REQUIRE_MENTION is in the messaging category."""
+        from hermes_cli.config import OPTIONAL_ENV_VARS
+        assert OPTIONAL_ENV_VARS["SLACK_THREAD_FOLLOWUPS_REQUIRE_MENTION"]["category"] == "messaging"
+
+    def test_slack_thread_followups_require_mention_in_env_vars_by_version(self):
+        """SLACK_THREAD_FOLLOWUPS_REQUIRE_MENTION is listed in ENV_VARS_BY_VERSION."""
+        from hermes_cli.config import ENV_VARS_BY_VERSION
+        all_vars = []
+        for vars_list in ENV_VARS_BY_VERSION.values():
+            all_vars.extend(vars_list)
+        assert "SLACK_THREAD_FOLLOWUPS_REQUIRE_MENTION" in all_vars
+
 
 class TestAnthropicTokenMigration:
     """Test that config version 8→9 clears ANTHROPIC_TOKEN."""

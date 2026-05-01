@@ -1051,6 +1051,14 @@ DEFAULT_CONFIG = {
         "server_actions": "",
     },
 
+    # Slack platform settings (gateway mode)
+    "slack": {
+        # If true, channel thread replies must @mention the bot every time.
+        # Default false preserves the existing behavior where active bot
+        # threads/sessions continue without repeated mentions.
+        "thread_followups_require_mention": False,
+    },
+
     # WhatsApp platform settings (gateway mode)
     "whatsapp": {
         # Reply prefix prepended to every outgoing WhatsApp message.
@@ -1282,6 +1290,7 @@ ENV_VARS_BY_VERSION: Dict[int, List[str]] = {
         "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "SLACK_ALLOWED_USERS"],
     10: ["TAVILY_API_KEY"],
     11: ["TERMINAL_MODAL_MODE"],
+    13: ["SLACK_THREAD_FOLLOWUPS_REQUIRE_MENTION"],
 }
 
 # Required environment variables with metadata for migration prompts.
@@ -1990,6 +1999,14 @@ OPTIONAL_ENV_VARS = {
         "prompt": "Slack App Token (xapp-...)",
         "url": "https://api.slack.com/apps",
         "password": True,
+        "category": "messaging",
+    },
+    "SLACK_THREAD_FOLLOWUPS_REQUIRE_MENTION": {
+        "description": "Require @mention on every Slack channel thread reply. Default: false "
+                       "(active bot threads continue without repeated mentions).",
+        "prompt": "Require @mention for Slack thread follow-ups",
+        "url": None,
+        "password": False,
         "category": "messaging",
     },
     "MATTERMOST_URL": {

@@ -1739,6 +1739,48 @@ class TestThreadReplyHandling:
         assert msg_event.text == "Follow-up question"
 
     @pytest.mark.asyncio
+    async def test_thread_reply_without_mention_with_session_ignored_when_configured(
+        self, adapter_with_session_store, mock_session_store
+    ):
+        """thread_followups_require_mention=true should force mentions on thread replies."""
+        adapter_with_session_store.config.extra["thread_followups_require_mention"] = True
+        session_key = "agent:main:slack:group:C123:123.000:U_USER"
+        mock_session_store._entries = {session_key: MagicMock()}
+
+        event = {
+            "text": "Follow-up question",
+            "user": "U_USER",
+            "channel": "C123",
+            "ts": "123.456",
+            "thread_ts": "123.000",
+            "channel_type": "channel",
+            "team": "T_TEAM",
+        }
+        await adapter_with_session_store._handle_slack_message(event)
+        adapter_with_session_store.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_thread_reply_with_mention_still_processed_when_configured(
+        self, adapter_with_session_store, mock_session_store
+    ):
+        """Explicit mentions should still work when thread follow-ups require mention."""
+        adapter_with_session_store.config.extra["thread_followups_require_mention"] = True
+        session_key = "agent:main:slack:group:C123:123.000:U_USER"
+        mock_session_store._entries = {session_key: MagicMock()}
+
+        event = {
+            "text": "<@U_BOT> Follow-up question",
+            "user": "U_USER",
+            "channel": "C123",
+            "ts": "123.456",
+            "thread_ts": "123.000",
+            "channel_type": "channel",
+            "team": "T_TEAM",
+        }
+        await adapter_with_session_store._handle_slack_message(event)
+        adapter_with_session_store.handle_message.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_thread_reply_with_mention_strips_bot_id(
         self, adapter_with_session_store, mock_session_store
     ):

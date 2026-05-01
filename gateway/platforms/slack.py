@@ -368,6 +368,17 @@ class SlackAdapter(BasePlatformAdapter):
             )
         return None
 
+    def _slack_thread_followups_require_mention(self) -> bool:
+        """Return whether channel thread follow-ups must always @mention the bot."""
+        configured = self.config.extra.get("thread_followups_require_mention")
+        if configured is not None:
+            if isinstance(configured, str):
+                return configured.lower() in ("true", "1", "yes", "on")
+            return bool(configured)
+        return os.getenv(
+            "SLACK_THREAD_FOLLOWUPS_REQUIRE_MENTION", "false"
+        ).lower() in ("true", "1", "yes", "on")
+
     async def connect(self) -> bool:
         """Connect to Slack via Socket Mode."""
         if not SLACK_AVAILABLE:
@@ -1685,14 +1696,20 @@ class SlackAdapter(BasePlatformAdapter):
         #   0. Channel is in free_response_channels, OR require_mention is
         #      disabled — always process regardless of mention.
         #   1. The bot is @mentioned in this message, OR
-        #   2. The message is a reply in a thread the bot started/participated in, OR
-        #   3. The message is in a thread where the bot was previously @mentioned, OR
-        #   4. There's an existing session for this thread (survives restarts)
+        #   2. thread_followups_require_mention is false AND the message is a
+        #      reply in a thread the bot started/participated in, OR
+        #   3. thread_followups_require_mention is false AND the message is in
+        #      a thread where the bot was previously @mentioned, OR
+        #   4. thread_followups_require_mention is false AND there's an active
+        #      session for this thread (survives restarts)
         bot_uid = self._team_bot_user_ids.get(team_id, self._bot_user_id)
         routing_text = original_text or ""
         is_mentioned = bot_uid and f"<@{bot_uid}>" in routing_text
         event_thread_ts = event.get("thread_ts")
         is_thread_reply = bool(event_thread_ts and event_thread_ts != ts)
+        thread_followups_require_mention = (
+            self._slack_thread_followups_require_mention()
+        )
 
         if not is_dm and bot_uid:
             if channel_id in self._slack_free_response_channels():
@@ -1703,14 +1720,18 @@ class SlackAdapter(BasePlatformAdapter):
                 return  # Strict mode: ignore until @-mentioned again
             elif not is_mentioned:
                 reply_to_bot_thread = (
-                    is_thread_reply and event_thread_ts in self._bot_message_ts
+                    is_thread_reply
+                    and not thread_followups_require_mention
+                    and event_thread_ts in self._bot_message_ts
                 )
                 in_mentioned_thread = (
                     event_thread_ts is not None
+                    and not thread_followups_require_mention
                     and event_thread_ts in self._mentioned_threads
                 )
                 has_session = (
                     is_thread_reply
+                    and not thread_followups_require_mention
                     and self._has_active_session_for_thread(
                         channel_id=channel_id,
                         thread_ts=event_thread_ts,

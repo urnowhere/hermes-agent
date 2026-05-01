@@ -342,10 +342,10 @@ Set to `false` if you want a collaborative mode where the entire channel shares 
 
 ```yaml
 slack:
-  # Require @mention in channels (this is the default behavior;
-  # the Slack adapter enforces @mention gating in channels regardless,
-  # but you can set this explicitly for consistency with other platforms)
-  require_mention: true
+  # Require @mention on every thread follow-up in channels.
+  # Default false preserves Slack's current behavior:
+  # once Hermes is active in a thread, follow-ups can omit the mention.
+  thread_followups_require_mention: false
 
   # Prevent thread auto-engagement: only reply to channel messages that
   # contain an explicit @mention. With this OFF (default), Slack can
@@ -370,7 +370,7 @@ Set this to `true` in busy workspaces where Slack's default "the bot remembers t
 :::
 
 :::info
-Slack supports both patterns: `@mention` required to start a conversation by default, but you can opt specific channels out via `SLACK_FREE_RESPONSE_CHANNELS` (comma-separated channel IDs) or `slack.free_response_channels` in `config.yaml`. Once the bot has an active session in a thread, subsequent thread replies do not require a mention. In DMs the bot always responds without needing a mention.
+Slack supports both patterns: `@mention` required to start a conversation by default, but you can opt specific channels out via `SLACK_FREE_RESPONSE_CHANNELS` (comma-separated channel IDs) or `slack.free_response_channels` in `config.yaml`. Once the bot has an active session in a thread, subsequent thread replies do not require a mention. Set `slack.thread_followups_require_mention: true` or `SLACK_THREAD_FOLLOWUPS_REQUIRE_MENTION=true` if you want every thread reply to explicitly mention the bot. In DMs the bot always responds without needing a mention.
 :::
 
 ### Unauthorized User Handling
@@ -410,7 +410,7 @@ stt_enabled: true
 
 # Slack-specific settings
 slack:
-  require_mention: true
+  thread_followups_require_mention: false
   unauthorized_dm_behavior: "pair"
 
 # Platform config
