@@ -952,6 +952,7 @@ class AIAgent:
         parent_session_id: str = None,
         iteration_budget: "IterationBudget" = None,
         fallback_model: Dict[str, Any] = None,
+        runtime_env: Dict[str, Any] = None,
         credential_pool=None,
         checkpoints_enabled: bool = False,
         checkpoint_max_snapshots: int = 50,
@@ -1032,6 +1033,7 @@ class AIAgent:
         self.load_soul_identity = load_soul_identity
         self.pass_session_id = pass_session_id
         self._credential_pool = credential_pool
+        self._runtime_env = dict(runtime_env or {}) if runtime_env is not None else None
         self.log_prefix_chars = log_prefix_chars
         self.log_prefix = f"{log_prefix} " if log_prefix else ""
         # Store effective base URL for feature detection (prompt caching, reasoning, etc.)
@@ -7474,12 +7476,46 @@ class AIAgent:
             if not fb_api_key_hint:
                 fb_key_env = (fb.get("key_env") or "").strip()
                 if fb_key_env:
-                    fb_api_key_hint = os.getenv(fb_key_env, "").strip() or None
+                    if self._runtime_env is None:
+                        fb_api_key_hint = os.getenv(fb_key_env, "").strip() or None
+                    else:
+                        fb_api_key_hint = str(self._runtime_env.get(fb_key_env, "")).strip() or None
             # For Ollama Cloud endpoints, pull OLLAMA_API_KEY from env
             # when no explicit key is in the fallback config. Host match
             # (not substring) — see GHSA-76xc-57q6-vm5m.
             if fb_base_url_hint and base_url_host_matches(fb_base_url_hint, "ollama.com") and not fb_api_key_hint:
-                fb_api_key_hint = os.getenv("OLLAMA_API_KEY") or None
+                if self._runtime_env is None:
+                    fb_api_key_hint = os.getenv("OLLAMA_API_KEY") or None
+                else:
+                    fb_api_key_hint = str(self._runtime_env.get("OLLAMA_API_KEY", "")).strip() or None
+            if self._runtime_env is not None and not fb_api_key_hint:
+                fb_env_candidates = []
+                if fb_provider == "openrouter":
+                    fb_env_candidates = ["OPENROUTER_API_KEY", "OPENAI_API_KEY"]
+                elif fb_provider == "custom":
+                    fb_env_candidates = ["OPENAI_API_KEY", "OPENROUTER_API_KEY"]
+                else:
+                    try:
+                        from hermes_cli.auth import PROVIDER_REGISTRY
+                        pconfig = PROVIDER_REGISTRY.get(fb_provider)
+                        fb_env_candidates = list(getattr(pconfig, "api_key_env_vars", ()) or [])
+                    except Exception:
+                        fb_env_candidates = []
+                for env_name in fb_env_candidates:
+                    fb_api_key_hint = str(self._runtime_env.get(env_name, "")).strip() or None
+                    if fb_api_key_hint:
+                        break
+            if self._runtime_env is not None and not fb_api_key_hint:
+                fb_host = base_url_hostname(fb_base_url_hint or "")
+                if fb_host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
+                    fb_api_key_hint = "no-key-required"
+                else:
+                    logging.warning(
+                        "Skipping fallback provider %s for routed profile: no profile-scoped "
+                        "api_key/key_env was configured",
+                        fb_provider,
+                    )
+                    return self._try_activate_fallback()
             fb_client, _resolved_fb_model = resolve_provider_client(
                 fb_provider, model=fb_model, raw_codex=True,
                 explicit_base_url=fb_base_url_hint,

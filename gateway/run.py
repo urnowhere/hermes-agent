@@ -538,7 +538,18 @@ logger = logging.getLogger(__name__)
 _AGENT_PENDING_SENTINEL = object()
 
 
-def _resolve_runtime_agent_kwargs() -> dict:
+class TopicProfileRoutingError(RuntimeError):
+    """Raised when a routed topic profile cannot be safely resolved."""
+
+
+def _env_get(runtime_env: Optional[dict], key: str, default: str = "") -> str:
+    if runtime_env is None:
+        return os.getenv(key, default)
+    value = runtime_env.get(key, default)
+    return "" if value is None else str(value)
+
+
+def _resolve_runtime_agent_kwargs(runtime_env: Optional[dict] = None) -> dict:
     """Resolve provider credentials for gateway-created AIAgent instances.
 
     If the primary provider fails with an authentication error, attempt to
@@ -553,13 +564,14 @@ def _resolve_runtime_agent_kwargs() -> dict:
 
     try:
         runtime = resolve_runtime_provider(
-            requested=os.getenv("HERMES_INFERENCE_PROVIDER"),
+            requested=_env_get(runtime_env, "HERMES_INFERENCE_PROVIDER"),
+            env=runtime_env,
         )
     except AuthError as auth_exc:
         # Primary provider auth failed (expired token, revoked key, etc.).
         # Try the fallback provider chain before raising.
         logger.warning("Primary provider auth failed: %s — trying fallback", auth_exc)
-        fb_config = _try_resolve_fallback_provider()
+        fb_config = _try_resolve_fallback_provider(runtime_env=runtime_env)
         if fb_config is not None:
             return fb_config
         raise RuntimeError(format_runtime_provider_error(auth_exc)) from auth_exc
@@ -577,12 +589,14 @@ def _resolve_runtime_agent_kwargs() -> dict:
     }
 
 
-def _try_resolve_fallback_provider() -> dict | None:
+def _try_resolve_fallback_provider(runtime_env: Optional[dict] = None) -> dict | None:
     """Attempt to resolve credentials from the fallback_model/fallback_providers config."""
     from hermes_cli.runtime_provider import resolve_runtime_provider
     try:
         import yaml as _y
-        cfg_path = _hermes_home / "config.yaml"
+        cfg_path = get_hermes_home() / "config.yaml"
+        if not cfg_path.exists() and runtime_env is None:
+            cfg_path = _hermes_home / "config.yaml"
         if not cfg_path.exists():
             return None
         with open(cfg_path, encoding="utf-8") as _f:
@@ -600,6 +614,7 @@ def _try_resolve_fallback_provider() -> dict | None:
                     requested=entry.get("provider"),
                     explicit_base_url=entry.get("base_url"),
                     explicit_api_key=entry.get("api_key"),
+                    env=runtime_env,
                 )
                 logger.info("Fallback provider resolved: %s", runtime.get("provider"))
                 return {
@@ -729,6 +744,15 @@ def _check_unavailable_skill(command_name: str) -> str | None:
 def _platform_config_key(platform: "Platform") -> str:
     """Map a Platform enum to its config.yaml key (LOCAL→"cli", rest→enum value)."""
     return "cli" if platform == Platform.LOCAL else platform.value
+
+
+def _thread_metadata_for_source(source: SessionSource, thread_id: Optional[str] = None) -> Optional[dict]:
+    effective_thread_id = thread_id if thread_id is not None else getattr(source, "thread_id", None)
+    metadata = {"thread_id": effective_thread_id} if effective_thread_id else {}
+    profile = str(getattr(source, "agent_profile", None) or "").strip()
+    if source.platform == Platform.TELEGRAM and profile and profile != "default":
+        metadata["disable_thread_fallback"] = True
+    return metadata or None
 
 
 def _load_gateway_config(hermes_home: Path | None = None) -> dict:
@@ -1342,24 +1366,66 @@ class GatewayRunner:
         if not profile or profile == "default":
             return None
         try:
-            from hermes_cli.profiles import get_profile_dir, validate_profile_name
+            from hermes_cli.profiles import get_profile_dir, profile_exists, validate_profile_name
             validate_profile_name(profile)
-        except Exception:
-            logger.warning("Ignoring invalid routed profile name: %r", profile)
-            return None
+        except Exception as exc:
+            raise TopicProfileRoutingError(
+                f"Invalid routed Hermes profile name: {profile!r}"
+            ) from exc
 
         explicit = getattr(source, "agent_hermes_home", None)
         if explicit:
+            safe_root = None
+            try:
+                platform_cfg = self.config.platforms.get(source.platform)
+                if platform_cfg:
+                    safe_root_raw = platform_cfg.extra.get("topic_profiles_safe_root")
+                    if safe_root_raw:
+                        safe_root = Path(str(safe_root_raw)).expanduser()
+                        if not safe_root.is_absolute():
+                            safe_root = get_hermes_home() / safe_root
+                        safe_root = safe_root.resolve(strict=False)
+            except Exception:
+                safe_root = None
+
+            if safe_root is None:
+                raise TopicProfileRoutingError(
+                    "Explicit routed profile_home requires "
+                    "telegram.topic_profiles_safe_root"
+                )
+            if safe_root == (Path.home() / ".hermes").resolve(strict=False):
+                raise TopicProfileRoutingError(
+                    "telegram.topic_profiles_safe_root must not be ~/.hermes"
+                )
             explicit_path = Path(str(explicit)).expanduser()
-            if explicit_path.is_absolute() and not explicit_path.is_symlink():
-                try:
-                    return explicit_path.resolve(strict=False)
-                except OSError:
-                    return explicit_path
-            logger.warning(
-                "Ignoring unsafe profile_home %r for routed profile %s; using named profile directory",
-                explicit,
-                profile,
+            if not explicit_path.is_absolute():
+                explicit_path = safe_root / explicit_path
+            if explicit_path.is_symlink():
+                raise TopicProfileRoutingError(
+                    f"Unsafe routed profile_home for {profile}: symlinks are not allowed"
+                )
+            try:
+                resolved = explicit_path.resolve(strict=False)
+                resolved.relative_to(safe_root)
+            except Exception as exc:
+                raise TopicProfileRoutingError(
+                    f"Unsafe routed profile_home for {profile}: path must stay inside "
+                    "topic_profiles_safe_root"
+                ) from exc
+            if resolved == (Path.home() / ".hermes").resolve(strict=False):
+                raise TopicProfileRoutingError(
+                    f"Unsafe routed profile_home for {profile}: ~/.hermes is forbidden"
+                )
+            if not resolved.is_dir():
+                raise TopicProfileRoutingError(
+                    f"Routed Hermes profile home does not exist for {profile}: {resolved}"
+                )
+            return resolved
+
+        if not profile_exists(profile):
+            raise TopicProfileRoutingError(
+                f"Routed Hermes profile does not exist: {profile!r}. "
+                "Create it with `hermes profile create` or configure a safe profile_home."
             )
 
         return get_profile_dir(profile)
@@ -1384,6 +1450,7 @@ class GatewayRunner:
         source: Optional[SessionSource] = None,
         session_key: Optional[str] = None,
         user_config: Optional[dict] = None,
+        runtime_env: Optional[dict] = None,
     ) -> tuple[str, dict]:
         """Resolve model/runtime for a session, honoring session-scoped /model overrides.
 
@@ -1397,6 +1464,18 @@ class GatewayRunner:
                 resolved_session_key = self._session_key_for_source(source)
             except Exception:
                 resolved_session_key = None
+
+        if runtime_env is None and source is not None and getattr(source, "agent_profile", None):
+            try:
+                profile_home = self._profile_home_for_source(source)
+                if profile_home is not None:
+                    from hermes_cli.env_loader import read_hermes_dotenv_values
+                    runtime_env = read_hermes_dotenv_values(hermes_home=profile_home)
+            except TopicProfileRoutingError:
+                raise
+            except Exception as exc:
+                logger.debug("Could not read routed profile runtime env: %s", exc)
+                runtime_env = {}
 
         model = _resolve_gateway_model(user_config)
         override = self._session_model_overrides.get(resolved_session_key) if resolved_session_key else None
@@ -1428,7 +1507,7 @@ class GatewayRunner:
                 list(self._session_model_overrides.keys())[:5] if self._session_model_overrides else "[]",
             )
 
-        runtime_kwargs = _resolve_runtime_agent_kwargs()
+        runtime_kwargs = _resolve_runtime_agent_kwargs(runtime_env=runtime_env)
         if override and resolved_session_key:
             model, runtime_kwargs = self._apply_session_model_override(
                 resolved_session_key, model, runtime_kwargs
@@ -5404,7 +5483,7 @@ class GatewayRunner:
                 )
                 if any(marker in message_text for marker in _stt_fail_markers):
                     _stt_adapter = self.adapters.get(source.platform)
-                    _stt_meta = {"thread_id": source.thread_id} if source.thread_id else None
+                    _stt_meta = _thread_metadata_for_source(source)
                     if _stt_adapter:
                         try:
                             _stt_msg = (
@@ -5528,7 +5607,11 @@ class GatewayRunner:
             source.agent_profile = event.agent_profile
         if getattr(event, "agent_hermes_home", None) and not getattr(source, "agent_hermes_home", None):
             source.agent_hermes_home = event.agent_hermes_home
-        _profile_home = self._profile_home_for_source(source)
+        try:
+            _profile_home = self._profile_home_for_source(source)
+        except TopicProfileRoutingError as exc:
+            logger.error("Topic profile routing failed closed: %s", exc)
+            return f"⚠️ Topic profile routing failed: {exc}"
         _profile_home_token = (
             set_hermes_home_override(_profile_home)
             if _profile_home is not None
@@ -5873,7 +5956,7 @@ class GatewayRunner:
                         f"{_compress_token_threshold:,}",
                     )
 
-                    _hyg_meta = {"thread_id": source.thread_id} if source.thread_id else None
+                    _hyg_meta = _thread_metadata_for_source(source)
 
                     try:
                         from run_agent import AIAgent
@@ -7404,7 +7487,7 @@ class GatewayRunner:
                         lines.append("_(session only — use `/model <name> --global` to persist)_")
                         return "\n".join(lines)
 
-                    metadata = {"thread_id": source.thread_id} if source.thread_id else None
+                    metadata = _thread_metadata_for_source(source)
                     result = await adapter.send_model_picker(
                         chat_id=source.chat_id,
                         providers=providers,
@@ -8472,7 +8555,7 @@ class GatewayRunner:
             logger.warning("No adapter for platform %s in background task %s", source.platform, task_id)
             return
 
-        _thread_metadata = {"thread_id": source.thread_id} if source.thread_id else None
+        _thread_metadata = _thread_metadata_for_source(source)
 
         try:
             user_config = _load_gateway_config()
@@ -11456,10 +11539,7 @@ class GatewayRunner:
             else bool(_plat_streaming)
         )
 
-        if source.thread_id:
-            _thread_metadata: Optional[Dict[str, Any]] = {"thread_id": source.thread_id}
-        else:
-            _thread_metadata = None
+        _thread_metadata: Optional[Dict[str, Any]] = _thread_metadata_for_source(source)
 
         if _streaming_enabled:
             try:
@@ -11879,7 +11959,7 @@ class GatewayRunner:
             _progress_thread_id = source.thread_id or event_message_id
         else:
             _progress_thread_id = source.thread_id
-        _progress_metadata = {"thread_id": _progress_thread_id} if _progress_thread_id else None
+        _progress_metadata = _thread_metadata_for_source(source, _progress_thread_id)
 
         async def send_progress_messages():
             if not progress_queue:
@@ -12101,7 +12181,7 @@ class GatewayRunner:
         # Bridge sync status_callback → async adapter.send for context pressure
         _status_adapter = self.adapters.get(source.platform)
         _status_chat_id = source.chat_id
-        _status_thread_metadata = {"thread_id": _progress_thread_id} if _progress_thread_id else None
+        _status_thread_metadata = _thread_metadata_for_source(source, _progress_thread_id)
 
         def _status_callback_sync(event_type: str, message: str) -> None:
             if not _status_adapter or not _run_still_current():
@@ -12147,21 +12227,44 @@ class GatewayRunner:
             if self._ephemeral_system_prompt:
                 combined_ephemeral = (combined_ephemeral + "\n\n" + self._ephemeral_system_prompt).strip()
 
-            # Re-read .env and config for fresh credentials (gateway is long-lived,
-            # keys may change without restart).
-            try:
-                load_dotenv(get_hermes_home() / ".env", override=True, encoding="utf-8")
-            except UnicodeDecodeError:
-                load_dotenv(get_hermes_home() / ".env", override=True, encoding="latin-1")
-            except Exception:
-                pass
+            runtime_env = None
+            if _profile_home is not None:
+                try:
+                    from hermes_cli.env_loader import read_hermes_dotenv_values
+                    runtime_env = read_hermes_dotenv_values(hermes_home=_profile_home)
+                except Exception as exc:
+                    logger.debug("Could not read routed profile .env from %s: %s", _profile_home, exc)
+                    runtime_env = {}
+            else:
+                # Re-read .env and config for fresh credentials (gateway is long-lived,
+                # keys may change without restart).  Routed profiles use an in-memory
+                # env mapping so their secrets never overwrite process-global env.
+                try:
+                    load_dotenv(get_hermes_home() / ".env", override=True, encoding="utf-8")
+                except UnicodeDecodeError:
+                    load_dotenv(get_hermes_home() / ".env", override=True, encoding="latin-1")
+                except Exception:
+                    pass
 
             try:
                 model, runtime_kwargs = self._resolve_session_agent_runtime(
                     source=source,
                     session_key=session_key,
                     user_config=user_config,
+                    runtime_env=runtime_env,
                 )
+                if _profile_home is not None:
+                    from hermes_cli.auth import has_usable_secret
+                    if (
+                        not runtime_kwargs.get("credential_pool")
+                        and not runtime_kwargs.get("command")
+                        and not has_usable_secret(str(runtime_kwargs.get("api_key") or ""))
+                    ):
+                        raise RuntimeError(
+                            f"Routed profile {getattr(source, 'agent_profile', '')!r} has no "
+                            "profile-scoped provider credentials. Add the API key to that "
+                            "profile's .env/config/auth store; gateway credentials are not reused."
+                        )
                 logger.debug(
                     "run_agent resolved: model=%s provider=%s session=%s",
                     model, runtime_kwargs.get("provider"), session_key or "",
@@ -12245,7 +12348,7 @@ class GatewayRunner:
                             adapter=_adapter,
                             chat_id=source.chat_id,
                             config=_consumer_cfg,
-                            metadata={"thread_id": _progress_thread_id} if _progress_thread_id else None,
+                            metadata=_thread_metadata_for_source(source, _progress_thread_id),
                             on_new_message=(
                                 (lambda: progress_queue.put(("__reset__",)))
                                 if progress_queue is not None
@@ -12344,7 +12447,12 @@ class GatewayRunner:
                     thread_id=source.thread_id,
                     gateway_session_key=session_key,
                     session_db=session_db if session_db is not None else self._session_db,
-                    fallback_model=self._fallback_model,
+                    fallback_model=(
+                        user_config.get("fallback_providers")
+                        or user_config.get("fallback_model")
+                        or (None if _profile_home is not None else self._fallback_model)
+                    ),
+                    runtime_env=runtime_env,
                 )
                 if _cache_lock and _cache is not None:
                     with _cache_lock:

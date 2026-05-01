@@ -49,6 +49,7 @@ model:
   base_url: http://127.0.0.1:18099/v1
 telegram:
   enabled: true
+  topic_profiles_safe_root: "$PROFILES_ROOT"
   topic_profiles:
     - match:
         chat_id: "-1000000000000"

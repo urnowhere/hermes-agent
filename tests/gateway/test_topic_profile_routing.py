@@ -1,10 +1,15 @@
+import os
 from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import MessageType, resolve_topic_profile
+from gateway.platforms.base import (
+    MessageType,
+    TopicProfileConfigError,
+    resolve_topic_profile,
+)
 from gateway.session import SessionSource, SessionStore, build_session_key
 from hermes_constants import get_hermes_home, hermes_home_context
 
@@ -23,8 +28,10 @@ def _source(**overrides):
 
 def test_topic_profile_resolver_matches_exact_topic_and_home(tmp_path):
     profile_home = tmp_path / "profiles" / "cybrel-test"
+    profile_home.mkdir(parents=True)
     route = resolve_topic_profile(
         {
+            "topic_profiles_safe_root": str(tmp_path / "profiles"),
             "topic_profiles": [
                 {
                     "match": {"chat_id": "-1001", "thread_id": 101},
@@ -40,12 +47,11 @@ def test_topic_profile_resolver_matches_exact_topic_and_home(tmp_path):
     assert route == {"profile": "cybrel-test", "profile_home": str(profile_home)}
 
 
-def test_topic_profile_resolver_handles_general_topic_and_absent_topic(tmp_path):
+def test_topic_profile_resolver_handles_general_topic_and_absent_topic_falls_back():
     general = resolve_topic_profile(
         {
             "topic_profiles": [
                 {"match": {"chat_id": "-1001", "thread_id": "1"}, "profile": "general-test"},
-                {"match": {"chat_id": "-1001"}, "profile": "no-topic-test"},
             ]
         },
         "-1001",
@@ -55,7 +61,6 @@ def test_topic_profile_resolver_handles_general_topic_and_absent_topic(tmp_path)
         {
             "topic_profiles": [
                 {"match": {"chat_id": "-1001", "thread_id": "1"}, "profile": "general-test"},
-                {"match": {"chat_id": "-1001"}, "profile": "no-topic-test"},
             ]
         },
         "-1001",
@@ -63,25 +68,67 @@ def test_topic_profile_resolver_handles_general_topic_and_absent_topic(tmp_path)
     )
 
     assert general == {"profile": "general-test"}
-    assert no_topic == {"profile": "no-topic-test"}
+    assert no_topic is None
 
 
-def test_topic_profile_resolver_rejects_invalid_profile_names(caplog):
-    route = resolve_topic_profile(
-        {
-            "topic_profiles": [
-                {
-                    "match": {"chat_id": "-1001", "thread_id": "101"},
-                    "profile": "bad:profile",
-                }
-            ]
-        },
-        "-1001",
-        "101",
-    )
+def test_topic_profile_resolver_rejects_invalid_profile_names():
+    with pytest.raises(TopicProfileConfigError, match="Invalid .*profile"):
+        resolve_topic_profile(
+            {
+                "topic_profiles": [
+                    {
+                        "match": {"chat_id": "-1001", "thread_id": "101"},
+                        "profile": "bad:profile",
+                    }
+                ]
+            },
+            "-1001",
+            "101",
+        )
 
-    assert route is None
-    assert "invalid topic profile" in caplog.text
+
+def test_topic_profile_resolver_rejects_missing_thread_id():
+    with pytest.raises(TopicProfileConfigError, match="requires match.chat_id and match.thread_id"):
+        resolve_topic_profile(
+            {
+                "topic_profiles": [
+                    {"match": {"chat_id": "-1001"}, "profile": "no-topic-test"},
+                ]
+            },
+            "-1001",
+            None,
+        )
+
+
+def test_topic_profile_resolver_rejects_duplicate_routes():
+    with pytest.raises(TopicProfileConfigError, match="Duplicate"):
+        resolve_topic_profile(
+            {
+                "topic_profiles": [
+                    {"match": {"chat_id": "-1001", "thread_id": 101}, "profile": "a"},
+                    {"match": {"chat_id": "-1001", "thread_id": "101"}, "profile": "b"},
+                ]
+            },
+            "-1001",
+            "101",
+        )
+
+
+def test_topic_profile_resolver_rejects_profile_home_without_safe_root(tmp_path):
+    with pytest.raises(TopicProfileConfigError, match="profile_home requires"):
+        resolve_topic_profile(
+            {
+                "topic_profiles": [
+                    {
+                        "match": {"chat_id": "-1001", "thread_id": "101"},
+                        "profile": "cybrel-test",
+                        "profile_home": str(tmp_path / "cybrel-test"),
+                    }
+                ]
+            },
+            "-1001",
+            "101",
+        )
 
 
 def test_session_key_includes_valid_profile_and_ignores_invalid_profile():
@@ -109,7 +156,14 @@ def test_profile_session_store_uses_routed_home_without_changing_global_home(tmp
 
     gateway_home = tmp_path / "gateway"
     profile_home = tmp_path / "profiles" / "cybrel-test"
-    config = GatewayConfig()
+    profile_home.mkdir(parents=True)
+    config = GatewayConfig(
+        platforms={
+            Platform.TELEGRAM: PlatformConfig(
+                extra={"topic_profiles_safe_root": str(tmp_path / "profiles")}
+            )
+        }
+    )
 
     with hermes_home_context(gateway_home):
         runner = object.__new__(GatewayRunner)
@@ -135,6 +189,7 @@ def test_named_profile_without_explicit_home_stays_isolated_under_profiles_root(
 
     gateway_home = tmp_path / "gateway"
     config = GatewayConfig()
+    (gateway_home / "profiles" / "cybrel-test").mkdir(parents=True)
 
     with hermes_home_context(gateway_home):
         runner = object.__new__(GatewayRunner)
@@ -149,11 +204,20 @@ def test_named_profile_without_explicit_home_stays_isolated_under_profiles_root(
         assert profile_store is not runner.session_store
 
 
-def test_relative_explicit_profile_home_falls_back_to_named_profile_root(tmp_path):
+def test_relative_explicit_profile_home_is_resolved_inside_safe_root(tmp_path):
     from gateway.run import GatewayRunner
 
     gateway_home = tmp_path / "gateway"
-    config = GatewayConfig()
+    profiles_root = tmp_path / "profiles"
+    profile_home = profiles_root / "relative-home"
+    profile_home.mkdir(parents=True)
+    config = GatewayConfig(
+        platforms={
+            Platform.TELEGRAM: PlatformConfig(
+                extra={"topic_profiles_safe_root": str(profiles_root)}
+            )
+        }
+    )
 
     with hermes_home_context(gateway_home):
         runner = object.__new__(GatewayRunner)
@@ -163,7 +227,65 @@ def test_relative_explicit_profile_home_falls_back_to_named_profile_root(tmp_pat
 
         profile_store = runner._session_store_for_source(source)
 
-        assert profile_store.sessions_dir == gateway_home / "profiles" / "cybrel-test" / "sessions"
+        assert profile_store.sessions_dir == profile_home / "sessions"
+
+
+def test_missing_named_profile_fails_closed(tmp_path):
+    from gateway.run import GatewayRunner, TopicProfileRoutingError
+
+    gateway_home = tmp_path / "gateway"
+    config = GatewayConfig()
+
+    with hermes_home_context(gateway_home):
+        runner = object.__new__(GatewayRunner)
+        runner.config = config
+        runner.session_store = SessionStore(gateway_home / "sessions", config)
+        source = _source(agent_profile="missing-profile")
+
+        with pytest.raises(TopicProfileRoutingError, match="does not exist"):
+            runner._session_store_for_source(source)
+
+
+def test_routed_profile_runtime_env_is_loaded_without_mutating_process_env(monkeypatch, tmp_path):
+    from gateway import run as gateway_run
+    from gateway.run import GatewayRunner
+
+    gateway_home = tmp_path / "gateway"
+    profile_home = gateway_home / "profiles" / "cybrel-test"
+    profile_home.mkdir(parents=True)
+    (profile_home / ".env").write_text("OPENROUTER_API_KEY=profile-key\n", encoding="utf-8")
+    config = GatewayConfig()
+    captured = {}
+
+    def _capture_runtime(runtime_env=None):
+        captured["runtime_env"] = dict(runtime_env or {})
+        return {
+            "api_key": runtime_env.get("OPENROUTER_API_KEY"),
+            "base_url": "https://openrouter.ai/api/v1",
+            "provider": "openrouter",
+            "api_mode": "chat_completions",
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "main-key")
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", _capture_runtime)
+
+    with hermes_home_context(gateway_home):
+        runner = object.__new__(GatewayRunner)
+        runner.config = config
+        runner.session_store = SessionStore(gateway_home / "sessions", config)
+        runner._session_model_overrides = {}
+        runner._pending_model_notes = {}
+        source = _source(agent_profile="cybrel-test")
+
+        model, runtime = runner._resolve_session_agent_runtime(
+            source=source,
+            user_config={"model": {"default": "test-model"}},
+        )
+
+    assert model == "test-model"
+    assert runtime["api_key"] == "profile-key"
+    assert captured["runtime_env"] == {"OPENROUTER_API_KEY": "profile-key"}
+    assert os.environ["OPENROUTER_API_KEY"] == "main-key"
 
 
 @pytest.mark.asyncio
@@ -213,11 +335,13 @@ def test_telegram_synthetic_message_event_sets_profile_on_event_and_source(tmp_p
     from gateway.platforms.telegram import TelegramAdapter
 
     profile_home = tmp_path / "cybrel-test"
+    profile_home.mkdir()
     adapter = TelegramAdapter(
         PlatformConfig(
             enabled=True,
             token="test-token",
             extra={
+                "topic_profiles_safe_root": str(tmp_path),
                 "topic_profiles": [
                     {
                         "match": {"chat_id": "-1001", "thread_id": "101"},

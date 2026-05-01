@@ -1136,6 +1136,9 @@ class TelegramAdapter(BasePlatformAdapter):
             
             message_ids = []
             thread_id = self._metadata_thread_id(metadata)
+            disable_thread_fallback = bool(
+                isinstance(metadata, dict) and metadata.get("disable_thread_fallback")
+            )
             
             try:
                 from telegram.error import NetworkError as _NetErr
@@ -1193,6 +1196,12 @@ class TelegramAdapter(BasePlatformAdapter):
                         # specific cases instead of blindly retrying.
                         if _BadReq and isinstance(send_err, _BadReq):
                             if self._is_thread_not_found_error(send_err) and effective_thread_id is not None:
+                                if disable_thread_fallback:
+                                    logger.warning(
+                                        "[%s] Thread %s not found for routed profile; not retrying in main chat",
+                                        self.name, effective_thread_id,
+                                    )
+                                    raise
                                 # Thread doesn't exist — retry without
                                 # message_thread_id so the message still
                                 # reaches the chat.

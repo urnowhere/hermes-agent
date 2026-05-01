@@ -210,6 +210,30 @@ async def test_send_retries_without_thread_on_thread_not_found():
 
 
 @pytest.mark.asyncio
+async def test_send_does_not_fallback_to_main_chat_when_routed_topic_missing():
+    """Routed profile replies must not leak into the parent chat."""
+    adapter = _make_adapter()
+
+    call_log = []
+
+    async def mock_send_message(**kwargs):
+        call_log.append(dict(kwargs))
+        raise FakeBadRequest("Message thread not found")
+
+    adapter._bot = SimpleNamespace(send_message=mock_send_message)
+
+    result = await adapter.send(
+        chat_id="123",
+        content="test message",
+        metadata={"thread_id": "99999", "disable_thread_fallback": True},
+    )
+
+    assert result.success is False
+    assert len(call_log) == 1
+    assert call_log[0]["message_thread_id"] == 99999
+
+
+@pytest.mark.asyncio
 async def test_send_raises_on_other_bad_request():
     """Non-thread BadRequest errors should NOT be retried — they fail immediately."""
     adapter = _make_adapter()

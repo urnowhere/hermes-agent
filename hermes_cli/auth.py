@@ -79,6 +79,15 @@ MINIMAX_OAUTH_GLOBAL_BASE = "https://api.minimax.io"
 MINIMAX_OAUTH_CN_BASE = "https://api.minimaxi.com"
 MINIMAX_OAUTH_GLOBAL_INFERENCE = "https://api.minimax.io/anthropic"
 MINIMAX_OAUTH_CN_INFERENCE = "https://api.minimaxi.com/anthropic"
+
+
+def _env_get(env: Optional[Dict[str, Any]], key: str, default: str = "") -> str:
+    if env is None:
+        return os.getenv(key, default)
+    value = env.get(key, default)
+    return "" if value is None else str(value)
+
+
 MINIMAX_OAUTH_REFRESH_SKEW_SECONDS = 60
 DEFAULT_QWEN_BASE_URL = "https://portal.qwen.ai/v1"
 DEFAULT_GITHUB_MODELS_BASE_URL = "https://api.githubcopilot.com"
@@ -501,7 +510,7 @@ def has_usable_secret(value: Any, *, min_length: int = 4) -> bool:
 
 
 def _resolve_api_key_provider_secret(
-    provider_id: str, pconfig: ProviderConfig
+    provider_id: str, pconfig: ProviderConfig, env: Optional[Dict[str, Any]] = None
 ) -> tuple[str, str]:
     """Resolve an API-key provider's token and indicate where it came from."""
     if provider_id == "copilot":
@@ -517,10 +526,13 @@ def _resolve_api_key_provider_secret(
             pass
         return "", ""
 
-    from hermes_cli.config import get_env_value
     for env_var in pconfig.api_key_env_vars:
-        # Check both os.environ and ~/.hermes/.env file
-        val = (get_env_value(env_var) or "").strip()
+        if env is None:
+            from hermes_cli.config import get_env_value
+            # Check both os.environ and ~/.hermes/.env file
+            val = (get_env_value(env_var) or "").strip()
+        else:
+            val = _env_get(env, env_var).strip()
         if has_usable_secret(val):
             return val, env_var
 
@@ -1148,6 +1160,7 @@ def resolve_provider(
     *,
     explicit_api_key: Optional[str] = None,
     explicit_base_url: Optional[str] = None,
+    env: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Determine which inference provider to use.
@@ -1228,7 +1241,7 @@ def resolve_provider(
     except Exception as e:
         logger.debug("Could not detect active auth provider: %s", e)
 
-    if has_usable_secret(os.getenv("OPENAI_API_KEY")) or has_usable_secret(os.getenv("OPENROUTER_API_KEY")):
+    if has_usable_secret(_env_get(env, "OPENAI_API_KEY")) or has_usable_secret(_env_get(env, "OPENROUTER_API_KEY")):
         return "openrouter"
 
     # Auto-detect API-key providers by checking their env vars
@@ -1244,17 +1257,18 @@ def resolve_provider(
         if pid in ("copilot", "lmstudio"):
             continue
         for env_var in pconfig.api_key_env_vars:
-            if has_usable_secret(os.getenv(env_var, "")):
+            if has_usable_secret(_env_get(env, env_var)):
                 return pid
 
     # AWS Bedrock — detect via boto3 credential chain (IAM roles, SSO, env vars).
     # This runs after API-key providers so explicit keys always win.
-    try:
-        from agent.bedrock_adapter import has_aws_credentials
-        if has_aws_credentials():
-            return "bedrock"
-    except ImportError:
-        pass  # boto3 not installed — skip Bedrock auto-detection
+    if env is None or any(_env_get(env, key).strip() for key in ("AWS_ACCESS_KEY_ID", "AWS_PROFILE")):
+        try:
+            from agent.bedrock_adapter import has_aws_credentials
+            if has_aws_credentials():
+                return "bedrock"
+        except ImportError:
+            pass  # boto3 not installed — skip Bedrock auto-detection
 
     raise AuthError(
         "No inference provider configured. Run 'hermes model' to choose a "
@@ -3502,7 +3516,11 @@ def get_auth_status(provider_id: Optional[str] = None) -> Dict[str, Any]:
     return {"logged_in": False}
 
 
-def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
+def resolve_api_key_provider_credentials(
+    provider_id: str,
+    *,
+    env: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Resolve API key and base URL for an API-key provider.
 
     Returns dict with: provider, api_key, base_url, source.
@@ -3517,7 +3535,7 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
 
     api_key = ""
     key_source = ""
-    api_key, key_source = _resolve_api_key_provider_secret(provider_id, pconfig)
+    api_key, key_source = _resolve_api_key_provider_secret(provider_id, pconfig, env=env)
 
     # No-auth LM Studio: substitute a placeholder so runtime / auxiliary_client
     # see the local server as configured. doctor still reports unconfigured
@@ -3528,7 +3546,7 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
 
     env_url = ""
     if pconfig.base_url_env_var:
-        env_url = os.getenv(pconfig.base_url_env_var, "").strip()
+        env_url = _env_get(env, pconfig.base_url_env_var).strip()
 
     if provider_id in ("kimi-coding", "kimi-coding-cn"):
         base_url = _resolve_kimi_base_url(api_key, pconfig.inference_base_url, env_url)
@@ -3547,7 +3565,11 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
     }
 
 
-def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str, Any]:
+def resolve_external_process_provider_credentials(
+    provider_id: str,
+    *,
+    env: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Resolve runtime details for local subprocess-backed providers."""
     pconfig = PROVIDER_REGISTRY.get(provider_id)
     if not pconfig or pconfig.auth_type != "external_process":
@@ -3557,16 +3579,16 @@ def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str,
             code="invalid_provider",
         )
 
-    base_url = os.getenv(pconfig.base_url_env_var, "").strip() if pconfig.base_url_env_var else ""
+    base_url = _env_get(env, pconfig.base_url_env_var).strip() if pconfig.base_url_env_var else ""
     if not base_url:
         base_url = pconfig.inference_base_url
 
     command = (
-        os.getenv("HERMES_COPILOT_ACP_COMMAND", "").strip()
-        or os.getenv("COPILOT_CLI_PATH", "").strip()
+        _env_get(env, "HERMES_COPILOT_ACP_COMMAND").strip()
+        or _env_get(env, "COPILOT_CLI_PATH").strip()
         or "copilot"
     )
-    raw_args = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
+    raw_args = _env_get(env, "HERMES_COPILOT_ACP_ARGS").strip()
     args = shlex.split(raw_args) if raw_args else ["--acp", "--stdio"]
     resolved_command = shutil.which(command) if command else None
     if not resolved_command and not base_url.startswith("acp+tcp://"):

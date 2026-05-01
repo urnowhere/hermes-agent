@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from hermes_cli import runtime_provider as rp
@@ -400,6 +402,44 @@ def test_resolve_runtime_provider_openrouter_explicit(monkeypatch):
     assert resolved["api_key"] == "test-key"
     assert resolved["base_url"] == "https://example.com/v1"
     assert resolved["source"] == "explicit"
+
+
+def test_resolve_runtime_provider_env_mapping_overrides_process_env(monkeypatch):
+    class _Pool:
+        def has_credentials(self):
+            return False
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "main-gateway-key")
+    monkeypatch.setattr(rp, "load_pool", lambda provider: _Pool())
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {"provider": "openrouter"})
+
+    resolved = rp.resolve_runtime_provider(
+        requested="openrouter",
+        env={"OPENROUTER_API_KEY": "profile-key"},
+    )
+
+    assert resolved["provider"] == "openrouter"
+    assert resolved["api_key"] == "profile-key"
+    assert os.environ["OPENROUTER_API_KEY"] == "main-gateway-key"
+
+
+def test_resolve_runtime_provider_env_mapping_does_not_inherit_main_env(monkeypatch):
+    class _Pool:
+        def has_credentials(self):
+            return False
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "main-gateway-key")
+    monkeypatch.setattr(rp, "load_pool", lambda provider: _Pool())
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {"provider": "openrouter"})
+
+    resolved = rp.resolve_runtime_provider(
+        requested="openrouter",
+        env={},
+    )
+
+    assert resolved["provider"] == "openrouter"
+    assert resolved["api_key"] == ""
+    assert os.environ["OPENROUTER_API_KEY"] == "main-gateway-key"
 
 
 def test_resolve_runtime_provider_auto_uses_openrouter_pool(monkeypatch):
