@@ -98,6 +98,7 @@ def _configured_platforms() -> list[str]:
     """Return list of configured messaging platform names."""
     checks = {
         "telegram": "TELEGRAM_BOT_TOKEN",
+        "line": "LINE_CHANNEL_ACCESS_TOKEN",
         "discord": "DISCORD_BOT_TOKEN",
         "slack": "SLACK_BOT_TOKEN",
         "whatsapp": "WHATSAPP_ENABLED",

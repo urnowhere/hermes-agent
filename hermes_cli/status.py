@@ -28,15 +28,12 @@ def check_mark(ok: bool) -> str:
     return color("✗", Colors.RED)
 
 def redact_key(key: str) -> str:
-    """Redact an API key for display.
-
-    Thin wrapper over :func:`agent.redact.mask_secret`. Preserves the
-    "(not set)" placeholder in dim color to match ``hermes config``'s
-    output (previously this variant was missing the DIM color —
-    consolidated via PR that also introduced ``mask_secret``).
-    """
-    from agent.redact import mask_secret
-    return mask_secret(key, empty=color("(not set)", Colors.DIM))
+    """Redact an API key for display."""
+    if not key:
+        return "(not set)"
+    if len(key) < 12:
+        return "***"
+    return key[:4] + "..." + key[-4:]
 
 
 def _format_iso_timestamp(value) -> str:
@@ -369,6 +366,7 @@ def show_status(args):
 
     platforms = {
         "Telegram": ("TELEGRAM_BOT_TOKEN", "TELEGRAM_HOME_CHANNEL"),
+        "LINE": ("LINE_CHANNEL_ACCESS_TOKEN", "LINE_HOME_CHANNEL"),
         "Discord": ("DISCORD_BOT_TOKEN", "DISCORD_HOME_CHANNEL"),
         "WhatsApp": ("WHATSAPP_ENABLED", None),
         "Signal": ("SIGNAL_HTTP_URL", "SIGNAL_HOME_CHANNEL"),
@@ -388,18 +386,26 @@ def show_status(args):
     for name, (token_var, home_var) in platforms.items():
         token = os.getenv(token_var, "")
         has_token = bool(token)
-        
+
         home_channel = ""
         if home_var:
             home_channel = os.getenv(home_var, "")
         # Back-compat: QQBot home channel was renamed from QQ_HOME_CHANNEL to QQBOT_HOME_CHANNEL
         if not home_channel and home_var == "QQBOT_HOME_CHANNEL":
             home_channel = os.getenv("QQ_HOME_CHANNEL", "")
-        
+
         status = "configured" if has_token else "not configured"
+        # LINE works in two modes: outbound-only (token alone — Push API for
+        # send_message + cron) or full duplex (token + secret — adds inbound
+        # webhook receiver). Reflect which mode is active so operators know.
+        if name == "LINE" and has_token:
+            if os.getenv("LINE_CHANNEL_SECRET", ""):
+                status = "configured (full duplex: send + receive)"
+            else:
+                status = "configured (outbound-only — set LINE_CHANNEL_SECRET to enable inbound)"
         if home_channel:
             status += f" (home: {home_channel})"
-        
+
         print(f"  {name:<12}  {check_mark(has_token)} {status}")
 
     # Plugin-registered platforms

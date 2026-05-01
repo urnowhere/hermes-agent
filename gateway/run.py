@@ -38,7 +38,6 @@ from typing import Dict, Optional, Any, List
 # gateway is a long-running daemon, so its boot cost matters less than
 # preserving the established test-patch surface.
 from agent.account_usage import fetch_account_usage, render_account_usage_lines
-from hermes_cli.config import cfg_get
 
 # --- Agent cache tuning ---------------------------------------------------
 # Bounds the per-session AIAgent cache to prevent unbounded growth in
@@ -292,8 +291,6 @@ if _config_path.exists():
                 "container_disk": "TERMINAL_CONTAINER_DISK",
                 "container_persistent": "TERMINAL_CONTAINER_PERSISTENT",
                 "docker_volumes": "TERMINAL_DOCKER_VOLUMES",
-                "docker_mount_cwd_to_workspace": "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE",
-                "docker_run_as_host_user": "TERMINAL_DOCKER_RUN_AS_HOST_USER",
                 "sandbox_dir": "TERMINAL_SANDBOX_DIR",
                 "persistent_shell": "TERMINAL_PERSISTENT_SHELL",
             }
@@ -306,10 +303,6 @@ if _config_path.exists():
                     # Only bridge explicit absolute paths from config.yaml.
                     if _cfg_key == "cwd" and str(_val) in (".", "auto", "cwd"):
                         continue
-                    # Expand shell tilde in cwd so subprocess.Popen never
-                    # receives a literal "~/" which the kernel rejects.
-                    if _cfg_key == "cwd" and isinstance(_val, str):
-                        _val = os.path.expanduser(_val)
                     if isinstance(_val, list):
                         os.environ[_env_var] = json.dumps(_val)
                     else:
@@ -1614,7 +1607,7 @@ class GatewayRunner:
             if cfg_path.exists():
                 with open(cfg_path, encoding="utf-8") as _f:
                     cfg = _y.safe_load(_f) or {}
-                return (cfg_get(cfg, "agent", "system_prompt", default="") or "").strip()
+                return (cfg.get("agent", {}).get("system_prompt", "") or "").strip()
         except Exception:
             pass
         return ""
@@ -1635,7 +1628,7 @@ class GatewayRunner:
             if cfg_path.exists():
                 with open(cfg_path, encoding="utf-8") as _f:
                     cfg = _y.safe_load(_f) or {}
-                effort = str(cfg_get(cfg, "agent", "reasoning_effort", default="") or "").strip()
+                effort = str(cfg.get("agent", {}).get("reasoning_effort", "") or "").strip()
         except Exception:
             pass
         result = parse_reasoning_effort(effort)
@@ -1718,7 +1711,7 @@ class GatewayRunner:
             if cfg_path.exists():
                 with open(cfg_path, encoding="utf-8") as _f:
                     cfg = _y.safe_load(_f) or {}
-                raw = str(cfg_get(cfg, "agent", "service_tier", default="") or "").strip()
+                raw = str(cfg.get("agent", {}).get("service_tier", "") or "").strip()
         except Exception:
             pass
 
@@ -1739,7 +1732,7 @@ class GatewayRunner:
             if cfg_path.exists():
                 with open(cfg_path, encoding="utf-8") as _f:
                     cfg = _y.safe_load(_f) or {}
-                return bool(cfg_get(cfg, "display", "show_reasoning", default=False))
+                return bool(cfg.get("display", {}).get("show_reasoning", False))
         except Exception:
             pass
         return False
@@ -1755,7 +1748,7 @@ class GatewayRunner:
                 if cfg_path.exists():
                     with open(cfg_path, encoding="utf-8") as _f:
                         cfg = _y.safe_load(_f) or {}
-                    mode = str(cfg_get(cfg, "display", "busy_input_mode", default="") or "").strip().lower()
+                    mode = str(cfg.get("display", {}).get("busy_input_mode", "") or "").strip().lower()
             except Exception:
                 pass
         if mode == "queue":
@@ -1775,7 +1768,7 @@ class GatewayRunner:
                 if cfg_path.exists():
                     with open(cfg_path, encoding="utf-8") as _f:
                         cfg = _y.safe_load(_f) or {}
-                    raw = str(cfg_get(cfg, "agent", "restart_drain_timeout", default="") or "").strip()
+                    raw = str(cfg.get("agent", {}).get("restart_drain_timeout", "") or "").strip()
             except Exception:
                 pass
         value = parse_restart_drain_timeout(raw)
@@ -1808,7 +1801,7 @@ class GatewayRunner:
                 if cfg_path.exists():
                     with open(cfg_path, encoding="utf-8") as _f:
                         cfg = _y.safe_load(_f) or {}
-                    raw = cfg_get(cfg, "display", "background_process_notifications")
+                    raw = cfg.get("display", {}).get("background_process_notifications")
                     if raw is False:
                         mode = "off"
                     elif raw not in (None, ""):
@@ -2405,6 +2398,9 @@ class GatewayRunner:
             "BLUEBUBBLES_ALLOWED_USERS",
             "QQ_ALLOWED_USERS",
             "YUANBAO_ALLOWED_USERS",
+            "LINE_ALLOWED_USERS",
+            "LINE_ALLOWED_GROUPS",
+            "LINE_ALLOWED_ROOMS",
             "GATEWAY_ALLOWED_USERS",
         )
         _builtin_allow_all_vars = (
@@ -2420,6 +2416,7 @@ class GatewayRunner:
             "BLUEBUBBLES_ALLOW_ALL_USERS",
             "QQ_ALLOW_ALL_USERS",
             "YUANBAO_ALLOW_ALL_USERS",
+            "LINE_ALLOW_ALL_USERS",
         )
         # Also pick up plugin-registered platforms — each entry can declare
         # its own allowed_users_env / allow_all_env, so the warning stays
@@ -2487,7 +2484,6 @@ class GatewayRunner:
 
         # Discover and load event hooks
         self.hooks.discover_and_load()
-
         
         # Recover background processes from checkpoint (crash recovery)
         try:
@@ -3878,6 +3874,19 @@ class GatewayRunner:
                 return None
             return YuanbaoAdapter(config)
 
+        elif platform == Platform.LINE:
+            from gateway.platforms.line import (
+                LineAdapter,
+                check_line_requirements,
+            )
+            if not check_line_requirements():
+                logger.warning("LINE: Dependencies not available (httpx/aiohttp missing)")
+                return None
+            if not config.token:
+                logger.warning("LINE: LINE_CHANNEL_ACCESS_TOKEN must be set")
+                return None
+            return LineAdapter(config)
+
         return None
     def _is_user_authorized(self, source: SessionSource) -> bool:
         """
@@ -3896,6 +3905,16 @@ class GatewayRunner:
         # Webhook events are authenticated via HMAC signature validation in
         # the adapter itself — no user allowlist applies.
         if source.platform in (Platform.HOMEASSISTANT, Platform.WEBHOOK):
+            return True
+
+        # LINE: HMAC-verified webhook events for group/room sources have
+        # already been authorized by the adapter's own three-allowlist
+        # check (LINE_ALLOWED_GROUPS / LINE_ALLOWED_ROOMS) before dispatch.
+        # The DM path (chat_type="dm") still flows through LINE_ALLOWED_USERS
+        # below — only group and room sources skip the per-user check, since
+        # LINE groups have no stable per-member allowlist concept and the
+        # group/room id is the meaningful authorization handle.
+        if source.platform == Platform.LINE and source.chat_type in {"group", "room"}:
             return True
 
         user_id = source.user_id
@@ -3920,6 +3939,7 @@ class GatewayRunner:
             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOWED_USERS",
             Platform.QQBOT: "QQ_ALLOWED_USERS",
             Platform.YUANBAO: "YUANBAO_ALLOWED_USERS",
+            Platform.LINE: "LINE_ALLOWED_USERS",
         }
         platform_group_user_env_map = {
             Platform.TELEGRAM: "TELEGRAM_GROUP_ALLOWED_USERS",
@@ -3946,6 +3966,7 @@ class GatewayRunner:
             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOW_ALL_USERS",
             Platform.QQBOT: "QQ_ALLOW_ALL_USERS",
             Platform.YUANBAO: "YUANBAO_ALLOW_ALL_USERS",
+            Platform.LINE: "LINE_ALLOW_ALL_USERS",
         }
 
         # Plugin platforms: check the registry for auth env var names
@@ -4131,6 +4152,7 @@ class GatewayRunner:
                 Platform.WEIXIN:   "WEIXIN_ALLOWED_USERS",
                 Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOWED_USERS",
                 Platform.QQBOT:    "QQ_ALLOWED_USERS",
+                Platform.LINE:     "LINE_ALLOWED_USERS",
             }
             platform_group_env_map = {
                 Platform.TELEGRAM: (
@@ -7266,7 +7288,7 @@ class GatewayRunner:
 
         try:
             config = _load_gateway_config()
-            personalities = cfg_get(config, "agent", "personalities", default={})
+            personalities = config.get("agent", {}).get("personalities", {}) if config else {}
         except Exception:
             config = {}
             personalities = {}
@@ -8292,7 +8314,7 @@ class GatewayRunner:
         # --- check config gate ------------------------------------------------
         try:
             user_config = _load_gateway_config()
-            gate_enabled = cfg_get(user_config, "display", "tool_progress_command", default=False)
+            gate_enabled = user_config.get("display", {}).get("tool_progress_command", False)
         except Exception:
             gate_enabled = False
 
@@ -9383,7 +9405,7 @@ class GatewayRunner:
         Platform.TELEGRAM, Platform.DISCORD, Platform.SLACK, Platform.WHATSAPP,
         Platform.SIGNAL, Platform.MATTERMOST, Platform.MATRIX,
         Platform.HOMEASSISTANT, Platform.EMAIL, Platform.SMS, Platform.DINGTALK,
-        Platform.FEISHU, Platform.WECOM, Platform.WECOM_CALLBACK, Platform.WEIXIN, Platform.BLUEBUBBLES, Platform.QQBOT, Platform.LOCAL,
+        Platform.FEISHU, Platform.WECOM, Platform.WECOM_CALLBACK, Platform.WEIXIN, Platform.BLUEBUBBLES, Platform.QQBOT, Platform.LINE, Platform.LOCAL,
     })
 
     async def _handle_debug_command(self, event: MessageEvent) -> str:
@@ -11219,7 +11241,7 @@ class GatewayRunner:
                             tool_progress_hint_gateway,
                         )
                         _cfg = _load_gateway_config()
-                        gate_on = bool(cfg_get(_cfg, "display", "tool_progress_command", default=False))
+                        gate_on = bool(_cfg.get("display", {}).get("tool_progress_command", False))
                         if gate_on and not is_seen(_cfg, TOOL_PROGRESS_FLAG):
                             long_tool_hint_fired[0] = True
                             progress_queue.put(tool_progress_hint_gateway())
@@ -11377,20 +11399,6 @@ class GatewayRunner:
                         if progress_lines:
                             progress_lines[-1] = f"{base_msg} (×{count + 1})"
                         msg = progress_lines[-1] if progress_lines else base_msg
-                    elif isinstance(raw, tuple) and len(raw) >= 1 and raw[0] == "__reset__":
-                        # Content bubble just landed on the platform — close off
-                        # the current tool-progress bubble so the next tool
-                        # starts a fresh bubble below the content. Without this,
-                        # tool lines keep editing the ORIGINAL progress message
-                        # above the new content, making the chat appear out of
-                        # order. Mirrors GatewayStreamConsumer.on_segment_break
-                        # on the content side. (Issue: tool + content
-                        # linearization regression after PR #7885.)
-                        progress_msg_id = None
-                        progress_lines = []
-                        last_progress_msg[0] = None
-                        repeat_count[0] = 0
-                        continue
                     else:
                         msg = raw
                         progress_lines.append(msg)
@@ -11460,24 +11468,6 @@ class GatewayRunner:
                                 _, base_msg, count = raw
                                 if progress_lines:
                                     progress_lines[-1] = f"{base_msg} (×{count + 1})"
-                            elif isinstance(raw, tuple) and len(raw) >= 1 and raw[0] == "__reset__":
-                                # Content-bubble marker during drain: close off
-                                # the current progress bubble and start a fresh
-                                # one for any tool lines that arrived after.
-                                if can_edit and progress_lines and progress_msg_id:
-                                    _pending_text = "\n".join(progress_lines)
-                                    try:
-                                        await adapter.edit_message(
-                                            chat_id=source.chat_id,
-                                            message_id=progress_msg_id,
-                                            content=_pending_text,
-                                        )
-                                    except Exception:
-                                        pass
-                                progress_msg_id = None
-                                progress_lines = []
-                                last_progress_msg[0] = None
-                                repeat_count[0] = 0
                             else:
                                 progress_lines.append(raw)
                         except Exception:
@@ -11683,11 +11673,6 @@ class GatewayRunner:
                             chat_id=source.chat_id,
                             config=_consumer_cfg,
                             metadata={"thread_id": _progress_thread_id} if _progress_thread_id else None,
-                            on_new_message=(
-                                (lambda: progress_queue.put(("__reset__",)))
-                                if progress_queue is not None
-                                else None
-                            ),
                         )
                         if _want_stream_deltas:
                             def _stream_delta_cb(text: str) -> None:
@@ -12906,7 +12891,6 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
     IMAGE_CACHE_EVERY = 60   # ticks — once per hour at default 60s interval
     CHANNEL_DIR_EVERY = 5    # ticks — every 5 minutes
     PASTE_SWEEP_EVERY = 60   # ticks — once per hour
-    CURATOR_EVERY = 60       # ticks — poll hourly (inner gate handles the real cadence)
 
     logger.info("Cron ticker started (interval=%ds)", interval)
     tick_count = 0
@@ -12957,21 +12941,6 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
                     )
             except Exception as e:
                 logger.debug("Paste sweep error: %s", e)
-
-        # Curator — piggy-back on the existing cron ticker so long-running
-        # gateways get weekly skill maintenance without needing restarts.
-        # maybe_run_curator() is internally gated by config.interval_hours
-        # (7 days by default), so CURATOR_EVERY is just the poll rate — the
-        # real work only fires once per config interval.
-        if tick_count % CURATOR_EVERY == 0:
-            try:
-                from agent.curator import maybe_run_curator
-                maybe_run_curator(
-                    idle_for_seconds=float("inf"),
-                    on_summary=lambda msg: logger.info("curator: %s", msg),
-                )
-            except Exception as e:
-                logger.debug("Curator tick error: %s", e)
 
         stop_event.wait(timeout=interval)
     logger.info("Cron ticker stopped")
