@@ -29,6 +29,7 @@ from tools.delegate_tool import (
     _build_child_agent,
     _build_child_progress_callback,
     _build_child_system_prompt,
+    _judge_best_of_n,
     _strip_blocked_tools,
     _resolve_child_credential_pool,
     _resolve_delegation_credentials,
@@ -92,6 +93,68 @@ class TestChildSystemPrompt(unittest.TestCase):
     def test_empty_context_ignored(self):
         prompt = _build_child_system_prompt("Do something", "  ")
         self.assertNotIn("CONTEXT", prompt)
+
+
+
+class TestJudgeBestOfN(unittest.TestCase):
+    @patch("agent.auxiliary_client.call_llm")
+    def test_best_of_n_selects_winner(self, mock_call_llm):
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = (
+            '{"winner_index": 1, "reasoning": "Better error handling"}'
+        )
+        mock_call_llm.return_value = mock_resp
+
+        results = [
+            {"task_index": 0, "summary": "Implementation A"},
+            {"task_index": 1, "summary": "Implementation B"},
+            {"task_index": 2, "summary": "Implementation C"},
+        ]
+        winner_idx = _judge_best_of_n(results, "Select best error handling")
+        self.assertEqual(winner_idx, 1)
+        mock_call_llm.assert_called_once()
+
+    @patch("agent.auxiliary_client.call_llm")
+    def test_best_of_n_no_evaluator_returns_all(self, mock_call_llm):
+        results = [
+            {"task_index": 0, "summary": "Implementation A"},
+            {"task_index": 1, "summary": "Implementation B"},
+        ]
+        winner_idx = _judge_best_of_n(results, "")
+        self.assertIsNone(winner_idx)
+        mock_call_llm.assert_not_called()
+
+    @patch("agent.auxiliary_client.call_llm")
+    def test_best_of_n_judge_failure_returns_all(self, mock_call_llm):
+        mock_call_llm.side_effect = RuntimeError("No provider")
+
+        results = [
+            {"task_index": 0, "summary": "Implementation A"},
+            {"task_index": 1, "summary": "Implementation B"},
+        ]
+        winner_idx = _judge_best_of_n(results, "Select best")
+        self.assertIsNone(winner_idx)
+        mock_call_llm.assert_called_once()
+
+    def test_best_of_n_single_task_ignores_evaluator(self):
+        results = [{"task_index": 0, "summary": "Only one"}]
+        winner_idx = _judge_best_of_n(results, "Select best")
+        self.assertIsNone(winner_idx)
+
+    @patch("agent.auxiliary_client.call_llm")
+    def test_best_of_n_invalid_winner_index_returns_none(self, mock_call_llm):
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = '{"winner_index": 99, "reasoning": "invalid"}'
+        mock_call_llm.return_value = mock_resp
+
+        results = [
+            {"task_index": 0, "summary": "Implementation A"},
+            {"task_index": 1, "summary": "Implementation B"},
+        ]
+        winner_idx = _judge_best_of_n(results, "Select best")
+        self.assertIsNone(winner_idx)
 
 
 class TestStripBlockedTools(unittest.TestCase):

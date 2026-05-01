@@ -1809,6 +1809,154 @@ def _run_single_child(
             logger.debug("Failed to close child agent after delegation")
 
 
+
+
+# TODO: remove after #17980 merges into upstream
+def _judge_output(
+    objective: str,
+    acceptance_criteria: str,
+    output: str,
+) -> Dict[str, str]:
+    """Evaluate sub-agent output against acceptance criteria using a cheap LLM.
+
+    Returns a dict with verdict (PASS|FAIL) and reasoning.
+    If the auxiliary LLM is unavailable or returns unparseable output,
+    logs a warning and returns {"verdict": "FAIL", "reasoning": "..."}.
+    """
+    if not acceptance_criteria or not acceptance_criteria.strip():
+        return {"verdict": "PASS", "reasoning": "No criteria provided"}
+
+    judge_prompt = (
+        "Evaluate whether this output meets the acceptance criteria.\n\n"
+        f"Objective: {objective}\n"
+        f"Acceptance Criteria: {acceptance_criteria}\n\n"
+        f"Output:\n{output}\n\n"
+        'Respond ONLY with valid JSON — no markdown, no backticks, no preamble:\n'
+        '{"verdict": "PASS"|"FAIL", "reasoning": "explanation"}'
+    )
+
+    try:
+        import re
+        from agent.auxiliary_client import call_llm
+
+        resp = call_llm(
+            task="judge",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an independent quality judge. Check if a sub-agent's "
+                        "output meets the stated acceptance criteria. Be strict but fair. "
+                        "Respond ONLY with the requested JSON."
+                    ),
+                },
+                {"role": "user", "content": judge_prompt},
+            ],
+            temperature=0.0,
+            max_tokens=512,
+        )
+        raw = resp.choices[0].message.content.strip() if resp and resp.choices else ""
+    except Exception as exc:
+        logger.warning("Judge LLM call failed: %s", exc)
+        return {"verdict": "FAIL", "reasoning": f"Judge unavailable: {exc}"}
+
+    # Strip optional markdown code fences
+    raw = re.sub(r"^```(?:json)?\s*\n?", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\n?```\s*$", "", raw)
+    raw = raw.strip()
+
+    try:
+        parsed = json.loads(raw)
+        verdict = str(parsed.get("verdict", "")).strip().upper()
+        reasoning = str(parsed.get("reasoning", "")).strip()
+        if verdict not in {"PASS", "FAIL"}:
+            verdict = "FAIL"
+            reasoning = f"Invalid verdict from judge: {raw[:200]}"
+        return {"verdict": verdict, "reasoning": reasoning}
+    except json.JSONDecodeError:
+        logger.warning("Judge returned non-JSON: %s", raw[:200])
+        upper = raw.upper()
+        if "PASS" in upper and "FAIL" not in upper:
+            return {"verdict": "PASS", "reasoning": raw}
+        return {"verdict": "FAIL", "reasoning": f"Judge returned non-JSON: {raw[:200]}"}
+
+
+
+def _judge_best_of_n(
+    results: List[Dict[str, Any]],
+    evaluator: str,
+) -> Optional[int]:
+    """Run competitive evaluation on N parallel outputs and return best index.
+
+    Returns the task_index of the winning entry, or None if evaluation
+    fails (in which case all results are preserved and the caller decides).
+    """
+    if not results or len(results) < 2:
+        return None
+
+    if not evaluator or not evaluator.strip():
+        return None
+
+    summaries: List[str] = []
+    for entry in results:
+        idx = entry.get("task_index", 0)
+        summary = entry.get("summary", "") or entry.get("error", "")
+        summaries.append(
+            f"--- Implementation {idx} ---\n{summary[:800]}\n"
+        )
+
+    comparison_prompt = (
+        f"Evaluate the following {len(results)} implementations of the same task.\n\n"
+        f"Evaluation criteria: {evaluator}\n\n"
+        + "\n".join(summaries)
+        + "\n\nSelect the BEST implementation based on the criteria above. "
+        "Respond ONLY with valid JSON — no markdown, no backticks, no preamble:\n"
+        '{"winner_index": <int>, "reasoning": "explanation"}'
+    )
+
+    try:
+        import re
+        from agent.auxiliary_client import call_llm
+
+        resp = call_llm(
+            task="judge",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an independent competitive evaluator. "
+                        "Compare multiple implementations and select the best one. "
+                        "Respond ONLY with the requested JSON."
+                    ),
+                },
+                {"role": "user", "content": comparison_prompt},
+            ],
+            temperature=0.0,
+            max_tokens=1024,
+        )
+        raw = resp.choices[0].message.content.strip() if resp and resp.choices else ""
+    except Exception as exc:
+        logger.warning("Best-of-N judge call failed: %s", exc)
+        return None
+
+    # Strip optional markdown code fences
+    raw = re.sub(r"^```(?:json)?\s*\n?", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\n?```\s*$", "", raw)
+    raw = raw.strip()
+
+    try:
+        parsed = json.loads(raw)
+        winner = int(parsed.get("winner_index", -1))
+        reasoning = str(parsed.get("reasoning", "")).strip()
+        if 0 <= winner < len(results):
+            logger.debug("Best-of-N winner: index %d (%s)", winner, reasoning[:100])
+            return winner
+        logger.warning("Best-of-N returned invalid winner_index: %d", winner)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        logger.warning("Best-of-N returned non-JSON: %s", raw[:200])
+
+    return None
+
 def delegate_task(
     goal: Optional[str] = None,
     context: Optional[str] = None,
@@ -1817,6 +1965,7 @@ def delegate_task(
     max_iterations: Optional[int] = None,
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
+    evaluator: Optional[str] = None,
     role: Optional[str] = None,
     parent_agent=None,
 ) -> str:
@@ -2095,6 +2244,15 @@ def delegate_task(
 
         # Sort by task_index so results match input order
         results.sort(key=lambda r: r["task_index"])
+
+    # Best-of-N competitive evaluation (#479 Phase 1)
+    if evaluator and len(results) > 1:
+        winner_idx = _judge_best_of_n(results, evaluator)
+        if winner_idx is not None and 0 <= winner_idx < len(results):
+            for entry in results:
+                entry["best_of_n_winner"] = (
+                    entry["task_index"] == winner_idx
+                )
 
     # Notify parent's memory provider of delegation outcomes
     if (
@@ -2500,6 +2658,14 @@ DELEGATE_TASK_SCHEMA = {
                 "description": (
                     "Arguments for the ACP command (default: ['--acp', '--stdio']). "
                     "Only used when acp_command is set. Example: ['--acp', '--stdio', '--model', 'claude-opus-4-6']"
+                ),
+            },
+            "evaluator": {
+                "type": "string",
+                "description": (
+                    "Optional evaluation rubric for competitive Best-of-N selection. "
+                    "When provided with multiple tasks, all outputs are evaluated side-by-side "
+                    "by an independent judge and the best result is marked as winner."
                 ),
             },
         },
