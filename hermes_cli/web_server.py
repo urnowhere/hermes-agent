@@ -2973,7 +2973,9 @@ async def pty_ws(ws: WebSocket) -> None:
         return
 
     client_host = ws.client.host if ws.client else ""
-    if client_host and client_host not in _LOOPBACK_HOSTS:
+    # Fail-closed: if client_host is empty (proxy/unknown), reject the connection
+    # rather than silently allowing it.
+    if not client_host or client_host not in _LOOPBACK_HOSTS:
         await ws.close(code=4403)
         return
 
@@ -3081,7 +3083,9 @@ async def gateway_ws(ws: WebSocket) -> None:
         return
 
     client_host = ws.client.host if ws.client else ""
-    if client_host and client_host not in _LOOPBACK_HOSTS:
+    # Fail-closed: if client_host is empty (proxy/unknown), reject the connection
+    # rather than silently allowing it.
+    if not client_host or client_host not in _LOOPBACK_HOSTS:
         await ws.close(code=4403)
         return
 
@@ -3114,7 +3118,9 @@ async def pub_ws(ws: WebSocket) -> None:
         return
 
     client_host = ws.client.host if ws.client else ""
-    if client_host and client_host not in _LOOPBACK_HOSTS:
+    # Fail-closed: if client_host is empty (proxy/unknown), reject the connection
+    # rather than silently allowing it.
+    if not client_host or client_host not in _LOOPBACK_HOSTS:
         await ws.close(code=4403)
         return
 
@@ -3144,7 +3150,9 @@ async def events_ws(ws: WebSocket) -> None:
         return
 
     client_host = ws.client.host if ws.client else ""
-    if client_host and client_host not in _LOOPBACK_HOSTS:
+    # Fail-closed: if client_host is empty (proxy/unknown), reject the connection
+    # rather than silently allowing it.
+    if not client_host or client_host not in _LOOPBACK_HOSTS:
         await ws.close(code=4403)
         return
 
