@@ -1041,6 +1041,18 @@ DEFAULT_CONFIG = {
     # Empty string means use server-local time.
     "timezone": "",
 
+    # Agent identity emoji shown on message acknowledgment and completion.
+    # Platforms that support reactions (Discord, Signal, etc.) display this emoji
+    # while the agent is processing. Empty string falls back to 👀.
+    # Can be overridden per-platform under discord.persona_emoji, etc.
+    "persona_emoji": "",
+
+    # Swap the active reaction emoji to reflect the current tool call.
+    # Provides per-tool visibility (📖 read_file, 💻 terminal, 🌐 browser, etc.)
+    # without cluttering the chat with text messages.
+    # Can be overridden per-platform under discord.dynamic_reactions, etc.
+    "dynamic_reactions": True,
+
     # Discord platform settings (gateway mode)
     "discord": {
         "require_mention": True,       # Require @mention to respond in server channels
@@ -1048,8 +1060,8 @@ DEFAULT_CONFIG = {
         "allowed_channels": "",        # If set, bot ONLY responds in these channel IDs (whitelist)
         "auto_thread": True,           # Auto-create threads on @mention in channels (like Slack)
         "reactions": True,             # Add emoji reactions to messages during processing
-        "persona_emoji": "",           # Agent identity emoji shown on ack + completion (e.g. 🔎). Empty = 👀
-        "dynamic_reactions": True,     # Swap reaction per tool call to show current activity
+        # persona_emoji: ""            # Per-platform override (inherits global persona_emoji if unset)
+        # dynamic_reactions: true      # Per-platform override (inherits global dynamic_reactions if unset)
         "channel_prompts": {},         # Per-channel ephemeral system prompts (forum parents apply to child threads)
         # discord / discord_admin tools: restrict which actions the agent may call.
         # Default (empty) = all actions allowed (subject to bot privileged intents).
