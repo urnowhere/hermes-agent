@@ -32,6 +32,7 @@ from urllib.parse import urlparse, urlunparse
 import httpx
 import yaml
 
+from tools.url_safety import is_safe_url
 from tools.skills_guard import (
     ScanResult, content_hash, TRUSTED_REPOS,
 )
@@ -887,6 +888,9 @@ class WellKnownSkillSource(SkillSource):
         if isinstance(cached, dict) and isinstance(cached.get("skills"), list):
             return cached
 
+        if not is_safe_url(index_url):
+            logger.warning("Blocked SSRF: unsafe index URL %s", index_url)
+            return None
         try:
             resp = httpx.get(index_url, timeout=20, follow_redirects=True)
             if resp.status_code != 200:
@@ -918,6 +922,9 @@ class WellKnownSkillSource(SkillSource):
 
     @staticmethod
     def _fetch_text(url: str) -> Optional[str]:
+        if not is_safe_url(url):
+            logger.warning("Blocked SSRF: unsafe fetch URL %s", url)
+            return None
         try:
             resp = httpx.get(url, timeout=20, follow_redirects=True)
             if resp.status_code == 200:
@@ -1993,11 +2000,15 @@ class ClawHubSource(SkillSource):
         import zipfile
 
         files: Dict[str, str] = {}
+        download_url = f"{self.BASE_URL}/download"
+        if not is_safe_url(download_url):
+            logger.warning("Blocked SSRF: unsafe download URL %s", download_url)
+            return files
         max_retries = 3
         for attempt in range(max_retries):
             try:
                 resp = httpx.get(
-                    f"{self.BASE_URL}/download",
+                    download_url,
                     params={"slug": slug, "version": version},
                     timeout=30,
                     follow_redirects=True,
@@ -2051,6 +2062,9 @@ class ClawHubSource(SkillSource):
         return files
 
     def _fetch_text(self, url: str) -> Optional[str]:
+        if not is_safe_url(url):
+            logger.warning("Blocked SSRF: unsafe fetch URL %s", url)
+            return None
         try:
             resp = httpx.get(url, timeout=20)
             if resp.status_code == 200:
