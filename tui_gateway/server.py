@@ -599,6 +599,22 @@ def _start_agent_build(sid: str, session: dict) -> None:
                         unregister_gateway_notify(key)
                     except Exception:
                         pass
+            else:
+                # If the frontend queued a title before the deferred agent
+                # build created/confirmed the DB row, consume it here.  A
+                # duplicate/invalid title should not poison the session forever;
+                # `/title` can be retried explicitly.
+                pending = current.get("pending_title")
+                if pending:
+                    db = _get_db()
+                    if db is not None:
+                        try:
+                            if db.set_session_title(key, pending):
+                                current["pending_title"] = None
+                        except ValueError:
+                            current["pending_title"] = None
+                        except Exception:
+                            pass
             ready.set()
 
     threading.Thread(target=_build, daemon=True).start()
