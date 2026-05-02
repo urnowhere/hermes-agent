@@ -146,6 +146,7 @@ from agent.model_metadata import (
     query_ollama_num_ctx,
 )
 from agent.context_compressor import ContextCompressor
+from agent.moonshot_schema import is_moonshot_model
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
@@ -8338,11 +8339,7 @@ class AIAgent:
         )
         _is_nous = "nousresearch" in self._base_url_lower
         _is_nvidia = "integrate.api.nvidia.com" in self._base_url_lower
-        _is_kimi = (
-            base_url_host_matches(self.base_url, "api.kimi.com")
-            or base_url_host_matches(self.base_url, "moonshot.ai")
-            or base_url_host_matches(self.base_url, "moonshot.cn")
-        )
+        _is_kimi = self._is_kimi_runtime()
         _is_tokenhub = base_url_host_matches(self._base_url_lower, "tokenhub.tencentmaas.com")
         _is_lmstudio = (self.provider or "").strip().lower() == "lmstudio"
 
@@ -8758,6 +8755,29 @@ class AIAgent:
         return (
             self._needs_deepseek_tool_reasoning()
             or self._needs_kimi_tool_reasoning()
+        )
+
+    def _is_kimi_runtime(self) -> bool:
+        """Return True when the runtime is serving Moonshot/Kimi inference.
+
+        Direct routes are caught by host match. Aggregator routes
+        (synthetic.new, OpenRouter, Together, …) keep the aggregator's base
+        URL but still serve Moonshot inference for Kimi slugs, so we also
+        match by model name via ``is_moonshot_model()``.
+
+        Distinct from ``_needs_kimi_tool_reasoning()``: that helper guards a
+        signature-replay quirk on the Anthropic-shaped Kimi/Moonshot routes
+        only and intentionally does NOT match aggregator slugs.  This helper
+        gates the chat_completions Kimi defaults (max_tokens floor,
+        reasoning_effort hint) which Kimi K2.x needs on every route or
+        thinking-mode burns the entire token budget on hidden reasoning and
+        emits an empty visible response (#18742).
+        """
+        return (
+            base_url_host_matches(self.base_url, "api.kimi.com")
+            or base_url_host_matches(self.base_url, "moonshot.ai")
+            or base_url_host_matches(self.base_url, "moonshot.cn")
+            or is_moonshot_model(self.model)
         )
 
     def _needs_kimi_tool_reasoning(self) -> bool:
