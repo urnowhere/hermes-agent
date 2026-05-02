@@ -1643,7 +1643,6 @@ def setup_terminal_backend(config: dict):
 def _apply_default_agent_settings(config: dict):
     """Apply recommended defaults for all agent settings without prompting."""
     config.setdefault("agent", {})["max_turns"] = 90
-    save_env_value("HERMES_MAX_ITERATIONS", "90")
 
     config.setdefault("display", {})["tool_progress"] = "all"
 
@@ -1673,9 +1672,10 @@ def setup_agent_settings(config: dict):
     print()
 
     # ── Max Iterations ──
-    current_max = get_env_value("HERMES_MAX_ITERATIONS") or str(
-        cfg_get(config, "agent", "max_turns", default=90)
-    )
+    # config.yaml is the single source of truth for agent.max_turns. Reading or
+    # writing HERMES_MAX_ITERATIONS here previously created a stale-ghost env
+    # entry whenever the user later edited config.yaml directly (issue #17534).
+    current_max = str(cfg_get(config, "agent", "max_turns", default=90))
     print_info("Maximum tool-calling iterations per conversation.")
     print_info("Higher = more complex tasks, but costs more tokens.")
     print_info(
@@ -1686,7 +1686,6 @@ def setup_agent_settings(config: dict):
     try:
         max_iter = int(max_iter_str)
         if max_iter > 0:
-            save_env_value("HERMES_MAX_ITERATIONS", str(max_iter))
             config.setdefault("agent", {})["max_turns"] = max_iter
             config.pop("max_turns", None)
             print_success(f"Max iterations set to {max_iter}")
