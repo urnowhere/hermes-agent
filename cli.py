@@ -1449,13 +1449,14 @@ def _format_process_notification(evt: dict) -> "str | None":
     evt_type = evt.get("type", "completion")
     _sid = evt.get("session_id", "unknown")
     _cmd = evt.get("command", "unknown")
+    _clean_output = strip_ansi(evt.get("output", ""))
 
     if evt_type == "watch_disabled":
         return f"[IMPORTANT: {evt.get('message', '')}]"
 
     if evt_type == "watch_match":
         _pat = evt.get("pattern", "?")
-        _out = evt.get("output", "")
+        _out = _clean_output
         _sup = evt.get("suppressed", 0)
         text = (
             f"[IMPORTANT: Background process {_sid} matched "
@@ -1470,7 +1471,7 @@ def _format_process_notification(evt: dict) -> "str | None":
 
     # Default: completion event
     _exit = evt.get("exit_code", "?")
-    _out = evt.get("output", "")
+    _out = _clean_output
     return (
         f"[IMPORTANT: Background process {_sid} completed "
         f"(exit code {_exit}).\n"
