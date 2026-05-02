@@ -122,6 +122,10 @@ def format_zh(text: str, **kwargs) -> str:
         "Add to permanent allowlist": "添加到永久白名单",
         "Deny": "拒绝",
         
+        # Dangerous Command UI
+        "Dangerous Command": "危险命令",
+        "Show full command": "显示完整命令",
+        
         # MCP reload
         "Reloading MCP servers...": "正在重新加载 MCP 服务器...",
         
