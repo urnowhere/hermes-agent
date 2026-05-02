@@ -166,6 +166,25 @@ def _apply_profile_override() -> None:
 
 _apply_profile_override()
 
+# macOS 26+ regression: kqueue cannot register stdin (fd 0) for async
+# reading, causing OSError [Errno 22] Invalid argument.  prompt_toolkit
+# triggers this via loop.add_reader(0, ...) in Vt100Input._attached_input().
+# Fall back to PollSelector which works correctly.  Must run BEFORE any
+# prompt_toolkit import (cli.py imports it at module level).
+# See: https://github.com/prompt-toolkit/python-prompt-toolkit/issues/1943
+if sys.platform == "darwin":
+    try:
+        import selectors as _selectors
+
+        _sel = _selectors.DefaultSelector()
+        _sel.register(0, _selectors.EVENT_READ)
+        _sel.unregister(0)
+        del _sel
+    except OSError:
+        _selectors.DefaultSelector = _selectors.PollSelector
+    except Exception:
+        pass  # non-interactive (fd 0 unavailable) — safe to skip
+
 # Load .env from ~/.hermes/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
 from hermes_cli.config import get_hermes_home
