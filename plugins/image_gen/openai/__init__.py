@@ -13,12 +13,24 @@ All three hit the same underlying API model (``gpt-image-2``) with a
 different ``quality`` parameter. Output is base64 JSON → saved under
 ``$HERMES_HOME/cache/images/``.
 
-Selection precedence (first hit wins):
+Tier selection precedence (first hit wins):
 
-1. ``OPENAI_IMAGE_MODEL`` env var (escape hatch for scripts / tests)
+1. ``OPENAI_IMAGE_MODEL`` env var
 2. ``image_gen.openai.model`` in ``config.yaml``
 3. ``image_gen.model`` in ``config.yaml`` (when it's one of our tier IDs)
 4. :data:`DEFAULT_MODEL` — ``gpt-image-2-medium``
+
+API model selection precedence (the actual ``model`` field in the API call):
+
+1. ``OPENAI_IMAGE_API_MODEL`` env var — escape hatch for third-party backends
+2. ``image_gen.openai.api_model`` in ``config.yaml``
+3. ``API_MODEL`` — ``gpt-image-2``
+
+Base URL selection precedence:
+
+1. ``OPENAI_BASE_URL`` env var (standard openai SDK behaviour)
+2. ``image_gen.openai.base_url`` in ``config.yaml``
+3. ``None`` — defaults to api.openai.com
 """
 
 from __future__ import annotations
@@ -116,6 +128,53 @@ def _resolve_model() -> Tuple[str, Dict[str, Any]]:
     return DEFAULT_MODEL, _MODELS[DEFAULT_MODEL]
 
 
+def _resolve_api_model() -> str:
+    """Resolve the actual model name to send in the API request.
+
+    Selection precedence (first hit wins):
+
+    1. ``OPENAI_IMAGE_API_MODEL`` env var — escape hatch for third-party backends
+    2. ``image_gen.openai.api_model`` in ``config.yaml``
+    3. ``API_MODEL`` — ``gpt-image-2``
+
+    This is separate from ``_resolve_model()`` because the tier selection
+    (low/medium/high) and the API model name are orthogonal concerns.
+    """
+    env_override = os.environ.get("OPENAI_IMAGE_API_MODEL")
+    if env_override:
+        return env_override
+
+    cfg = _load_openai_config()
+    openai_cfg = cfg.get("openai") if isinstance(cfg.get("openai"), dict) else {}
+    if isinstance(openai_cfg, dict):
+        value = openai_cfg.get("api_model")
+        if isinstance(value, str) and value:
+            return value
+
+    return API_MODEL
+
+
+def _resolve_base_url() -> Optional[str]:
+    """Resolve the ``base_url`` for the OpenAI client.
+
+    Selection precedence (first hit wins):
+
+    1. ``OPENAI_BASE_URL`` env var (standard openai SDK behaviour)
+    2. ``image_gen.openai.base_url`` in ``config.yaml``
+
+    Returns ``None`` when neither is set, so ``openai.OpenAI()`` uses its
+    default (api.openai.com).
+    """
+    cfg = _load_openai_config()
+    openai_cfg = cfg.get("openai") if isinstance(cfg.get("openai"), dict) else {}
+    if isinstance(openai_cfg, dict):
+        value = openai_cfg.get("base_url")
+        if isinstance(value, str) and value:
+            return value
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Provider
 # ---------------------------------------------------------------------------
@@ -210,12 +269,14 @@ class OpenAIImageGenProvider(ImageGenProvider):
             )
 
         tier_id, meta = _resolve_model()
+        api_model = _resolve_api_model()
+        base_url = _resolve_base_url()
         size = _SIZES.get(aspect, _SIZES["square"])
 
         # gpt-image-2 returns b64_json unconditionally and REJECTS
         # ``response_format`` as an unknown parameter. Don't send it.
         payload: Dict[str, Any] = {
-            "model": API_MODEL,
+            "model": api_model,
             "prompt": prompt,
             "size": size,
             "n": 1,
@@ -223,7 +284,10 @@ class OpenAIImageGenProvider(ImageGenProvider):
         }
 
         try:
-            client = openai.OpenAI()
+            client_kwargs: Dict[str, Any] = {}
+            if base_url:
+                client_kwargs["base_url"] = base_url
+            client = openai.OpenAI(**client_kwargs)
             response = client.images.generate(**payload)
         except Exception as exc:
             logger.debug("OpenAI image generation failed", exc_info=True)
