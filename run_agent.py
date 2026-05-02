@@ -10834,7 +10834,7 @@ class AIAgent:
             # This prevents max_iterations from killing the agent before compression
             # has a chance to trigger (e.g. when tool outputs are small per iteration
             # but accumulated context is large, or when the provider doesn't return
-            # usage data and should_compress(0) never fires). (#TODO-issue)
+            # usage data and should_compress(0) never fires). (ref: PR #18607)
             if (not self._budget_grace_call
                     and self.iteration_budget.remaining <= 1
                     and self.compression_enabled
