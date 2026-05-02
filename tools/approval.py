@@ -543,7 +543,7 @@ def load_permanent_allowlist() -> set:
             load_permanent(patterns)
         return patterns
     except Exception as e:
-        logger.warning("Failed to load permanent allowlist: %s", e)
+        logger.warning("Failed to load permanent allowlist: %s", e, exc_info=True)
         return set()
 
 
@@ -555,7 +555,7 @@ def save_permanent_allowlist(patterns: set):
         config["command_allowlist"] = list(patterns)
         save_config(config)
     except Exception as e:
-        logger.warning("Could not save allowlist: %s", e)
+        logger.warning("Could not save allowlist: %s", e, exc_info=True)
 
 
 # =========================================================================
@@ -696,7 +696,7 @@ def _get_approval_config() -> dict:
         config = load_config()
         return config.get("approvals", {}) or {}
     except Exception as e:
-        logger.warning("Failed to load approval config: %s", e)
+        logger.warning("Failed to load approval config: %s", e, exc_info=True)
         return {}
 
 
@@ -1072,7 +1072,7 @@ def check_all_command_guards(command: str, env_type: str,
             try:
                 notify_cb(approval_data)
             except Exception as exc:
-                logger.warning("Gateway approval notify failed: %s", exc)
+                logger.warning("Gateway approval notify failed: %s", exc, exc_info=True)
                 with _lock:
                     queue = _gateway_queues.get(session_key, [])
                     if entry in queue:
