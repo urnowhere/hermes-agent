@@ -491,8 +491,31 @@ def _resolve_named_custom_runtime(
     requested_norm = (requested_provider or "").strip().lower()
     if requested_norm == "custom" and explicit_base_url:
         base_url = explicit_base_url.strip().rstrip("/")
+        # Look up custom_providers for a matching entry by base_url so that
+        # key_env / inline api_key configured on the provider are honoured
+        # even when the caller only passes provider="custom" + base_url
+        # (e.g. the default model config path).
+        _cp_api_key = ""
+        _cp_api_mode = ""
+        try:
+            _cp_list = get_compatible_custom_providers(load_config())
+            for _cp in (_cp_list or []):
+                if not isinstance(_cp, dict):
+                    continue
+                _cp_url = (_cp.get("base_url") or "").strip().rstrip("/")
+                if _cp_url and _cp_url == base_url:
+                    _cp_api_key = str(_cp.get("api_key", "") or "").strip()
+                    if not has_usable_secret(_cp_api_key):
+                        _kenv = str(_cp.get("key_env", "") or "").strip()
+                        if _kenv:
+                            _cp_api_key = os.getenv(_kenv, "").strip()
+                    _cp_api_mode = _parse_api_mode(_cp.get("api_mode")) or ""
+                    break
+        except Exception:
+            pass
         api_key_candidates = [
             (explicit_api_key or "").strip(),
+            _cp_api_key,
             os.getenv("OPENAI_API_KEY", "").strip(),
             os.getenv("OPENROUTER_API_KEY", "").strip(),
         ]
@@ -502,7 +525,7 @@ def _resolve_named_custom_runtime(
         ) or "no-key-required"
         return {
             "provider": "custom",
-            "api_mode": _detect_api_mode_for_url(base_url) or "chat_completions",
+            "api_mode": _cp_api_mode or _detect_api_mode_for_url(base_url) or "chat_completions",
             "base_url": base_url,
             "api_key": api_key,
             "source": "direct-alias",
