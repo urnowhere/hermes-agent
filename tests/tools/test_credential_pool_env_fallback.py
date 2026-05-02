@@ -108,8 +108,10 @@ class TestCredentialPoolSeedsFromDotEnv:
 
     def test_os_environ_still_wins_over_dotenv(self, isolated_hermes_home, monkeypatch):
         """get_env_value checks os.environ first — verify seeding picks that up."""
-        _write_env_file(isolated_hermes_home, DEEPSEEK_API_KEY="sk-dotenv-stale")
-        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-env-fresh-xyz")
+        dotenv_value = "dotenv-deepseek-key"
+        env_value = "env-deepseek-key"
+        _write_env_file(isolated_hermes_home, DEEPSEEK_API_KEY=dotenv_value)
+        monkeypatch.setenv("DEEPSEEK_API_KEY", env_value)
 
         from agent.credential_pool import _seed_from_env
         entries = []
@@ -118,7 +120,8 @@ class TestCredentialPoolSeedsFromDotEnv:
         assert changed is True
         seeded = [e for e in entries if e.source == "env:DEEPSEEK_API_KEY"]
         assert len(seeded) == 1
-        assert seeded[0].access_token == "sk-env-fresh-xyz"
+        assert seeded[0].access_token == env_value
+        assert seeded[0].access_token != dotenv_value
 
 
 class TestAuthResolvesFromDotEnv:
