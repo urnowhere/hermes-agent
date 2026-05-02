@@ -6,7 +6,7 @@ skills_hub, cronjob_tools, and credential_files.
 """
 
 import logging
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -39,5 +39,4 @@ def has_traversal_component(path_str: str) -> bool:
 
     Quick check for obvious traversal attempts before doing full resolution.
     """
-    parts = Path(path_str).parts
-    return ".." in parts
+    return ".." in Path(path_str).parts or ".." in PureWindowsPath(path_str).parts
