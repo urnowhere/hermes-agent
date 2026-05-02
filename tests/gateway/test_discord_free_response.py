@@ -88,6 +88,16 @@ def adapter(monkeypatch):
     monkeypatch.setattr(discord_platform.discord, "Thread", FakeThread, raising=False)
     monkeypatch.setattr(discord_platform.discord, "ForumChannel", FakeForumChannel, raising=False)
 
+    # Keep these unit tests hermetic. The developer machine and gateway runtime
+    # often export Discord channel gates; if they leak into this suite, messages
+    # get filtered before the behavior under test can run.
+    for env_name in (
+        "DISCORD_ALLOWED_CHANNELS",
+        "DISCORD_IGNORED_CHANNELS",
+        "DISCORD_NO_THREAD_CHANNELS",
+    ):
+        monkeypatch.delenv(env_name, raising=False)
+
     config = PlatformConfig(enabled=True, token="fake-token")
     adapter = DiscordAdapter(config)
     adapter._client = SimpleNamespace(user=SimpleNamespace(id=999))
