@@ -54,12 +54,14 @@ class TestUpdateYesConfigMigration:
     @patch("hermes_cli.config.check_config_version", return_value=(1, 2))
     @patch("hermes_cli.config.get_missing_config_fields", return_value=[])
     @patch("hermes_cli.config.get_missing_env_vars", return_value=["NEW_KEY"])
+    @patch("hermes_cli.config.is_managed", return_value=False)
     @patch("shutil.which", return_value=None)
     @patch("subprocess.run")
     def test_yes_auto_migrates_without_input(
         self,
         mock_run,
         _mock_which,
+        _mock_is_managed,
         _mock_missing_env,
         _mock_missing_cfg,
         _mock_version,
@@ -93,12 +95,14 @@ class TestUpdateYesConfigMigration:
     @patch("hermes_cli.config.check_config_version", return_value=(1, 2))
     @patch("hermes_cli.config.get_missing_config_fields", return_value=[])
     @patch("hermes_cli.config.get_missing_env_vars", return_value=["NEW_KEY"])
+    @patch("hermes_cli.config.is_managed", return_value=False)
     @patch("shutil.which", return_value=None)
     @patch("subprocess.run")
     def test_no_yes_flag_still_prompts_in_tty(
         self,
         mock_run,
         _mock_which,
+        _mock_is_managed,
         _mock_missing_env,
         _mock_missing_cfg,
         _mock_version,
@@ -136,12 +140,14 @@ class TestUpdateYesStashRestore:
     @patch("hermes_cli.config.check_config_version", return_value=(1, 1))
     @patch("hermes_cli.config.get_missing_config_fields", return_value=[])
     @patch("hermes_cli.config.get_missing_env_vars", return_value=[])
+    @patch("hermes_cli.config.is_managed", return_value=False)
     @patch("shutil.which", return_value=None)
     @patch("subprocess.run")
     def test_yes_restores_stash_without_prompting(
         self,
         mock_run,
         _mock_which,
+        _mock_is_managed,
         _mock_missing_env,
         _mock_missing_cfg,
         _mock_version,
