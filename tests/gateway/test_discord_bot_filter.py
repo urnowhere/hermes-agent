@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -41,6 +42,17 @@ def _make_message(*, author=None, content="hello", mentions=None, is_dm=False):
 class TestDiscordBotFilter(unittest.TestCase):
     """Test the DISCORD_ALLOW_BOTS filtering logic."""
 
+    @staticmethod
+    def _self_is_explicitly_mentioned(message, client_user):
+        if not client_user:
+            return False
+        if client_user in message.mentions:
+            return True
+        return str(client_user.id) in {
+            match.group(1)
+            for match in re.finditer(r"<@!?(\d+)>", getattr(message, "content", "") or "")
+        }
+
     def _run_filter(self, message, allow_bots="none", client_user=None):
         """Simulate the on_message filter logic and return whether message was accepted."""
         # Replicate the exact filter logic from discord.py on_message
@@ -52,7 +64,7 @@ class TestDiscordBotFilter(unittest.TestCase):
             if allow == "none":
                 return False
             elif allow == "mentions":
-                if not client_user or client_user not in message.mentions:
+                if not self._self_is_explicitly_mentioned(message, client_user):
                     return False
             # "all" falls through
         
@@ -96,6 +108,13 @@ class TestDiscordBotFilter(unittest.TestCase):
         our_user = _make_author(is_self=True)
         bot = _make_author(bot=True)
         msg = _make_message(author=bot, mentions=[our_user])
+        self.assertTrue(self._run_filter(msg, "mentions", our_user))
+
+    def test_allow_bots_mentions_accepts_with_raw_content_mention(self):
+        """Raw Discord mention syntax should count even if message.mentions is empty."""
+        our_user = _make_author(is_self=True)
+        bot = _make_author(bot=True)
+        msg = _make_message(author=bot, content=f"<@!{our_user.id}> relay", mentions=[])
         self.assertTrue(self._run_filter(msg, "mentions", our_user))
 
     def test_default_is_none(self):

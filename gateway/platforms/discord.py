@@ -672,7 +672,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     if allow_bots == "none":
                         return
                     elif allow_bots == "mentions":
-                        if not self._client.user or self._client.user not in message.mentions:
+                        if not adapter_self._self_is_explicitly_mentioned(message):
                             return
                     # "all" falls through; bot is permitted — skip the
                     # human-user allowlist below (bots aren't in it).
@@ -691,10 +691,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 # with bot-aware filtering that works correctly when multiple
                 # agents share a channel.
                 if not isinstance(message.channel, discord.DMChannel) and message.mentions:
-                    _self_mentioned = (
-                        self._client.user is not None
-                        and self._client.user in message.mentions
-                    )
+                    _self_mentioned = adapter_self._self_is_explicitly_mentioned(message)
                     _other_bots_mentioned = any(
                         m.bot and m != self._client.user
                         for m in message.mentions
@@ -2862,6 +2859,22 @@ class DiscordAdapter(BasePlatformAdapter):
             return {part.strip() for part in s.split(",") if part.strip()}
         return set()
 
+    def _raw_mentioned_user_ids(self, message: Any) -> set[str]:
+        """Extract Discord user mentions directly from raw message content."""
+        content = getattr(message, "content", "") or ""
+        return {
+            match.group(1)
+            for match in re.finditer(r"<@!?(\d+)>", content)
+        }
+
+    def _self_is_explicitly_mentioned(self, message: Any) -> bool:
+        """Return True when this bot is explicitly mentioned in the message."""
+        if not self._client or not self._client.user:
+            return False
+        if self._client.user in getattr(message, "mentions", []):
+            return True
+        return str(self._client.user.id) in self._raw_mentioned_user_ids(message)
+
     def _thread_parent_channel(self, channel: Any) -> Any:
         """Return the parent text channel when invoked from a thread."""
         return getattr(channel, "parent", None) or channel
@@ -3414,10 +3427,19 @@ class DiscordAdapter(BasePlatformAdapter):
             # Skip the mention check if the message is in a thread where
             # the bot has previously participated (auto-created or replied in).
             in_bot_thread = is_thread and thread_id in self._threads
+            self_explicitly_mentioned = self._self_is_explicitly_mentioned(message)
 
             if require_mention and not is_free_channel and not in_bot_thread:
-                if self._client.user not in message.mentions and not mention_prefix:
+                if not self_explicitly_mentioned:
                     return
+
+            clean_content = normalized_content
+            if self_explicitly_mentioned and not mention_prefix:
+                clean_content = clean_content.replace(f"<@{self._client.user.id}>", "").strip()
+                clean_content = clean_content.replace(f"<@!{self._client.user.id}>", "").strip()
+        else:
+            self_explicitly_mentioned = False
+            clean_content = normalized_content
         # Auto-thread: when enabled, automatically create a thread for every
         # @mention in a text channel so each conversation is isolated (like Slack).
         # Messages already inside threads or DMs are unaffected.
@@ -3584,15 +3606,30 @@ class DiscordAdapter(BasePlatformAdapter):
                                 att.filename, e, exc_info=True,
                             )
 
-        # Use normalized_content (saved before auto-threading) instead of message.content,
-        # to detect /slash commands in channel messages.
-        event_text = normalized_content
+        # Use pre-auto-thread normalized content so raw mentions and mention-only
+        # messages are handled consistently even if create_thread() mutates message.content.
+        event_text = clean_content
         if pending_text_injection:
             event_text = f"{pending_text_injection}\n\n{event_text}" if event_text else pending_text_injection
 
         # Defense-in-depth: prevent empty user messages from entering session
         # (can happen when user sends @mention-only with no other text)
         if not event_text or not event_text.strip():
+            if (
+                self_explicitly_mentioned
+                and not media_urls
+                and not pending_text_injection
+            ):
+                stripped = re.sub(r"<@[!&]?\d+>", "", raw_content)
+                stripped = re.sub(r"<#\d+>", "", stripped)
+                stripped = re.sub(r"\s+", " ", stripped).strip()
+                if not stripped:
+                    logger.info(
+                        "[Discord] Ignoring mention-only message from %s in %s",
+                        getattr(message.author, "display_name", getattr(message.author, "name", "unknown")),
+                        getattr(effective_channel, "id", "unknown"),
+                    )
+                    return
             event_text = "(The user sent a message with no text content)"
 
         _chan = message.channel
