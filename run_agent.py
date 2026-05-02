@@ -302,6 +302,11 @@ class IterationBudget:
             if self._used > 0:
                 self._used -= 1
 
+    def reset(self) -> None:
+        """Reset the iteration counter (e.g. after emergency compression)."""
+        with self._lock:
+            self._used = 0
+
     @property
     def used(self) -> int:
         return self._used
@@ -2026,6 +2031,10 @@ class AIAgent:
                 api_mode=self.api_mode,
             )
         self.compression_enabled = compression_enabled
+        # Tracks how many emergency compressions have been done in this turn.
+        # Emergency compression fires when max_iterations is about to exhaust
+        # but the context is still large enough to benefit from compression.
+        self._emergency_compression_count = 0
 
         # Reject models whose context window is below the minimum required
         # for reliable tool-calling workflows (64K tokens).
@@ -10540,6 +10549,7 @@ class AIAgent:
         # They are initialized in __init__ and must persist across run_conversation
         # calls so that nudge logic accumulates correctly in CLI mode.
         self.iteration_budget = IterationBudget(self.max_iterations)
+        self._emergency_compression_count = 0
 
         # Log conversation turn start for debugging/observability
         _preview_text = _summarize_user_message_for_log(user_message)
@@ -10818,7 +10828,37 @@ class AIAgent:
                 if not self.quiet_mode:
                     self._safe_print("\n⚡ Breaking out of tool loop due to interrupt...")
                 break
-            
+
+            # Emergency compression: if budget is nearly exhausted but context is
+            # still large, compress and reset the budget to allow more iterations.
+            # This prevents max_iterations from killing the agent before compression
+            # has a chance to trigger (e.g. when tool outputs are small per iteration
+            # but accumulated context is large, or when the provider doesn't return
+            # usage data and should_compress(0) never fires). (#TODO-issue)
+            if (not self._budget_grace_call
+                    and self.iteration_budget.remaining <= 1
+                    and self.compression_enabled
+                    and getattr(self, "_emergency_compression_count", 0) < 3):
+                _est_tokens = estimate_messages_tokens_rough(messages)
+                if _est_tokens > self.context_compressor.threshold_tokens:
+                    self._safe_print(
+                        "  ⟳ Emergency compression "
+                        f"(budget: {self.iteration_budget.remaining} remaining, "
+                        f"~{_est_tokens:,} tokens > {self.context_compressor.threshold_tokens:,} threshold)"
+                    )
+                    messages, active_system_prompt = self._compress_context(
+                        messages, system_message,
+                        approx_tokens=_est_tokens,
+                        task_id=effective_task_id,
+                    )
+                    self.iteration_budget.reset()
+                    api_call_count = 0  # Reset to allow full budget again
+                    conversation_history = None  # New session after compression
+                    self._emergency_compression_count = (
+                        getattr(self, "_emergency_compression_count", 0) + 1
+                    )
+                    continue
+
             api_call_count += 1
             self._api_call_count = api_call_count
             self._touch_activity(f"starting API call #{api_call_count}")
