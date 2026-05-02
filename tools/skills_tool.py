@@ -892,6 +892,27 @@ def skill_view(
             pm = get_plugin_manager()
             plugin_skill_md = pm.find_plugin_skill(name)
 
+            # Memory provider plugins are loaded through plugins.memory rather
+            # than the general PluginManager. If a memory provider shim also
+            # registers skills, load the namespaced provider once so its
+            # collector can forward those skills into the plugin skill registry
+            # before declaring the qualified skill missing.
+            if plugin_skill_md is None:
+                try:
+                    from plugins.memory import _get_active_memory_provider, load_memory_provider
+
+                    if namespace == _get_active_memory_provider():
+                        load_memory_provider(namespace)
+                        plugin_skill_md = pm.find_plugin_skill(name)
+                except Exception as exc:
+                    import logging
+
+                    logging.getLogger(__name__).debug(
+                        "Failed lazy memory-provider skill load for %s: %s",
+                        namespace,
+                        exc,
+                    )
+
             if plugin_skill_md is not None:
                 if not plugin_skill_md.exists():
                     # Stale registry entry — file deleted out of band
