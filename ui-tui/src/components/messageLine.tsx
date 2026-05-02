@@ -5,6 +5,7 @@ import { LONG_MSG } from '../config/limits.js'
 import { sectionMode } from '../domain/details.js'
 import { userDisplay } from '../domain/messages.js'
 import { ROLE } from '../domain/roles.js'
+import { composerPromptWidth } from '../lib/inputMetrics.js'
 import {
   boundedHistoryRenderText,
   boundedLiveRenderText,
@@ -162,15 +163,25 @@ export const MessageLine = memo(function MessageLine({
         </Box>
       )}
 
-      <Box>
-        <NoSelect flexShrink={0} fromLeftEdge width={3}>
-          <Text bold={msg.role === 'user'} color={prefix}>
-            {glyph}{' '}
-          </Text>
-        </NoSelect>
+      {/* Reserve gutter width based on the rendered glyph + trailing space so
+          compound or wide prompt symbols (e.g. multi-codepoint branding glyphs
+          like "❯❯" or "Ψ >") don't clip the separator and visually attach to
+          the message body. Mirrors composerPromptWidth() so the live composer
+          and the saved transcript stay aligned. */}
+      {(() => {
+        const gutterWidth = composerPromptWidth(glyph)
+        return (
+          <Box>
+            <NoSelect flexShrink={0} fromLeftEdge width={gutterWidth}>
+              <Text bold={msg.role === 'user'} color={prefix}>
+                {glyph}{' '}
+              </Text>
+            </NoSelect>
 
-        <Box width={Math.max(20, cols - 5)}>{content}</Box>
-      </Box>
+            <Box width={Math.max(20, cols - gutterWidth - 2)}>{content}</Box>
+          </Box>
+        )
+      })()}
     </Box>
   )
 })
