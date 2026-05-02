@@ -505,6 +505,9 @@ def test_ws_events_rejects_when_token_required(tmp_path, monkeypatch):
     kb.init_db()
 
     # Stub web_server so _check_ws_token has a token to compare against.
+    # The plugin imports it as `from hermes_cli import web_server`, which may
+    # hit the package attribute rather than sys.modules if another test loaded
+    # the real dashboard first. Patch both surfaces to keep this xdist-stable.
     import hermes_cli
     import types
     stub = types.SimpleNamespace(_SESSION_TOKEN="secret-xyz")

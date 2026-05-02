@@ -138,11 +138,6 @@ class TestUpdateYesConfigMigration:
 class TestUpdateYesStashRestore:
     """--yes auto-restores the pre-update autostash without prompting."""
 
-    @patch("hermes_cli.main._restore_stashed_changes")
-    @patch(
-        "hermes_cli.main._stash_local_changes_if_needed",
-        return_value="stash@{0}",
-    )
     @patch("hermes_cli.config.check_config_version", return_value=(1, 1))
     @patch("hermes_cli.config.get_missing_config_fields", return_value=[])
     @patch("hermes_cli.config.get_missing_env_vars", return_value=[])
@@ -157,8 +152,6 @@ class TestUpdateYesStashRestore:
         _mock_missing_env,
         _mock_missing_cfg,
         _mock_version,
-        _mock_stash,
-        mock_restore,
         capsys,
     ):
         # Not on main → cmd_update switches to main → autostash fires.
@@ -166,14 +159,29 @@ class TestUpdateYesStashRestore:
             branch="feature-branch", verify_ok=True, commit_count="1", dirty=True
         )
 
+        restore_calls = []
+
+        def fake_restore(*_args, **kwargs):
+            restore_calls.append(kwargs)
+
         args = SimpleNamespace(yes=True)
 
-        cmd_update(args)
+        # Patch the function globals used by this imported cmd_update object.
+        # This is sturdier under pytest-xdist/import-order weirdness than
+        # relying on a module-name patch alone.
+        with patch.dict(
+            cmd_update.__globals__,
+            {
+                "_stash_local_changes_if_needed": lambda *_a, **_kw: "stash@{0}",
+                "_restore_stashed_changes": fake_restore,
+            },
+        ):
+            cmd_update(args)
 
         # _restore_stashed_changes was called, and called with prompt_user=False
         # every time (so the user never sees "Restore local changes now?").
-        assert mock_restore.called
-        for call in mock_restore.call_args_list:
-            assert call.kwargs.get("prompt_user") is False, (
-                f"Expected prompt_user=False under --yes, got {call.kwargs}"
+        assert restore_calls
+        for kwargs in restore_calls:
+            assert kwargs.get("prompt_user") is False, (
+                f"Expected prompt_user=False under --yes, got {kwargs}"
             )
