@@ -113,9 +113,22 @@ class TestCredentialPoolSeedsFromDotEnv:
         _write_env_file(isolated_hermes_home, DEEPSEEK_API_KEY=dotenv_value)
         monkeypatch.setenv("DEEPSEEK_API_KEY", env_value)
 
-        from agent.credential_pool import _seed_from_env
+        import hermes_cli.config as config_mod
+        import agent.credential_pool as credential_pool_mod
+
+        # Full-suite CI can import agent.credential_pool while another test has
+        # hermes_cli.config.get_env_value monkeypatched. Because credential_pool
+        # imports get_env_value by value, make this test's dependency explicit
+        # instead of relying on xdist/import order.
+        monkeypatch.setattr(
+            credential_pool_mod,
+            "get_env_value",
+            config_mod.get_env_value,
+            raising=False,
+        )
+
         entries = []
-        changed, _ = _seed_from_env("deepseek", entries)
+        changed, _ = credential_pool_mod._seed_from_env("deepseek", entries)
 
         assert changed is True
         seeded = [e for e in entries if e.source == "env:DEEPSEEK_API_KEY"]
