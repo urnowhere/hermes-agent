@@ -3,11 +3,12 @@
 Covers the fix from #15914 / PR #15920:
 - _seed_from_env reads API keys from ~/.hermes/.env when not in os.environ
 - _resolve_api_key_provider_secret falls back to credential_pool when env vars are empty
-- env vars take priority over .env file (handled by get_env_value itself)
+- ~/.hermes/.env takes priority over inherited process env for pool seeding
 - env vars take priority over credential pool (fallback only kicks in when env is empty)
 """
 
 import os
+import importlib
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -106,8 +107,28 @@ class TestCredentialPoolSeedsFromDotEnv:
         assert active_sources == set()
         assert entries == []
 
-    def test_os_environ_still_wins_over_dotenv(self, isolated_hermes_home, monkeypatch):
-        """get_env_value checks os.environ first — verify seeding picks that up."""
+    def test_dotenv_wins_over_os_environ_for_pool_seeding(self, isolated_hermes_home, monkeypatch):
+        """Credential pool seeding treats .env as authoritative over parent env."""
+        dotenv_value = "dotenv-deepseek-key"
+        env_value = "env-deepseek-key"
+        _write_env_file(isolated_hermes_home, DEEPSEEK_API_KEY=dotenv_value)
+        monkeypatch.setenv("DEEPSEEK_API_KEY", env_value)
+
+        import agent.credential_pool as credential_pool_mod
+
+        entries = []
+        changed, _ = credential_pool_mod._seed_from_env("deepseek", entries)
+
+        assert changed is True
+        seeded = [e for e in entries if e.source == "env:DEEPSEEK_API_KEY"]
+        assert len(seeded) == 1
+        assert seeded[0].access_token == dotenv_value
+        assert seeded[0].access_token != env_value
+
+    def test_import_under_temporary_config_patch_still_uses_live_load_env(
+        self, isolated_hermes_home, monkeypatch
+    ):
+        """Import-order guard: do not freeze patched config helpers by value."""
         dotenv_value = "dotenv-deepseek-key"
         env_value = "env-deepseek-key"
         _write_env_file(isolated_hermes_home, DEEPSEEK_API_KEY=dotenv_value)
@@ -116,25 +137,23 @@ class TestCredentialPoolSeedsFromDotEnv:
         import hermes_cli.config as config_mod
         import agent.credential_pool as credential_pool_mod
 
-        # Full-suite CI can import agent.credential_pool while another test has
-        # hermes_cli.config.get_env_value monkeypatched. Because credential_pool
-        # imports get_env_value by value, make this test's dependency explicit
-        # instead of relying on xdist/import order.
-        monkeypatch.setattr(
-            credential_pool_mod,
-            "get_env_value",
-            config_mod.get_env_value,
-            raising=False,
-        )
+        def fake_load_env():
+            return {"DEEPSEEK_API_KEY": dotenv_value}
 
-        entries = []
-        changed, _ = credential_pool_mod._seed_from_env("deepseek", entries)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(config_mod, "load_env", fake_load_env)
+            credential_pool_mod = importlib.reload(credential_pool_mod)
 
-        assert changed is True
-        seeded = [e for e in entries if e.source == "env:DEEPSEEK_API_KEY"]
-        assert len(seeded) == 1
-        assert seeded[0].access_token == env_value
-        assert seeded[0].access_token != dotenv_value
+        try:
+            entries = []
+            changed, _ = credential_pool_mod._seed_from_env("deepseek", entries)
+
+            assert changed is True
+            seeded = [e for e in entries if e.source == "env:DEEPSEEK_API_KEY"]
+            assert len(seeded) == 1
+            assert seeded[0].access_token == dotenv_value
+        finally:
+            importlib.reload(credential_pool_mod)
 
 
 class TestAuthResolvesFromDotEnv:
