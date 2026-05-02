@@ -159,6 +159,34 @@ class TestAutoTitleSession:
             auto_title_session(db, "sess-1", "hi", "hello")
             db.set_session_title.assert_not_called()
 
+    def test_invokes_on_title_after_title_is_stored(self):
+        db = MagicMock()
+        db.get_session_title.return_value = None
+        db.set_session_title.return_value = True
+        seen = []
+
+        with patch("agent.title_generator.generate_title", return_value="New Title"):
+            auto_title_session(
+                db,
+                "sess-1",
+                "hi",
+                "hello",
+                on_title=lambda title: seen.append(title),
+            )
+
+        assert seen == ["New Title"]
+
+    def test_does_not_invoke_on_title_when_db_store_fails(self):
+        db = MagicMock()
+        db.get_session_title.return_value = None
+        db.set_session_title.return_value = False
+        cb = MagicMock()
+
+        with patch("agent.title_generator.generate_title", return_value="New Title"):
+            auto_title_session(db, "sess-1", "hi", "hello", on_title=cb)
+
+        cb.assert_not_called()
+
 
 class TestMaybeAutoTitle:
     """Tests for maybe_auto_title() — the fire-and-forget entry point."""
