@@ -226,6 +226,92 @@ from hermes_constants import AI_GATEWAY_BASE_URL, OPENROUTER_BASE_URL
 logger = logging.getLogger(__name__)
 
 
+def _display_cell_width(ch: str) -> int:
+    """Return terminal column width for a single character (CJK-aware)."""
+    from unicodedata import east_asian_width
+
+    # Fullwidth and wide East Asian — occupy two cells in typical terminals.
+    return 2 if east_asian_width(ch) in ("F", "W") else 1
+
+
+def _text_display_width(s: str) -> int:
+    return sum(_display_cell_width(c) for c in s)
+
+
+def _fit_display_width(s: str, max_cells: int, *, ellipsis: str = "…") -> str:
+    """Truncate ``s`` to at most ``max_cells`` display cells; append ellipsis if truncated."""
+    if _text_display_width(s) <= max_cells:
+        return s
+    ell_w = _text_display_width(ellipsis)
+    if max_cells <= ell_w:
+        return ellipsis[:max_cells] if max_cells > 0 else ""
+    out: list[str] = []
+    w = 0
+    for ch in s:
+        cw = _display_cell_width(ch)
+        if w + cw + ell_w > max_cells:
+            break
+        out.append(ch)
+        w += cw
+    return "".join(out) + ellipsis
+
+
+def _pad_display_right(s: str, width: int) -> str:
+    """Pad ``s`` on the right to exactly ``width`` display cells (truncate first if needed)."""
+    if _text_display_width(s) > width:
+        s = _fit_display_width(s, width)
+    pad = width - _text_display_width(s)
+    return s + (" " * max(0, pad))
+
+
+def print_sessions_table(
+    sessions: list,
+    *,
+    has_titles: bool,
+    indent: str = "",
+) -> None:
+    """Print session rows with terminal-accurate column alignment (CJK-safe).
+
+    Plain ``str.ljust`` / f-string padding counts Unicode code points, not
+    terminal cell width, which breaks mixed Chinese/Latin rows.
+    """
+
+    def _row_titled(title: str, preview: str, last_active: str, sid: str) -> str:
+        return (
+            f"{_pad_display_right(title, 32)} {_pad_display_right(preview, 40)} "
+            f"{_pad_display_right(last_active, 13)} {sid}"
+        )
+
+    def _row_plain(preview: str, last_active: str, src: str, sid: str) -> str:
+        return (
+            f"{_pad_display_right(preview, 50)} {_pad_display_right(last_active, 13)} "
+            f"{_pad_display_right(src, 6)} {sid}"
+        )
+
+    if has_titles:
+        header = _row_titled("Title", "Preview", "Last Active", "ID")
+        rule_w = min(_text_display_width(header) + 4, 120)
+        print(f"{indent}{header}")
+        print(f"{indent}{'─' * rule_w}")
+        for s in sessions:
+            title = s.get("title") or "—"
+            preview = s.get("preview") or ""
+            last_active = _relative_time(s.get("last_active"))
+            sid = s.get("id") or ""
+            print(f"{indent}{_row_titled(title, preview, last_active, sid)}")
+    else:
+        header = _row_plain("Preview", "Last Active", "Src", "ID")
+        rule_w = min(_text_display_width(header) + 4, 120)
+        print(f"{indent}{header}")
+        print(f"{indent}{'─' * rule_w}")
+        for s in sessions:
+            preview = s.get("preview") or ""
+            last_active = _relative_time(s.get("last_active"))
+            src = s.get("source") or ""
+            sid = s.get("id") or ""
+            print(f"{indent}{_row_plain(preview, last_active, src, sid)}")
+
+
 def _relative_time(ts) -> str:
     """Format a timestamp as relative time (e.g., '2h ago', 'yesterday')."""
     if not ts:
@@ -9695,6 +9781,7 @@ Examples:
                 print("No sessions found.")
                 return
             has_titles = any(s.get("title") for s in sessions)
+            print_sessions_table(sessions, has_titles=has_titles)
             if has_titles:
                 print(f"{'Title':<32} {'Preview':<40} {'Last Active':<13} {'ID'}")
                 print("─" * 110)
@@ -9921,6 +10008,8 @@ Examples:
     claw_migrate.add_argument(
         "--skill-conflict",
         choices=["skip", "overwrite", "rename"],
+      
+      
         default="skip",
         help="How to handle skill name conflicts (default: skip)",
     )

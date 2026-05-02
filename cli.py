@@ -4833,7 +4833,7 @@ class HermesCLI:
         if not sessions:
             return False
 
-        from hermes_cli.main import _relative_time
+        from hermes_cli.main import print_sessions_table
 
         print()
         if reason == "history":
@@ -4841,13 +4841,7 @@ class HermesCLI:
         else:
             print("  Recent sessions:")
         print()
-        print(f"  {'Title':<32} {'Preview':<40} {'Last Active':<13} {'ID'}")
-        print(f"  {'─' * 32} {'─' * 40} {'─' * 13} {'─' * 24}")
-        for session in sessions:
-            title = (session.get("title") or "—")[:30]
-            preview = (session.get("preview") or "")[:38]
-            last_active = _relative_time(session.get("last_active"))
-            print(f"  {title:<32} {preview:<40} {last_active:<13} {session['id']}")
+        print_sessions_table(sessions, has_titles=True, indent="  ")
         print()
         print("  Use /resume <session id or title> to continue where you left off.")
         print()
