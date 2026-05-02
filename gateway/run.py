@@ -6162,6 +6162,13 @@ class GatewayRunner:
             # If the agent's session_id changed during compression, update
             # session_entry so transcript writes below go to the right session.
             if agent_result.get("session_id") and agent_result["session_id"] != session_entry.session_id:
+                # Carry any in-flight /goal across the rebind — gateway
+                # GoalManager keys on session_id same as CLI (#18467).
+                try:
+                    from hermes_cli.goals import migrate_goal as _migrate_goal
+                    _migrate_goal(session_entry.session_id, agent_result["session_id"])
+                except Exception as _mg_exc:
+                    logger.debug("[Gateway] goal migration failed (non-fatal): %s", _mg_exc)
                 session_entry.session_id = agent_result["session_id"]
 
             # Prepend reasoning/thinking if display is enabled (per-platform)
@@ -12737,6 +12744,13 @@ class GatewayRunner:
                     "Session split detected: %s → %s (compression)",
                     session_id, agent.session_id,
                 )
+                # Carry any in-flight /goal across the rebind — gateway
+                # GoalManager keys on session_id same as CLI (#18467).
+                try:
+                    from hermes_cli.goals import migrate_goal as _migrate_goal
+                    _migrate_goal(session_id, agent.session_id)
+                except Exception as _mg_exc:
+                    logger.debug("[Gateway] goal migration failed (non-fatal): %s", _mg_exc)
                 entry = self.session_store._entries.get(session_key)
                 if entry:
                     entry.session_id = agent.session_id
