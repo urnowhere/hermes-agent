@@ -849,15 +849,19 @@ def get_cute_tool_message(
     skin_prefix = get_skin_tool_prefix()
 
     def _trunc(s, n=40):
-        s = str(s)
+        # Completion lines must remain single-line even when the underlying
+        # tool argument is a heredoc, pasted code block, or otherwise contains
+        # embedded newlines.  display.tool_preview_length=0 means "unlimited
+        # length", not "preserve raw whitespace".
+        s = _oneline(str(s))
         if _tool_preview_max_len == 0:
-            return s  # no limit
+            return s  # no length limit
         return (s[:n-3] + "...") if len(s) > n else s
 
     def _path(p, n=35):
-        p = str(p)
+        p = _oneline(str(p))
         if _tool_preview_max_len == 0:
-            return p  # no limit
+            return p  # no length limit
         return ("..." + p[-(n-3):]) if len(p) > n else p
 
     def _wrap(line: str) -> str:
