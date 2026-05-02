@@ -8,10 +8,12 @@ Covers:
      input() call) and the stash is applied automatically
 """
 
+import io
 import subprocess
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import hermes_cli.main as main_mod
 from hermes_cli.main import cmd_update
 
 
@@ -117,11 +119,15 @@ class TestUpdateYesConfigMigration:
 
         args = SimpleNamespace(yes=False)
 
-        with patch("builtins.input", return_value="n") as mock_input, patch(
-            "hermes_cli.main.sys"
-        ) as mock_sys:
-            mock_sys.stdin.isatty.return_value = True
-            mock_sys.stdout.isatty.return_value = True
+        class _TTYStringIO(io.StringIO):
+            def isatty(self):
+                return True
+
+        tty_in = _TTYStringIO()
+        tty_out = _TTYStringIO()
+        with patch("builtins.input", return_value="n") as mock_input, patch.object(
+            main_mod.sys, "stdin", tty_in
+        ), patch.object(main_mod.sys, "stdout", tty_out):
             cmd_update(args)
             # The user was actually prompted.
             assert mock_input.called
