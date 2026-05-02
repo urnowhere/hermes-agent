@@ -4979,9 +4979,9 @@ class AIAgent:
             if context_files_prompt:
                 prompt_parts.append(context_files_prompt)
 
-        from hermes_time import now as _hermes_now, get_timezone_name as _get_tz
+        from hermes_time import now as _hermes_now, get_timezone_name
         now = _hermes_now()
-        _tz_name = _get_tz()
+        _tz_name = get_timezone_name()
         timestamp_line = f"Session started: {now.strftime('%A, %B %d, %Y %I:%M %p')}"
         if _tz_name:
             timestamp_line += f" ({_tz_name})"
@@ -10180,13 +10180,8 @@ class AIAgent:
         # per-turn time injection in run_conversation's main loop).
         _time_prefix = ""
         try:
-            from hermes_time import now as _ht_now, get_timezone_name as _get_tz
-            _current = _ht_now()
-            _time_prefix = f"[Current time: {_current.strftime('%A, %B %d, %Y %I:%M %p')}"
-            _tz = _get_tz()
-            if _tz:
-                _time_prefix += f" ({_tz})"
-            _time_prefix += "]\n\n"
+            from hermes_time import format_current_time_context
+            _time_prefix = format_current_time_context() + "\n\n"
         except Exception:
             pass
         messages.append({"role": "user", "content": _time_prefix + summary_request})
@@ -10697,25 +10692,16 @@ class AIAgent:
         # timestamp as "now", we inject the actual current time into the
         # user message on every turn — same mechanism that plugins use,
         # so the system prompt cache prefix is preserved.
-        _time_ctx_parts: list[str] = []
         try:
-            from hermes_time import now as _ht_now, get_timezone_name as _get_tz
-            _current = _ht_now()
-            _time_ctx_parts.append(
-                f"Current time: {_current.strftime('%A, %B %d, %Y %I:%M %p')}"
-            )
-            _tz = _get_tz()
-            if _tz:
-                _time_ctx_parts.append(f"Timezone: {_tz}")
-        except Exception:
-            pass  # non-critical; agent can fall back to ``date`` command
-        if _time_ctx_parts:
-            _time_block = "\n".join(_time_ctx_parts)
+            from hermes_time import format_current_time_context
+            _time_block = format_current_time_context()
             _plugin_user_context = (
                 f"{_time_block}\n\n{_plugin_user_context}"
                 if _plugin_user_context
                 else _time_block
             )
+        except Exception:
+            pass  # non-critical; agent can fall back to ``date`` command
 
         # Main conversation loop
         api_call_count = 0

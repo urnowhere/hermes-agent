@@ -99,6 +99,37 @@ def get_timezone_name() -> Optional[str]:
     return _cached_tz_name or None
 
 
+def format_current_time_context(current: Optional[datetime] = None) -> str:
+    """Return the standard per-turn current-time context string.
+
+    This is the single source of truth for how "current time" is formatted
+    when injected into the user message each turn.  Keeping it in one place
+    ensures the format is consistent across injection sites (main loop,
+    ``_handle_max_iterations`` recovery, codex path) and aligned with
+    PR #10061's timezone format.
+
+    Returns a multi-line string like::
+
+        Current time: Sunday, April 26, 2026 11:08 AM
+        Timezone: Asia/Hong_Kong (UTC+08:00)
+
+    When no timezone is configured, the ``Timezone:`` line is omitted and
+    only ``Current time:`` is returned.
+    """
+    current = current or now()
+    parts = [f"Current time: {current.strftime('%A, %B %d, %Y %I:%M %p')}"]
+    tz_name = get_timezone_name()
+    if tz_name:
+        offset = current.utcoffset()
+        offset_hours = int(offset.total_seconds() // 3600) if offset else 0
+        offset_minutes = int((offset.total_seconds() % 3600) // 60) if offset else 0
+        sign = "+" if offset_hours >= 0 else "-"
+        parts.append(
+            f"Timezone: {tz_name} (UTC{sign}{abs(offset_hours):02d}:{abs(offset_minutes):02d})"
+        )
+    return "\n".join(parts)
+
+
 def now() -> datetime:
     """
     Return the current time as a timezone-aware datetime.

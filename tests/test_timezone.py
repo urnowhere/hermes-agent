@@ -130,6 +130,65 @@ class TestGetTimezone:
         assert tz is None
 
 
+class TestFormatCurrentTimeContext:
+    """Test format_current_time_context() — the shared helper that produces
+    the per-turn current-time string injected into user messages."""
+
+    def setup_method(self):
+        _reset_hermes_time_cache()
+
+    def teardown_method(self):
+        _reset_hermes_time_cache()
+        os.environ.pop("HERMES_TIMEZONE", None)
+
+    def test_includes_current_time_line(self):
+        """Output always starts with 'Current time:'."""
+        ctx = hermes_time.format_current_time_context()
+        assert ctx.startswith("Current time: ")
+
+    def test_timezone_line_when_configured(self):
+        """When a timezone is configured, a 'Timezone:' line is appended with
+        IANA name and UTC offset, matching the #10061 format."""
+        os.environ["HERMES_TIMEZONE"] = "Asia/Hong_Kong"
+        _reset_hermes_time_cache()
+        ctx = hermes_time.format_current_time_context()
+        lines = ctx.split("\n")
+        assert len(lines) == 2
+        assert lines[0].startswith("Current time: ")
+        assert lines[1].startswith("Timezone: Asia/Hong_Kong")
+        assert "UTC+08:00" in lines[1]
+
+    def test_no_timezone_line_when_unconfigured(self):
+        """When no timezone is set, only the 'Current time:' line appears."""
+        os.environ.pop("HERMES_TIMEZONE", None)
+        _reset_hermes_time_cache()
+        ctx = hermes_time.format_current_time_context()
+        assert "\n" not in ctx
+        assert ctx.startswith("Current time: ")
+
+    def test_accepts_explicit_datetime(self):
+        """An explicit datetime can be passed instead of using now()."""
+        os.environ["HERMES_TIMEZONE"] = "UTC"
+        _reset_hermes_time_cache()
+        dt = datetime(2026, 1, 15, 9, 30, tzinfo=ZoneInfo("UTC"))
+        ctx = hermes_time.format_current_time_context(dt)
+        assert "January 15, 2026" in ctx
+        assert "09:30 AM" in ctx
+        assert "Timezone: UTC" in ctx
+
+    def test_dst_aware_offset(self):
+        """UTC offset reflects DST for zones that observe it."""
+        os.environ["HERMES_TIMEZONE"] = "America/New_York"
+        _reset_hermes_time_cache()
+        # July = EDT (UTC-04:00)
+        summer = datetime(2026, 7, 1, 12, 0, tzinfo=ZoneInfo("America/New_York"))
+        ctx = hermes_time.format_current_time_context(summer)
+        assert "UTC-04:00" in ctx
+        # January = EST (UTC-05:00)
+        winter = datetime(2026, 1, 1, 12, 0, tzinfo=ZoneInfo("America/New_York"))
+        ctx = hermes_time.format_current_time_context(winter)
+        assert "UTC-05:00" in ctx
+
 
 # =========================================================================
 # execute_code child env — TZ injection
