@@ -33,6 +33,8 @@ from utils import is_truthy_value
 
 logger = logging.getLogger(__name__)
 
+_ALLOWED_SCHEMES = frozenset({"http", "https"})
+
 # Hostnames that should always be blocked regardless of IP resolution
 # or any config toggle.  These are cloud metadata endpoints that an
 # attacker could use to steal instance credentials.
@@ -165,8 +167,11 @@ def is_safe_url(url: str) -> bool:
     """
     try:
         parsed = urlparse(url)
-        hostname = (parsed.hostname or "").strip().lower().rstrip(".")
         scheme = (parsed.scheme or "").strip().lower()
+        if scheme not in _ALLOWED_SCHEMES:
+            return False
+
+        hostname = (parsed.hostname or "").strip().lower().rstrip(".")
         if not hostname:
             return False
 

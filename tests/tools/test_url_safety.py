@@ -21,6 +21,18 @@ class TestIsSafeUrl:
         ]):
             assert is_safe_url("https://example.com/image.png") is True
 
+    @pytest.mark.parametrize("url", [
+        "ftp://example.com/image.png",
+        "gopher://example.com/1",
+        "file://example.com/etc/passwd",
+        "javascript://example.com/alert",
+    ])
+    def test_non_http_schemes_blocked_even_with_public_host(self, url):
+        with patch("socket.getaddrinfo", return_value=[
+            (2, 1, 6, "", ("93.184.216.34", 0)),
+        ]):
+            assert is_safe_url(url) is False
+
     def test_localhost_blocked(self):
         with patch("socket.getaddrinfo", return_value=[
             (2, 1, 6, "", ("127.0.0.1", 0)),
