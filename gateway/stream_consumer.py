@@ -501,7 +501,7 @@ class GatewayStreamConsumer:
             if _best_effort_ok and not self._final_response_sent:
                 self._final_response_sent = True
         except Exception as e:
-            logger.error("Stream consumer error: %s", e)
+            logger.error("Stream consumer error: %s", e, exc_info=True)
 
     # Pattern to strip MEDIA:<path> tags (including optional surrounding quotes).
     # Matches the simple cleanup regex used by the non-streaming path in
@@ -556,7 +556,7 @@ class GatewayStreamConsumer:
                 self._edit_supported = False
                 return reply_to_id
         except Exception as e:
-            logger.error("Stream send chunk error: %s", e)
+            logger.error("Stream send chunk error: %s", e, exc_info=True)
             return reply_to_id
 
     def _visible_prefix(self) -> str:
@@ -776,7 +776,7 @@ class GatewayStreamConsumer:
                 self._notify_new_message()
             return result.success
         except Exception as e:
-            logger.error("Commentary send error: %s", e)
+            logger.error("Commentary send error: %s", e, exc_info=True)
             return False
 
     def _should_send_fresh_final(self) -> bool:
@@ -1014,5 +1014,5 @@ class GatewayStreamConsumer:
                     self._edit_supported = False
                     return False
         except Exception as e:
-            logger.error("Stream send/edit error: %s", e)
+            logger.error("Stream send/edit error: %s", e, exc_info=True)
             return False
