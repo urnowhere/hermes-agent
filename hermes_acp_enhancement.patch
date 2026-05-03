@@ -1,0 +1,282 @@
+diff --git a/acp_adapter/events.py b/acp_adapter/events.py
+index 1257f902e..740ed6a94 100644
+--- a/acp_adapter/events.py
++++ b/acp_adapter/events.py
+@@ -178,17 +178,79 @@ def make_step_cb(
+ # Agent message callback
+ # ------------------------------------------------------------------
+ 
+-def make_message_cb(
++def make_buffered_cb(
+     conn: acp.Client,
+     session_id: str,
+     loop: asyncio.AbstractEventLoop,
++    flush_ms: int = 500,
+ ) -> Callable:
+-    """Create a callback that streams agent response text to the editor."""
++    """Create a streaming callback that buffers text and flushes every flush_ms.
+ 
+-    def _message(text: str) -> None:
++    Instead of sending one ACP update per token (high protocol overhead),
++    accumulate text and send in batches.
++    """
++    import threading
++
++    buf: list[str] = []
++    lock = threading.Lock()
++    timer: threading.Event | None = None
++
++    def _flush() -> None:
++        nonlocal timer
++        with lock:
++            text = "".join(buf)
++            buf.clear()
++            timer = None
++        if text:
++            update = acp.update_agent_message_text(text)
++            _send_update(conn, session_id, loop, update)
++
++    def _push(text: str) -> None:
+         if not text:
+             return
+-        update = acp.update_agent_message_text(text)
+-        _send_update(conn, session_id, loop, update)
++        nonlocal timer
++        with lock:
++            buf.append(text)
++            if timer is None:
++                timer = threading.Timer(flush_ms / 1000.0, _flush)
++                timer.daemon = True
++                timer.start()
++
++    return _push
+ 
+-    return _message
++
++def make_buffered_thinking_cb(
++    conn: acp.Client,
++    session_id: str,
++    loop: asyncio.AbstractEventLoop,
++    flush_ms: int = 500,
++) -> Callable:
++    """Buffered thinking callback — same batching as message callback."""
++    import threading
++
++    buf: list[str] = []
++    lock = threading.Lock()
++    timer: threading.Event | None = None
++
++    def _flush() -> None:
++        nonlocal timer
++        with lock:
++            text = "".join(buf)
++            buf.clear()
++            timer = None
++        if text:
++            update = acp.update_agent_thought_text(text)
++            _send_update(conn, session_id, loop, update)
++
++    def _push(text: str) -> None:
++        if not text:
++            return
++        nonlocal timer
++        with lock:
++            buf.append(text)
++            if timer is None:
++                timer = threading.Timer(flush_ms / 1000.0, _flush)
++                timer.daemon = True
++                timer.start()
++
++    return _push
+diff --git a/acp_adapter/server.py b/acp_adapter/server.py
+index f8dade72a..28fe4f580 100644
+--- a/acp_adapter/server.py
++++ b/acp_adapter/server.py
+@@ -58,9 +58,9 @@ except ImportError:
+ 
+ from acp_adapter.auth import detect_provider
+ from acp_adapter.events import (
+-    make_message_cb,
++    make_buffered_cb,
++    make_buffered_thinking_cb,
+     make_step_cb,
+-    make_thinking_cb,
+     make_tool_progress_cb,
+ )
+ from acp_adapter.permissions import make_approval_callback
+@@ -166,6 +166,8 @@ class HermesACPAgent(acp.Agent):
+         "compact": "Compress conversation context",
+         "steer": "Inject guidance into the currently running agent turn",
+         "queue": "Queue a prompt to run after the current turn finishes",
++        "effort": "Show or set reasoning effort (none/low/medium/high/xhigh)",
++        "show_thinking": "Toggle reasoning display (on/off)",
+         "version": "Show Hermes version",
+     }
+ 
+@@ -205,6 +207,16 @@ class HermesACPAgent(acp.Agent):
+             "description": "Queue a prompt to run after the current turn finishes",
+             "input_hint": "prompt to run next",
+         },
++        {
++            "name": "effort",
++            "description": "Show or set reasoning effort (none/low/medium/high/xhigh)",
++            "input_hint": "none | low | medium | high | xhigh",
++        },
++        {
++            "name": "show_thinking",
++            "description": "Toggle whether reasoning content is shown (on/off)",
++            "input_hint": "on | off",
++        },
+         {
+             "name": "version",
+             "description": "Show Hermes version",
+@@ -746,9 +758,9 @@ class HermesACPAgent(acp.Agent):
+ 
+         if conn:
+             tool_progress_cb = make_tool_progress_cb(conn, session_id, loop, tool_call_ids, tool_call_meta)
+-            thinking_cb = make_thinking_cb(conn, session_id, loop)
++            thinking_cb = make_buffered_thinking_cb(conn, session_id, loop)
+             step_cb = make_step_cb(conn, session_id, loop, tool_call_ids, tool_call_meta)
+-            message_cb = make_message_cb(conn, session_id, loop)
++            message_cb = make_buffered_cb(conn, session_id, loop)
+             approval_cb = make_approval_callback(conn.request_permission, loop, session_id)
+         else:
+             tool_progress_cb = None
+@@ -759,9 +771,16 @@ class HermesACPAgent(acp.Agent):
+ 
+         agent = state.agent
+         agent.tool_progress_callback = tool_progress_cb
+-        agent.thinking_callback = thinking_cb
+         agent.step_callback = step_cb
+-        agent.message_callback = message_cb
++        # 流式输出：stream_delta_callback → agent_message_chunk（逐 token）
++        agent.stream_delta_callback = message_cb
++        # 思考流式：respect /show_thinking toggle
++        if getattr(state, "show_thinking", True):
++            agent.reasoning_callback = thinking_cb
++        else:
++            agent.reasoning_callback = None
++        # 保存原始思考回调，供 /show_thinking 开关
++        state._reasoning_callback = thinking_cb
+ 
+         # Approval callback is per-thread (thread-local, GHSA-qg5c-hvr5-hjgr).
+         # Set it INSIDE _run_agent so the TLS write happens in the executor
+@@ -867,9 +886,11 @@ class HermesACPAgent(acp.Agent):
+                 )
+             except Exception:
+                 logger.debug("Failed to auto-title ACP session %s", session_id, exc_info=True)
+-        if final_response and conn:
+-            update = acp.update_agent_message_text(final_response)
+-            await conn.session_update(session_id, update)
++        # ❌ 流式已经通过 stream_delta_callback 逐 token 推过了
++        # 这里再发 final_response 会导致重复
++        # if final_response and conn:
++        #     update = acp.update_agent_message_text(final_response)
++        #     await conn.session_update(session_id, update)
+ 
+         # Mark this turn idle before draining queued work so recursive prompt()
+         # calls can acquire the session. Queued turns are intentionally run as
+@@ -972,6 +993,8 @@ class HermesACPAgent(acp.Agent):
+             "compact": self._cmd_compact,
+             "steer": self._cmd_steer,
+             "queue": self._cmd_queue,
++            "effort": self._cmd_effort,
++            "show_thinking": self._cmd_show_thinking,
+             "version": self._cmd_version,
+         }.get(cmd)
+ 
+@@ -1139,6 +1162,42 @@ class HermesACPAgent(acp.Agent):
+             depth = len(state.queued_prompts)
+         return f"Queued for the next turn. ({depth} queued)"
+ 
++    def _cmd_effort(self, args: str, state: SessionState) -> str:
++        """显示或设置 reasoning effort."""
++        VALID_LEVELS = {"none", "low", "medium", "high", "xhigh"}
++        current = getattr(state.agent, "reasoning_config", {}) or {}
++        current_effort = current.get("effort", "default") if isinstance(current, dict) else "default"
++
++        level = args.strip().lower()
++        if not level:
++            return (
++                f"⚡ Reasoning effort: {current_effort}\n"
++                f"   用法: /effort none | low | medium | high | xhigh"
++            )
++        if level not in VALID_LEVELS:
++            return f"❌ 无效等级: {level} — 可用: {', '.join(sorted(VALID_LEVELS))}"
++
++        state.agent.reasoning_config = {"effort": level}
++        return f"⚡ Reasoning effort 设为: {level} (was: {current_effort})"
++
++    def _cmd_show_thinking(self, args: str, state: SessionState) -> str:
++        """Toggle reasoning/thinking streaming display."""
++        toggle = args.strip().lower()
++        if toggle not in ("on", "off"):
++            current = getattr(state, "show_thinking", True)
++            return (
++                f"🧠 Thinking display: {'ON' if current else 'OFF'}\n"
++                f"   用法: /show_thinking on | off"
++            )
++        state.show_thinking = (toggle == "on")
++        if toggle == "on":
++            state.agent.reasoning_callback = getattr(state, "_reasoning_callback", None)
++        else:
++            state.agent.reasoning_callback = None
++        # 持久化
++        self.session_manager.save_session(state.session_id)
++        return f"🧠 Thinking display: {'ON' if state.show_thinking else 'OFF'}"
++
+     def _cmd_version(self, args: str, state: SessionState) -> str:
+         return f"Hermes Agent v{HERMES_VERSION}"
+ 
+diff --git a/acp_adapter/session.py b/acp_adapter/session.py
+index d6dace66b..b46c992ea 100644
+--- a/acp_adapter/session.py
++++ b/acp_adapter/session.py
+@@ -442,6 +442,12 @@ class SessionManager:
+             session_meta["base_url"] = base_url.strip()
+         if isinstance(api_mode, str) and api_mode.strip():
+             session_meta["api_mode"] = api_mode.strip()
++        # Persist /effort and /show_thinking
++        rc = getattr(state.agent, "reasoning_config", None)
++        if isinstance(rc, dict) and rc.get("effort"):
++            session_meta["effort"] = rc["effort"]
++        if not getattr(state, "show_thinking", True):
++            session_meta["show_thinking"] = False
+         cwd_json = json.dumps(session_meta)
+ 
+         try:
+@@ -548,6 +554,15 @@ class SessionManager:
+             history=history,
+             cancel_event=threading.Event(),
+         )
++        # 恢复 /effort 和 /show_thinking
++        if mc and isinstance(mc, dict):
++            effort = mc.get("effort")
++            if effort and effort != "none":
++                agent.reasoning_config = {"effort": effort}
++            elif effort == "none":
++                agent.reasoning_config = {"effort": "none"}
++            if mc.get("show_thinking") is False:
++                state.show_thinking = False
+         with self._lock:
+             self._sessions[session_id] = state
+         _register_task_cwd(session_id, cwd)
+@@ -576,6 +591,7 @@ class SessionManager:
+         requested_provider: str | None = None,
+         base_url: str | None = None,
+         api_mode: str | None = None,
++        reasoning_effort: str | None = None,
+     ):
+         if self._agent_factory is not None:
+             return self._agent_factory()
+@@ -626,6 +642,10 @@ class SessionManager:
+         except Exception:
+             logger.debug("ACP session falling back to default provider resolution", exc_info=True)
+ 
++        # 注入 reasoning_config (reasoning_effort = "none" 也传，用于关闭思考)
++        if reasoning_effort is not None:
++            kwargs["reasoning_config"] = {"effort": reasoning_effort}
++
+         _register_task_cwd(session_id, cwd)
+         agent = AIAgent(**kwargs)
+         # ACP stdio transport requires stdout to remain protocol-only JSON-RPC.

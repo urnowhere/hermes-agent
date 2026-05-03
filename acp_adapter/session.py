@@ -442,6 +442,12 @@ class SessionManager:
             session_meta["base_url"] = base_url.strip()
         if isinstance(api_mode, str) and api_mode.strip():
             session_meta["api_mode"] = api_mode.strip()
+        # Persist /effort and /show_thinking
+        rc = getattr(state.agent, "reasoning_config", None)
+        if isinstance(rc, dict) and rc.get("effort"):
+            session_meta["effort"] = rc["effort"]
+        if not getattr(state, "show_thinking", True):
+            session_meta["show_thinking"] = False
         cwd_json = json.dumps(session_meta)
 
         try:
@@ -548,6 +554,15 @@ class SessionManager:
             history=history,
             cancel_event=threading.Event(),
         )
+        # 恢复 /effort 和 /show_thinking
+        if mc and isinstance(mc, dict):
+            effort = mc.get("effort")
+            if effort and effort != "none":
+                agent.reasoning_config = {"effort": effort}
+            elif effort == "none":
+                agent.reasoning_config = {"effort": "none"}
+            if mc.get("show_thinking") is False:
+                state.show_thinking = False
         with self._lock:
             self._sessions[session_id] = state
         _register_task_cwd(session_id, cwd)
@@ -576,6 +591,7 @@ class SessionManager:
         requested_provider: str | None = None,
         base_url: str | None = None,
         api_mode: str | None = None,
+        reasoning_effort: str | None = None,
     ):
         if self._agent_factory is not None:
             return self._agent_factory()
@@ -625,6 +641,10 @@ class SessionManager:
             )
         except Exception:
             logger.debug("ACP session falling back to default provider resolution", exc_info=True)
+
+        # 注入 reasoning_config (reasoning_effort = "none" 也传，用于关闭思考)
+        if reasoning_effort is not None:
+            kwargs["reasoning_config"] = {"effort": reasoning_effort}
 
         _register_task_cwd(session_id, cwd)
         agent = AIAgent(**kwargs)

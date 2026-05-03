@@ -178,17 +178,89 @@ def make_step_cb(
 # Agent message callback
 # ------------------------------------------------------------------
 
-def make_message_cb(
+def make_buffered_cb(
     conn: acp.Client,
     session_id: str,
     loop: asyncio.AbstractEventLoop,
-) -> Callable:
-    """Create a callback that streams agent response text to the editor."""
+    flush_ms: int = 500,
+) -> tuple[Callable, Callable]:
+    """Create a streaming callback that buffers text and flushes every flush_ms.
 
-    def _message(text: str) -> None:
+    Returns (push_fn, flush_fn). Call flush() before end_turn to drain the buffer.
+    """
+    import threading
+
+    buf: list[str] = []
+    lock = threading.Lock()
+    timer: threading.Event | None = None
+
+    def _flush() -> None:
+        nonlocal timer
+        with lock:
+            text = "".join(buf)
+            buf.clear()
+            timer = None
+        if text:
+            update = acp.update_agent_message_text(text)
+            _send_update(conn, session_id, loop, update)
+
+    async def _flush_async() -> None:
+        """同步版 flush — await 确保发出后才返回"""
+        nonlocal timer
+        with lock:
+            text = "".join(buf)
+            buf.clear()
+            timer = None
+        if text and conn:
+            update = acp.update_agent_message_text(text)
+            await conn.session_update(session_id, update)
+
+    def _push(text: str) -> None:
         if not text:
             return
-        update = acp.update_agent_message_text(text)
-        _send_update(conn, session_id, loop, update)
+        nonlocal timer
+        with lock:
+            buf.append(text)
+            if timer is None:
+                timer = threading.Timer(flush_ms / 1000.0, _flush)
+                timer.daemon = True
+                timer.start()
 
-    return _message
+    return _push, _flush_async
+
+
+def make_buffered_thinking_cb(
+    conn: acp.Client,
+    session_id: str,
+    loop: asyncio.AbstractEventLoop,
+    flush_ms: int = 500,
+) -> Callable:
+    """Buffered thinking callback — same batching as message callback."""
+    import threading
+
+    buf: list[str] = []
+    lock = threading.Lock()
+    timer: threading.Event | None = None
+
+    def _flush() -> None:
+        nonlocal timer
+        with lock:
+            text = "".join(buf)
+            buf.clear()
+            timer = None
+        if text:
+            update = acp.update_agent_thought_text(text)
+            _send_update(conn, session_id, loop, update)
+
+    def _push(text: str) -> None:
+        if not text:
+            return
+        nonlocal timer
+        with lock:
+            buf.append(text)
+            if timer is None:
+                timer = threading.Timer(flush_ms / 1000.0, _flush)
+                timer.daemon = True
+                timer.start()
+
+    return _push
