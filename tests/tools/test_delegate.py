@@ -32,7 +32,6 @@ from tools.delegate_tool import (
     _strip_blocked_tools,
     _resolve_child_credential_pool,
     _resolve_delegation_credentials,
-    _warn_model_provider_mismatch,
 )
 
 
