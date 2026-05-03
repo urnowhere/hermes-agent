@@ -1449,8 +1449,20 @@ def cmd_whatsapp(args):
             print("  ⚠ No allowlist — the agent will respond to ALL incoming messages")
 
     # ── Step 4: Install bridge dependencies ──────────────────────────────
-    project_root = Path(__file__).resolve().parents[1]
-    bridge_dir = project_root / "scripts" / "whatsapp-bridge"
+    # Bridge files were moved from ``scripts/whatsapp-bridge/`` (outside
+    # any package) to the ``gateway`` package (#15336) so setuptools /
+    # pip / Nix would actually ship them.  But the package-data location
+    # (``site-packages/gateway/whatsapp_bridge/``) is read-only on Nix
+    # and on system pip installs — so ``npm install`` would fail there.
+    # Materialise a writable copy under HERMES_HOME and run npm there.
+    from gateway.platforms.whatsapp import (
+        WhatsAppAdapter,
+        _resolve_runtime_bridge_dir,
+        _ensure_runtime_bridge_files,
+    )
+    template_dir = WhatsAppAdapter._DEFAULT_BRIDGE_TEMPLATE_DIR
+    bridge_dir = _resolve_runtime_bridge_dir()
+    _ensure_runtime_bridge_files(template_dir, bridge_dir)
     bridge_script = bridge_dir / "bridge.js"
 
     if not bridge_script.exists():

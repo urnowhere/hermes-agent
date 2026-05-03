@@ -47,6 +47,11 @@ def _make_adapter():
     adapter.config = MagicMock()
     adapter._bridge_port = 19876
     adapter._bridge_script = "/tmp/test-bridge.js"
+    # Added in the #15460 follow-up: adapters materialise bridge files
+    # into a writable runtime dir under HERMES_HOME.  Tests that bypass
+    # ``__init__`` must still set this so ``start()``'s runtime-copy
+    # check doesn't AttributeError on a partially-built instance.
+    adapter._runtime_bridge_dir = Path("/tmp/test-wa-runtime")
     adapter._session_path = Path("/tmp/test-wa-session")
     adapter._bridge_log_fh = None
     adapter._bridge_log = None

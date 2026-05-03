@@ -21,13 +21,14 @@ import logging
 import os
 import platform
 import re
+import shutil
 import subprocess
 
 _IS_WINDOWS = platform.system() == "Windows"
 from pathlib import Path
 from typing import Dict, Optional, Any
 
-from hermes_constants import get_hermes_dir
+from hermes_constants import get_hermes_dir, get_hermes_home
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +116,7 @@ from gateway.platforms.base import (
 def check_whatsapp_requirements() -> bool:
     """
     Check if WhatsApp dependencies are available.
-    
+
     WhatsApp requires a Node.js bridge for most implementations.
     """
     # Check for Node.js
@@ -129,6 +130,84 @@ def check_whatsapp_requirements() -> bool:
         return result.returncode == 0
     except Exception:
         return False
+
+
+# ── Bridge file lifecycle (#15336, #15460 follow-up) ───────────────────────
+
+# Files that must be present in the runtime bridge directory before the
+# Node process can start.  ``__init__.py`` (the Python package marker
+# from the template location) is intentionally excluded — it's a
+# Python-side artefact, not part of the Node app.
+_BRIDGE_TEMPLATE_FILES = (
+    "bridge.js",
+    "allowlist.js",
+    "allowlist.test.mjs",
+    "package.json",
+    "package-lock.json",
+)
+
+
+def _resolve_runtime_bridge_dir() -> Path:
+    """Return the writable runtime location for the WhatsApp bridge.
+
+    The bridge files ship as package-data inside the ``gateway`` package
+    (``site-packages/gateway/whatsapp_bridge/``).  That location is
+    read-only on Nix store and many system pip installs, so running
+    ``npm install`` directly there fails with EACCES / EROFS.
+
+    We materialise a writable copy under ``HERMES_HOME`` instead — by
+    convention at ``~/.hermes/whatsapp-bridge/`` — and let npm manage
+    ``node_modules`` there.  Honouring ``get_hermes_home()`` means
+    profile-isolated installs and Docker volumes work correctly without
+    extra wiring.
+    """
+    return get_hermes_home() / "whatsapp-bridge"
+
+
+def _ensure_runtime_bridge_files(template_dir: Path, runtime_dir: Path) -> None:
+    """Copy template bridge files to the writable runtime location.
+
+    Copies are mtime-aware: a file is only re-copied when the template
+    is newer than the runtime copy (or the runtime copy is missing
+    entirely).  That way Hermes upgrades pick up bridge updates on the
+    next start-up without burning IO every time.
+
+    ``node_modules/`` is never copied — that's npm's job and copying it
+    would defeat the lockfile reproducibility ``npm ci`` relies on.
+
+    File modes are normalised to ``0o644`` on copy because pip /
+    setuptools may ship package-data at ``0o444`` (read-only on the Nix
+    store), and ``npm install`` needs to overwrite ``package-lock.json``
+    when resolving dependencies.
+
+    No-ops cleanly when the template is missing (development checkouts
+    that never ran ``pip install -e .``) — callers are expected to
+    handle the missing-bridge case themselves.
+    """
+    if not template_dir.is_dir():
+        return
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    for filename in _BRIDGE_TEMPLATE_FILES:
+        src = template_dir / filename
+        if not src.is_file():
+            continue
+        dst = runtime_dir / filename
+        if dst.exists():
+            try:
+                if dst.stat().st_mtime >= src.stat().st_mtime:
+                    continue
+            except OSError:
+                # Fall through and re-copy — better to overwrite a
+                # questionable runtime file than to skip a stale one.
+                pass
+        try:
+            shutil.copy2(src, dst)
+            os.chmod(dst, 0o644)
+        except (OSError, PermissionError) as exc:
+            logger.warning(
+                "Failed to copy WhatsApp bridge file %s -> %s: %s",
+                src, dst, exc,
+            )
 
 
 class WhatsAppAdapter(BasePlatformAdapter):
@@ -159,16 +238,39 @@ class WhatsAppAdapter(BasePlatformAdapter):
     # WhatsApp allows ~65K but long messages are unreadable on mobile.
     MAX_MESSAGE_LENGTH = 4096
     
-    # Default bridge location relative to the hermes-agent install
-    _DEFAULT_BRIDGE_DIR = Path(__file__).resolve().parents[2] / "scripts" / "whatsapp-bridge"
+    # Read-only template location: the bridge files ship as package-data
+    # of the ``gateway`` package (``gateway/whatsapp_bridge/``).  Resolving
+    # via ``__file__.parents[1]`` (gateway/) keeps the path correct under
+    # both source-tree runs and installed wheels (#15336).  This is the
+    # SOURCE of truth for the bridge JS — but it lives in site-packages,
+    # which is read-only on Nix store / system pip installs.  We copy
+    # into a writable runtime dir before running ``npm install``; see
+    # ``_resolve_runtime_bridge_dir`` and ``_ensure_runtime_bridge_files``.
+    _DEFAULT_BRIDGE_TEMPLATE_DIR = Path(__file__).resolve().parents[1] / "whatsapp_bridge"
+
+    # Backward-compat alias.  External callers (and a handful of tests)
+    # reference ``_DEFAULT_BRIDGE_DIR`` to discover where the bridge
+    # lives at runtime.  Now that we materialise into HERMES_HOME, we
+    # redirect to the runtime location — but only when one already
+    # exists, so attribute access at *class* definition time (no
+    # HERMES_HOME yet) doesn't trigger a copy.  The class attribute
+    # below is the template location; instances resolve the runtime
+    # location lazily in ``__init__``.
+    _DEFAULT_BRIDGE_DIR = _DEFAULT_BRIDGE_TEMPLATE_DIR
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.WHATSAPP)
         self._bridge_process: Optional[subprocess.Popen] = None
         self._bridge_port: int = config.extra.get("bridge_port", 3000)
+        # The default bridge script is the writable runtime copy under
+        # HERMES_HOME, NOT the read-only template in site-packages
+        # (#15460 follow-up).  Operators can still override via
+        # ``bridge_script`` in the platform config if they have a
+        # custom Node.js bridge build.
+        self._runtime_bridge_dir: Path = _resolve_runtime_bridge_dir()
         self._bridge_script: Optional[str] = config.extra.get(
             "bridge_script",
-            str(self._DEFAULT_BRIDGE_DIR / "bridge.js"),
+            str(self._runtime_bridge_dir / "bridge.js"),
         )
         self._session_path: Path = Path(config.extra.get(
             "session_path",
@@ -363,12 +465,22 @@ class WhatsAppAdapter(BasePlatformAdapter):
         if not check_whatsapp_requirements():
             logger.warning("[%s] Node.js not found. WhatsApp requires Node.js.", self.name)
             return False
-        
+
+        # Materialise the bridge files into the writable runtime dir on
+        # first start (or after a Hermes upgrade — copy is mtime-aware).
+        # Skipped silently if the operator overrode ``bridge_script`` to
+        # point at their own custom build outside HERMES_HOME.
         bridge_path = Path(self._bridge_script)
+        if bridge_path.parent == self._runtime_bridge_dir:
+            _ensure_runtime_bridge_files(
+                self._DEFAULT_BRIDGE_TEMPLATE_DIR,
+                self._runtime_bridge_dir,
+            )
+
         if not bridge_path.exists():
             logger.warning("[%s] Bridge script not found: %s", self.name, bridge_path)
             return False
-        
+
         logger.info("[%s] Bridge found at %s", self.name, bridge_path)
         
         # Acquire scoped lock to prevent duplicate sessions
