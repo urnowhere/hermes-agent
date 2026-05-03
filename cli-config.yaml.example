@@ -94,6 +94,30 @@ model:
 #     models:
 #       gpt-5.4:
 #         stale_timeout_seconds: 1800  # Longer non-stream stale timeout for slow large-context turns
+#
+# default_headers (optional, dict of HTTP header name → value):
+# Merged into the OpenAI client's default headers for every request to that
+# provider.  User-supplied entries override Hermes' built-in host defaults on
+# conflicts (e.g. you can replace the User-Agent that Hermes sets for a known
+# host, or inject one for an unknown relay).
+#
+# Common use case: some third-party OpenAI-compatible relays run a WAF that
+# rejects the OpenAI Python SDK's default ``User-Agent: OpenAI/Python ...``.
+# Override it here so the request looks like a different client.
+#
+# Top-level ``model.default_headers`` applies to whichever provider is active.
+# A per-provider entry under ``providers:`` takes precedence on conflicts.
+#
+# model:
+#   default_headers:
+#     User-Agent: "claude-code/0.1.0"   # bypass relay WAFs that block OpenAI/Python
+#
+# providers:
+#   my-relay:
+#     base_url: https://relay.example.com/v1
+#     default_headers:
+#       User-Agent: "claude-code/0.1.0"
+#       X-Custom-Tag: "hermes-agent"
 
 # =============================================================================
 # OpenRouter Provider Routing (only applies when using OpenRouter)

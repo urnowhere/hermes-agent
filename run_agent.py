@@ -1537,6 +1537,14 @@ class AIAgent:
                         headers["x-anthropic-beta"] = _FINE_GRAINED
                     client_kwargs["default_headers"] = headers
 
+            # User-supplied HTTP headers from config.yaml — merged on top of
+            # built-in host defaults so the user can override e.g. User-Agent
+            # for relays whose WAF blocks the OpenAI Python SDK's default UA.
+            _user_default_headers = self._resolve_user_default_headers()
+            if _user_default_headers:
+                _existing = client_kwargs.get("default_headers") or {}
+                client_kwargs["default_headers"] = {**_existing, **_user_default_headers}
+
             self.api_key = client_kwargs.get("api_key", "")
             self.base_url = client_kwargs.get("base_url", self.base_url)
             try:
@@ -6160,26 +6168,90 @@ class AIAgent:
         from agent.auxiliary_client import _AI_GATEWAY_HEADERS, _OR_HEADERS
 
         if base_url_host_matches(base_url, "openrouter.ai"):
-            self._client_kwargs["default_headers"] = dict(_OR_HEADERS)
+            host_headers: Dict[str, str] = dict(_OR_HEADERS)
         elif base_url_host_matches(base_url, "ai-gateway.vercel.sh"):
-            self._client_kwargs["default_headers"] = dict(_AI_GATEWAY_HEADERS)
+            host_headers = dict(_AI_GATEWAY_HEADERS)
         elif base_url_host_matches(base_url, "api.routermint.com"):
-            self._client_kwargs["default_headers"] = _routermint_headers()
+            host_headers = _routermint_headers()
         elif base_url_host_matches(base_url, "api.githubcopilot.com"):
             from hermes_cli.models import copilot_default_headers
 
-            self._client_kwargs["default_headers"] = copilot_default_headers()
+            host_headers = copilot_default_headers()
         elif base_url_host_matches(base_url, "api.kimi.com"):
-            self._client_kwargs["default_headers"] = {"User-Agent": "claude-code/0.1.0"}
+            host_headers = {"User-Agent": "claude-code/0.1.0"}
         elif base_url_host_matches(base_url, "portal.qwen.ai"):
-            self._client_kwargs["default_headers"] = _qwen_portal_headers()
+            host_headers = _qwen_portal_headers()
         elif base_url_host_matches(base_url, "chatgpt.com"):
             from agent.auxiliary_client import _codex_cloudflare_headers
-            self._client_kwargs["default_headers"] = _codex_cloudflare_headers(
+            host_headers = _codex_cloudflare_headers(
                 self._client_kwargs.get("api_key", "")
             )
         else:
+            host_headers = {}
+
+        # User-supplied headers from config.yaml take precedence on conflicts.
+        merged: Dict[str, str] = {**host_headers, **self._resolve_user_default_headers()}
+        if merged:
+            self._client_kwargs["default_headers"] = merged
+        else:
             self._client_kwargs.pop("default_headers", None)
+
+    def _resolve_user_default_headers(self) -> Dict[str, str]:
+        """Return user-supplied default HTTP headers from config.yaml.
+
+        Reads, in order of increasing precedence:
+          1. ``model.default_headers`` (top-level — applies to whichever
+             provider/base_url is currently active).
+          2. ``providers.<provider_name>.default_headers`` (per-provider).
+
+        Per-provider entries override top-level on conflicts.  Malformed
+        entries are skipped with a warning by the sanitizer.
+        """
+        try:
+            from hermes_cli.config import (
+                _sanitize_default_headers,
+                load_config,
+            )
+        except Exception:
+            return {}
+
+        try:
+            config = load_config()
+        except Exception:
+            return {}
+        if not isinstance(config, dict):
+            return {}
+
+        merged: Dict[str, str] = {}
+
+        model_block = config.get("model")
+        if isinstance(model_block, dict):
+            cleaned = _sanitize_default_headers(
+                model_block.get("default_headers"), source="model"
+            )
+            if cleaned:
+                merged.update(cleaned)
+
+        provider_name = (getattr(self, "provider", "") or "").strip().lower()
+        if provider_name:
+            providers_block = config.get("providers")
+            if isinstance(providers_block, dict):
+                for key, entry in providers_block.items():
+                    if not isinstance(key, str):
+                        continue
+                    if key.strip().lower() != provider_name:
+                        continue
+                    if not isinstance(entry, dict):
+                        continue
+                    cleaned = _sanitize_default_headers(
+                        entry.get("default_headers"),
+                        source=f"providers.{key}",
+                    )
+                    if cleaned:
+                        merged.update(cleaned)
+                    break
+
+        return merged
 
     def _swap_credential(self, entry) -> None:
         runtime_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")

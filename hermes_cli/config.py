@@ -2539,6 +2539,7 @@ def _normalize_custom_provider_entry(
         "api_mode", "transport", "model", "default_model", "models",
         "context_length", "rate_limit_delay",
         "request_timeout_seconds", "stale_timeout_seconds",
+        "default_headers",
     }
     for camel, snake in _CAMEL_ALIASES.items():
         if camel in entry and snake not in entry:
@@ -2629,7 +2630,53 @@ def _normalize_custom_provider_entry(
     if isinstance(rate_limit_delay, (int, float)) and rate_limit_delay >= 0:
         normalized["rate_limit_delay"] = rate_limit_delay
 
+    default_headers = entry.get("default_headers")
+    sanitized_headers = _sanitize_default_headers(
+        default_headers, source=f"providers.{provider_key or name}"
+    )
+    if sanitized_headers:
+        normalized["default_headers"] = sanitized_headers
+
     return normalized
+
+
+def _sanitize_default_headers(
+    raw: Any, *, source: str
+) -> Optional[Dict[str, str]]:
+    """Validate a ``default_headers`` mapping; return a clean ``str -> str`` dict.
+
+    Accepts any mapping whose keys and values coerce cleanly to non-empty
+    strings.  Logs a warning and returns ``None`` for malformed entries so
+    callers can fall through to host defaults.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        logger.warning(
+            "%s.default_headers must be a mapping of header name to value "
+            "(got %s) — ignored",
+            source, type(raw).__name__,
+        )
+        return None
+
+    cleaned: Dict[str, str] = {}
+    for k, v in raw.items():
+        if not isinstance(k, str) or not k.strip():
+            logger.warning(
+                "%s.default_headers: ignoring entry with non-string key %r",
+                source, k,
+            )
+            continue
+        if v is None:
+            continue
+        if not isinstance(v, (str, int, float, bool)):
+            logger.warning(
+                "%s.default_headers[%r]: value must be a scalar (got %s) — ignored",
+                source, k, type(v).__name__,
+            )
+            continue
+        cleaned[k.strip()] = str(v)
+    return cleaned or None
 
 
 def providers_dict_to_custom_providers(providers_dict: Any) -> List[Dict[str, Any]]:
@@ -2793,6 +2840,10 @@ _VALID_CUSTOM_PROVIDER_FIELDS = {
     # key_env is read at runtime by runtime_provider.py and auxiliary_client.py
     # — include it here so the set accurately describes the supported schema.
     "key_env",
+    # default_headers — user-supplied HTTP headers merged into the OpenAI
+    # client's request headers (overrides built-in host defaults on conflicts).
+    # See run_agent.py:_resolve_user_default_headers.
+    "default_headers",
 }
 
 # Fields that look like they should be inside custom_providers, not at root
