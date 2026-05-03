@@ -762,6 +762,25 @@ class TestInit:
             )
             assert a.valid_tool_names == {"web_search", "terminal"}
 
+    def test_codex_responses_injects_session_routing_headers(self):
+        """codex_responses mode sets session_id header for cache routing."""
+        with (
+            patch("run_agent.get_tool_definitions", return_value=[]),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            a = AIAgent(
+                api_key="test-key-1234567890",
+                api_mode="codex_responses",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+        headers = a._client_kwargs.get("default_headers", {})
+        assert headers.get("session_id") == a.session_id
+        assert headers.get("x-client-request-id") == a.session_id
+
     def test_session_id_auto_generated(self):
         """Session ID should be auto-generated in YYYYMMDD_HHMMSS_<hex6> format."""
         with (

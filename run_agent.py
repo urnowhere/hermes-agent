@@ -1640,6 +1640,20 @@ class AIAgent:
             short_uuid = uuid.uuid4().hex[:6]
             self.session_id = f"{timestamp_str}_{short_uuid}"
         
+        # Codex Responses API: inject session routing headers so the
+        # upstream provider can route requests to the same server that
+        # holds the cached prompt prefix.  Without these, prompt_cache_key
+        # in the request body is useless.
+        if self.api_mode == "codex_responses" and self.session_id:
+            _codex_headers = self._client_kwargs.get("default_headers") or {}
+            _codex_headers["session_id"] = self.session_id
+            _codex_headers["x-client-request-id"] = self.session_id
+            self._client_kwargs["default_headers"] = _codex_headers
+            if self.client:
+                self.client = self._create_openai_client(
+                    self._client_kwargs, reason="codex_session_headers", shared=True,
+                )
+
         # Session logs go into ~/.hermes/sessions/ alongside gateway sessions
         hermes_home = get_hermes_home()
         self.logs_dir = hermes_home / "sessions"
@@ -6203,6 +6217,14 @@ class AIAgent:
             )
         else:
             self._client_kwargs.pop("default_headers", None)
+
+        # Codex Responses API: preserve session routing headers after
+        # /model switch so prompt caching continues to work.
+        if self.api_mode == "codex_responses" and getattr(self, "session_id", None):
+            headers = self._client_kwargs.get("default_headers") or {}
+            headers["session_id"] = self.session_id
+            headers["x-client-request-id"] = self.session_id
+            self._client_kwargs["default_headers"] = headers
 
     def _swap_credential(self, entry) -> None:
         runtime_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")

@@ -168,6 +168,42 @@ def test_estimate_usage_cost_refuses_cache_pricing_without_official_cache_rate(m
     assert result.status == "unknown"
 
 
+def test_codex_responses_reads_cache_write_tokens_field():
+    """codex_responses returns cache_write_tokens, not cache_creation_tokens."""
+    usage = SimpleNamespace(
+        input_tokens=5000,
+        output_tokens=800,
+        input_tokens_details=SimpleNamespace(
+            cached_tokens=2000,
+            cache_write_tokens=1500,
+        ),
+    )
+
+    normalized = normalize_usage(usage, provider="openai", api_mode="codex_responses")
+
+    assert normalized.cache_read_tokens == 2000
+    assert normalized.cache_write_tokens == 1500
+    assert normalized.input_tokens == 1500  # 5000 - 2000 - 1500
+    assert normalized.output_tokens == 800
+
+
+def test_codex_responses_falls_back_to_cache_creation_tokens():
+    """Backward compat: if a provider returns cache_creation_tokens, still works."""
+    usage = SimpleNamespace(
+        input_tokens=3000,
+        output_tokens=400,
+        input_tokens_details=SimpleNamespace(
+            cached_tokens=1000,
+            cache_creation_tokens=500,
+        ),
+    )
+
+    normalized = normalize_usage(usage, provider="openai", api_mode="codex_responses")
+
+    assert normalized.cache_write_tokens == 500
+    assert normalized.input_tokens == 1500  # 3000 - 1000 - 500
+
+
 def test_custom_endpoint_models_api_pricing_is_supported(monkeypatch):
     monkeypatch.setattr(
         "agent.usage_pricing.fetch_endpoint_model_metadata",
