@@ -123,6 +123,7 @@ def show_status(args):
     print(color("◆ API Keys", Colors.CYAN, Colors.BOLD))
 
     keys = {
+        "OpenPaths": "OPENPATHS_API_KEY",
         "OpenRouter": "OPENROUTER_API_KEY",
         "OpenAI": "OPENAI_API_KEY",
         "NVIDIA": "NVIDIA_API_KEY",
