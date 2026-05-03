@@ -1185,6 +1185,8 @@ class HermesACPAgent(acp.Agent):
             return f"❌ 无效等级: {level} — 可用: {', '.join(sorted(VALID_LEVELS))}"
 
         state.agent.reasoning_config = {"effort": level}
+        # 持久化
+        self.session_manager.save_session(state.session_id)
         return f"⚡ Reasoning effort 设为: {level} (was: {current_effort})"
 
     def _cmd_show_thinking(self, args: str, state: SessionState) -> str:
