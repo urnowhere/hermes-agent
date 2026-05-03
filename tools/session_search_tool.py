@@ -235,9 +235,25 @@ def _truncate_around_matches(
 
 
 async def _summarize_session(
-    conversation_text: str, query: str, session_meta: Dict[str, Any]
+    conversation_text: str, query: str, session_meta: Dict[str, Any],
+    user_id: str = None,
 ) -> Optional[str]:
     """Summarize a single session conversation focused on the search query."""
+    user_context = ""
+    if user_id:
+        user_context = (
+            f"\n\nIMPORTANT: This conversation belongs to user {user_id}. "
+            "The transcript may mention other people's private information (names, habits, "
+            "study records, personal details) that appeared during debugging or investigation. "
+            "You MUST:\n"
+            "- Only include information that the USER (the conversation owner) asked about, "
+            "decided, or acted upon\n"
+            "- Do NOT include other people's personal details, habits, or private information "
+            "as if they belong to the user\n"
+            "- If the conversation discusses another person's data (e.g. during a bug investigation), "
+            "mention it only as context for what the user was doing, not as the user's own information"
+        )
+
     system_prompt = (
         "You are reviewing a past conversation transcript to help recall what happened. "
         "Summarize the conversation with a focus on the search topic. Include:\n"
@@ -248,6 +264,7 @@ async def _summarize_session(
         "5. Anything left unresolved or notable\n\n"
         "Be thorough but concise. Preserve specific details (commands, paths, error messages) "
         "that would be useful to recall. Write in past tense as a factual recap."
+        f"{user_context}"
     )
 
     source = session_meta.get("source", "unknown")
@@ -494,7 +511,7 @@ def session_search(
 
             async def _bounded_summary(text: str, meta: Dict[str, Any]) -> Optional[str]:
                 async with semaphore:
-                    return await _summarize_session(text, query, meta)
+                    return await _summarize_session(text, query, meta, user_id=user_id)
 
             coros = [
                 _bounded_summary(text, meta)
@@ -628,7 +645,8 @@ registry.register(
         role_filter=args.get("role_filter"),
         limit=args.get("limit", 3),
         db=kw.get("db"),
-        current_session_id=kw.get("current_session_id")),
+        current_session_id=kw.get("current_session_id"),
+        user_id=kw.get("user_id")),
     check_fn=check_session_search_requirements,
     emoji="🔍",
 )
