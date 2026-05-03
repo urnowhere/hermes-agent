@@ -679,7 +679,18 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                 formatted = message
             send_parse_mode = ParseMode.MARKDOWN_V2
 
-        bot = Bot(token=token)
+        # Respect TELEGRAM_PROXY / system proxy for send_message tool.
+        # The gateway adapter already does this (gateway/platforms/telegram.py),
+        # but the one-shot tool path created a bare Bot() without proxy config,
+        # causing timeouts when a proxy is required.  (hermes-agent #17347)
+        from gateway.platforms.base import resolve_proxy_url
+        proxy_url = resolve_proxy_url('TELEGRAM_PROXY')
+        if proxy_url:
+            from telegram.request import HTTPXRequest
+            bot = Bot(token=token, request=HTTPXRequest(proxy=proxy_url))
+            logger.info('[send_message/telegram] Proxy detected: %s', proxy_url)
+        else:
+            bot = Bot(token=token)
         int_chat_id = int(chat_id)
         media_files = media_files or []
         thread_kwargs = {}
@@ -1531,7 +1542,12 @@ async def _send_wecom(extra, chat_id, message):
 
 
 async def _send_weixin(pconfig, chat_id, message, media_files=None):
-    """Send via Weixin iLink using the native adapter helper."""
+    """Send via Weixin iLink using the native adapter helper.
+
+    Retries on rate-limit (iLink ret=-2) with exponential backoff.
+    The adapter has its own per-chunk retry, but when those are exhausted
+    we still want to give the rate limit time to cool down before giving up.
+    """
     try:
         from gateway.platforms.weixin import check_weixin_requirements, send_weixin_direct
         if not check_weixin_requirements():
@@ -1539,16 +1555,28 @@ async def _send_weixin(pconfig, chat_id, message, media_files=None):
     except ImportError:
         return {"error": "Weixin adapter not available."}
 
-    try:
-        return await send_weixin_direct(
-            extra=pconfig.extra,
-            token=pconfig.token,
-            chat_id=chat_id,
-            message=message,
-            media_files=media_files,
-        )
-    except Exception as e:
-        return _error(f"Weixin send failed: {e}")
+    max_retries = 3
+    for attempt in range(max_retries + 1):
+        try:
+            return await send_weixin_direct(
+                extra=pconfig.extra,
+                token=pconfig.token,
+                chat_id=chat_id,
+                message=message,
+                media_files=media_files,
+            )
+        except Exception as e:
+            err_str = str(e)
+            is_rate_limit = "rate limit" in err_str.lower() or "ret=-2" in err_str
+            if is_rate_limit and attempt < max_retries:
+                wait = 10 * (attempt + 1)  # 10s, 20s, 30s
+                logger.warning(
+                    "[send_message/weixin] rate limited (attempt %d/%d), retrying in %ds: %s",
+                    attempt + 1, max_retries, wait, e,
+                )
+                await asyncio.sleep(wait)
+                continue
+            return _error(f"Weixin send failed: {e}")
 
 
 async def _send_bluebubbles(extra, chat_id, message):

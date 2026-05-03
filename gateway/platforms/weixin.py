@@ -2030,7 +2030,21 @@ async def send_weixin_direct(
 
     live_adapter = _LIVE_ADAPTERS.get(resolved_token)
     send_session = getattr(live_adapter, '_send_session', None)
+
+    # Check if the live adapter's session is usable in the current event loop.
+    # Cron delivery runs in a separate thread/event loop from the gateway,
+    # so the session's internal _loop won't match — aiohttp will raise
+    # "Timeout context manager should be used inside a task". (hermes-agent #17347)
+    _can_use_live = False
     if live_adapter is not None and send_session is not None and not send_session.closed:
+        try:
+            _current_loop = asyncio.get_running_loop()
+            _session_loop = getattr(send_session, '_loop', None)
+            _can_use_live = _session_loop is None or _session_loop is _current_loop
+        except RuntimeError:
+            pass  # no running loop — can't use live adapter
+
+    if _can_use_live:
         last_result: Optional[SendResult] = None
         cleaned = live_adapter.format_message(message)
         if cleaned:
