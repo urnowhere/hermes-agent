@@ -507,6 +507,23 @@ class TestSlashCommandCompleter:
 
         assert [item.text for item in completions] == ["help"]
 
+    # -- picker commands must NOT get trailing space ---------------------
+
+    def test_picker_commands_no_trailing_space(self):
+        """Picker commands (/model, /skin, /personality) must not get trailing space."""
+        for cmd in ("model", "skin", "personality"):
+            result = SlashCommandCompleter._completion_text(cmd, cmd)
+            assert result == cmd, f"/{cmd} should not have trailing space"
+
+    def test_non_picker_exact_match_gets_trailing_space(self):
+        """Regular commands like /help should still get trailing space on exact match."""
+        assert SlashCommandCompleter._completion_text("help", "help") == "help "
+
+    def test_partial_match_never_has_trailing_space_for_picker(self):
+        """Partial matches should never have trailing space regardless of command type."""
+        assert SlashCommandCompleter._completion_text("model", "mo") == "model"
+        assert SlashCommandCompleter._completion_text("help", "he") == "help"
+
     # -- non-slash input returns nothing ---------------------------------
 
     def test_no_completions_for_non_slash_input(self):
