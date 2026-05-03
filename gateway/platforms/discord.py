@@ -810,6 +810,12 @@ class DiscordAdapter(BasePlatformAdapter):
         self._ready_event.clear()
         self._post_connect_task = None
 
+        for task in self._pending_text_batch_tasks.values():
+            if task and not task.done():
+                task.cancel()
+        self._pending_text_batch_tasks.clear()
+        self._pending_text_batches.clear()
+
         self._release_platform_lock()
 
         logger.info("[%s] Disconnected", self.name)

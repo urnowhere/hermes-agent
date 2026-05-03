@@ -1107,7 +1107,7 @@ class TelegramAdapter(BasePlatformAdapter):
             return False
 
     async def disconnect(self) -> None:
-        """Stop polling/webhook, cancel pending album flushes, and disconnect."""
+        """Stop polling/webhook, cancel pending batch flushes, and disconnect."""
         pending_media_group_tasks = list(self._media_group_tasks.values())
         for task in pending_media_group_tasks:
             task.cancel()
@@ -1133,6 +1133,12 @@ class TelegramAdapter(BasePlatformAdapter):
                 task.cancel()
         self._pending_photo_batch_tasks.clear()
         self._pending_photo_batches.clear()
+
+        for task in self._pending_text_batch_tasks.values():
+            if task and not task.done():
+                task.cancel()
+        self._pending_text_batch_tasks.clear()
+        self._pending_text_batches.clear()
 
         self._mark_disconnected()
         self._app = None
