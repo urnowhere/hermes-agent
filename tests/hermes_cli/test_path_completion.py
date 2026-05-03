@@ -35,6 +35,12 @@ class TestExtractPathWord:
     def test_absolute_path(self):
         assert SlashCommandCompleter._extract_path_word("read /etc/hosts") == "/etc/hosts"
 
+    def test_windows_absolute_path(self):
+        assert SlashCommandCompleter._extract_path_word(r"read C:\Users\Simba\notes.txt") == r"C:\Users\Simba\notes.txt"
+
+    def test_windows_relative_path(self):
+        assert SlashCommandCompleter._extract_path_word(r"edit .\src\main.py") == r".\src\main.py"
+
     def test_parent_path(self):
         assert SlashCommandCompleter._extract_path_word("check ../config.yaml") == "../config.yaml"
 
@@ -101,6 +107,7 @@ class TestPathCompletions:
 
     def test_home_expansion(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
         (tmp_path / "testfile.md").touch()
 
         completions = list(SlashCommandCompleter._path_completions("~/test"))
@@ -149,19 +156,39 @@ class TestIntegration:
         finally:
             os.chdir(old_cwd)
 
+    def test_path_completion_triggers_on_windows_style_path(self, completer, monkeypatch):
+        seen = {}
+
+        def fake_path_completions(word, limit=30):
+            seen["word"] = word
+            return iter(())
+
+        monkeypatch.setattr(SlashCommandCompleter, "_path_completions", staticmethod(fake_path_completions))
+
+        doc = Document(r"edit .\te", cursor_position=len(r"edit .\te"))
+        event = MagicMock()
+
+        list(completer.get_completions(doc, event))
+
+        assert seen["word"] == r".\te"
+
     def test_no_completion_for_plain_words(self, completer):
         doc = Document("hello world", cursor_position=11)
         event = MagicMock()
         completions = list(completer.get_completions(doc, event))
         assert completions == []
 
-    def test_absolute_path_triggers_completion(self, completer):
-        doc = Document("check /etc/hos", cursor_position=14)
+    def test_absolute_path_triggers_completion(self, completer, tmp_path):
+        (tmp_path / "host_test.txt").touch()
+        abs_path = str(tmp_path / "hos")
+        # Replace backslashes with forward slashes for the test if it's Windows, or leave as native
+        # The user's fix allows backslashes too. Let's test native absolute path.
+        doc_text = f"check {abs_path}"
+        doc = Document(doc_text, cursor_position=len(doc_text))
         event = MagicMock()
         completions = list(completer.get_completions(doc, event))
         names = _display_names(completions)
-        # /etc/hosts should exist on Linux
-        assert any("host" in n.lower() for n in names)
+        assert any("host_test" in n.lower() for n in names)
 
 
 class TestFileSizeLabel:

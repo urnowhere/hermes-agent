@@ -1130,7 +1130,8 @@ class SlashCommandCompleter(Completer):
         Returns the path-like token under the cursor, or None if the
         current word doesn't look like a path.  A word is path-like when
         it starts with ``./``, ``../``, ``~/``, ``/``, or contains a
-        ``/`` separator (e.g. ``src/main.py``).
+        ``/`` or ``\\`` separator (e.g. ``src/main.py`` or
+        ``src\\main.py``).
         """
         if not text:
             return None
@@ -1143,7 +1144,11 @@ class SlashCommandCompleter(Completer):
         if not word:
             return None
         # Only trigger path completion for path-like tokens
-        if word.startswith(("./", "../", "~/", "/")) or "/" in word:
+        if (
+            word.startswith(("./", "../", "~/", "/", ".\\", "..\\", "~\\", "\\"))
+            or "/" in word
+            or "\\" in word
+        ):
             return word
         return None
 
