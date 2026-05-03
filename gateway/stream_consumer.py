@@ -362,13 +362,34 @@ class GatewayStreamConsumer:
                         chunks = self.adapter.truncate_message(
                             self._accumulated, _safe_limit
                         )
+                        sent_length = 0
                         for chunk in chunks:
-                            await self._send_new_chunk(chunk, self._message_id)
-                        self._accumulated = ""
+                            if not self._clean_for_display(chunk).strip():
+                                # Chunk is empty after removing media/whitespace
+                                # markers — advance past it
+                                sent_length += len(chunk)
+                                continue
+                            reply_id = self._message_id
+                            new_id = await self._send_new_chunk(chunk, reply_id)
+                            if new_id is not None and new_id != reply_id:
+                                sent_length += len(chunk)
+                            else:
+                                break
+                        self._accumulated = self._accumulated[sent_length:]
                         self._last_sent_text = ""
                         self._last_edit_time = time.monotonic()
                         if got_done:
-                            self._final_response_sent = self._already_sent
+                            # If some chunks failed, _accumulated holds the
+                            # unsent remainder.  Attempt to deliver it now so
+                            # it is not silently dropped.  Only mark the
+                            # response as fully sent when _accumulated is empty
+                            # (all chunks delivered) or when the fallback send
+                            # succeeds; otherwise leave _final_response_sent
+                            # False so the gateway's own fallback path retries.
+                            if self._accumulated:
+                                await self._send_fallback_final(self._accumulated)
+                            else:
+                                self._final_response_sent = self._already_sent
                             return
                         if got_segment_break:
                             self._message_id = None
