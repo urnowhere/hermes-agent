@@ -359,6 +359,94 @@ class TestWeixinChunkDelivery:
         assert first_try["client_id"] == retry["client_id"]
 
 
+class TestWeixinDirectSend:
+    def test_send_weixin_direct_reuses_live_adapter_only_on_same_event_loop(self):
+        adapter = _make_adapter()
+        loop = asyncio.new_event_loop()
+        adapter._send_session = type("Session", (), {"closed": False, "_loop": loop})()
+        adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="live-msg"))
+        adapter.send_image_file = AsyncMock()
+        adapter.send_document = AsyncMock()
+
+        async def _run():
+            with patch.dict(weixin._LIVE_ADAPTERS, {"test-token": adapter}, clear=True), \
+                 patch.object(weixin, "ContextTokenStore") as store_cls, \
+                 patch.object(weixin, "get_hermes_home", return_value="/tmp"), \
+                 patch.object(weixin.aiohttp, "ClientSession") as client_session_cls:
+                store = store_cls.return_value
+                store.restore.return_value = None
+                store.get.return_value = None
+
+                result = await weixin.send_weixin_direct(
+                    extra={"account_id": "test-account", "base_url": "https://wx.example.com"},
+                    token="test-token",
+                    chat_id="wxid_test123",
+                    message="hello from same loop",
+                )
+
+            assert result["success"] is True
+            assert result["message_id"] == "live-msg"
+            adapter.send.assert_awaited_once_with("wxid_test123", "hello from same loop")
+            client_session_cls.assert_not_called()
+
+        try:
+            loop.run_until_complete(_run())
+        finally:
+            loop.close()
+
+    def test_send_weixin_direct_avoids_live_adapter_across_event_loops(self):
+        adapter = _make_adapter()
+        foreign_loop = asyncio.new_event_loop()
+        adapter._send_session = type("Session", (), {"closed": False, "_loop": foreign_loop})()
+        adapter.send = AsyncMock(side_effect=AssertionError("should not reuse foreign-loop live adapter"))
+
+        isolated_session = type("Session", (), {"closed": False})()
+
+        class _ClientSessionCtx:
+            def __init__(self, session):
+                self._session = session
+
+            async def __aenter__(self):
+                return self._session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        async def _run():
+            with patch.dict(weixin._LIVE_ADAPTERS, {"test-token": adapter}, clear=True), \
+                 patch.object(weixin, "ContextTokenStore") as store_cls, \
+                 patch.object(weixin, "get_hermes_home", return_value="/tmp"), \
+                 patch.object(weixin.aiohttp, "ClientSession", return_value=_ClientSessionCtx(isolated_session)) as client_session_cls, \
+                 patch.object(weixin, "WeixinAdapter") as adapter_cls:
+                store = store_cls.return_value
+                store.restore.return_value = None
+                store.get.return_value = None
+
+                fresh_adapter = adapter_cls.return_value
+                fresh_adapter.format_message.return_value = "fresh message"
+                fresh_adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="fresh-msg"))
+                fresh_adapter.send_image_file = AsyncMock()
+                fresh_adapter.send_document = AsyncMock()
+
+                result = await weixin.send_weixin_direct(
+                    extra={"account_id": "test-account", "base_url": "https://wx.example.com"},
+                    token="test-token",
+                    chat_id="wxid_test123",
+                    message="hello from foreign loop",
+                )
+
+            assert result["success"] is True
+            assert result["message_id"] == "fresh-msg"
+            fresh_adapter.send.assert_awaited_once_with("wxid_test123", "fresh message")
+            client_session_cls.assert_called_once()
+            adapter.send.assert_not_awaited()
+
+        try:
+            asyncio.run(_run())
+        finally:
+            foreign_loop.close()
+
+
 class TestWeixinOutboundMedia:
     def test_send_image_file_accepts_keyword_image_path(self):
         adapter = _make_adapter()

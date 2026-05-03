@@ -2030,7 +2030,15 @@ async def send_weixin_direct(
 
     live_adapter = _LIVE_ADAPTERS.get(resolved_token)
     send_session = getattr(live_adapter, '_send_session', None)
-    if live_adapter is not None and send_session is not None and not send_session.closed:
+    current_loop = asyncio.get_running_loop()
+    live_session_loop = getattr(send_session, '_loop', None)
+    can_reuse_live_adapter = (
+        live_adapter is not None
+        and send_session is not None
+        and not send_session.closed
+        and live_session_loop is current_loop
+    )
+    if can_reuse_live_adapter:
         last_result: Optional[SendResult] = None
         cleaned = live_adapter.format_message(message)
         if cleaned:
@@ -2054,6 +2062,14 @@ async def send_weixin_direct(
             "message_id": last_result.message_id if last_result else None,
             "context_token_used": bool(context_token),
         }
+
+    if live_adapter is not None and send_session is not None and not send_session.closed and live_session_loop is not current_loop:
+        logger.debug(
+            "[weixin-direct] live adapter loop mismatch for %s: adapter loop=%r current loop=%r; using isolated session",
+            _safe_id(chat_id),
+            live_session_loop,
+            current_loop,
+        )
 
     async with aiohttp.ClientSession(trust_env=True, connector=_make_ssl_connector()) as session:
         adapter = WeixinAdapter(
