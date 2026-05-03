@@ -415,7 +415,7 @@ class TestCmdUpdateLaunchdRestart:
             pid=12345,
         )
 
-        with patch.object(gateway_cli, "find_gateway_pids", return_value=[12345]), \
+        with patch.object(gateway_cli, "find_gateway_pids", side_effect=[[12345], []]), \
              patch.object(gateway_cli, "find_profile_gateway_processes", return_value=[process]), \
              patch.object(gateway_cli, "launch_detached_profile_gateway_restart", return_value=True) as restart, \
              patch.object(gateway_cli, "_graceful_restart_via_sigusr1", return_value=True) as graceful, \
@@ -453,7 +453,7 @@ class TestCmdUpdateLaunchdRestart:
             pid=12345,
         )
 
-        with patch.object(gateway_cli, "find_gateway_pids", return_value=[12345]), \
+        with patch.object(gateway_cli, "find_gateway_pids", side_effect=[[12345], []]), \
              patch.object(gateway_cli, "find_profile_gateway_processes", return_value=[process]), \
              patch.object(gateway_cli, "launch_detached_profile_gateway_restart", return_value=True) as restart, \
              patch.object(gateway_cli, "_graceful_restart_via_sigusr1", return_value=False) as graceful, \
@@ -872,9 +872,17 @@ class TestServicePidExclusion:
             launchctl_loaded=True,
         )
 
+        find_calls = {"count": 0}
+
         def fake_find(exclude_pids=None, all_profiles=False):
             _exclude = exclude_pids or set()
-            return [p for p in [SERVICE_PID, MANUAL_PID] if p not in _exclude]
+            find_calls["count"] += 1
+            candidates = [SERVICE_PID, MANUAL_PID]
+            if find_calls["count"] > 1:
+                # The manual process received SIGTERM during the first sweep;
+                # the post-restart survivor check should see only the service PID.
+                candidates = [SERVICE_PID]
+            return [p for p in candidates if p not in _exclude]
 
         with patch.object(
             gateway_cli, "_get_service_pids", return_value={SERVICE_PID}

@@ -413,6 +413,45 @@ class LocalEnvironment(BaseEnvironment):
                 pass
             return not _group_alive(pgid)
 
+        def _processes_in_group(pgid: int) -> list[int]:
+            """Best-effort process-group member discovery for cleanup fallback."""
+            members: list[int] = []
+            proc_root = "/proc"
+            if os.path.isdir(proc_root):
+                for name in os.listdir(proc_root):
+                    if not name.isdigit():
+                        continue
+                    try:
+                        # POSIX-only: this helper is called only from the
+                        # non-Windows branch where _IS_WINDOWS is false.
+                        if os.getpgid(int(name)) == pgid:
+                            members.append(int(name))
+                    except (ProcessLookupError, PermissionError, OSError):
+                        continue
+                return members
+            try:
+                result = subprocess.run(
+                    ["ps", "-o", "pid=", "-g", str(pgid)],
+                    capture_output=True,
+                    text=True,
+                    timeout=1,
+                    check=False,
+                )
+                for raw in result.stdout.splitlines():
+                    raw = raw.strip()
+                    if raw.isdigit():
+                        members.append(int(raw))
+            except Exception:
+                pass
+            return members
+
+        def _signal_group_members(pgid: int, sig: signal.Signals) -> None:
+            for pid in _processes_in_group(pgid):
+                try:
+                    os.kill(pid, sig)
+                except (ProcessLookupError, PermissionError, OSError):
+                    continue
+
         try:
             if _IS_WINDOWS:
                 proc.terminate()
@@ -440,6 +479,12 @@ class LocalEnvironment(BaseEnvironment):
                     os.killpg(pgid, signal.SIGKILL)
                 except ProcessLookupError:
                     return
+                if not _wait_for_group_exit(pgid, 0.5):
+                    # Some loaded hosts have shown a narrow race where killpg
+                    # returns successfully but a grandchild remains visible in
+                    # the group for another scheduler tick. Fall back to direct
+                    # member signalling before declaring cleanup done.
+                    _signal_group_members(pgid, signal.SIGKILL)
                 _wait_for_group_exit(pgid, 2.0)
                 try:
                     proc.wait(timeout=0.2)

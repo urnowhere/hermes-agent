@@ -19,7 +19,12 @@ class TestApplyIPv4Preference:
 
     def setup_method(self):
         """Save the original getaddrinfo before each test."""
-        self._original = socket.getaddrinfo
+        self._original = getattr(
+            socket.getaddrinfo,
+            "_hermes_ipv4_original",
+            socket.getaddrinfo,
+        )
+        socket.getaddrinfo = self._original
 
     def teardown_method(self):
         """Restore the original getaddrinfo after each test."""
