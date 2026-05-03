@@ -182,72 +182,66 @@ def make_streaming_cbs(
     conn: acp.Client,
     session_id: str,
     loop: asyncio.AbstractEventLoop,
-    batch_ms: int = 500,
 ) -> tuple[Callable, Callable, Callable]:
-    """Create streaming callbacks with a shared ordered queue.
+    """Streaming callbacks — shared ordered queue + real-time sends.
 
-    Thinking and text chunks arrive in model-defined order. We batch them
-    together every batch_ms, preserving the original sequence. Returns
-    (thinking_cb, message_cb, flush_fn).
+    - thinking / text chunks are queued in order, then sent immediately
+      via _send_update (synchronous, blocks until delivered).
+    - flush_fn() awaits the last send future so result never arrives first.
+    - Real-time streaming feel, no-timer races, guaranteed ordering.
     """
     import threading, time
     import asyncio
 
-    # (type, text, timestamp) — type: "think" or "text"
     queue: list[tuple[str, str, float]] = []
-    queue_lock = threading.Lock()
-    timer: threading.Timer | None = None
+    lock = threading.Lock()
+    _last_future: asyncio.Future | None = None
 
-    def _flush() -> None:
-        nonlocal timer
-        with queue_lock:
-            if not queue:
-                timer = None
-                return
-            # Take all pending, preserve order
-            batch = queue[:]
-            queue.clear()
-            timer = None
-        # Build and send all events in order
-        for kind, text, _ts in batch:
-            if kind == "think":
-                update = acp.update_agent_thought_text(text)
-            else:
-                update = acp.update_agent_message_text(text)
-            _send_update(conn, session_id, loop, update)
+    def _send_now(kind: str, text: str) -> None:
+        nonlocal _last_future
+        update = (
+            acp.update_agent_thought_text(text)
+            if kind == "think"
+            else acp.update_agent_message_text(text)
+        )
+        fut = asyncio.run_coroutine_threadsafe(
+            conn.session_update(session_id, update), loop
+        )
+        fut.result(timeout=5)  # synchronous — blocks until websocket sends
+        _last_future = fut
 
-    def _start_timer() -> None:
-        nonlocal timer
-        if timer is not None:
-            return
-        timer = threading.Timer(batch_ms / 1000.0, _flush)
-        timer.daemon = True
-        timer.start()
+    def _drain() -> None:
+        """Send everything queued (called under lock)."""
+        while queue:
+            kind, text, _ts = queue.pop(0)
+            _send_now(kind, text)
 
-    def _enqueue(kind: str, text: str) -> None:
+    def _enqueue_and_send(kind: str, text: str) -> None:
         if not text:
             return
-        with queue_lock:
+        with lock:
             queue.append((kind, text, time.monotonic()))
-            _start_timer()
+            _drain()
 
     def thinking_cb(text: str) -> None:
-        _enqueue("think", text)
+        _enqueue_and_send("think", text)
 
     def message_cb(text: str) -> None:
-        _enqueue("text", text)
+        _enqueue_and_send("text", text)
 
     async def flush_fn() -> None:
-        nonlocal timer
-        with queue_lock:
-            if timer:
-                timer.cancel()
-                timer = None
-            if not queue:
-                return
+        nonlocal _last_future
+        # 等最后一个发送完成
+        if _last_future is not None:
+            try:
+                await asyncio.wrap_future(_last_future)
+            except Exception:
+                pass
+            _last_future = None
+        # 最后一批（如果有）
+        with lock:
             batch = queue[:]
             queue.clear()
-        # Send directly (no _send_update here — we're in async, await for ordering)
         for kind, text, _ts in batch:
             if kind == "think":
                 update = acp.update_agent_thought_text(text)
