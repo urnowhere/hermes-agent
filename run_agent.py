@@ -870,6 +870,28 @@ def _qwen_portal_headers() -> dict:
     }
 
 
+def detect_honcho_auto_migrate() -> str:
+    """Detect an actively-configured Honcho installation for auto-migration.
+
+    Returns ``"honcho"`` when the Honcho client config has *both* ``enabled``
+    set to True *and* at least one credential (``api_key`` or ``base_url``).
+    Returns ``""`` otherwise (disabled, no credentials, or plugin not
+    installed).
+
+    Persistence is intentionally NOT handled here — the caller must verify
+    ``is_available()`` before writing to config so that a broken Honcho setup
+    cannot persist a stale entry.
+    """
+    try:
+        from plugins.memory.honcho.client import HonchoClientConfig as _HCC
+        _hcfg = _HCC.from_global_config()
+        if _hcfg.enabled and (_hcfg.api_key or _hcfg.base_url):
+            return "honcho"
+    except Exception:
+        pass
+    return ""
+
+
 class AIAgent:
     """
     AI Agent with tool calling capabilities.
@@ -1727,6 +1749,9 @@ class AIAgent:
             try:
                 _mem_provider_name = mem_config.get("provider", "") if mem_config else ""
 
+                if not _mem_provider_name:
+                    _mem_provider_name = detect_honcho_auto_migrate()
+
                 if _mem_provider_name:
                     from agent.memory_manager import MemoryManager as _MemoryManager
                     from plugins.memory import load_memory_provider as _load_mem
@@ -1734,6 +1759,20 @@ class AIAgent:
                     _mp = _load_mem(_mem_provider_name)
                     if _mp and _mp.is_available():
                         self._memory_manager.add_provider(_mp)
+                        # Persist auto-migration so it only runs once.
+                        # This runs AFTER is_available() confirms the provider
+                        # works, so a broken setup never writes to config.
+                        if _mem_provider_name == "honcho" and not mem_config.get("provider"):
+                            try:
+                                from hermes_cli.config import load_config as _lc, save_config as _sc
+                                _cfg = _lc()
+                                _cfg.setdefault("memory", {})["provider"] = "honcho"
+                                _sc(_cfg)
+                            except Exception:
+                                pass
+                            if not self.quiet_mode:
+                                print("  ✓ Auto-migrated Honcho to memory provider plugin.")
+                                print("    Your config and data are preserved.\n")
                     if self._memory_manager.providers:
                         _init_kwargs = {
                             "session_id": self.session_id,
