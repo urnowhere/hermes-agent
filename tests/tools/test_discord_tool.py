@@ -487,6 +487,114 @@ class TestRoleManagement:
 
 
 # ---------------------------------------------------------------------------
+# Actions: create_channel / update_channel / delete_channel
+# ---------------------------------------------------------------------------
+
+class TestChannelManagement:
+    @patch("tools.discord_tool._discord_request")
+    def test_create_text_channel(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = {
+            "id": "900", "name": "test-channel", "type": 0,
+            "guild_id": "111", "position": 24, "parent_id": "10",
+        }
+        result = json.loads(discord_admin_handler(
+            action="create_channel",
+            guild_id="111",
+            name="test-channel",
+            type=0,
+            parent_id="10",
+            position=24,
+        ))
+        assert result["success"] is True
+        assert result["message"] == "Channel 'test-channel' created with ID 900."
+        mock_req.assert_called_once_with(
+            "POST", "/guilds/111/channels", "test-token",
+            body={"name": "test-channel", "type": 0, "parent_id": "10", "position": 24},
+        )
+
+    @patch("tools.discord_tool._discord_request")
+    def test_create_channel_type_zero_not_treated_as_missing(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = {
+            "id": "901", "name": "text", "type": 0,
+            "guild_id": "111", "position": 0, "parent_id": None,
+        }
+        result = json.loads(discord_admin_handler(
+            action="create_channel", guild_id="111", name="text", type=0,
+        ))
+        assert result["success"] is True
+        mock_req.assert_called_once_with(
+            "POST", "/guilds/111/channels", "test-token",
+            body={"name": "text", "type": 0},
+        )
+
+    @patch("tools.discord_tool._discord_request")
+    def test_update_channel(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = {
+            "id": "900", "name": "renamed", "type": 0,
+            "guild_id": "111", "position": 25, "parent_id": "10",
+        }
+        result = json.loads(discord_admin_handler(
+            action="update_channel", channel_id="900", name="renamed", position=25,
+        ))
+        assert result["success"] is True
+        assert result["message"] == "Channel 900 updated."
+        mock_req.assert_called_once_with(
+            "PATCH", "/channels/900", "test-token",
+            body={"name": "renamed", "position": 25},
+        )
+
+    def test_update_channel_requires_update_fields(self, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        result = json.loads(discord_admin_handler(action="update_channel", channel_id="900"))
+        assert "error" in result
+        assert "name, parent_id, or position" in result["error"]
+
+    @patch("tools.discord_tool._discord_request")
+    def test_update_channel_can_clear_parent_category(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = {"id": "900", "name": "general", "type": 0, "parent_id": None}
+        result = json.loads(discord_admin_handler(
+            action="update_channel", channel_id="900", parent_id=None,
+        ))
+        assert result["success"] is True
+        mock_req.assert_called_once_with(
+            "PATCH", "/channels/900", "test-token",
+            body={"parent_id": None},
+        )
+
+    @patch("tools.discord_tool._discord_request")
+    def test_delete_channel(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {"discord": {"server_actions": ["delete_channel"]}},
+        )
+        mock_req.return_value = {
+            "id": "900", "name": "deleted", "type": 0,
+            "guild_id": "111", "position": 24, "parent_id": "10",
+        }
+        result = json.loads(discord_admin_handler(action="delete_channel", channel_id="900"))
+        assert result["success"] is True
+        assert result["message"] == "Channel 900 deleted."
+        mock_req.assert_called_once_with("DELETE", "/channels/900", "test-token")
+
+    @patch("tools.discord_tool._discord_request")
+    def test_delete_channel_requires_explicit_opt_in(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {"discord": {"server_actions": ""}},
+        )
+        result = json.loads(discord_admin_handler(action="delete_channel", channel_id="900"))
+        assert "error" in result
+        assert "requires explicit opt-in" in result["error"]
+        mock_req.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Error handling
 # ---------------------------------------------------------------------------
 
@@ -551,7 +659,10 @@ class TestRegistration:
         from tools.registry import registry
         entry = registry._tools["discord_admin"]
         actions = set(entry.schema["parameters"]["properties"]["action"]["enum"])
-        expected_admin = set(_ACTIONS.keys()) - {"fetch_messages", "search_members", "create_thread"}
+        expected_admin = (
+            set(_ACTIONS.keys())
+            - {"fetch_messages", "search_members", "create_thread", "delete_channel"}
+        )
         assert actions == expected_admin
 
     def test_all_actions_covered(self):
@@ -566,6 +677,7 @@ class TestRegistration:
         assert props["limit"]["minimum"] == 1
         assert props["limit"]["maximum"] == 100
         assert props["auto_archive_duration"]["enum"] == [60, 1440, 4320, 10080]
+        assert props["parent_id"]["type"] == ["string", "null"]
 
     def test_core_schema_description(self):
         """Core schema description should mention core actions."""
@@ -586,6 +698,9 @@ class TestRegistration:
         desc = entry.schema["description"]
         assert "list_guilds()" in desc
         assert "add_role(guild_id, user_id, role_id)" in desc
+        assert "create_channel(guild_id, name, type)" in desc
+        assert "update_channel(channel_id)" in desc
+        assert "delete_channel(channel_id)" not in desc
         # Core actions should NOT be in admin description
         assert "fetch_messages(" not in desc
         assert "create_thread(" not in desc
@@ -822,7 +937,14 @@ class TestConfigAllowlist:
 class TestAvailableActions:
     def test_all_available_when_unrestricted(self):
         caps = {"detected": True, "has_members_intent": True, "has_message_content": True}
-        assert _available_actions(caps, None) == list(_ACTIONS.keys())
+        assert _available_actions(caps, None) == [
+            action for action in _ACTIONS if action != "delete_channel"
+        ]
+
+    def test_destructive_actions_require_allowlist_opt_in(self):
+        caps = {"detected": True, "has_members_intent": True, "has_message_content": True}
+        actions = _available_actions(caps, ["list_guilds", "delete_channel"])
+        assert actions == ["list_guilds", "delete_channel"]
 
     def test_no_members_intent_hides_member_actions(self):
         caps = {"detected": True, "has_members_intent": False, "has_message_content": True}
@@ -900,10 +1022,23 @@ class TestDynamicSchema:
         mock_req.return_value = {"flags": (1 << 14) | (1 << 18)}
         schema = get_dynamic_schema_admin()
         actions = set(schema["parameters"]["properties"]["action"]["enum"])
-        assert actions == set(_ADMIN_ACTIONS.keys())
+        assert actions == set(_ADMIN_ACTIONS.keys()) - {"delete_channel"}
         assert schema["name"] == "discord_admin"
         # No content warning when MESSAGE_CONTENT is enabled
         assert "MESSAGE_CONTENT" not in schema["description"]
+
+    @patch("tools.discord_tool._discord_request")
+    def test_delete_channel_only_in_admin_schema_when_allowlisted(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {"discord": {"server_actions": "list_guilds,delete_channel"}},
+        )
+        mock_req.return_value = {"flags": (1 << 14) | (1 << 18)}
+        schema = get_dynamic_schema_admin()
+        actions = schema["parameters"]["properties"]["action"]["enum"]
+        assert actions == ["list_guilds", "delete_channel"]
+        assert "delete_channel(channel_id)" in schema["description"]
 
     @patch("tools.discord_tool._discord_request")
     def test_no_members_intent_removes_member_actions_from_admin_schema(
@@ -1032,6 +1167,12 @@ class Test403Enrichment:
         msg = _enrich_403("add_role", '{"message":"Missing Permissions"}')
         assert "MANAGE_ROLES" in msg
         assert "Missing Permissions" in msg  # Raw body preserved
+
+    @pytest.mark.parametrize("action", ["create_channel", "update_channel", "delete_channel"])
+    def test_enrich_channel_management_actions(self, action):
+        msg = _enrich_403(action, '{"message":"Missing Permissions"}')
+        assert "MANAGE_CHANNELS" in msg
+        assert "Missing Permissions" in msg
 
     def test_enrich_unknown_action_includes_body(self):
         msg = _enrich_403("some_new_action", '{"message":"weird"}')

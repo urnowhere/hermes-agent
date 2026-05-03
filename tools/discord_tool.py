@@ -18,7 +18,8 @@ The schema exposed to the model is filtered by two gates:
 2. User config allowlist at ``discord.server_actions``. If the user
    sets a comma-separated list (or YAML list) of action names, only
    those appear in the schema. Empty/unset means all intent-available
-   actions are exposed.
+   actions are exposed, except explicitly destructive actions such as
+   ``delete_channel`` which require opt-in.
 
 Per-guild permissions (MANAGE_ROLES etc.) are NOT pre-checked — Discord
 returns a 403 at call time and :func:`_enrich_403` maps it to
@@ -45,6 +46,12 @@ _FLAG_GATEWAY_GUILD_MEMBERS = 1 << 14
 _FLAG_GATEWAY_GUILD_MEMBERS_LIMITED = 1 << 15
 _FLAG_GATEWAY_MESSAGE_CONTENT = 1 << 18
 _FLAG_GATEWAY_MESSAGE_CONTENT_LIMITED = 1 << 19
+
+_UNSET = object()
+
+# Actions that can permanently destroy server state should never appear just
+# because a deployment already had the broad discord_admin toolset enabled.
+_EXPLICIT_OPT_IN_ACTIONS = frozenset({"delete_channel"})
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -460,6 +467,58 @@ def _remove_role(token: str, guild_id: str, user_id: str, role_id: str, **_kwarg
     return json.dumps({"success": True, "message": f"Role {role_id} removed from user {user_id}."})
 
 
+def _create_channel(
+    token: str,
+    guild_id: str,
+    name: str,
+    type: int,
+    parent_id: Any = _UNSET,
+    position: Optional[int] = None,
+    **_kwargs: Any,
+) -> str:
+    """Create a guild channel."""
+    body: Dict[str, Any] = {"name": name, "type": type}
+    if parent_id is not _UNSET and parent_id not in (None, ""):
+        body["parent_id"] = parent_id
+    if position is not None:
+        body["position"] = position
+
+    channel = _discord_request("POST", f"/guilds/{guild_id}/channels", token, body=body)
+    return json.dumps({"success": True, "message": f"Channel '{name}' created with ID {channel['id']}."})
+
+
+def _update_channel(
+    token: str,
+    channel_id: str,
+    name: str = "",
+    parent_id: Any = _UNSET,
+    position: Optional[int] = None,
+    **_kwargs: Any,
+) -> str:
+    """Update a channel's editable metadata."""
+    body: Dict[str, Any] = {}
+    if name:
+        body["name"] = name
+    if parent_id is not _UNSET and parent_id != "":
+        body["parent_id"] = parent_id
+    if position is not None:
+        body["position"] = position
+
+    if not body:
+        return json.dumps({
+            "error": "Missing update parameters for 'update_channel': name, parent_id, or position",
+        })
+
+    _discord_request("PATCH", f"/channels/{channel_id}", token, body=body)
+    return json.dumps({"success": True, "message": f"Channel {channel_id} updated."})
+
+
+def _delete_channel(token: str, channel_id: str, **_kwargs: Any) -> str:
+    """Delete a channel."""
+    _discord_request("DELETE", f"/channels/{channel_id}", token)
+    return json.dumps({"success": True, "message": f"Channel {channel_id} deleted."})
+
+
 # ---------------------------------------------------------------------------
 # Action dispatch + metadata
 # ---------------------------------------------------------------------------
@@ -479,6 +538,9 @@ _ACTIONS = {
     "create_thread": _create_thread,
     "add_role": _add_role,
     "remove_role": _remove_role,
+    "create_channel": _create_channel,
+    "delete_channel": _delete_channel,
+    "update_channel": _update_channel,
 }
 
 _CORE_ACTION_NAMES = frozenset({"fetch_messages", "search_members", "create_thread"})
@@ -505,6 +567,9 @@ _ACTION_MANIFEST: List[Tuple[str, str, str]] = [
     ("create_thread", "(channel_id, name)", "create a public thread; optional message_id anchor"),
     ("add_role", "(guild_id, user_id, role_id)", "assign a role"),
     ("remove_role", "(guild_id, user_id, role_id)", "remove a role"),
+    ("create_channel", "(guild_id, name, type)", "create a text, voice, or category channel"),
+    ("delete_channel", "(channel_id)", "delete a channel"),
+    ("update_channel", "(channel_id)", "update a channel's name, parent category, or position"),
 ]
 
 # Actions that require the GUILD_MEMBERS privileged intent.
@@ -525,6 +590,9 @@ _REQUIRED_PARAMS: Dict[str, List[str]] = {
     "create_thread": ["channel_id", "name"],
     "add_role": ["guild_id", "user_id", "role_id"],
     "remove_role": ["guild_id", "user_id", "role_id"],
+    "create_channel": ["guild_id", "name", "type"],
+    "delete_channel": ["channel_id"],
+    "update_channel": ["channel_id"],
 }
 
 
@@ -583,6 +651,9 @@ def _available_actions(
     """
     actions: List[str] = []
     for name in _ACTIONS:
+        # Destructive actions must be explicitly named in the config allowlist.
+        if allowlist is None and name in _EXPLICIT_OPT_IN_ACTIONS:
+            continue
         # Intent filter
         if not caps.get("has_members_intent", True) and name in _INTENT_GATED_MEMBERS:
             continue
@@ -682,7 +753,25 @@ def _build_schema(
         },
         "name": {
             "type": "string",
-            "description": "New thread name (create_thread).",
+            "description": "New thread/channel name (create_thread, create_channel, update_channel).",
+            "minLength": 1,
+            "maxLength": 100,
+        },
+        "type": {
+            "type": "integer",
+            "enum": [0, 2, 4],
+            "description": "Discord guild channel type for create_channel: 0=text, 2=voice, 4=category.",
+        },
+        "parent_id": {
+            "type": ["string", "null"],
+            "description": (
+                "Parent category channel ID for create_channel or update_channel. "
+                "Pass null with update_channel to remove the channel from its category."
+            ),
+        },
+        "position": {
+            "type": "integer",
+            "description": "Sorting position for create_channel or update_channel.",
         },
         "limit": {
             "type": "integer",
@@ -770,6 +859,16 @@ _ACTION_403_HINT = {
         "Either the bot lacks MANAGE_ROLES, or the target role sits higher "
         "than the bot's highest role."
     ),
+    "create_channel": (
+        "Bot lacks MANAGE_CHANNELS permission in this guild, or cannot create "
+        "channels under the requested parent category."
+    ),
+    "delete_channel": (
+        "Bot lacks MANAGE_CHANNELS permission in this channel or guild."
+    ),
+    "update_channel": (
+        "Bot lacks MANAGE_CHANNELS permission in this channel or guild."
+    ),
     "fetch_messages": (
         "Bot cannot view this channel (missing VIEW_CHANNEL or READ_MESSAGE_HISTORY)."
     ),
@@ -823,6 +922,9 @@ def _run_discord_action(
     message_id: str = "",
     query: str = "",
     name: str = "",
+    type: Optional[int] = None,
+    parent_id: Any = _UNSET,
+    position: Optional[int] = None,
     limit: int = 50,
     before: str = "",
     after: str = "",
@@ -844,6 +946,15 @@ def _run_discord_action(
     # but a stale cached schema from a prior config should not let denied
     # actions through).
     allowlist = _load_allowed_actions_config()
+    if action in _EXPLICIT_OPT_IN_ACTIONS and (
+        allowlist is None or action not in allowlist
+    ):
+        return json.dumps({
+            "error": (
+                f"Action '{action}' is destructive and requires explicit opt-in "
+                "via discord.server_actions. Add it to that allowlist to enable it."
+            ),
+        })
     if allowlist is not None and action not in allowlist:
         return json.dumps({
             "error": (
@@ -860,9 +971,15 @@ def _run_discord_action(
         "message_id": message_id,
         "query": query,
         "name": name,
+        "type": type,
+        "parent_id": parent_id,
+        "position": position,
     }
 
-    missing = [p for p in _REQUIRED_PARAMS.get(action, []) if not local_vars.get(p)]
+    missing = [
+        p for p in _REQUIRED_PARAMS.get(action, [])
+        if local_vars.get(p) is None or local_vars.get(p) == ""
+    ]
     if missing:
         return json.dumps({
             "error": f"Missing required parameters for '{action}': {', '.join(missing)}",
@@ -878,6 +995,9 @@ def _run_discord_action(
             message_id=message_id,
             query=query,
             name=name,
+            type=type,
+            parent_id=parent_id,
+            position=position,
             limit=limit,
             before=before,
             after=after,
@@ -910,7 +1030,8 @@ def discord_admin_handler(action: str, **kwargs) -> str:
 _HANDLER_DEFAULTS = {
     "action": "", "guild_id": "", "channel_id": "", "user_id": "",
     "role_id": "", "message_id": "", "query": "", "name": "",
-    "limit": 50, "before": "", "after": "", "auto_archive_duration": 1440,
+    "type": None, "parent_id": _UNSET, "position": None, "limit": 50,
+    "before": "", "after": "", "auto_archive_duration": 1440,
 }
 
 
@@ -925,7 +1046,9 @@ _STATIC_CORE_SCHEMA = _build_schema(
     list(_CORE_ACTIONS.keys()), caps={"detected": False}, tool_name="discord",
 )
 _STATIC_ADMIN_SCHEMA = _build_schema(
-    list(_ADMIN_ACTIONS.keys()), caps={"detected": False}, tool_name="discord_admin",
+    [a for a in _ADMIN_ACTIONS if a not in _EXPLICIT_OPT_IN_ACTIONS],
+    caps={"detected": False},
+    tool_name="discord_admin",
 )
 
 registry.register(

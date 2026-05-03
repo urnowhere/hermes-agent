@@ -307,6 +307,7 @@ discord:
   reactions: true                 # Add emoji reactions during processing
   ignored_channels: []            # Channel IDs where bot never responds
   no_thread_channels: []          # Channel IDs where bot responds without threading
+  server_actions: []              # Allowlist for Discord tools in `discord` and `discord_admin` toolsets; empty list allows all tools except `delete_channel` tool must be named explicitly to be allowed
   channel_prompts: {}             # Per-channel ephemeral system prompts
   allow_mentions:                 # What the bot is allowed to ping (safe defaults)
     everyone: false               # @everyone / @here pings (default: false)
@@ -398,6 +399,29 @@ discord:
 ```
 
 Useful for channels dedicated to bot interaction where threads would add unnecessary noise.
+
+#### `discord.server_actions`
+
+**Type:** string or list — **Default:** `""` / `[]`
+
+Allowlist for the Discord REST actions exposed through the gateway's `discord` and `discord_admin` tools. The empty default keeps the normal action set available, but destructive actions still stay gated.
+
+Important behavior:
+- `create_channel` and `update_channel` are available as normal `discord_admin` actions.
+- `delete_channel` is treated as destructive and is never enabled by default.
+- To expose `delete_channel`, you must explicitly include it in `discord.server_actions`.
+
+```yaml
+discord:
+  server_actions:
+    - list_guilds
+    - list_channels
+    - create_channel
+    - update_channel
+    - delete_channel   # explicit opt-in required
+```
+
+You can also use a comma-separated string instead of a YAML list. Unknown action names are ignored with a warning at load time.
 
 #### `discord.channel_prompts`
 
