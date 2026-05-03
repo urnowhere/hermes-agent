@@ -187,6 +187,35 @@ class TestTelegramExecApproval:
 # _handle_callback_query — approval button clicks
 # ===========================================================================
 
+class TestTelegramMediaFallback:
+    """Regression tests for native media fallback routing."""
+
+    @pytest.mark.asyncio
+    async def test_document_fallback_preserves_thread_metadata(self, tmp_path):
+        adapter = _make_adapter()
+        file_path = tmp_path / "plan.md"
+        file_path.write_text("# test plan\n", encoding="utf-8")
+
+        adapter._bot.send_document = AsyncMock(side_effect=RuntimeError("native document failed"))
+        mock_msg = MagicMock()
+        mock_msg.message_id = 43
+        adapter._bot.send_message = AsyncMock(return_value=mock_msg)
+
+        result = await adapter.send_document(
+            chat_id="12345",
+            file_path=str(file_path),
+            metadata={"thread_id": "2068"},
+        )
+
+        assert result.success is True
+        assert result.message_id == "43"
+        native_kwargs = adapter._bot.send_document.await_args.kwargs
+        assert native_kwargs.get("message_thread_id") == 2068
+        fallback_kwargs = adapter._bot.send_message.await_args.kwargs
+        assert fallback_kwargs.get("message_thread_id") == 2068
+        assert "File:" in fallback_kwargs["text"]
+
+
 class TestTelegramApprovalCallback:
     """Test the approval callback handling in _handle_callback_query."""
 
