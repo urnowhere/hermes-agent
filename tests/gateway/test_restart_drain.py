@@ -1,7 +1,7 @@
 import asyncio
 import shutil
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -283,3 +283,96 @@ async def test_shutdown_notification_uses_persisted_origin_for_colon_ids():
 
     assert adapter.send.await_count == 1
     assert adapter.send.await_args.args[0] == "!room123:example.org"
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_pending_session_injects_internal_continue():
+    runner, adapter = make_restart_runner()
+    adapter.handle_message = AsyncMock()
+    source = make_restart_source(chat_id="42")
+    session_key = build_session_key(source)
+    runner.session_store._entries = {
+        session_key: SessionEntry(
+            session_key=session_key,
+            session_id="resume-session",
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+            origin=source,
+            platform=source.platform,
+            chat_type=source.chat_type,
+            resume_pending=True,
+            resume_reason="restart_timeout",
+            last_resume_marked_at=datetime.now(),
+        )
+    }
+
+    runner._schedule_auto_resume_pending_sessions()
+    tasks = list(runner._background_tasks)
+    assert len(tasks) == 1
+
+    await asyncio.gather(*tasks)
+
+    adapter.handle_message.assert_awaited_once()
+    event = adapter.handle_message.await_args.args[0]
+    assert event.internal is True
+    assert event.text == "continue"
+    assert event.source == source
+    assert event.message_id == "auto-resume:resume-session"
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_pending_session_accepts_service_restart_marker():
+    runner, adapter = make_restart_runner()
+    adapter.handle_message = AsyncMock()
+    source = make_restart_source(chat_id="42")
+    session_key = build_session_key(source)
+    runner.session_store._entries = {
+        session_key: SessionEntry(
+            session_key=session_key,
+            session_id="shutdown-session",
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+            origin=source,
+            platform=source.platform,
+            chat_type=source.chat_type,
+            resume_pending=True,
+            resume_reason="shutdown_timeout",
+            last_resume_marked_at=datetime.now(),
+        )
+    }
+
+    runner._schedule_auto_resume_pending_sessions()
+    tasks = list(runner._background_tasks)
+    assert len(tasks) == 1
+
+    await asyncio.gather(*tasks)
+
+    event = adapter.handle_message.await_args.args[0]
+    assert event.internal is True
+    assert event.message_id == "auto-resume:shutdown-session"
+
+
+def test_auto_resume_pending_session_skips_stale_marker():
+    runner, adapter = make_restart_runner()
+    adapter.handle_message = AsyncMock()
+    source = make_restart_source(chat_id="42")
+    session_key = build_session_key(source)
+    runner.session_store._entries = {
+        session_key: SessionEntry(
+            session_key=session_key,
+            session_id="stale-session",
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+            origin=source,
+            platform=source.platform,
+            chat_type=source.chat_type,
+            resume_pending=True,
+            resume_reason="restart_timeout",
+            last_resume_marked_at=datetime.now() - timedelta(hours=2),
+        )
+    }
+
+    runner._schedule_auto_resume_pending_sessions()
+
+    assert runner._background_tasks == set()
+    adapter.handle_message.assert_not_called()

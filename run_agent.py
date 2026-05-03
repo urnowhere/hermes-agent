@@ -7086,6 +7086,10 @@ class AIAgent:
                             result["response"] = _call_chat_completions()
                         return  # success
                     except Exception as e:
+                        if self._interrupt_requested:
+                            raise InterruptedError(
+                                "Agent interrupted during streaming API call"
+                            ) from e
                         _is_timeout = isinstance(
                             e, (_httpx.ReadTimeout, _httpx.ConnectTimeout, _httpx.PoolTimeout)
                         )
@@ -7375,6 +7379,18 @@ class AIAgent:
             # inner retry loop can start a fresh connection.
             _stale_elapsed = time.time() - last_chunk_time["t"]
             if _stale_elapsed > _stream_stale_timeout:
+                if self._interrupt_requested:
+                    try:
+                        if self.api_mode == "anthropic_messages":
+                            self._anthropic_client.close()
+                            self._rebuild_anthropic_client()
+                        else:
+                            request_client = request_client_holder.get("client")
+                            if request_client is not None:
+                                self._close_request_openai_client(request_client, reason="stream_interrupt_abort")
+                    except Exception:
+                        pass
+                    raise InterruptedError("Agent interrupted during streaming API call")
                 _est_ctx = sum(len(str(v)) for v in api_kwargs.get("messages", [])) // 4
                 logger.warning(
                     "Stream stale for %.0fs (threshold %.0fs) — no chunks received. "

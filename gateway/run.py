@@ -2270,7 +2270,7 @@ class GatewayRunner:
         action = "restarting" if self._restart_requested else "shutting down"
         hint = (
             "Your current task will be interrupted. "
-            "Send any message after restart and I'll try to resume where you left off."
+            "If restart interrupts it, I'll try to resume it automatically."
             if self._restart_requested
             else "Your current task will be interrupted."
         )
@@ -2955,6 +2955,7 @@ class GatewayRunner:
 
         # Notify the chat that initiated /restart that the gateway is back.
         await self._send_restart_notification()
+        self._schedule_auto_resume_pending_sessions()
 
         # Drain any recovered process watchers (from crash recovery checkpoint)
         try:
@@ -6216,7 +6217,7 @@ class GatewayRunner:
             # shutdown) — the turn ran to completion, so recovery
             # succeeded and subsequent messages should no longer receive
             # the restart-interruption system note.
-            if session_key:
+            if session_key and not getattr(self, "_draining", False):
                 self._clear_restart_failure_count(session_key)
                 try:
                     self.session_store.clear_resume_pending(session_key)
@@ -10519,6 +10520,98 @@ class GatewayRunner:
         finally:
             notify_path.unlink(missing_ok=True)
 
+    def _schedule_auto_resume_pending_sessions(self) -> None:
+        """Inject continuation turns for fresh sessions interrupted by restart.
+
+        The explicit ``resume_pending`` marker is written during a drain-timeout
+        shutdown. Startup already preserves that session mapping; this removes
+        the final manual nudge by sending an internal event through the normal
+        adapter pipeline once adapters are connected.
+        """
+        try:
+            self.session_store._ensure_loaded()
+            entries = list(getattr(self.session_store, "_entries", {}).items())
+        except Exception as e:
+            logger.warning("Auto-resume scan failed: %s", e)
+            return
+
+        candidates = []
+        window = _auto_continue_freshness_window()
+        for session_key, entry in entries:
+            if not getattr(entry, "resume_pending", False):
+                continue
+            if getattr(entry, "suspended", False):
+                continue
+            reason = getattr(entry, "resume_reason", None)
+            if reason not in ("restart_timeout", "shutdown_timeout"):
+                logger.debug(
+                    "Auto-resume skipped for %s: unsupported reason %s",
+                    session_key[:30],
+                    reason,
+                )
+                continue
+            marked_at = getattr(entry, "last_resume_marked_at", None)
+            if not _is_fresh_gateway_interruption(marked_at, window_secs=window):
+                logger.info("Auto-resume skipped for %s: stale marker", session_key[:30])
+                continue
+            source = getattr(entry, "origin", None)
+            if source is None or not getattr(source, "chat_id", None):
+                logger.debug("Auto-resume skipped for %s: missing source", session_key[:30])
+                continue
+            adapter = self.adapters.get(source.platform)
+            if adapter is None:
+                logger.debug(
+                    "Auto-resume skipped for %s: %s adapter not connected",
+                    session_key[:30],
+                    getattr(source.platform, "value", source.platform),
+                )
+                continue
+            if session_key in getattr(self, "_running_agents", {}):
+                continue
+            candidates.append((session_key, entry.session_id, source))
+
+        for session_key, session_id, source in candidates:
+            task = asyncio.create_task(
+                self._auto_resume_pending_session(session_key, session_id, source)
+            )
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+
+        if candidates:
+            logger.info("Scheduled auto-resume for %d interrupted session(s)", len(candidates))
+
+    async def _auto_resume_pending_session(
+        self,
+        session_key: str,
+        session_id: str,
+        source: SessionSource,
+    ) -> None:
+        await asyncio.sleep(1.0)
+        if not getattr(self, "_running", False):
+            return
+        if session_key in getattr(self, "_running_agents", {}):
+            return
+        adapter = self.adapters.get(source.platform)
+        if adapter is None:
+            return
+        event = MessageEvent(
+            text="continue",
+            message_type=MessageType.TEXT,
+            source=source,
+            message_id=f"auto-resume:{session_id}",
+            internal=True,
+        )
+        logger.info(
+            "Auto-resuming interrupted gateway session %s for %s:%s",
+            session_key[:30],
+            getattr(source.platform, "value", source.platform),
+            source.chat_id,
+        )
+        try:
+            await adapter.handle_message(event)
+        except Exception as e:
+            logger.warning("Auto-resume failed for %s: %s", session_key[:30], e)
+
     def _set_session_env(self, context: SessionContext) -> list:
         """Set session context variables for the current async task.
 
@@ -13636,6 +13729,23 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
     logger.info("Cron ticker stopped")
 
 
+def _is_systemd_managed_process(pid: int) -> bool:
+    """Return True when *pid* appears to be owned by a systemd service unit."""
+    if pid <= 0:
+        return False
+    try:
+        cgroup = Path(f"/proc/{pid}/cgroup").read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    return ".service" in cgroup
+
+
+def _current_process_is_service_managed() -> bool:
+    if os.environ.get("INVOCATION_ID"):
+        return True
+    return _is_systemd_managed_process(os.getpid())
+
+
 async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = False, verbosity: Optional[int] = 0) -> bool:
     """
     Start the gateway and run until interrupted.
@@ -13666,6 +13776,20 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     existing_pid = get_running_pid()
     if existing_pid is not None and existing_pid != os.getpid():
         if replace:
+            if (
+                _is_systemd_managed_process(existing_pid)
+                and not _current_process_is_service_managed()
+            ):
+                logger.warning(
+                    "Refusing --replace from unmanaged process because existing "
+                    "gateway PID %d is service-managed. Restart the service instead.",
+                    existing_pid,
+                )
+                print(
+                    f"\n❌ Gateway already running under a service (PID {existing_pid}).\n"
+                    f"   Use 'hermes gateway restart' or systemctl to restart it.\n"
+                )
+                return False
             existing_start_time = get_process_start_time(existing_pid)
             logger.info(
                 "Replacing existing gateway instance (PID %d) with --replace.",

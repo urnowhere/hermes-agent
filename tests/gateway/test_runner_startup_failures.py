@@ -215,6 +215,31 @@ async def test_start_gateway_replace_force_uses_terminate_pid(monkeypatch, tmp_p
 
 
 @pytest.mark.asyncio
+async def test_start_gateway_replace_refuses_to_kill_service_managed_gateway(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("INVOCATION_ID", raising=False)
+
+    calls = []
+
+    monkeypatch.setattr("gateway.status.get_running_pid", lambda: 42)
+    monkeypatch.setattr(
+        "gateway.status.terminate_pid",
+        lambda pid, force=False: calls.append((pid, force)),
+    )
+    monkeypatch.setattr("gateway.run.os.getpid", lambda: 100)
+    monkeypatch.setattr("gateway.run._is_systemd_managed_process", lambda pid: pid == 42)
+
+    from gateway.run import start_gateway
+
+    ok = await start_gateway(config=GatewayConfig(), replace=True, verbosity=None)
+
+    assert ok is False
+    assert calls == []
+
+
+@pytest.mark.asyncio
 async def test_start_gateway_replace_writes_takeover_marker_before_sigterm(
     monkeypatch, tmp_path
 ):
