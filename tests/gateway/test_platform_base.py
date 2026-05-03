@@ -329,6 +329,33 @@ class TestExtractMedia:
         assert media == [("/tmp/Jane Doe/speech.flac", False)]
         assert cleaned == ""
 
+    def test_media_tag_resolves_home_relative_safe_root_path(self, tmp_path, monkeypatch):
+        safe_root = tmp_path / "Hermes"
+        movie = safe_root / "weaver_output" / "final_weaver_movie.mp4"
+        movie.parent.mkdir(parents=True)
+        movie.write_bytes(b"movie")
+        monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(safe_root))
+
+        content = f"MEDIA:{os.path.expanduser('~')}/weaver_output/final_weaver_movie.mp4"
+
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+
+        assert media == [(str(movie), False)]
+        assert cleaned == ""
+
+    def test_bare_local_file_resolves_typoed_user_home_under_safe_root(self, tmp_path, monkeypatch):
+        safe_root = tmp_path / "Hermes"
+        movie = safe_root / "weaver_output" / "final_weaver_movie.mp4"
+        movie.parent.mkdir(parents=True)
+        movie.write_bytes(b"movie")
+        monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(safe_root))
+        content = "The film is ready: /Users/hedimand/weaver_output/final_weaver_movie.mp4"
+
+        local_files, cleaned = BasePlatformAdapter.extract_local_files(content)
+
+        assert local_files == [str(movie)]
+        assert "final_weaver_movie.mp4" not in cleaned
+
 
 # ---------------------------------------------------------------------------
 # should_send_media_as_audio
@@ -676,4 +703,3 @@ class TestProxyKwargsForAiohttp:
             sess_kw, req_kw = proxy_kwargs_for_aiohttp("http://proxy:8080")
             assert sess_kw == {}
             assert req_kw == {"proxy": "http://proxy:8080"}
-
