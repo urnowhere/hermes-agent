@@ -32,6 +32,41 @@ SETUP:
 REQUIREMENTS:
     - Python 3.10+ (stdlib only, no dependencies)
     - OPENROUTER_API_KEY environment variable
+
+MAINTENANCE — HOW TO KEEP EVERYTHING IN SYNC:
+
+    There are THREE locations that must stay consistent:
+
+    1. ~/.hermes/scripts/refresh_openrouter_models.py         ← THIS FILE (cron runs this)
+    2. ~/.hermes/hermes-agent-feat/scripts/refresh_openrouter_models.py  ← feat branch copy
+    3. ~/.hermes/skills/autonomous-ai-agents/subagent-model-routing/SKILL.md  ← human-readable mirror
+
+    CANONICAL SOURCE OF TRUTH: This file's WHITELISTS dict.
+
+    UPDATE FLOW (approved changes only — never edit whitelists speculatively):
+    1. Cron delivers a read-only digest to Jordan on Sundays
+    2. Jordan approves specific changes in a follow-up session
+    3. Agent patches WHITELISTS in THIS file first
+    4. Agent patches the skill's tier tables and WHITELISTS section to match (same session)
+    5. Agent copies this file AND the skill to the feat branch:
+           cp ~/.hermes/scripts/refresh_openrouter_models.py \
+              ~/.hermes/hermes-agent-feat/scripts/refresh_openrouter_models.py
+           cp ~/.hermes/skills/autonomous-ai-agents/subagent-model-routing/SKILL.md \
+              ~/.hermes/hermes-agent-feat/skills/autonomous-ai-agents/subagent-model-routing/SKILL.md
+    6. Steps 3–5 must happen atomically in one session. A partial update
+       (script only, or skill only, or feat branch not synced) leaves the
+       system inconsistent.
+
+    WHY TWO SCRIPT LOCATIONS:
+    - The Hermes cron sandbox only executes scripts inside ~/.hermes/scripts/
+      (symlinks that resolve outside are blocked by path traversal guard)
+    - The feat branch (hermes-agent-feat) is a separate git repo tracking
+      the PR. It must stay in sync so the PR reflects current whitelist state.
+    - These two files are NOT linked — copies must be explicit after every edit.
+
+    POST-MERGE (when PR #12794 lands in upstream main):
+    - Update the copy step above to use ~/.hermes/hermes-agent/scripts/ instead
+    - The feat worktree can then be deleted
 """
 
 import json
@@ -41,6 +76,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from pathlib import Path
+
+PRICE_CACHE_PATH = Path.home() / ".hermes/caches/openrouter_prices_last.json"
+PRICE_CHANGE_THRESHOLD = 0.20  # 20% delta triggers a flag
 
 # ---------------------------------------------------------------------------
 # WHITELISTS — CUSTOMIZE THESE FOR YOUR USE CASE
@@ -58,44 +97,27 @@ from datetime import datetime, timezone
 # ---------------------------------------------------------------------------
 
 WHITELISTS: dict[str, list[str]] = {
-    # FULL: Top-tier models available — orchestrator-level, synthesis, judgment
-    "full": [
-        "google/gemini-2.5-flash",
-        "x-ai/grok-4.1-fast",
-        "openai/gpt-5-nano",
-        "meta-llama/llama-4-maverick",
-        "deepseek/deepseek-chat-v3.1",
-        "qwen/qwen3-coder-flash",
-        "mistralai/devstral-small",
-        "anthropic/claude-haiku-4-5",
-        "openai/o4-mini",
-        "google/gemini-2.5-pro",
-        "x-ai/grok-code-fast-1",
-        "openai/gpt-5.1-codex-mini",
-        "deepseek/deepseek-r1-0528",
-        "qwen/qwq-32b",
-        "anthropic/claude-opus-4-7",
-        "anthropic/claude-sonnet-4-6",
+    # PREMIUM: Orchestrator-level, synthesis, judgment, reviews
+    "premium": [
         "x-ai/grok-4.20",
+        "x-ai/grok-4.20-multi-agent",
+        "x-ai/grok-4.3",
+        "anthropic/claude-opus-4.7",
+        "anthropic/claude-sonnet-4.6",
+        "google/gemini-2.5-pro",
         "openai/o3",
+        "openai/gpt-5.5",
+        "google/gemini-3.1-pro-preview",
     ],
     # STANDARD: Regular delegation — business ops, analysis, general tasks
     "standard": [
-        "google/gemini-2.5-flash",
-        "x-ai/grok-4.1-fast",
-        "openai/gpt-5-nano",
-        "meta-llama/llama-4-maverick",
-        "deepseek/deepseek-chat-v3.1",
-        "qwen/qwen3-coder-flash",
-        "mistralai/devstral-small",
-        "anthropic/claude-haiku-4-5",
+        "anthropic/claude-haiku-4.5",
         "openai/o4-mini",
-        "x-ai/grok-code-fast-1",
-        "openai/gpt-5.1-codex-mini",
         "deepseek/deepseek-r1-0528",
-        "qwen/qwq-32b",
+        "openai/gpt-5.4-mini",
+        "deepseek/deepseek-v4-pro",
     ],
-    # CODING: Code writing, review, and modification tasks only
+    # CODING: Code writing, review, and modification tasks only (may overlap other tiers)
     "coding": [
         "x-ai/grok-code-fast-1",
         "qwen/qwen3-coder-flash",
@@ -103,12 +125,13 @@ WHITELISTS: dict[str, list[str]] = {
         "openai/gpt-5.1-codex-mini",
         "openai/gpt-5.1-codex",
         "deepseek/deepseek-r1-0528",
-        "anthropic/claude-sonnet-4-6",
+        "anthropic/claude-sonnet-4.6",
         "google/gemini-2.5-pro",
         "openai/o3",
+        "openai/gpt-5.5",
+        "anthropic/claude-opus-4.7",
     ],
     # BUDGET: Cron jobs, automated extraction, simple parsing
-    # Account-level default — workhorse only, nothing expensive
     "budget": [
         "google/gemini-2.5-flash",
         "google/gemini-2.5-flash-lite",
@@ -116,8 +139,7 @@ WHITELISTS: dict[str, list[str]] = {
         "openai/gpt-5-nano",
         "meta-llama/llama-4-maverick",
         "deepseek/deepseek-chat-v3.1",
-        "qwen/qwen3-coder-flash",
-        "mistralai/devstral-small",
+        "deepseek/deepseek-v4-flash",
     ],
 }
 
@@ -147,6 +169,27 @@ TRACKED_PROVIDERS: set[str] = {
 # ---------------------------------------------------------------------------
 # Implementation — no customization needed below this line
 # ---------------------------------------------------------------------------
+
+# Validate whitelist exclusivity:
+# budget / standard / premium must be mutually exclusive.
+# coding is allowed to overlap with any tier.
+_EXCLUSIVE_TIERS = {"budget", "standard", "premium"}
+_exclusive_seen: dict[str, str] = {}
+_overlap_errors: list[str] = []
+for _tier in _EXCLUSIVE_TIERS:
+    for _mid in WHITELISTS.get(_tier, []):
+        if _mid in _exclusive_seen:
+            _overlap_errors.append(
+                f"  '{_mid}' appears in both '{_exclusive_seen[_mid]}' and '{_tier}'"
+            )
+        else:
+            _exclusive_seen[_mid] = _tier
+if _overlap_errors:
+    raise ValueError(
+        "WHITELIST OVERLAP DETECTED — budget/standard/premium must be mutually exclusive:\n"
+        + "\n".join(_overlap_errors)
+        + "\n(coding is exempt — it may overlap any tier)"
+    )
 
 # Flatten all unique models across all whitelists
 ALL_WHITELISTED: set[str] = set()
@@ -201,6 +244,20 @@ def price_per_million(price_per_token: float | None) -> str:
     return f"${price_per_token * 1_000_000:.2f}"
 
 
+def load_price_cache() -> dict:
+    """Load previous run's price snapshot. Returns empty dict if none exists."""
+    try:
+        return json.loads(PRICE_CACHE_PATH.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_price_cache(prices: dict) -> None:
+    """Persist current run's prices for next week's delta comparison."""
+    PRICE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PRICE_CACHE_PATH.write_text(json.dumps(prices, indent=2))
+
+
 def fmt_ctx(ctx) -> str:
     c = int(ctx) if ctx else 0
     if not c:
@@ -242,6 +299,14 @@ def main() -> None:
 
     live_ids = {m["id"] for m in models if "id" in m}
     live_by_id = {m["id"]: m for m in models if "id" in m}
+
+    # Load previous price snapshot for delta comparison
+    prev_prices = load_price_cache()
+    if prev_prices:
+        print(f"📅 Price baseline: {prev_prices.get('_run_date', 'unknown')}")
+    else:
+        print("📅 Price baseline: none (first run — delta tracking starts next week)")
+    print()
 
     # Precompute per-model whitelist membership for O(1) lookup.
     whitelist_by_model: dict[str, list[str]] = {}
@@ -285,6 +350,44 @@ def main() -> None:
             f"{price_per_million(p_out):>12}  {fmt_ctx(ctx):>10}"
         )
     print()
+
+    # ------------------------------------------------------------------
+    # 2b. Pricing deltas vs previous run
+    # ------------------------------------------------------------------
+    current_prices: dict = {"_run_date": now}
+    price_changes = []
+    for model_id in sorted(ALL_WHITELISTED):
+        m = live_by_id.get(model_id)
+        if not m:
+            continue
+        pricing = m.get("pricing", {})
+        p_in = parse_price(pricing, "prompt")
+        p_out = parse_price(pricing, "completion")
+        current_prices[model_id] = {"in": p_in, "out": p_out}
+
+        if prev_prices and model_id in prev_prices:
+            old = prev_prices[model_id]
+            for label, old_val, new_val in [
+                ("in", old.get("in"), p_in),
+                ("out", old.get("out"), p_out),
+            ]:
+                if old_val and new_val and abs(new_val - old_val) / old_val >= PRICE_CHANGE_THRESHOLD:
+                    direction = "▲" if new_val > old_val else "▼"
+                    pct = abs(new_val - old_val) / old_val * 100
+                    price_changes.append(
+                        f"  {direction} {model_id} [{label}]: "
+                        f"{price_per_million(old_val)} → {price_per_million(new_val)} "
+                        f"({pct:.0f}%)"
+                    )
+
+    if prev_prices:
+        if price_changes:
+            print(f"💸 PRICING CHANGES vs {prev_prices.get('_run_date', 'last run')} (>{PRICE_CHANGE_THRESHOLD*100:.0f}% delta):")
+            for line in price_changes:
+                print(line)
+        else:
+            print("✅ No significant pricing changes vs last run.")
+        print()
 
     # ------------------------------------------------------------------
     # 3. New models from tracked providers not yet in any whitelist
@@ -361,44 +464,8 @@ def main() -> None:
     print("   When approved: patch BOTH this script's WHITELISTS dict AND")
     print("   the skill's tier tables atomically in the same session.")
 
-
-# ---------------------------------------------------------------------------
-# CRON PROMPT TEMPLATE
-#
-# Copy this as the `prompt` argument when creating the cron job.
-# Customize the approval workflow section to match your preferences.
-# ---------------------------------------------------------------------------
-
-CRON_PROMPT_TEMPLATE = """
-You have just received a live OpenRouter model catalog report from the refresh
-script. Your job:
-
-1. Check for MISSING models — any whitelisted model not found in the live
-   catalog needs flagging immediately.
-2. Scan NEW MODELS — identify any that would be strong additions to the
-   whitelists. Focus on models that are cheaper, faster, or more capable than
-   current whitelist members in the same tier. Flag standouts only.
-3. Confirm PRICING is consistent with the subagent-model-routing skill. Flag
-   any model where the live price differs significantly from the documented price.
-4. Produce a concise digest — 3 sections:
-   (a) Alerts (missing models, major price changes)
-   (b) Recommended whitelist additions or removals with rationale
-   (c) All-clear if nothing notable
-
-⛔ DO NOT WRITE ANY FILES. This run is read-only and advisory only.
-   Do not patch the skill, modify this script, or update any config.
-   Your output is a report to the operator. They will review and approve
-   changes in a subsequent session.
-
-When the operator approves changes in that follow-up session, the approving
-agent must apply them ATOMICALLY — updating BOTH of the following before
-finishing:
-  (a) ~/.hermes/scripts/refresh_openrouter_models.py — update the WHITELISTS dict
-  (b) ~/.hermes/skills/.../subagent-model-routing/SKILL.md — update tier tables
-
-Both must be updated together. A partial update leaves the system inconsistent.
-After both are patched, update the "Last updated" date in the skill header.
-""".strip()
+    # Persist current prices for next run's delta comparison
+    save_price_cache(current_prices)
 
 
 if __name__ == "__main__":
