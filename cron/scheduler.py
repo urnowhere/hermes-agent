@@ -777,11 +777,26 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         legacy = job.get("skill")
         skills = [legacy] if legacy else []
 
-    skill_names = [str(name).strip() for name in skills if str(name).strip()]
+    # Reject skill names that look like path traversal attempts
+    _SAFE_SKILL_NAME_RE = __import__("re").compile(r"^[A-Za-z0-9_\-]+$")
+    MAX_SKILLS_PER_JOB = 10
+
+    raw_skill_names = [str(name).strip() for name in skills if str(name).strip()]
+    skill_names = []
+    for sn in raw_skill_names[:MAX_SKILLS_PER_JOB]:
+        if not _SAFE_SKILL_NAME_RE.match(sn):
+            logger.warning(
+                "Cron job '%s': rejecting skill name with unsafe characters: %r",
+                job.get("name", job.get("id")), sn,
+            )
+        else:
+            skill_names.append(sn)
+
     if not skill_names:
         return prompt
 
     from tools.skills_tool import skill_view
+    from tools.cronjob_tools import _scan_cron_prompt
 
     parts = []
     skipped: list[str] = []
@@ -794,6 +809,19 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
             continue
 
         content = str(loaded.get("content") or "").strip()
+
+        # Re-scan skill content at execution time — the install-time scan
+        # is the primary gate, but skills may have been modified since
+        # installation or installed before stricter scanner versions.
+        scan_error = _scan_cron_prompt(content)
+        if scan_error:
+            logger.warning(
+                "Cron job '%s': skill '%s' blocked at execution — %s",
+                job.get("name", job.get("id")), skill_name, scan_error,
+            )
+            skipped.append(skill_name)
+            continue
+
         if parts:
             parts.append("")
         parts.extend(
