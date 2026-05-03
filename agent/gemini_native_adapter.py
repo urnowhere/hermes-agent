@@ -680,6 +680,19 @@ def translate_stream_event(event: Dict[str, Any], model: str, tool_call_indices:
     if finish_reason_raw:
         mapped = "tool_calls" if tool_call_indices else _map_gemini_finish_reason(finish_reason_raw)
         chunks.append(_make_stream_chunk(model=model, finish_reason=mapped))
+
+    # Extract usageMetadata from streaming events (Gemini includes it in the final chunk)
+    usage_meta = event.get("usageMetadata")
+    if usage_meta and chunks:
+        chunks[-1].usage = SimpleNamespace(
+            prompt_tokens=int(usage_meta.get("promptTokenCount") or 0),
+            completion_tokens=int(usage_meta.get("candidatesTokenCount") or 0),
+            total_tokens=int(usage_meta.get("totalTokenCount") or 0),
+            prompt_tokens_details=SimpleNamespace(
+                cached_tokens=int(usage_meta.get("cachedContentTokenCount") or 0),
+            ),
+        )
+
     return chunks
 
 

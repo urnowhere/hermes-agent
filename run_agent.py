@@ -6827,12 +6827,16 @@ class AIAgent:
                 if self._interrupt_requested:
                     break
 
+                # Capture usage from any chunk that carries it.
+                # OpenAI sends usage in a final chunk with empty choices.
+                # Gemini sends usageMetadata in every chunk (including
+                # chunks WITH choices). Always update — the last value wins.
+                if hasattr(chunk, "usage") and chunk.usage:
+                    usage_obj = chunk.usage
+
                 if not chunk.choices:
                     if hasattr(chunk, "model") and chunk.model:
                         model_name = chunk.model
-                    # Usage comes in the final chunk with empty choices
-                    if hasattr(chunk, "usage") and chunk.usage:
-                        usage_obj = chunk.usage
                     continue
 
                 delta = chunk.choices[0].delta
