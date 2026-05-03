@@ -5,7 +5,7 @@ import base64
 import json
 import os
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from gateway.config import PlatformConfig
 from gateway.config import GatewayConfig, HomeChannel, Platform, _apply_env_overrides
@@ -307,6 +307,69 @@ class TestWeixinSendMessageIntegration:
             "hello",
             media_files=[("/tmp/demo.png", False)],
         )
+
+    def test_send_weixin_direct_schedules_live_adapter_send_on_adapter_loop(self, tmp_path, monkeypatch):
+        """Direct sends must use the live adapter's loop for aiohttp sessions.
+
+        Cron/send_message can call send_weixin_direct from a different worker
+        loop than the gateway adapter loop. The live adapter's aiohttp sessions
+        are bound to the adapter loop, so using them on the caller's loop can
+        raise "Timeout context manager should be used inside a task".
+        """
+
+        adapter_loop = MagicMock()
+        adapter_loop.is_running.return_value = True
+        adapter_loop.is_closed.return_value = False
+        caller_loop = asyncio.new_event_loop()
+        adapter = _make_adapter()
+        adapter._send_session = MagicMock(closed=False)
+        adapter._loop = adapter_loop
+        adapter.format_message = MagicMock(return_value="hello")
+        adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="msg-1"))
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setitem(weixin._LIVE_ADAPTERS, "bot-token", adapter)
+
+        async def _call_direct():
+            return await weixin.send_weixin_direct(
+                extra={"account_id": "bot-account"},
+                token="bot-token",
+                chat_id="wxid_test123",
+                message="hello",
+            )
+
+        try:
+            with patch("gateway.platforms.weixin.asyncio.run_coroutine_threadsafe") as schedule_mock:
+                scheduled_coro = None
+
+                def _schedule(coro, loop):
+                    nonlocal scheduled_coro
+                    scheduled_coro = coro
+                    assert loop is adapter_loop
+                    import concurrent.futures
+                    future = concurrent.futures.Future()
+                    future.set_result(
+                        {
+                            "success": True,
+                            "platform": "weixin",
+                            "chat_id": "wxid_test123",
+                            "message_id": "msg-1",
+                            "context_token_used": False,
+                        }
+                    )
+                    return future
+
+                schedule_mock.side_effect = _schedule
+                result = caller_loop.run_until_complete(_call_direct())
+
+            assert result["success"] is True
+            schedule_mock.assert_called_once()
+            adapter.send.assert_not_awaited()
+            assert scheduled_coro is not None
+            scheduled_coro.close()
+        finally:
+            weixin._LIVE_ADAPTERS.pop("bot-token", None)
+            caller_loop.close()
 
 
 class TestWeixinChunkDelivery:
