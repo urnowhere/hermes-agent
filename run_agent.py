@@ -8642,7 +8642,9 @@ class AIAgent:
 
         msg = {
             "role": "assistant",
-            "content": _san_content,
+            # Anthropic proxies reject empty-string content with HTTP 400, so
+            # normalize to None when content is absent to maintain compatibility.
+            "content": _san_content if _san_content else None,
             "reasoning": reasoning_text,
             "finish_reason": finish_reason,
         }
