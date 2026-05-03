@@ -368,6 +368,7 @@ AUTHOR_MAP = {
     "oluwadareab12@gmail.com": "bennytimz",
     "simon@simonmarcus.org": "simon-marcus",
     "xowiekk@gmail.com": "Xowiek",
+    "chqchshj@outlook.com": "chqchshj",
     "1243352777@qq.com": "zons-zhaozhy",
     "e.silacandmr@gmail.com": "Es1la",
     "h3057183414@gmail.com": "CoreyNoDream",
