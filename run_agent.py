@@ -870,6 +870,29 @@ def _qwen_portal_headers() -> dict:
     }
 
 
+def apply_streaming_token_fallback(usage_obj, api_messages, content_parts):
+    """Fall back to rough estimation for providers that don't send usage data.
+
+    Providers like MiniMax and Kimi don't include token counts in stream
+    chunks.  A None usage object or one missing both token fields is treated
+    as "no data received" and replaced with rough estimates.
+
+    Uses ``is None`` checks (not falsiness) so that valid zero values
+    (e.g. cache hits with prompt_tokens=0) are preserved.
+    """
+    _raw = usage_obj
+    _prompt = getattr(_raw, "prompt_tokens", None) if _raw else None
+    _completion = getattr(_raw, "completion_tokens", None) if _raw else None
+    if _prompt is None and _completion is None:
+        _est = estimate_messages_tokens_rough(api_messages)
+        _comp_text = "".join(content_parts) if content_parts else ""
+        usage_obj = SimpleNamespace(
+            prompt_tokens=_est,
+            completion_tokens=estimate_tokens_rough(_comp_text),
+        )
+    return usage_obj
+
+
 class AIAgent:
     """
     AI Agent with tool calling capabilities.
@@ -6998,6 +7021,9 @@ class AIAgent:
                 index=0,
                 message=mock_message,
                 finish_reason=effective_finish_reason,
+            )
+            usage_obj = apply_streaming_token_fallback(
+                usage_obj, api_messages, content_parts
             )
             return SimpleNamespace(
                 id="stream-" + str(uuid.uuid4()),
