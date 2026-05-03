@@ -870,6 +870,25 @@ def _qwen_portal_headers() -> dict:
     }
 
 
+def normalize_conversation_history(conversation_history):
+    """Normalize conversation_history to a list.
+
+    ACP Copilot and some adapter paths can pass a non-iterable
+    (e.g. SimpleNamespace) instead of a list, which would crash on
+    len(), list(), reversed(), etc.
+    """
+    if conversation_history is None:
+        return []
+    try:
+        return list(conversation_history)
+    except TypeError:
+        logger.warning(
+            "conversation_history is not iterable (%s) — treating as empty",
+            type(conversation_history).__name__,
+        )
+        return []
+
+
 class AIAgent:
     """
     AI Agent with tool calling capabilities.
@@ -10483,6 +10502,8 @@ class AIAgent:
         # calls so that nudge logic accumulates correctly in CLI mode.
         self.iteration_budget = IterationBudget(self.max_iterations)
 
+        conversation_history = normalize_conversation_history(conversation_history)
+
         # Log conversation turn start for debugging/observability
         _preview_text = _summarize_user_message_for_log(user_message)
         _msg_preview = (_preview_text[:80] + "...") if len(_preview_text) > 80 else _preview_text
@@ -10490,12 +10511,12 @@ class AIAgent:
         logger.info(
             "conversation turn: session=%s model=%s provider=%s platform=%s history=%d msg=%r",
             self.session_id or "none", self.model, self.provider or "unknown",
-            self.platform or "unknown", len(conversation_history or []),
+            self.platform or "unknown", len(conversation_history),
             _msg_preview,
         )
 
         # Initialize conversation (copy to avoid mutating the caller's list)
-        messages = list(conversation_history) if conversation_history else []
+        messages = list(conversation_history)
 
         # Hydrate todo store from conversation history (gateway creates a fresh
         # AIAgent per message, so the in-memory store is empty -- we need to
