@@ -58,9 +58,8 @@ except ImportError:
 
 from acp_adapter.auth import detect_provider
 from acp_adapter.events import (
-    make_message_cb,
+    make_streaming_cbs,
     make_step_cb,
-    make_thinking_cb,
     make_tool_progress_cb,
 )
 from acp_adapter.permissions import make_approval_callback
@@ -166,6 +165,8 @@ class HermesACPAgent(acp.Agent):
         "compact": "Compress conversation context",
         "steer": "Inject guidance into the currently running agent turn",
         "queue": "Queue a prompt to run after the current turn finishes",
+        "effort": "Show or set reasoning effort (none/low/medium/high/xhigh)",
+        "show_thinking": "Toggle reasoning display (on/off)",
         "version": "Show Hermes version",
     }
 
@@ -204,6 +205,16 @@ class HermesACPAgent(acp.Agent):
             "name": "queue",
             "description": "Queue a prompt to run after the current turn finishes",
             "input_hint": "prompt to run next",
+        },
+        {
+            "name": "effort",
+            "description": "Show or set reasoning effort (none/low/medium/high/xhigh)",
+            "input_hint": "none | low | medium | high | xhigh",
+        },
+        {
+            "name": "show_thinking",
+            "description": "Toggle whether reasoning content is shown (on/off)",
+            "input_hint": "on | off",
         },
         {
             "name": "version",
@@ -746,22 +757,29 @@ class HermesACPAgent(acp.Agent):
 
         if conn:
             tool_progress_cb = make_tool_progress_cb(conn, session_id, loop, tool_call_ids, tool_call_meta)
-            thinking_cb = make_thinking_cb(conn, session_id, loop)
+            thinking_cb, message_cb, message_flush = make_streaming_cbs(conn, session_id, loop)
             step_cb = make_step_cb(conn, session_id, loop, tool_call_ids, tool_call_meta)
-            message_cb = make_message_cb(conn, session_id, loop)
             approval_cb = make_approval_callback(conn.request_permission, loop, session_id)
         else:
             tool_progress_cb = None
             thinking_cb = None
             step_cb = None
             message_cb = None
+            message_flush = None
             approval_cb = None
 
         agent = state.agent
         agent.tool_progress_callback = tool_progress_cb
-        agent.thinking_callback = thinking_cb
         agent.step_callback = step_cb
-        agent.message_callback = message_cb
+        # 流式输出：stream_delta_callback → agent_message_chunk（逐 token）
+        agent.stream_delta_callback = message_cb
+        # 思考流式：respect /show_thinking toggle
+        if getattr(state, "show_thinking", True):
+            agent.reasoning_callback = thinking_cb
+        else:
+            agent.reasoning_callback = None
+        # 保存原始思考回调，供 /show_thinking 开关
+        state._reasoning_callback = thinking_cb
 
         # Approval callback is per-thread (thread-local, GHSA-qg5c-hvr5-hjgr).
         # Set it INSIDE _run_agent so the TLS write happens in the executor
@@ -867,9 +885,11 @@ class HermesACPAgent(acp.Agent):
                 )
             except Exception:
                 logger.debug("Failed to auto-title ACP session %s", session_id, exc_info=True)
-        if final_response and conn:
-            update = acp.update_agent_message_text(final_response)
-            await conn.session_update(session_id, update)
+        # ❌ 流式已经通过 stream_delta_callback 逐 token 推过了
+        # 这里再发 final_response 会导致重复
+        # if final_response and conn:
+        #     update = acp.update_agent_message_text(final_response)
+        #     await conn.session_update(session_id, update)
 
         # Mark this turn idle before draining queued work so recursive prompt()
         # calls can acquire the session. Queued turns are intentionally run as
@@ -904,6 +924,14 @@ class HermesACPAgent(acp.Agent):
             )
 
         stop_reason = "cancelled" if state.cancel_event and state.cancel_event.is_set() else "end_turn"
+
+        # 强制 flush 掉最后的 buffer，确保客户端收到完整消息
+        if conn:
+            try:
+                await message_flush()
+            except Exception:
+                pass
+
         return PromptResponse(stop_reason=stop_reason, usage=usage)
 
     # ---- Slash commands (headless) -------------------------------------------
@@ -972,6 +1000,8 @@ class HermesACPAgent(acp.Agent):
             "compact": self._cmd_compact,
             "steer": self._cmd_steer,
             "queue": self._cmd_queue,
+            "effort": self._cmd_effort,
+            "show_thinking": self._cmd_show_thinking,
             "version": self._cmd_version,
         }.get(cmd)
 
@@ -1138,6 +1168,44 @@ class HermesACPAgent(acp.Agent):
             state.queued_prompts.append(queued_text)
             depth = len(state.queued_prompts)
         return f"Queued for the next turn. ({depth} queued)"
+
+    def _cmd_effort(self, args: str, state: SessionState) -> str:
+        """显示或设置 reasoning effort."""
+        VALID_LEVELS = {"none", "low", "medium", "high", "xhigh"}
+        current = getattr(state.agent, "reasoning_config", {}) or {}
+        current_effort = current.get("effort", "default") if isinstance(current, dict) else "default"
+
+        level = args.strip().lower()
+        if not level:
+            return (
+                f"⚡ Reasoning effort: {current_effort}\n"
+                f"   用法: /effort none | low | medium | high | xhigh"
+            )
+        if level not in VALID_LEVELS:
+            return f"❌ 无效等级: {level} — 可用: {', '.join(sorted(VALID_LEVELS))}"
+
+        state.agent.reasoning_config = {"effort": level}
+        # 持久化
+        self.session_manager.save_session(state.session_id)
+        return f"⚡ Reasoning effort 设为: {level} (was: {current_effort})"
+
+    def _cmd_show_thinking(self, args: str, state: SessionState) -> str:
+        """Toggle reasoning/thinking streaming display."""
+        toggle = args.strip().lower()
+        if toggle not in ("on", "off"):
+            current = getattr(state, "show_thinking", True)
+            return (
+                f"🧠 Thinking display: {'ON' if current else 'OFF'}\n"
+                f"   用法: /show_thinking on | off"
+            )
+        state.show_thinking = (toggle == "on")
+        if toggle == "on":
+            state.agent.reasoning_callback = getattr(state, "_reasoning_callback", None)
+        else:
+            state.agent.reasoning_callback = None
+        # 持久化
+        self.session_manager.save_session(state.session_id)
+        return f"🧠 Thinking display: {'ON' if state.show_thinking else 'OFF'}"
 
     def _cmd_version(self, args: str, state: SessionState) -> str:
         return f"Hermes Agent v{HERMES_VERSION}"

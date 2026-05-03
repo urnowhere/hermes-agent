@@ -178,17 +178,30 @@ def make_step_cb(
 # Agent message callback
 # ------------------------------------------------------------------
 
-def make_message_cb(
+def make_streaming_cbs(
     conn: acp.Client,
     session_id: str,
     loop: asyncio.AbstractEventLoop,
-) -> Callable:
-    """Create a callback that streams agent response text to the editor."""
+) -> tuple[Callable, Callable, Callable]:
+    """Streaming callbacks — simple, proven approach.
 
-    def _message(text: str) -> None:
-        if not text:
-            return
-        update = acp.update_agent_message_text(text)
-        _send_update(conn, session_id, loop, update)
+    - Each chunk sent via _send_update (synchronous, blocks until queued).
+    - flush_fn() adds 50ms delay so the last notification is processed
+      before the result (end_turn) is sent. Same pattern as Kilo/OpenCode.
+    """
 
-    return _message
+    def thinking_cb(text: str) -> None:
+        if text:
+            update = acp.update_agent_thought_text(text)
+            _send_update(conn, session_id, loop, update)
+
+    def message_cb(text: str) -> None:
+        if text:
+            update = acp.update_agent_message_text(text)
+            _send_update(conn, session_id, loop, update)
+
+    async def flush_fn() -> None:
+        import asyncio
+        await asyncio.sleep(0.05)
+
+    return thinking_cb, message_cb, flush_fn
