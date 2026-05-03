@@ -94,6 +94,27 @@ def _make_adapter(platform_val="telegram"):
 class TestBusySessionAck:
     """User sends a message while agent is running — should get acknowledgment."""
 
+    def test_format_agent_status_parts_softens_stale_delegate_task(self):
+        runner, _ = _make_runner()
+        parts = runner._format_agent_status_parts(
+            {
+                "api_call_count": 4,
+                "max_iterations": 200,
+                "current_tool": "delegate_task",
+                "last_activity_ts": time.time() - 4200,
+                "last_activity_desc": "delegate_task",
+                "seconds_since_activity": 4200,
+            },
+            started_at=time.time() - 4200,
+            now_ts=time.time(),
+        )
+
+        assert "70 min elapsed" in parts
+        assert "waiting on delegated task" in parts
+        assert "parent idle 70 min" in parts
+        assert all("delegate_task" not in part for part in parts)
+        assert all("iteration 4/200" not in part for part in parts)
+
     @pytest.mark.asyncio
     async def test_handle_message_queue_mode_queues_without_interrupt(self):
         """Runner queue mode must not interrupt an active agent for text follow-ups."""
@@ -378,6 +399,35 @@ class TestBusySessionAck:
         assert "21/60" in content  # iteration
         assert "terminal" in content  # current tool
         assert "10 min" in content  # elapsed
+
+    @pytest.mark.asyncio
+    async def test_busy_ack_softens_stale_delegate_task_status(self):
+        runner, sentinel = _make_runner()
+        adapter = _make_adapter()
+
+        event = _make_event(text="yo")
+        sk = build_session_key(event.source)
+
+        agent = MagicMock()
+        agent.get_activity_summary.return_value = {
+            "api_call_count": 4,
+            "max_iterations": 200,
+            "current_tool": "delegate_task",
+            "last_activity_ts": time.time() - 4200,
+            "last_activity_desc": "delegate_task",
+            "seconds_since_activity": 4200,
+        }
+        runner._running_agents[sk] = agent
+        runner._running_agents_ts[sk] = time.time() - 4200
+        runner.adapters[event.source.platform] = adapter
+
+        await runner._handle_active_session_busy_message(event, sk)
+
+        content = adapter._send_with_retry.call_args.kwargs.get("content", "")
+        assert "waiting on delegated task" in content
+        assert "parent idle 70 min" in content
+        assert "delegate_task" not in content
+        assert "iteration 4/200" not in content
 
     @pytest.mark.asyncio
     async def test_draining_still_works(self):

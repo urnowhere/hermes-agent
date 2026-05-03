@@ -2045,6 +2045,49 @@ class GatewayRunner:
             return
         merge_pending_message_event(adapter._pending_messages, session_key, event)
 
+    def _format_agent_status_parts(
+        self,
+        summary: dict[str, Any],
+        *,
+        started_at: float = 0,
+        now_ts: float | None = None,
+    ) -> list[str]:
+        """Format user-facing activity details for busy and heartbeat messages.
+
+        Delegate tasks are special: the parent agent can sit inside
+        ``delegate_task`` for a long time while a child/subagent does the real
+        work. Repeating ``running: delegate_task`` makes the parent look frozen,
+        so stale delegate waits get a softer label instead.
+        """
+        now_ts = now_ts or time.time()
+        parts: list[str] = []
+
+        if started_at:
+            elapsed_min = int((now_ts - started_at) / 60)
+            if elapsed_min > 0:
+                parts.append(f"{elapsed_min} min elapsed")
+
+        current_tool = summary.get("current_tool")
+        idle_secs = float(summary.get("seconds_since_activity") or 0.0)
+        is_stale_delegate = current_tool == "delegate_task" and idle_secs >= 15
+
+        iteration = summary.get("api_call_count", 0)
+        max_iter = summary.get("max_iterations", 0)
+        if max_iter and not is_stale_delegate:
+            parts.append(f"iteration {iteration}/{max_iter}")
+
+        if current_tool:
+            if is_stale_delegate:
+                parts.append("waiting on delegated task")
+                if idle_secs >= 60:
+                    parts.append(f"parent idle {int(idle_secs // 60)} min")
+            else:
+                parts.append(f"running: {current_tool}")
+        elif summary.get("last_activity_desc"):
+            parts.append(summary["last_activity_desc"])
+
+        return parts
+
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
         # --- Authorization gate (#17775) ---
         # The cold path (_handle_message) checks _is_user_authorized before
@@ -2151,23 +2194,20 @@ class GatewayRunner:
 
         self._busy_ack_ts[session_key] = now
 
-        # Build a status-rich acknowledgment
+        # Build a status-rich acknowledgment.
+        # Delegate tasks are special: the parent agent can sit on current_tool=
+        # delegate_task for a long time while a child/subagent does the real work.
+        # Repeating "running: delegate_task" makes the parent look frozen even
+        # though it's just waiting on delegated work. Avoid that stale wording.
         status_parts = []
         if running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
             try:
                 summary = running_agent.get_activity_summary()
-                iteration = summary.get("api_call_count", 0)
-                max_iter = summary.get("max_iterations", 0)
-                current_tool = summary.get("current_tool")
-                start_ts = self._running_agents_ts.get(session_key, 0)
-                if start_ts:
-                    elapsed_min = int((now - start_ts) / 60)
-                    if elapsed_min > 0:
-                        status_parts.append(f"{elapsed_min} min elapsed")
-                if max_iter:
-                    status_parts.append(f"iteration {iteration}/{max_iter}")
-                if current_tool:
-                    status_parts.append(f"running: {current_tool}")
+                status_parts = self._format_agent_status_parts(
+                    summary,
+                    started_at=self._running_agents_ts.get(session_key, 0),
+                    now_ts=now,
+                )
             except Exception:
                 pass
 
@@ -13201,19 +13241,21 @@ class GatewayRunner:
                 return
             while True:
                 await asyncio.sleep(_NOTIFY_INTERVAL)
-                _elapsed_mins = int((time.time() - _notify_start) // 60)
+                _now = time.time()
+                _elapsed_mins = int((_now - _notify_start) // 60)
                 # Include agent activity context if available.
                 _agent_ref = agent_holder[0]
                 _status_detail = ""
                 if _agent_ref and hasattr(_agent_ref, "get_activity_summary"):
                     try:
                         _a = _agent_ref.get_activity_summary()
-                        _parts = [f"iteration {_a['api_call_count']}/{_a['max_iterations']}"]
-                        if _a.get("current_tool"):
-                            _parts.append(f"running: {_a['current_tool']}")
-                        else:
-                            _parts.append(_a.get("last_activity_desc", ""))
-                        _status_detail = " — " + ", ".join(_parts)
+                        _parts = self._format_agent_status_parts(
+                            _a,
+                            started_at=self._running_agents_ts.get(session_key, 0),
+                            now_ts=_now,
+                        )
+                        if _parts:
+                            _status_detail = " — " + ", ".join(_parts)
                     except Exception:
                         pass
                 try:
