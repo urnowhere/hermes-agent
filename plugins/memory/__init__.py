@@ -298,8 +298,18 @@ class _ProviderCollector:
     def register_tool(self, *args, **kwargs):
         pass
 
-    def register_hook(self, *args, **kwargs):
-        pass
+    def register_hook(self, hook_name, callback):
+        # Forward to the real PluginManager so memory-provider plugins can
+        # register lifecycle hooks (post_tool_call, on_session_finalize, etc.)
+        # via the same register(ctx) entry-point they use for the provider itself.
+        try:
+            from hermes_cli.plugins import get_plugin_manager, VALID_HOOKS
+            if hook_name not in VALID_HOOKS:
+                return
+            pm = get_plugin_manager()
+            pm._hooks.setdefault(hook_name, []).append(callback)
+        except Exception as e:
+            logger.debug("register_hook forward failed for %s: %s", hook_name, e)
 
     def register_cli_command(self, *args, **kwargs):
         pass  # CLI registration happens via discover_plugin_cli_commands()
