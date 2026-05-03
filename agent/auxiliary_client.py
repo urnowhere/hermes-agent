@@ -242,6 +242,7 @@ _API_KEY_PROVIDER_AUX_MODELS: Dict[str, str] = {
 _PROVIDER_VISION_MODELS: Dict[str, str] = {
     "xiaomi": "mimo-v2.5",
     "zai": "glm-5v-turbo",
+    "minimax": "minimax-vl-01",
 }
 
 # Providers whose endpoint does not accept image input, even though the
@@ -1529,6 +1530,225 @@ def _build_codex_client(model: str) -> Tuple[Optional[Any], Optional[str]]:
     return CodexAuxiliaryClient(real_client, model), model
 
 
+# ─── MiniMax Vision (Token Plan VLM) ─────────────────────────────────────────
+
+class _MiniMaxChatCompletions:
+    """Exposes .create() to satisfy the client.chat.completions.create() interface."""
+
+    def __init__(self, client: "_MiniMaxVisionClient"):
+        self._client = client
+
+    async def create(self, **kwargs) -> Any:
+        # chat_completions_create already returns a SimpleNamespace that passes
+        # _validate_llm_response checks — just return it directly.
+        return await self._client.chat_completions_create(**kwargs)
+
+
+class _MiniMaxChatShim:
+    """Exposes .completions to satisfy the client.chat.completions interface."""
+    def __init__(self, client: "_MiniMaxVisionClient"):
+        self.completions = _MiniMaxChatCompletions(client)
+
+
+class _MiniMaxVisionClient:
+    """
+    Vision client that wraps the MiniMax Token Plan VLM endpoint /v1/coding_plan/vlm.
+
+    Hermes expects a client that implements .chat.completions.create() but the
+    MiniMax VLM endpoint uses a different API shape. This shim:
+      - Accepts standard OpenAI-style vision kwargs (model, messages, temperature, etc.)
+      - Reformats messages to the MiniMax /v1/coding_plan/vlm payload
+      - Normalises the VLM response back to chat.completions format
+    """
+
+    def __init__(self, api_key: str, api_host: str, model: str = "minimax-vl-01"):
+        self.api_key = api_key
+        self.api_host = api_host.rstrip("/")
+        self.model = model
+
+    async def chat_completions_create(self, **kwargs) -> dict:
+        """Handle .chat.completions.create() — routes to /v1/coding_plan/vlm.
+
+        MiniMax VLM expects:  {"prompt": "...", "image_url": "data:image/...;base64,..."}
+        Not the OpenAI messages format. This shim extracts prompt + image from
+        messages and reformat.
+        """
+        import httpx
+        import base64
+        import json as _json
+        import re
+
+        model = kwargs.get("model", self.model)
+        messages = kwargs.get("messages", [])
+        temperature = kwargs.get("temperature")
+        max_tokens = kwargs.get("max_tokens", 2000)
+        timeout = kwargs.get("timeout", 120.0)
+
+        # Extract text prompt and image from messages
+        # MiniMax VLM only supports ONE image per request
+        # async_call_llm converts OpenAI image_url → Anthropic image blocks,
+        # so we handle both formats:
+        #   OpenAI:   {"type": "image_url", "image_url": {"url": "data:..."}}
+        #   Anthropic: {"type": "image", "source": {"type": "base64", "media_type": "...", "data": "..."}}
+        prompt = ""
+        image_base64 = None
+
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+
+            if isinstance(content, str):
+                if not prompt and role == "user":
+                    prompt = content
+            elif isinstance(content, list):
+                for block in content:
+                    btype = block.get("type", "")
+                    if btype == "text":
+                        if not prompt:
+                            prompt = block.get("text", "")
+                    elif btype == "image":
+                        # Anthropic format (set by async_call_llm conversion).
+                        # The OpenAI image_url branch is dead code — async_call_llm
+                        # always converts to Anthropic format before calling the client.
+                        if image_base64 is None:
+                            source = block.get("source", {})
+                            if source.get("type") == "base64":
+                                mime = source.get("media_type", "image/jpeg")
+                                fmt = mime.split("/")[1] if "/" in mime else "jpeg"
+                                data = source.get("data", "")
+                                image_base64 = f"data:image/{fmt};base64,{data}"
+                            elif source.get("type") == "url":
+                                url = source.get("url", "")
+                                image_base64 = await self._process_image_source(url)
+
+        if not prompt:
+            prompt = "Describe this image."
+        if image_base64 is None:
+            return SimpleNamespace(
+                choices=[SimpleNamespace(
+                    message=SimpleNamespace(content="No image provided")
+                )]
+            )
+
+        payload = {
+            "prompt": prompt,
+            "image_url": image_base64,
+        }
+        if temperature is not None:
+            payload["temperature"] = temperature
+
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            resp = await client.post(
+                f"{self.api_host}/v1/coding_plan/vlm",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+
+        # Normalise MiniMax VLM response to chat.completions format
+        # MiniMax returns: {choices: [{message: {content: "..."}}]}
+        # or: {text: "..."} or {content: "..."}
+        choices = result.get("choices", [])
+        if choices:
+            content = choices[0].get("message", {}).get("content", "")
+        else:
+            content = result.get("content") or result.get("text", "")
+
+        return SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content=content or "")
+            )]
+        )
+
+    async def _process_image_source(self, url: str) -> str:
+        """Convert HTTP URL or local file to base64 data URL.
+
+        Mimics the logic from MiniMax's official MCP utils.py:
+        - data: URLs → pass through
+        - HTTP/HTTPS URLs → download and encode (async, non-blocking)
+        - Local paths → read and encode
+        """
+        import base64
+        import re
+
+        if url.startswith("data:"):
+            return url
+
+        if url.startswith(("http://", "https://")):
+            import httpx
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                resp = await client.get(url)
+            resp.raise_for_status()
+            data = resp.content
+            content_type = resp.headers.get("content-type", "image/jpeg").lower()
+            if "jpeg" in content_type or "jpg" in content_type:
+                fmt = "jpeg"
+            elif "png" in content_type:
+                fmt = "png"
+            elif "webp" in content_type:
+                fmt = "webp"
+            else:
+                fmt = "jpeg"
+            b64 = base64.b64encode(data).decode("utf-8")
+            return f"data:image/{fmt};base64,{b64}"
+
+        # Local file path — strip @ prefix if present
+        path = url
+        if path.startswith("@"):
+            path = path[1:]
+
+        path = re.sub(r"^file:///", "/", path)
+
+        # Resolve bare filenames to Hermes image cache
+        if not os.path.exists(path):
+            # Try Hermes cache
+            alt = f"{get_hermes_home()}/cache/images/{os.path.basename(path)}"
+            if os.path.exists(alt):
+                path = alt
+
+        with open(path, "rb") as f:
+            data = f.read()
+
+        ext = os.path.splitext(path)[1].lower()
+        if ext in (".jpg", ".jpeg"):
+            fmt = "jpeg"
+        elif ext == ".png":
+            fmt = "png"
+        elif ext == ".webp":
+            fmt = "webp"
+        else:
+            fmt = "jpeg"
+
+        b64 = base64.b64encode(data).decode("utf-8")
+        return f"data:image/{fmt};base64,{b64}"
+
+    # Alias for callers that use the .chat.completions.create() interface
+    @property
+    def chat(self):
+        return _MiniMaxChatShim(self)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        pass
+
+
+def _try_minimax_vision() -> Tuple[Optional[Any], Optional[str]]:
+    """Try to create a MiniMax Token Plan vision client."""
+    from hermes_cli.config import get_env_value
+    api_key = get_env_value("MINIMAX_API_KEY") or ""
+    api_host = get_env_value("MINIMAX_API_HOST") or "https://api.minimax.io"
+    if not api_key:
+        return None, None
+    client = _MiniMaxVisionClient(api_key=api_key, api_host=api_host)
+    return client, "minimax-vl-01"
+
+
 def _try_anthropic() -> Tuple[Optional[Any], Optional[str]]:
     try:
         from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token
@@ -1946,6 +2166,9 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
         return AsyncCodexAuxiliaryClient(sync_client), model
     if isinstance(sync_client, AnthropicAuxiliaryClient):
         return AsyncAnthropicAuxiliaryClient(sync_client), model
+    if isinstance(sync_client, _MiniMaxVisionClient):
+        # MiniMax Vision Client is already async-capable (has async create method)
+        return sync_client, model
     try:
         from agent.gemini_native_adapter import GeminiNativeClient, AsyncGeminiNativeClient
 
@@ -2558,6 +2781,7 @@ def get_async_text_auxiliary_client(task: str = "", *, main_runtime: Optional[Di
 
 _VISION_AUTO_PROVIDER_ORDER = (
     "openrouter",
+    "minimax",
     "nous",
 )
 
@@ -2584,6 +2808,8 @@ def _resolve_strict_vision_backend(
         return resolve_provider_client("openai-codex", model, is_vision=True)
     if provider == "anthropic":
         return _try_anthropic()
+    if provider == "minimax":
+        return _try_minimax_vision()
     if provider == "custom":
         return _try_custom_endpoint()
     return None, None
@@ -2728,6 +2954,11 @@ def resolve_vision_provider_client(
         sync_client, default_model = _resolve_strict_vision_backend(
             requested, resolved_model
         )
+        return _finalize(requested, sync_client, default_model)
+
+    # Strict vision backends that bypass the generic client cache
+    if requested in ("minimax", "anthropic", "openai-codex"):
+        sync_client, default_model = _resolve_strict_vision_backend(requested)
         return _finalize(requested, sync_client, default_model)
 
     client, final_model = _get_cached_client(requested, resolved_model, async_mode,

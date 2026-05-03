@@ -291,6 +291,16 @@ TOOL_CATEGORIES = {
                 ],
             },
             {
+                "name": "MiniMax (Token Plan)",
+                "badge": "Token Plan",
+                "tag": "Web search via MiniMax Token Plan API — requires active subscription",
+                "web_backend": "minimax",
+                "env_vars": [
+                    {"key": "MINIMAX_API_KEY", "prompt": "MiniMax Token Plan API key", "url": "https://platform.minimax.io/subscribe/token-plan"},
+                    {"key": "MINIMAX_API_HOST", "prompt": "API host (https://api.minimax.io for Global, https://api.minimaxi.com for China)", "url": None},
+                ],
+            },
+            {
                 "name": "Firecrawl Self-Hosted",
                 "badge": "free · self-hosted",
                 "tag": "Run your own Firecrawl instance (Docker)",
@@ -298,6 +308,38 @@ TOOL_CATEGORIES = {
                 "env_vars": [
                     {"key": "FIRECRAWL_API_URL", "prompt": "Your Firecrawl instance URL (e.g., http://localhost:3002)"},
                 ],
+            },
+        ],
+    },
+    "vision": {
+        "name": "Vision / Image Analysis",
+        "icon": "👁️",
+        "providers": [
+            {
+                "name": "MiniMax (Token Plan)",
+                "badge": "Token Plan",
+                "tag": "Web search + Vision via MiniMax Token Plan — requires active subscription",
+                "env_vars": [
+                    {"key": "MINIMAX_API_KEY", "prompt": "MiniMax Token Plan API key", "url": "https://platform.minimax.io/subscribe/token-plan"},
+                    {"key": "MINIMAX_API_HOST", "prompt": "API host (https://api.minimax.io for Global, https://api.minimaxi.com for China)", "url": None},
+                ],
+            },
+            {
+                "name": "OpenRouter",
+                "badge": "free tier",
+                "tag": "Uses Gemini (free tier at openrouter.ai/keys)",
+                "env_vars": [
+                    {"key": "OPENROUTER_API_KEY", "prompt": "OpenRouter API key", "url": "https://openrouter.ai/keys"},
+                ],
+            },
+            {
+                "name": "OpenAI-compatible endpoint",
+                "badge": "custom",
+                "tag": "Base URL, API key, and vision model",
+                "env_vars": [
+                    {"key": "OPENAI_API_KEY", "prompt": "API key", "url": None},
+                ],
+                "requires_base_url": True,
             },
         ],
     },
@@ -465,7 +507,6 @@ TOOL_CATEGORIES = {
 # Simple env-var requirements for toolsets NOT in TOOL_CATEGORIES.
 # Used as a fallback for tools like vision/moa that just need an API key.
 TOOLSET_ENV_REQUIREMENTS = {
-    "vision":     [("OPENROUTER_API_KEY",   "https://openrouter.ai/keys")],
     "moa":        [("OPENROUTER_API_KEY",   "https://openrouter.ai/keys")],
 }
 
@@ -1429,13 +1470,18 @@ def _is_provider_active(provider: dict, config: dict) -> bool:
 
 def _detect_active_provider_index(providers: list, config: dict) -> int:
     """Return the index of the currently active provider, or 0."""
+    # First: check config for an explicitly active provider
     for i, p in enumerate(providers):
         if _is_provider_active(p, config):
             return i
-        # Fallback: env vars present → likely configured
+
+    # Second: fallback — if nothing is explicitly active in config,
+    # pick the first provider that has all its env vars present.
+    for i, p in enumerate(providers):
         env_vars = p.get("env_vars", [])
         if env_vars and all(get_env_value(v["key"]) for v in env_vars):
             return i
+
     return 0
 
 
@@ -1668,6 +1714,29 @@ def _configure_provider(provider: dict, config: dict):
         web_cfg["backend"] = provider["web_backend"]
         web_cfg["use_gateway"] = bool(managed_feature)
         _print_success(f"  Web backend set to: {provider['web_backend']}")
+
+    # Handle providers that need a base URL (e.g. OpenAI-compatible vision endpoint)
+    if provider.get("requires_base_url"):
+        base_url_var = "OPENAI_BASE_URL"
+        base_url = get_env_value(base_url_var)
+        default_url = "https://api.openai.com/v1"
+        if base_url:
+            _print_success(f"  {base_url_var}: configured ({base_url[:8]}...)")
+        else:
+            base_url = _prompt(f"    {base_url_var} (Enter for default: {default_url})").strip()
+            if not base_url:
+                base_url = default_url
+            else:
+                save_env_value(base_url_var, base_url)
+                _print_success("    Saved")
+
+        # Also save base_url to auxiliary.vision config
+        from hermes_cli.config import load_config
+        _cfg = load_config()
+        _aux = _cfg.setdefault("auxiliary", {}).setdefault("vision", {})
+        _aux["base_url"] = base_url
+        from hermes_cli.config import save_config
+        save_config(_cfg)
 
     # For tools without a specific config key (e.g. image_gen), still
     # track use_gateway so the runtime knows the user's intent.

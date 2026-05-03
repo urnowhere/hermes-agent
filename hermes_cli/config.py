@@ -1527,6 +1527,14 @@ OPTIONAL_ENV_VARS = {
         "category": "provider",
         "advanced": True,
     },
+    "MINIMAX_API_HOST": {
+        "description": "MiniMax Token Plan API host — https://api.minimax.io (Global) or https://api.minimaxi.com (China)",
+        "prompt": "MiniMax Token Plan API host",
+        "url": "https://platform.minimax.io/subscribe/token-plan",
+        "password": False,
+        "category": "provider",
+        "advanced": True,
+    },
     "MINIMAX_CN_API_KEY": {
         "description": "MiniMax API key (China endpoint)",
         "prompt": "MiniMax (China) API key",
