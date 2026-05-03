@@ -1174,7 +1174,7 @@ class MCPServerTask:
                     self.name, url, config.get("oauth"),
                 )
             except Exception as exc:
-                logger.warning("MCP OAuth setup failed for '%s': %s", self.name, exc)
+                logger.warning("MCP OAuth setup failed for '%s': %s", self.name, exc, exc_info=True)
                 raise
 
         sampling_kwargs = self._sampling.session_kwargs() if self._sampling else {}
