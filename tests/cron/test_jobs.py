@@ -618,6 +618,74 @@ class TestGetDueJobs:
         assert [job["id"] for job in due] == ["oneshot-recover"]
         assert get_job("oneshot-recover")["next_run_at"] == run_at
 
+    def test_recurring_cron_job_without_next_run_is_recovered(self, tmp_cron_dir, monkeypatch):
+        """Recurring cron jobs with null next_run_at should recompute via compute_next_run()."""
+        now = datetime(2026, 3, 18, 10, 0, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+
+        save_jobs(
+            [{
+                "id": "cron-recover",
+                "name": "Daily standup",
+                "prompt": "Good morning",
+                "schedule": {"kind": "cron", "expr": "0 9 * * *", "display": "daily at 09:00"},
+                "schedule_display": "daily at 09:00",
+                "repeat": {"times": -1, "completed": 3},
+                "enabled": True,
+                "state": "scheduled",
+                "paused_at": None,
+                "paused_reason": None,
+                "created_at": "2026-03-10T08:00:00+00:00",
+                "next_run_at": None,
+                "last_run_at": "2026-03-17T09:00:00+00:00",
+                "last_status": None,
+                "last_error": None,
+                "deliver": "local",
+                "origin": None,
+            }]
+        )
+
+        due = get_due_jobs()
+
+        # The job should not be due right now (next cron hit is tomorrow 09:00),
+        # but its next_run_at should have been recovered and persisted.
+        recovered = get_job("cron-recover")
+        assert recovered["next_run_at"] is not None, "Recurring cron job next_run_at was not recovered"
+
+    def test_recurring_interval_job_without_next_run_is_recovered(self, tmp_cron_dir, monkeypatch):
+        """Recurring interval jobs with null next_run_at should recompute via compute_next_run()."""
+        now = datetime(2026, 3, 18, 10, 0, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+
+        save_jobs(
+            [{
+                "id": "interval-recover",
+                "name": "Health check",
+                "prompt": "Check health",
+                "schedule": {"kind": "interval", "minutes": 30, "display": "every 30 minutes"},
+                "schedule_display": "every 30 minutes",
+                "repeat": {"times": -1, "completed": 10},
+                "enabled": True,
+                "state": "scheduled",
+                "paused_at": None,
+                "paused_reason": None,
+                "created_at": "2026-03-10T08:00:00+00:00",
+                "next_run_at": None,
+                "last_run_at": "2026-03-18T09:30:00+00:00",
+                "last_status": None,
+                "last_error": None,
+                "deliver": "local",
+                "origin": None,
+            }]
+        )
+
+        due = get_due_jobs()
+
+        # Interval job: last_run + 30min = 10:00, which equals now, so it should be due.
+        assert [job["id"] for job in due] == ["interval-recover"]
+        recovered = get_job("interval-recover")
+        assert recovered["next_run_at"] is not None, "Recurring interval job next_run_at was not recovered"
+
     def test_broken_stale_one_shot_without_next_run_is_not_recovered(self, tmp_cron_dir, monkeypatch):
         now = datetime(2026, 3, 18, 4, 30, 0, tzinfo=timezone.utc)
         monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
