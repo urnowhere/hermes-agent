@@ -29,14 +29,15 @@ WORKDIR /opt/hermes
 # Copy only package manifests first so npm install + Playwright are cached
 # unless the lockfiles themselves change.
 #
-# ui-tui/packages/hermes-ink/ is copied IN FULL (not just its manifests)
-# because it is referenced as a `file:` workspace dependency from
-# ui-tui/package.json.  Copying the tree up front lets npm resolve the
-# workspace to real content instead of stopping at a bare package.json.
+# ui-tui/packages/hermes-ink/ is copied with its manifests first because it
+# is referenced as a `file:` workspace dependency from ui-tui/package.json.
+# The full source tree is copied later with the rest of the repository, but
+# the nested lockfile must be present in the cached dependency layer so the
+# runtime materialization step can install @hermes/ink's production deps.
 COPY package.json package-lock.json ./
 COPY web/package.json web/package-lock.json web/
 COPY ui-tui/package.json ui-tui/package-lock.json ui-tui/
-COPY ui-tui/packages/hermes-ink/ ui-tui/packages/hermes-ink/
+COPY ui-tui/packages/hermes-ink/package.json ui-tui/packages/hermes-ink/package-lock.json ui-tui/packages/hermes-ink/
 
 # `npm_config_install_links=false` forces npm to install `file:` deps as
 # symlinks (the npm 10+ default) even on Debian's older bundled npm 9.x,
@@ -59,9 +60,16 @@ RUN npm install --prefer-offline --no-audit && \
 # .dockerignore excludes node_modules, so the installs above survive.
 COPY --chown=hermes:hermes . .
 
-# Build browser dashboard and terminal UI assets.
+# Build browser dashboard and terminal UI assets. Materialize @hermes/ink as
+# a real package under ui-tui/node_modules so runtime startup does not try to
+# reinstall root-owned build dependencies inside the container.
 RUN cd web && npm run build && \
-    cd ../ui-tui && npm run build
+    cd ../ui-tui && npm run build && \
+    rm -rf packages/hermes-ink/node_modules node_modules/@hermes/ink && \
+    cp -a packages/hermes-ink node_modules/@hermes/ink && \
+    npm install --omit=dev --prefer-offline --no-audit --prefix node_modules/@hermes/ink && \
+    rm -rf node_modules/@hermes/ink/node_modules/react && \
+    node -e "await import('@hermes/ink')"
 
 # ---------- Permissions ----------
 # Make install dir world-readable so any HERMES_UID can read it at runtime.

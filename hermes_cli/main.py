@@ -7597,7 +7597,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
             _drain_budget = max(_drain_budget, 30.0) + 15.0
 
             restarted_services = []
-            killed_pids = set()
+            handled_manual_pids = set()
+            sigterm_pids = set()
             relaunched_profiles = []
 
             # --- Systemd services (Linux) ---
@@ -7826,9 +7827,10 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 if not drained:
                     try:
                         os.kill(pid, _signal.SIGTERM)
+                        sigterm_pids.add(pid)
                     except (ProcessLookupError, PermissionError):
                         pass
-                killed_pids.add(pid)
+                handled_manual_pids.add(pid)
                 relaunched_profiles.append(proc.profile)
 
             for pid in manual_pids:
@@ -7836,18 +7838,19 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     continue
                 try:
                     os.kill(pid, _signal.SIGTERM)
-                    killed_pids.add(pid)
+                    handled_manual_pids.add(pid)
+                    sigterm_pids.add(pid)
                 except (ProcessLookupError, PermissionError):
                     pass
 
-            if restarted_services or killed_pids:
+            if restarted_services or handled_manual_pids:
                 print()
                 for svc in restarted_services:
                     print(f"  ✓ Restarted {svc}")
                 if relaunched_profiles:
                     names = ", ".join(relaunched_profiles)
                     print(f"  ✓ Restarting manual gateway profile(s): {names}")
-                unmapped_count = len(killed_pids) - len(relaunched_profiles)
+                unmapped_count = len(handled_manual_pids) - len(relaunched_profiles)
                 if unmapped_count:
                     print(f"  → Stopped {unmapped_count} manual gateway process(es)")
                     print("    Restart manually: hermes gateway run")
@@ -7856,7 +7859,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                             "    (or: hermes -p <profile> gateway run  for each profile)"
                         )
 
-            if not restarted_services and not killed_pids:
+            if not restarted_services and not handled_manual_pids:
                 # No gateways were running — nothing to do
                 pass
 
@@ -7876,11 +7879,11 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     exclude_pids=_service_pids_after,
                     all_profiles=True,
                 )
-                # Scope to PIDs we already tried to kill during this
-                # update (killed_pids).  Anything new is a gateway that
+                # Scope to PIDs we sent SIGTERM during this update
+                # (sigterm_pids).  Anything new is a gateway that
                 # started AFTER our restart attempt — respecting user
                 # intent, we don't kill those.
-                _stuck = [pid for pid in _surviving if pid in killed_pids]
+                _stuck = [pid for pid in _surviving if pid in sigterm_pids]
                 if _stuck:
                     print()
                     print(

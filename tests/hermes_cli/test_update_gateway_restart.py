@@ -8,12 +8,11 @@ when launchd will auto-respawn.
 
 import subprocess
 from types import SimpleNamespace
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
 import hermes_cli.gateway as gateway_cli
-import hermes_cli.main as cli_main
 from hermes_cli.main import cmd_update
 
 
@@ -463,8 +462,11 @@ class TestCmdUpdateLaunchdRestart:
         captured = capsys.readouterr().out
         restart.assert_called_once_with("coder", 12345)
         graceful.assert_called_once()
-        # Graceful drain returned False → SIGTERM fallback.
-        kill.assert_called_once()
+        # Graceful drain returned False → SIGTERM fallback, and the survivor
+        # sweep force-kills the same PID if it is still reported alive.
+        assert kill.call_count == 2
+        assert kill.call_args_list[0].args[1].name == "SIGTERM"
+        assert kill.call_args_list[1].args[1].name == "SIGKILL"
         assert "Restarting manual gateway profile(s): coder" in captured
 
     @patch("shutil.which", return_value=None)
@@ -885,9 +887,10 @@ class TestServicePidExclusion:
 
         captured = capsys.readouterr().out
         assert "Restarted" in captured
-        # Manual PID should be killed
+        # Manual PID should be terminated, then force-killed if the survivor
+        # sweep still sees that exact pre-update manual PID alive.
         manual_kills = [c for c in mock_kill.call_args_list if c.args[0] == MANUAL_PID]
-        assert len(manual_kills) == 1
+        assert [c.args[1].name for c in manual_kills] == ["SIGTERM", "SIGKILL"]
         # Service PID should NOT be killed
         service_kills = [c for c in mock_kill.call_args_list if c.args[0] == SERVICE_PID]
         assert len(service_kills) == 0

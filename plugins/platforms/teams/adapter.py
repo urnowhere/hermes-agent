@@ -22,7 +22,6 @@ Configuration in config.yaml:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -533,7 +532,12 @@ class TeamsAdapter(BasePlatformAdapter):
         if not self._app:
             return
         try:
-            await self._app.send(chat_id, TypingActivityInput())
+            activity_cls = TypingActivityInput
+            if activity_cls is None:
+                from microsoft_teams.api.activities.typing import (
+                    TypingActivityInput as activity_cls,
+                )
+            await self._app.send(chat_id, activity_cls())
         except Exception:
             pass
 

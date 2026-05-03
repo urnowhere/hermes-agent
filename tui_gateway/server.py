@@ -519,6 +519,25 @@ def _wait_agent(session: dict, rid: str, timeout: float = 30.0) -> dict | None:
     return _err(rid, 5032, err) if err else None
 
 
+def _apply_pending_title(session: dict, key: str) -> None:
+    """Best-effort application of a title queued before the DB row exists."""
+    pending = session.get("pending_title")
+    if not pending:
+        return
+    db = _get_db()
+    if not db:
+        return
+    try:
+        if db.set_session_title(key, pending):
+            session["pending_title"] = None
+    except ValueError:
+        # Duplicate/invalid titles are not retryable; drop them so the
+        # session does not keep reattempting the same failing title.
+        session["pending_title"] = None
+    except Exception:
+        pass
+
+
 def _start_agent_build(sid: str, session: dict) -> None:
     """Start building the real AIAgent for a TUI session, once.
 
@@ -554,9 +573,11 @@ def _start_agent_build(sid: str, session: dict) -> None:
             finally:
                 _clear_session_context(tokens)
 
-            # Session DB row deferred to first run_conversation() call.
-            # pending_title applied post-first-message (see cli.exec handler).
+            # Session DB row may be deferred to the first run_conversation()
+            # call, but apply/drop any queued title once possible so invalid
+            # pending titles do not retry forever.
             current["agent"] = agent
+            _apply_pending_title(current, key)
 
             try:
                 worker = _SlashWorker(key, getattr(agent, "model", _resolve_model()))
@@ -3192,25 +3213,8 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                     )
 
             # Apply pending_title now that the DB row exists.
-            _pending = session.get("pending_title")
-            if _pending and status == "complete":
-                _pdb = _get_db()
-                if _pdb:
-                    _session_key = session.get("session_key") or sid
-                    try:
-                        if _pdb.set_session_title(_session_key, _pending):
-                            session["pending_title"] = None
-                    except ValueError as exc:
-                        # Invalid/duplicate title — non-retryable, drop it.
-                        # Auto-title will take over. Fix for #19029.
-                        session["pending_title"] = None
-                        logger.info(
-                            "Dropping pending title for session %s: %s",
-                            _session_key, exc,
-                        )
-                    except Exception:
-                        # Transient DB failure — keep pending_title for retry.
-                        pass
+            if session.get("pending_title") and status == "complete":
+                _apply_pending_title(session, session.get("session_key") or sid)
 
             if (
                 status == "complete"
