@@ -287,6 +287,14 @@ class TestNormalizeModelForProvider:
         assert cli.model == "claude-sonnet-4-6"
         assert cli.api_mode == "anthropic_messages"
 
+    def test_opencode_zen_minimax_preserves_dots_and_uses_chat_completions(self):
+        cli = _make_cli(model="minimax-m2.5-free")
+        cli.api_mode = "anthropic_messages"
+        changed = cli._normalize_model_for_provider("opencode-zen")
+        assert changed is True
+        assert cli.model == "minimax-m2.5-free"
+        assert cli.api_mode == "chat_completions"
+
     def test_default_model_replaced(self):
         """No model configured (empty default) gets swapped for codex."""
         import cli as _cli_mod
