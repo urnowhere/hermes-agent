@@ -547,6 +547,30 @@ class TestSendToPlatformChunking:
         helper.assert_not_awaited()
         lightweight.assert_awaited_once()
 
+    def test_feishu_media_uses_native_adapter_helper(self, tmp_path):
+        image_path = tmp_path / "screenshot.png"
+        image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+        helper = AsyncMock(return_value={"success": True, "platform": "feishu", "chat_id": "oc_123", "message_id": "om_456"})
+        with patch("tools.send_message_tool._send_feishu", helper):
+            result = asyncio.run(
+                _send_to_platform(
+                    Platform.FEISHU,
+                    SimpleNamespace(enabled=True, token="tok", extra={}),
+                    "oc_123",
+                    "桌面截图",
+                    media_files=[(str(image_path), False)],
+                )
+            )
+
+        assert result["success"] is True
+        helper.assert_awaited_once()
+        call = helper.await_args
+        assert call.args[1] == "oc_123"
+        assert call.args[2] == "桌面截图"
+        assert call.kwargs["media_files"] == [(str(image_path), False)]
+        assert "warnings" not in result
+
     def test_send_matrix_via_adapter_sends_document(self, tmp_path):
         file_path = tmp_path / "report.pdf"
         file_path.write_bytes(b"%PDF-1.4 test")
