@@ -264,14 +264,21 @@ class MattermostAdapter(BasePlatformAdapter):
         chunks = self.truncate_message(formatted, MAX_POST_LENGTH)
 
         last_id = None
+        # Thread support: explicit reply_to wins; gateway delivery also passes
+        # thread context via metadata["thread_id"] (see gateway/delivery.py).
+        root_post_id = reply_to
+        if not root_post_id and metadata:
+            tid = metadata.get("thread_id")
+            if tid:
+                root_post_id = str(tid)
+
         for chunk in chunks:
             payload: Dict[str, Any] = {
                 "channel_id": chat_id,
                 "message": chunk,
             }
-            # Thread support: reply_to is the root post ID.
-            if reply_to and self._reply_mode == "thread":
-                payload["root_id"] = reply_to
+            if root_post_id and self._reply_mode == "thread":
+                payload["root_id"] = root_post_id
 
             data = await self._api_post("posts", payload)
             if not data or "id" not in data:
