@@ -623,3 +623,40 @@ def test_run_doctor_opencode_go_skips_invalid_models_probe(monkeypatch, tmp_path
     )
     assert not any(url == "https://opencode.ai/zen/go/v1/models" for url, _, _ in calls)
     assert not any("opencode" in url.lower() and "models" in url.lower() for url, _, _ in calls)
+
+
+def test_run_doctor_skips_minimax_cn_models_endpoint(monkeypatch, tmp_path):
+    """MiniMax China has no usable GET /v1/models endpoint, so doctor must not probe it."""
+    for env_name in (
+        "GLM_API_KEY",
+        "ZAI_API_KEY",
+        "Z_AI_API_KEY",
+        "KIMI_API_KEY",
+        "KIMI_CN_API_KEY",
+        "ARCEEAI_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "HF_TOKEN",
+        "DASHSCOPE_API_KEY",
+        "MINIMAX_API_KEY",
+        "MINIMAX_BASE_URL",
+        "MINIMAX_CN_BASE_URL",
+        "AI_GATEWAY_API_KEY",
+        "KILOCODE_API_KEY",
+        "OPENCODE_ZEN_API_KEY",
+        "OPENCODE_GO_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+    ):
+        monkeypatch.delenv(env_name, raising=False)
+    monkeypatch.setenv("MINIMAX_CN_API_KEY", "test-minimax-cn-key")
+
+    def fail_on_http_get(*args, **kwargs):
+        raise AssertionError("doctor should not call httpx.get for MiniMax China")
+
+    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(get=fail_on_http_get))
+
+    helper = TestDoctorMemoryProviderSection()
+    out = helper._run_doctor_and_capture(monkeypatch, tmp_path, provider="")
+
+    assert "MiniMax (China)" in out
+    assert "(key configured)" in out
