@@ -604,6 +604,53 @@ class TestChatCompletionsEndpoint:
             assert resp.status == 400
 
     @pytest.mark.asyncio
+    async def test_preserves_opaque_fields_in_history(self, adapter):
+        """Chat completions history should preserve opaque continuity fields."""
+        app = _create_app(adapter)
+        messages = [
+            {
+                "role": "assistant",
+                "content": "Thinking out loud",
+                "reasoning_content": "hidden reasoning",
+                "codex_reasoning_items": [{"id": "r0"}],
+                "tool_calls": [{"id": "call_0", "type": "function"}],
+                "finish_reason": "tool_calls",
+            },
+            {
+                "role": "tool",
+                "content": "lookup result",
+                "tool_call_id": "call_0",
+                "tool_name": "lookup",
+            },
+            {"role": "user", "content": "follow up"},
+        ]
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (
+                    {"final_response": "Done", "messages": [], "api_calls": 1},
+                    {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                )
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={"model": "test", "messages": messages},
+                )
+
+            assert resp.status == 200
+            preserved = mock_run.call_args.kwargs["conversation_history"][0]
+            tool_result = mock_run.call_args.kwargs["conversation_history"][1]
+            assert preserved["content"] == "Thinking out loud"
+            assert preserved["reasoning_content"] == "hidden reasoning"
+            assert preserved["codex_reasoning_items"] == [{"id": "r0"}]
+            assert preserved["tool_calls"] == [{"id": "call_0", "type": "function"}]
+            assert preserved["finish_reason"] == "tool_calls"
+            assert tool_result == {
+                "role": "tool",
+                "content": "lookup result",
+                "tool_call_id": "call_0",
+                "tool_name": "lookup",
+            }
+
+    @pytest.mark.asyncio
     async def test_stream_true_returns_sse(self, adapter):
         """stream=true returns SSE format with the full response."""
         app = _create_app(adapter)
@@ -1457,6 +1504,88 @@ class TestResponsesEndpoint:
                 json={"model": "hermes-agent", "input": 42},
             )
             assert resp.status == 400
+
+    @pytest.mark.asyncio
+    async def test_explicit_conversation_history_preserves_opaque_fields(self, adapter):
+        """Opaque continuity fields must survive explicit history replay."""
+        app = _create_app(adapter)
+        conversation_history = [
+            {
+                "role": "assistant",
+                "content": "Thinking out loud",
+                "reasoning_content": "hidden reasoning",
+                "reasoning_details": [{"type": "text", "text": "detailed reasoning"}],
+                "codex_reasoning_items": [{"id": "r1"}],
+                "codex_message_items": [{"id": "m1"}],
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"},
+                    }
+                ],
+                "finish_reason": "tool_calls",
+            }
+        ]
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (
+                    {"final_response": "Done", "messages": [], "api_calls": 1},
+                    {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                )
+                resp = await cli.post(
+                    "/v1/responses",
+                    json={
+                        "model": "hermes-agent",
+                        "input": "follow up",
+                        "conversation_history": conversation_history,
+                    },
+                )
+
+            assert resp.status == 200
+            call_kwargs = mock_run.call_args.kwargs
+            preserved = call_kwargs["conversation_history"][0]
+            assert preserved["content"] == "Thinking out loud"
+            assert preserved["reasoning_content"] == "hidden reasoning"
+            assert preserved["reasoning_details"] == [{"type": "text", "text": "detailed reasoning"}]
+            assert preserved["codex_reasoning_items"] == [{"id": "r1"}]
+            assert preserved["codex_message_items"] == [{"id": "m1"}]
+            assert preserved["tool_calls"][0]["function"]["name"] == "lookup"
+            assert preserved["finish_reason"] == "tool_calls"
+
+    @pytest.mark.asyncio
+    async def test_input_message_history_preserves_opaque_fields(self, adapter):
+        """Multi-message /v1/responses input should preserve opaque history fields."""
+        app = _create_app(adapter)
+        messages = [
+            {
+                "role": "assistant",
+                "content": "Thinking out loud",
+                "reasoning_content": "hidden reasoning",
+                "codex_reasoning_items": [{"id": "r-input"}],
+                "tool_calls": [{"id": "call_input", "type": "function"}],
+                "finish_reason": "tool_calls",
+            },
+            {"role": "user", "content": "follow up"},
+        ]
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (
+                    {"final_response": "Done", "messages": [], "api_calls": 1},
+                    {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                )
+                resp = await cli.post(
+                    "/v1/responses",
+                    json={"model": "hermes-agent", "input": messages},
+                )
+
+            assert resp.status == 200
+            preserved = mock_run.call_args.kwargs["conversation_history"][0]
+            assert preserved["content"] == "Thinking out loud"
+            assert preserved["reasoning_content"] == "hidden reasoning"
+            assert preserved["codex_reasoning_items"] == [{"id": "r-input"}]
+            assert preserved["tool_calls"] == [{"id": "call_input", "type": "function"}]
+            assert preserved["finish_reason"] == "tool_calls"
 
 
 class TestResponsesStreaming:
@@ -2527,3 +2656,110 @@ class TestSessionIdHeader:
             call_kwargs = mock_run.call_args.kwargs
             assert call_kwargs["conversation_history"] == []
             assert call_kwargs["session_id"] == "some-session"
+
+
+class TestRunsEndpoint:
+    @pytest.mark.asyncio
+    async def test_multimessage_history_preserves_opaque_fields(self, adapter):
+        """The /v1/runs fallback history path must preserve opaque fields."""
+        app = _create_app(adapter)
+        app.router.add_post("/v1/runs", adapter._handle_runs)
+        loop = asyncio.get_running_loop()
+        captured = {}
+        called = asyncio.Event()
+
+        mock_agent = MagicMock()
+
+        def _run_conversation(*, user_message, conversation_history, task_id):
+            captured["user_message"] = user_message
+            captured["conversation_history"] = conversation_history
+            captured["task_id"] = task_id
+            loop.call_soon_threadsafe(called.set)
+            return {"final_response": "OK", "messages": [], "api_calls": 1}
+
+        mock_agent.run_conversation.side_effect = _run_conversation
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+
+        with patch.object(adapter, "_create_agent", return_value=mock_agent):
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/v1/runs",
+                    json={
+                        "model": "hermes-agent",
+                        "input": [
+                            {
+                                "role": "assistant",
+                                "content": "think about this",
+                                "reasoning_content": "latent reasoning",
+                                "codex_reasoning_items": [{"id": "r2"}],
+                                "tool_calls": [{"id": "call_2", "type": "function"}],
+                            },
+                            {"role": "user", "content": "final prompt"},
+                        ],
+                    },
+                )
+
+        assert resp.status == 202
+        await asyncio.wait_for(called.wait(), timeout=2)
+        assert captured["user_message"] == "final prompt"
+        preserved = captured["conversation_history"][0]
+        assert preserved["content"] == "think about this"
+        assert preserved["reasoning_content"] == "latent reasoning"
+        assert preserved["codex_reasoning_items"] == [{"id": "r2"}]
+        assert preserved["tool_calls"] == [{"id": "call_2", "type": "function"}]
+
+    @pytest.mark.asyncio
+    async def test_explicit_conversation_history_preserves_opaque_fields(self, adapter):
+        """Explicit /v1/runs conversation_history should preserve opaque fields."""
+        app = _create_app(adapter)
+        app.router.add_post("/v1/runs", adapter._handle_runs)
+        loop = asyncio.get_running_loop()
+        captured = {}
+        called = asyncio.Event()
+
+        mock_agent = MagicMock()
+
+        def _run_conversation(*, user_message, conversation_history, task_id):
+            captured["user_message"] = user_message
+            captured["conversation_history"] = conversation_history
+            loop.call_soon_threadsafe(called.set)
+            return {"final_response": "OK", "messages": [], "api_calls": 1}
+
+        mock_agent.run_conversation.side_effect = _run_conversation
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+
+        history = [
+            {
+                "role": "assistant",
+                "content": "Thinking out loud",
+                "reasoning_content": "hidden reasoning",
+                "codex_reasoning_items": [{"id": "r1"}],
+                "tool_calls": [{"id": "call_1", "type": "function"}],
+                "finish_reason": "tool_calls",
+            }
+        ]
+
+        with patch.object(adapter, "_create_agent", return_value=mock_agent):
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/v1/runs",
+                    json={
+                        "model": "hermes-agent",
+                        "input": "final prompt",
+                        "conversation_history": history,
+                    },
+                )
+
+        assert resp.status == 202
+        await asyncio.wait_for(called.wait(), timeout=2)
+        assert captured["user_message"] == "final prompt"
+        preserved = captured["conversation_history"][0]
+        assert preserved["content"] == "Thinking out loud"
+        assert preserved["reasoning_content"] == "hidden reasoning"
+        assert preserved["codex_reasoning_items"] == [{"id": "r1"}]
+        assert preserved["tool_calls"] == [{"id": "call_1", "type": "function"}]
+        assert preserved["finish_reason"] == "tool_calls"
