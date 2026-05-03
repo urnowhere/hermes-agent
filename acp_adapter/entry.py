@@ -112,14 +112,14 @@ def main() -> None:
     import acp
     from .server import HermesACPAgent
 
-    # MCP tool discovery from config.yaml — run before asyncio.run() so
-    # it's safe to use blocking waits.  (ACP also registers per-session
-    # MCP servers dynamically via asyncio.to_thread inside the event
-    # loop; that path is unaffected.)  Moved from model_tools.py module
-    # scope to avoid freezing the gateway's loop on lazy import (#16856).
+    # MCP tool discovery — fire-and-forget so it doesn't block ACP
+    # startup.  (ACP also registers per-session MCP servers dynamically
+    # via asyncio.to_thread inside the event loop; that path is
+    # unaffected.)  Moved from model_tools.py module scope to avoid
+    # freezing the gateway's loop on lazy import (#16856).
     try:
-        from tools.mcp_tool import discover_mcp_tools
-        discover_mcp_tools()
+        from tools.mcp_tool import discover_mcp_tools_async
+        discover_mcp_tools_async()
     except Exception:
         logger.debug("MCP tool discovery failed at ACP startup", exc_info=True)
 

@@ -10781,13 +10781,13 @@ Examples:
                 exc_info=True,
             )
         try:
-            # MCP tool discovery — no event loop running in CLI/TUI startup,
-            # so inline is safe.  Moved here from model_tools.py module scope
-            # to avoid freezing the gateway's event loop on its first message
-            # via the same lazy import path (#16856).
-            from tools.mcp_tool import discover_mcp_tools
-
-            discover_mcp_tools()
+            # MCP tool discovery — fire-and-forget so slow/unreachable
+            # servers don't block CLI responsiveness at startup.
+            # Tools register as servers become ready; the "server not
+            # connected" handler gives the model clear guidance if a
+            # tool isn't available yet.
+            from tools.mcp_tool import discover_mcp_tools_async
+            discover_mcp_tools_async()
         except Exception:
             logger.debug(
                 "MCP tool discovery failed at CLI startup",

@@ -1316,6 +1316,59 @@ class MCPServerTask:
                 "this warning.",
                 self.name,
             )
+
+        # Optional pre-connect hook — e.g. docker pull for container-based
+        # servers.  Runs before each transport connect cycle so image pulls
+        # stay fresh; idempotent hooks (cached image pull) are near-instant.
+        pre_connect = config.get("pre_connect")
+        if pre_connect:
+            if not isinstance(pre_connect, str):
+                logger.warning(
+                    "MCP server '%s': pre_connect is not a string (type=%s), skipping",
+                    self.name, type(pre_connect).__name__,
+                )
+            else:
+                logger.info(
+                    "MCP server '%s': running pre_connect: %s",
+                    self.name, pre_connect[:120],
+                )
+                pre_connect_timeout = config.get(
+                    "connect_timeout", _DEFAULT_CONNECT_TIMEOUT
+                )
+                try:
+                    proc = await asyncio.create_subprocess_shell(
+                        pre_connect,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    stdout, stderr = await asyncio.wait_for(
+                        proc.communicate(),
+                        timeout=pre_connect_timeout,
+                    )
+                    if proc.returncode != 0:
+                        logger.warning(
+                            "MCP server '%s': pre_connect failed (exit %d): %s",
+                            self.name, proc.returncode,
+                            (stderr or stdout or b"").decode(
+                                errors="replace",
+                            )[:200],
+                        )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "MCP server '%s': pre_connect timed out after %ds",
+                        self.name, pre_connect_timeout,
+                    )
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                except Exception as exc:
+                    logger.warning(
+                        "MCP server '%s': pre_connect raised: %s",
+                        self.name, exc,
+                    )
+                # pre_connect failure is non-fatal — proceed with connect
+
         retries = 0
         initial_retries = 0
         backoff = 1.0
@@ -1812,7 +1865,9 @@ def _handle_session_expired_and_retry(
 # Dedicated event loop running in a background daemon thread.
 _mcp_loop: Optional[asyncio.AbstractEventLoop] = None
 _mcp_thread: Optional[threading.Thread] = None
-
+# Holds Futures from discover_mcp_tools_async() to prevent GC of
+# in-flight background discovery coroutines.
+_pending_async_discoveries: list = []
 # Protects _mcp_loop, _mcp_thread, _servers, and _stdio_pids.
 _lock = threading.Lock()
 
@@ -2946,6 +3001,78 @@ def discover_mcp_tools() -> List[str]:
         logger.info(summary)
 
     return tool_names
+
+
+def discover_mcp_tools_async() -> None:
+    """Start MCP tool discovery in the background. Returns immediately.
+
+    Schedules server connection on the MCP background event loop via
+    ``asyncio.run_coroutine_threadsafe``.  Servers register their tools
+    when they become ready — callers do not need to wait.
+
+    Idempotent for already-connected servers.  Safe to call when the
+    ``mcp`` package is not installed (no-op).
+
+    Use this during startup when blocking on MCP would delay gateway
+    readiness (``gateway/run.py``) or CLI responsiveness
+    (``hermes_cli/main.py``).  Tools that are called before their server
+    is ready return a clear "server not connected" error.
+    """
+    if not _MCP_AVAILABLE:
+        logger.debug("MCP SDK not available -- skipping async MCP discovery")
+        return
+
+    servers = _load_mcp_config()
+    if not servers:
+        logger.debug("No MCP servers configured -- skipping async MCP discovery")
+        return
+
+    with _lock:
+        new_servers = {
+            k: v
+            for k, v in servers.items()
+            if k not in _servers and _parse_boolish(v.get("enabled", True), default=True)
+        }
+
+    if not new_servers:
+        return
+
+    _ensure_mcp_loop()
+
+    async def _discover_one(name: str, cfg: dict) -> List[str]:
+        return await _discover_and_register_server(name, cfg)
+
+    async def _discover_all():
+        server_names = list(new_servers.keys())
+        results = await asyncio.gather(
+            *(_discover_one(name, cfg) for name, cfg in new_servers.items()),
+            return_exceptions=True,
+        )
+        for name, result in zip(server_names, results):
+            if isinstance(result, Exception):
+                command = new_servers.get(name, {}).get("command")
+                logger.warning(
+                    "Failed to connect to MCP server '%s'%s: %s",
+                    name,
+                    f" (command={command})" if command else "",
+                    _format_connect_error(result),
+                )
+
+    # _ensure_mcp_loop() starts a daemon thread.  The thread may not
+    # have entered run_forever() yet, but the loop object is stored
+    # and the coroutine will execute as soon as the thread starts.
+    with _lock:
+        loop = _mcp_loop
+    if loop is None:
+        logger.error("MCP event loop not running -- async discovery abandoned")
+        return
+
+    # Store the Future so unexpected exceptions in _discover_all() are
+    # reported through the loop's exception handler instead of silently
+    # dropped.
+    future = asyncio.run_coroutine_threadsafe(_discover_all(), loop)
+    # Keep a reference to prevent GC of the coroutine before it runs.
+    _pending_async_discoveries.append(future)
 
 
 def get_mcp_status() -> List[dict]:

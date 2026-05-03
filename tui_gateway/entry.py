@@ -195,8 +195,8 @@ def main():
         _has_mcp_servers = True
     if _has_mcp_servers:
         try:
-            from tools.mcp_tool import discover_mcp_tools
-            discover_mcp_tools()
+            from tools.mcp_tool import discover_mcp_tools_async
+            discover_mcp_tools_async()
         except Exception:
             pass
 
