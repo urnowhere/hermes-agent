@@ -2753,11 +2753,11 @@ class GatewayRunner:
                 pass
         else:
             try:
-                suspended = self.session_store.suspend_recently_active()
-                if suspended:
-                    logger.info("Suspended %d in-flight session(s) from previous run", suspended)
+                resumed = self.session_store.suspend_recently_active()
+                if resumed:
+                    logger.info("Marked %d in-flight session(s) as resume-pending from previous run", resumed)
             except Exception as e:
-                logger.warning("Session suspension on startup failed: %s", e)
+                logger.warning("Session resume-pending marking failed: %s", e)
 
         # Stuck-loop detection (#7536): if a session has been active across
         # 3+ consecutive restarts, it's probably stuck in a loop (the same
@@ -6489,7 +6489,7 @@ class GatewayRunner:
 
             # Auto voice reply: send TTS audio before the text response
             _already_sent = bool(agent_result.get("already_sent"))
-            if self._should_send_voice_reply(event, response, agent_messages, already_sent=_already_sent):
+            if self._should_send_voice_reply(event, response, agent_messages, already_sent=_already_sent, history_offset=agent_result.get("history_offset", len(agent_messages))):
                 await self._send_voice_reply(event, response)
 
             # If streaming already delivered the response, extract and
@@ -8218,6 +8218,7 @@ class GatewayRunner:
         response: str,
         agent_messages: list,
         already_sent: bool = False,
+        history_offset: int = 0,
     ) -> bool:
         """Decide whether the runner should send a TTS voice reply.
 
@@ -8244,14 +8245,15 @@ class GatewayRunner:
         if not should:
             return False
 
-        # Dedup: agent already called TTS tool
+        # Dedup: agent already called TTS tool (current turn only, not full history)
+        current_turn_messages = agent_messages[history_offset:] if history_offset else agent_messages
         has_agent_tts = any(
             msg.get("role") == "assistant"
             and any(
                 tc.get("function", {}).get("name") == "text_to_speech"
                 for tc in (msg.get("tool_calls") or [])
             )
-            for msg in agent_messages
+            for msg in current_turn_messages
         )
         if has_agent_tts:
             return False
