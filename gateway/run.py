@@ -864,6 +864,49 @@ def _resolve_gateway_model(config: dict | None = None) -> str:
     return ""
 
 
+def _coerce_positive_int(value: Any) -> Optional[int]:
+    """Return a positive int for config/env values, otherwise None."""
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _resolve_gateway_max_iterations(config: dict | None = None, default: int = 90) -> int:
+    """Resolve gateway agent max iterations from config before legacy env.
+
+    ``agent.max_turns`` in config.yaml is the current source of truth.  Older
+    deployments may still have ``HERMES_MAX_ITERATIONS`` in .env; keep that as
+    a fallback only so a stale env value cannot silently override config.yaml
+    after the long-lived gateway reloads .env between messages.
+    """
+    cfg = config if config is not None else _load_gateway_config()
+    candidates: list[Any] = []
+    if isinstance(cfg, dict):
+        agent_cfg = cfg.get("agent") or {}
+        if isinstance(agent_cfg, dict):
+            candidates.extend([
+                agent_cfg.get("max_turns"),
+                agent_cfg.get("max_iterations"),
+            ])
+        candidates.extend([
+            cfg.get("max_turns"),
+            cfg.get("max_iterations"),
+        ])
+    candidates.append(os.getenv("HERMES_MAX_ITERATIONS"))
+
+    for candidate in candidates:
+        value = _coerce_positive_int(candidate)
+        if value is not None:
+            return value
+    return default
+
+
 def _resolve_hermes_bin() -> Optional[list[str]]:
     """Resolve the Hermes update command as argv parts.
 
@@ -8656,7 +8699,7 @@ class GatewayRunner:
             disabled_toolsets = agent_cfg.get("disabled_toolsets") or None
 
             pr = self._provider_routing
-            max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
+            max_iterations = _resolve_gateway_max_iterations(user_config)
             reasoning_config = self._resolve_session_reasoning_config(source=source)
             self._reasoning_config = reasoning_config
             self._service_tier = self._load_service_tier()
@@ -12381,9 +12424,6 @@ class GatewayRunner:
             # session_key is now set via contextvars in _set_session_env()
             # (concurrency-safe). Keep os.environ as fallback for CLI/cron.
             os.environ["HERMES_SESSION_KEY"] = session_key or ""
-
-            # Read from env var or use default (same as CLI)
-            max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
             
             # Map platform enum to the platform hint key the agent understands.
             # Platform.LOCAL ("local") maps to "cli"; others pass through as-is.
@@ -12406,6 +12446,8 @@ class GatewayRunner:
                 load_dotenv(_env_path, override=True, encoding="latin-1")
             except Exception:
                 pass
+
+            max_iterations = _resolve_gateway_max_iterations(user_config)
 
             try:
                 model, runtime_kwargs = self._resolve_session_agent_runtime(
