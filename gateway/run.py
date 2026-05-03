@@ -3058,6 +3058,11 @@ class GatewayRunner:
         # simply don't use kanban; this loop becomes a no-op.
         asyncio.create_task(self._kanban_dispatcher_watcher())
 
+        # Start background kanban flow watcher — propagates notify subscriptions
+        # to child tasks when parents complete, and sends "flow complete"
+        # notifications when an entire task graph finishes (e.g. QA approved).
+        asyncio.create_task(self._kanban_flow_watcher())
+
         # Start background reconnection watcher for platforms that failed at startup
         if self._failed_platforms:
             logger.info(
@@ -3587,13 +3592,14 @@ class GatewayRunner:
                     # happened, so an idle gateway stays silent.
                     logger.info(
                         "kanban dispatcher: tick spawned=%d reclaimed=%d "
-                        "crashed=%d timed_out=%d promoted=%d auto_blocked=%d",
+                        "crashed=%d timed_out=%d promoted=%d auto_blocked=%d auto_unblocked=%d",
                         len(res.spawned),
                         res.reclaimed,
                         len(res.crashed) if hasattr(res.crashed, "__len__") else 0,
                         len(res.timed_out) if hasattr(res.timed_out, "__len__") else 0,
                         res.promoted,
                         len(res.auto_blocked) if hasattr(res.auto_blocked, "__len__") else 0,
+                        res.auto_unblocked,
                     )
                 # Health telemetry
                 ready_pending = await asyncio.to_thread(_ready_nonempty)
@@ -3625,6 +3631,131 @@ class GatewayRunner:
             while slept < interval and self._running:
                 await asyncio.sleep(min(1.0, interval - slept))
                 slept += 1.0
+
+    async def _kanban_flow_watcher(self, interval: float = 10.0) -> None:
+        """Watch for completed task graphs and propagate notify subscriptions.
+
+        Two jobs:
+        1. **Auto-subscribe children:** When a parent task has notify subscribers
+           and completes, propagate those subscriptions to its children so the
+           original requester gets updates from the whole flow.
+        2. **Flow-complete notification:** When a task completes and has no
+           pending children (todo/ready/running/blocked), send a "flow complete"
+           message to subscribers — the whole project is done (e.g. QA approved).
+
+        Runs every `interval` seconds (default 10s).
+        """
+        try:
+            from hermes_cli import kanban_db as _kb
+        except Exception:
+            logger.warning("kanban flow watcher: kanban_db not importable; disabled")
+            return
+
+        await asyncio.sleep(8)  # initial delay after gateway boot
+
+        # Track which task_ids we already sent flow-complete for
+        _flow_complete_sent: set[str] = set()
+
+        while self._running:
+            try:
+                def _tick():
+                    conn = _kb.connect()
+                    try:
+                        _kb.init_db()
+                    except Exception:
+                        pass
+                    try:
+                        # 1. Propagate subscriptions from completed parents to children
+                        subs = _kb.list_notify_subs(conn)
+                        for sub in subs:
+                            task_id = sub["task_id"]
+                            task = _kb.get_task(conn, task_id)
+                            if not task or task.status != "done":
+                                continue
+                            # Find children of this completed task
+                            children = conn.execute(
+                                "SELECT child_id FROM task_links WHERE parent_id = ?",
+                                (task_id,),
+                            ).fetchall()
+                            for child_row in children:
+                                child_id = child_row["child_id"]
+                                # Subscribe the same platform/chat/thread to the child
+                                _kb.add_notify_sub(
+                                    conn, task_id=child_id,
+                                    platform=sub["platform"], chat_id=sub["chat_id"],
+                                    thread_id=sub.get("thread_id") or "",
+                                    user_id=sub.get("user_id"),
+                                )
+
+                        # 2. Detect flow-complete: done tasks with no pending children
+                        done_tasks = conn.execute(
+                            "SELECT id, title, assignee FROM tasks WHERE status = 'done'"
+                        ).fetchall()
+                        flow_completes = []
+                        for t in done_tasks:
+                            if t["id"] in _flow_complete_sent:
+                                continue
+                            # Check if this task has children that are NOT done/archived
+                            pending_children = conn.execute(
+                                "SELECT t.id FROM tasks t "
+                                "JOIN task_links l ON l.child_id = t.id "
+                                "WHERE l.parent_id = ? AND t.status NOT IN ('done', 'archived')",
+                                (t["id"],),
+                            ).fetchall()
+                            if not pending_children:
+                                # This task is a leaf or all children are done → flow complete
+                                subs_for_task = _kb.list_notify_subs(conn, t["id"])
+                                if subs_for_task:
+                                    flow_completes.append({
+                                        "task": dict(t),
+                                        "subs": subs_for_task,
+                                    })
+                                    _flow_complete_sent.add(t["id"])
+                        return flow_completes
+                    finally:
+                        conn.close()
+
+                flow_completes = await asyncio.to_thread(_tick)
+
+                # Deliver flow-complete notifications
+                for fc in flow_completes:
+                    task = fc["task"]
+                    title = (task.get("title") or task["id"])[:120]
+                    assignee = task.get("assignee") or ""
+                    tag = f"@{assignee} " if assignee else ""
+                    msg = (
+                        f"✅ {tag}Fluxo completo: {task['id']} — {title}\n"
+                        f"Todas as tarefas dependentes foram concluídas."
+                    )
+                    for sub in fc["subs"]:
+                        platform_str = (sub["platform"] or "").lower()
+                        try:
+                            from gateway.config import Platform as _Platform
+                            plat = _Platform(platform_str)
+                        except (ValueError, ImportError):
+                            continue
+                        adapter = self.adapters.get(plat)
+                        if adapter is None:
+                            continue
+                        metadata: dict[str, Any] = {}
+                        if sub.get("thread_id"):
+                            metadata["thread_id"] = sub["thread_id"]
+                        try:
+                            await adapter.send(sub["chat_id"], msg, metadata=metadata)
+                        except Exception as exc:
+                            logger.warning(
+                                "kanban flow watcher: send failed for %s on %s: %s",
+                                task["id"], platform_str, exc,
+                            )
+
+            except Exception as exc:
+                logger.warning("kanban flow watcher tick failed: %s", exc)
+
+            # Sleep with cancellation checks
+            for _ in range(int(max(1, interval))):
+                if not self._running:
+                    return
+                await asyncio.sleep(1)
 
     async def _platform_reconnect_watcher(self) -> None:
         """Background task that periodically retries connecting failed platforms.

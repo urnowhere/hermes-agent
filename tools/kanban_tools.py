@@ -41,12 +41,27 @@ logger = logging.getLogger(__name__)
 
 def _check_kanban_mode() -> bool:
     """Tools are available iff the current process has ``HERMES_KANBAN_TASK``
-    set in its env, which the dispatcher sets when spawning a worker.
+    set in its env, which the dispatcher sets when spawning a worker, OR
+    the active profile has the ``kanban`` toolset enabled in config.yaml.
 
-    Humans running ``hermes chat`` see zero kanban tools. Workers spawned
-    by the kanban dispatcher (gateway-embedded by default) see all seven.
+    This allows orchestrator profiles (like techlead) that receive messages
+    via the gateway (no HERMES_KANBAN_TASK env var) to still see and use
+    kanban tools.
     """
-    return bool(os.environ.get("HERMES_KANBAN_TASK"))
+    if os.environ.get("HERMES_KANBAN_TASK"):
+        return True
+
+    # Check if the current profile has the kanban toolset enabled.
+    # Uses load_config() which has mtime-based caching, so this adds
+    # negligible overhead. The check_fn results are further TTL-cached
+    # (~30s) by the tool registry.
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        toolsets = cfg.get("toolsets", [])
+        return "kanban" in toolsets
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------

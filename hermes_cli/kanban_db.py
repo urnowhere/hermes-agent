@@ -1176,6 +1176,61 @@ def recompute_ready(conn: sqlite3.Connection) -> int:
     return promoted
 
 
+def recompute_blocked(conn: sqlite3.Connection) -> int:
+    """Unblock ``blocked`` tasks when all parents are ``done``.
+
+    When a fix task (parent) completes, the QA task (child) that was
+    blocked waiting for it should automatically transition back to
+    ``ready`` so the dispatcher can re-run QA.
+
+    Returns the number of tasks unblocked.
+    """
+    unblocked = 0
+    with write_txn(conn):
+        blocked_rows = conn.execute(
+            "SELECT id FROM tasks WHERE status = 'blocked'"
+        ).fetchall()
+        for row in blocked_rows:
+            task_id = row["id"]
+            parents = conn.execute(
+                "SELECT t.status FROM tasks t "
+                "JOIN task_links l ON l.parent_id = t.id "
+                "WHERE l.child_id = ?",
+                (task_id,),
+            ).fetchall()
+            # Only unblock if there ARE parents and ALL are done.
+            # If a blocked task has no parents, skip it — it was
+            # blocked for a different reason (e.g. human input needed).
+            if parents and all(p["status"] == "done" for p in parents):
+                # Reuse unblock_task logic inline to avoid nested txn issues
+                now = int(time.time())
+                stale = conn.execute(
+                    "SELECT current_run_id FROM tasks WHERE id = ? AND status = 'blocked'",
+                    (task_id,),
+                ).fetchone()
+                if stale and stale["current_run_id"]:
+                    conn.execute(
+                        """
+                        UPDATE task_runs
+                           SET status = 'reclaimed', outcome = 'reclaimed',
+                               summary = 'auto-unblocked: all parents done',
+                               ended_at = ?,
+                               claim_lock = NULL, claim_expires = NULL, worker_pid = NULL
+                         WHERE id = ? AND ended_at IS NULL
+                        """,
+                        (now, int(stale["current_run_id"])),
+                    )
+                conn.execute(
+                    "UPDATE tasks SET status = 'ready', current_run_id = NULL "
+                    "WHERE id = ? AND status = 'blocked'",
+                    (task_id,),
+                )
+                _append_event(conn, task_id, "auto_unblocked",
+                              {"reason": "all parents completed"})
+                unblocked += 1
+    return unblocked
+
+
 # ---------------------------------------------------------------------------
 # Claim / complete / block
 # ---------------------------------------------------------------------------
@@ -1406,6 +1461,8 @@ def complete_task(
         )
     # Recompute ready status for dependents (separate txn so children see done).
     recompute_ready(conn)
+    # Auto-unblock blocked tasks whose parents are now all done.
+    recompute_blocked(conn)
     return True
 
 
@@ -1614,6 +1671,8 @@ class DispatchResult:
     """Task ids auto-blocked by the spawn-failure circuit breaker."""
     timed_out: list[str] = field(default_factory=list)
     """Task ids whose workers exceeded ``max_runtime_seconds``."""
+    auto_unblocked: int = 0
+    """Number of blocked tasks auto-unblocked because all parents completed."""
 
 
 def _pid_alive(pid: Optional[int]) -> bool:
@@ -1980,6 +2039,8 @@ def dispatch_once(
     result.crashed = detect_crashed_workers(conn)
     result.timed_out = enforce_max_runtime(conn)
     result.promoted = recompute_ready(conn)
+    # Auto-unblock blocked tasks whose parents are now all done (e.g. fix task completed → QA re-runs)
+    result.auto_unblocked = recompute_blocked(conn)
 
     ready_rows = conn.execute(
         "SELECT id, assignee FROM tasks "
