@@ -58,8 +58,7 @@ except ImportError:
 
 from acp_adapter.auth import detect_provider
 from acp_adapter.events import (
-    make_buffered_cb,
-    make_buffered_thinking_cb,
+    make_streaming_cbs,
     make_step_cb,
     make_tool_progress_cb,
 )
@@ -758,15 +757,15 @@ class HermesACPAgent(acp.Agent):
 
         if conn:
             tool_progress_cb = make_tool_progress_cb(conn, session_id, loop, tool_call_ids, tool_call_meta)
-            thinking_cb = make_buffered_thinking_cb(conn, session_id, loop)
+            thinking_cb, message_cb, message_flush = make_streaming_cbs(conn, session_id, loop)
             step_cb = make_step_cb(conn, session_id, loop, tool_call_ids, tool_call_meta)
-            message_cb, message_flush = make_buffered_cb(conn, session_id, loop)
             approval_cb = make_approval_callback(conn.request_permission, loop, session_id)
         else:
             tool_progress_cb = None
             thinking_cb = None
             step_cb = None
             message_cb = None
+            message_flush = None
             approval_cb = None
 
         agent = state.agent

@@ -178,89 +178,81 @@ def make_step_cb(
 # Agent message callback
 # ------------------------------------------------------------------
 
-def make_buffered_cb(
+def make_streaming_cbs(
     conn: acp.Client,
     session_id: str,
     loop: asyncio.AbstractEventLoop,
-    flush_ms: int = 500,
-) -> tuple[Callable, Callable]:
-    """Create a streaming callback that buffers text and flushes every flush_ms.
+    batch_ms: int = 500,
+) -> tuple[Callable, Callable, Callable]:
+    """Create streaming callbacks with a shared ordered queue.
 
-    Returns (push_fn, flush_fn). Call flush() before end_turn to drain the buffer.
+    Thinking and text chunks arrive in model-defined order. We batch them
+    together every batch_ms, preserving the original sequence. Returns
+    (thinking_cb, message_cb, flush_fn).
     """
-    import threading
+    import threading, time
+    import asyncio
 
-    buf: list[str] = []
-    lock = threading.Lock()
-    timer: threading.Event | None = None
+    # (type, text, timestamp) — type: "think" or "text"
+    queue: list[tuple[str, str, float]] = []
+    queue_lock = threading.Lock()
+    timer: threading.Timer | None = None
 
     def _flush() -> None:
         nonlocal timer
-        with lock:
-            text = "".join(buf)
-            buf.clear()
+        with queue_lock:
+            if not queue:
+                timer = None
+                return
+            # Take all pending, preserve order
+            batch = queue[:]
+            queue.clear()
             timer = None
-        if text:
-            update = acp.update_agent_message_text(text)
+        # Build and send all events in order
+        for kind, text, _ts in batch:
+            if kind == "think":
+                update = acp.update_agent_thought_text(text)
+            else:
+                update = acp.update_agent_message_text(text)
             _send_update(conn, session_id, loop, update)
 
-    async def _flush_async() -> None:
-        """同步版 flush — await 确保发出后才返回"""
+    def _start_timer() -> None:
         nonlocal timer
-        with lock:
-            text = "".join(buf)
-            buf.clear()
-            timer = None
-        if text and conn:
-            update = acp.update_agent_message_text(text)
+        if timer is not None:
+            return
+        timer = threading.Timer(batch_ms / 1000.0, _flush)
+        timer.daemon = True
+        timer.start()
+
+    def _enqueue(kind: str, text: str) -> None:
+        if not text:
+            return
+        with queue_lock:
+            queue.append((kind, text, time.monotonic()))
+            _start_timer()
+
+    def thinking_cb(text: str) -> None:
+        _enqueue("think", text)
+
+    def message_cb(text: str) -> None:
+        _enqueue("text", text)
+
+    async def flush_fn() -> None:
+        nonlocal timer
+        with queue_lock:
+            if timer:
+                timer.cancel()
+                timer = None
+            if not queue:
+                return
+            batch = queue[:]
+            queue.clear()
+        # Send directly (no _send_update here — we're in async, await for ordering)
+        for kind, text, _ts in batch:
+            if kind == "think":
+                update = acp.update_agent_thought_text(text)
+            else:
+                update = acp.update_agent_message_text(text)
             await conn.session_update(session_id, update)
 
-    def _push(text: str) -> None:
-        if not text:
-            return
-        nonlocal timer
-        with lock:
-            buf.append(text)
-            if timer is None:
-                timer = threading.Timer(flush_ms / 1000.0, _flush)
-                timer.daemon = True
-                timer.start()
-
-    return _push, _flush_async
-
-
-def make_buffered_thinking_cb(
-    conn: acp.Client,
-    session_id: str,
-    loop: asyncio.AbstractEventLoop,
-    flush_ms: int = 500,
-) -> Callable:
-    """Buffered thinking callback — same batching as message callback."""
-    import threading
-
-    buf: list[str] = []
-    lock = threading.Lock()
-    timer: threading.Event | None = None
-
-    def _flush() -> None:
-        nonlocal timer
-        with lock:
-            text = "".join(buf)
-            buf.clear()
-            timer = None
-        if text:
-            update = acp.update_agent_thought_text(text)
-            _send_update(conn, session_id, loop, update)
-
-    def _push(text: str) -> None:
-        if not text:
-            return
-        nonlocal timer
-        with lock:
-            buf.append(text)
-            if timer is None:
-                timer = threading.Timer(flush_ms / 1000.0, _flush)
-                timer.daemon = True
-                timer.start()
-
-    return _push
+    return thinking_cb, message_cb, flush_fn
