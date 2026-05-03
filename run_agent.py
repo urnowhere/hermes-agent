@@ -10353,6 +10353,100 @@ class AIAgent:
 
         return final_response
 
+    # ── Automated verification helpers ────────────────────────────────────────
+
+    def _call_llm_simple(self, system_prompt: str, user_prompt: str) -> str:
+        """Make a no-tools LLM call using the primary OpenAI client.
+        Returns just the text, or '' on failure."""
+        try:
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": user_prompt})
+            client = self._ensure_primary_openai_client(reason="external_verify")
+            kwargs = {"model": self.model, "messages": messages}
+            if self.max_tokens is not None:
+                kwargs.update(self._max_tokens_param(self.max_tokens))
+            response = client.chat.completions.create(**kwargs)
+            transport = self._get_transport()
+            if transport is None:
+                logger.error("[VERIFY] _call_llm_simple: no transport for api_mode=%s", self.api_mode)
+                return ""
+            result = transport.normalize_response(response)
+            content = (result.content or "").strip()
+            if " thinking" in content:
+                content = re.sub(r' thinking.*? response\s*', '', content, flags=re.DOTALL).strip()
+            return content
+        except Exception as exc:
+            logger.error("[VERIFY] _call_llm_simple failed: %s", exc)
+            return ""
+
+    def _verify_response(self, original_request: str, response: str) -> tuple:
+        """Verify a text response against the original request.
+        Returns (passed: bool, feedback: str).  Silent passthrough on errors."""
+        if not response or not response.strip() or response == "(empty)":
+            return True, ""
+        try:
+            sys_p = (
+                "You are a strict but fair quality verifier. "
+                "You only see the final output, never the process."
+            )
+            usr_p = (
+                "You are a strict quality verifier. Review the response below against "
+                "the original request.\n\n"
+                "ORIGINAL REQUEST:\n" + original_request + "\n\n"
+                "RESPONSE TO VERIFY:\n" + response + "\n\n"
+                "=== INSTRUCTION ===\n"
+                "Does the response fully satisfy the original request? Check:\n"
+                "1. All key requirements are addressed\n"
+                "2. No factual errors or contradictions\n"
+                "3. The response is clear, complete, and well-structured\n"
+                "4. No missing important details\n\n"
+                "Begin your analysis with 'ANALYSIS:', then on the VERY LAST LINE "
+                "output exactly:\n"
+                "VERDICT: PASSED\n"
+                "  or\n"
+                "VERDICT: FAILED - <specific reason>"
+            )
+            result = self._call_llm_simple(sys_p, usr_p)
+            if not result:
+                return True, ""
+            for line in reversed(result.split('\n')):
+                line = line.strip()
+                if line.upper().startswith("VERDICT:"):
+                    verdict = line[8:].strip().upper()
+                    if verdict.startswith("PASSED"):
+                        return True, ""
+                    reason = line[8:].strip()
+                    if reason.upper().startswith("FAILED"):
+                        reason = reason[6:].strip().lstrip("-").strip()
+                    return False, reason or "Verification failed"
+            return True, ""
+        except Exception as exc:
+            logger.error("[VERIFY] _verify_response failed: %s", exc)
+            return True, ""
+
+    def _refine_response(self, original_request: str, current_response: str,
+                         feedback: str) -> str:
+        """Improve a response based on verifier feedback."""
+        try:
+            sys_p = "You are an assistant that improves responses based on feedback."
+            usr_p = (
+                "ORIGINAL REQUEST:\n" + original_request + "\n\n"
+                "CURRENT RESPONSE:\n" + current_response + "\n\n"
+                "VERIFIER FEEDBACK:\n" + feedback + "\n\n"
+                "=== INSTRUCTION ===\n"
+                "Improve the current response to address ALL feedback points. "
+                "Return ONLY the improved response, with no preamble or explanation."
+            )
+            new = self._call_llm_simple(sys_p, usr_p)
+            if new and new != current_response:
+                return new
+            return current_response
+        except Exception as exc:
+            logger.error("[VERIFY] _refine_response failed: %s", exc)
+            return current_response
+
     def run_conversation(
         self,
         user_message: str,
@@ -13680,7 +13774,55 @@ class AIAgent:
                     "— requesting summary..."
                 )
             final_response = self._handle_max_iterations(messages, api_call_count)
-        
+
+        # ── Automated verification loop ────────────────────────────────────────
+        # Run after the agent produces a final response.  The verifier only sees
+        # the original request + final response (never the intermediate steps).
+        # Silent: no output shown to the user unless something goes wrong.
+        # NOTE: quiet_mode=True suppresses INFO/WARNING from 'run_agent' logger
+        # (see __init__), so verification status must be logged at ERROR to be
+        # visible in agent.log during gateway operation.
+        MAX_VERIFICATION_ROUNDS = 5
+        _is_text_request = isinstance(original_user_message, str)
+        if final_response and not interrupted and _is_text_request:
+            logger.error(
+                "[VERIFY] Starting verification loop (rounds=%d, response_len=%d, model=%s)",
+                MAX_VERIFICATION_ROUNDS, len(final_response), self.model,
+            )
+            _verify_round = 0
+            while _verify_round < MAX_VERIFICATION_ROUNDS:
+                passed, feedback = self._verify_response(original_user_message, final_response)
+                if passed:
+                    logger.error(
+                        "[VERIFY] Passed round %d/%d (response len=%d)",
+                        _verify_round + 1, MAX_VERIFICATION_ROUNDS, len(final_response),
+                    )
+                    break
+                if not feedback:
+                    logger.error("[VERIFY] No feedback — passing through")
+                    break
+                _verify_round += 1
+                logger.error(
+                    "[VERIFY] Failed round %d/%d: %s",
+                    _verify_round, MAX_VERIFICATION_ROUNDS, feedback[:200],
+                )
+                new_response = self._refine_response(original_user_message, final_response, feedback)
+                if new_response == final_response:
+                    logger.error("[VERIFY] Refine produced identical output — stopping")
+                    break
+                final_response = new_response
+                # Update the assistant message in history so later turns see the refined version.
+                for _i in range(len(messages) - 1, -1, -1):
+                    if isinstance(messages[_i], dict) and messages[_i].get("role") == "assistant":
+                        messages[_i]["content"] = final_response
+                        break
+            else:
+                # Exhausted all rounds.
+                logger.error(
+                    "[VERIFY] Exhausted after %d rounds — returning best attempt (len=%d)",
+                    MAX_VERIFICATION_ROUNDS, len(final_response),
+                )
+
         # Determine if conversation completed successfully
         completed = final_response is not None and api_call_count < self.max_iterations
 

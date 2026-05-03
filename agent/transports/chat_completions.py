@@ -380,13 +380,20 @@ class ChatCompletionsTransport(ProviderTransport):
             options["num_ctx"] = ollama_ctx
             extra_body["options"] = options
 
-        # Ollama/custom think=false
+        # Ollama/custom: think=false or DeepSeek-style chat_template_kwargs
         if params.get("is_custom_provider", False):
             if reasoning_config and isinstance(reasoning_config, dict):
                 _effort = (reasoning_config.get("effort") or "").strip().lower()
                 _enabled = reasoning_config.get("enabled", True)
                 if _effort == "none" or _enabled is False:
                     extra_body["think"] = False
+                elif "deepseek" in model_lower:
+                    # DeepSeek custom provider: use chat_template_kwargs for thinking
+                    _ds_effort = "max" if _effort == "xhigh" else _effort
+                    extra_body["chat_template_kwargs"] = {
+                        "thinking": True,
+                        "reasoning_effort": _ds_effort,
+                    }
 
         if is_qwen:
             extra_body["vl_high_resolution_images"] = True
@@ -414,6 +421,8 @@ class ChatCompletionsTransport(ProviderTransport):
             extra_body.update(additions)
 
         if extra_body:
+            import logging as _log
+            _log.getLogger("hermes.transport").debug("extra_body: %s", extra_body)
             api_kwargs["extra_body"] = extra_body
 
         # Request overrides last (service_tier etc.)

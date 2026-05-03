@@ -56,6 +56,8 @@ _HERMES_CORE_TOOLS = [
     "execute_code", "delegate_task",
     # Cronjob management
     "cronjob",
+    # Car scraper (懂车帝/瓜子 L90 monitoring)
+    "dongchedi_watch",
     # Cross-platform messaging (gated on gateway running via check_fn)
     "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
@@ -491,6 +493,12 @@ TOOLSETS = {
     "hermes-webhook": {
         "description": "Webhook toolset - receive and process external webhook events",
         "tools": _HERMES_CORE_TOOLS,
+        "includes": []
+    },
+
+    "car-scraper": {
+        "description": "Car listing scraper - monitor 懂车帝/瓜子 EV listings with change detection",
+        "tools": ["dongchedi_watch"],
         "includes": []
     },
 

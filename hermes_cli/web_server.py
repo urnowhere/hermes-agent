@@ -4045,5 +4045,67 @@ def start_server(
 
         threading.Thread(target=_open, daemon=True).start()
 
+    _restore_foreground_tty()
     print(f"  Hermes Web UI → http://{host}:{port}")
     uvicorn.run(app, host=host, port=port, log_level="warning")
+
+
+def _restore_foreground_tty() -> bool:
+    """Best-effort reset of a foreground TTY before running the dashboard.
+
+    ``hermes dashboard`` is a long-lived foreground command that relies on the
+    terminal generating SIGINT on ``Ctrl-C``. If a prior interactive Hermes
+    flow left the TTY in a non-canonical mode, ``Ctrl-C`` is read as a literal
+    character (rendered as ``^C``) and Enter appears as ``^M`` instead of
+    producing a newline.
+
+    Normalizing a small set of canonical input/echo flags here is safer than
+    relying on every earlier command path to have restored the terminal.
+    """
+    if not getattr(sys.stdin, "isatty", lambda: False)():
+        return False
+
+    try:
+        import termios
+        fd = sys.stdin.fileno()
+        attrs = termios.tcgetattr(fd)
+    except Exception:
+        return False
+
+    try:
+        iflag, oflag, cflag, lflag, ispeed, ospeed, cc = attrs
+
+        for name in ("BRKINT", "ICRNL", "IXON"):
+            flag = getattr(termios, name, None)
+            if flag is not None:
+                iflag |= flag
+        for name in ("IGNBRK", "IGNCR", "INLCR", "ISTRIP"):
+            flag = getattr(termios, name, None)
+            if flag is not None:
+                iflag &= ~flag
+
+        for name in ("OPOST", "ONLCR"):
+            flag = getattr(termios, name, None)
+            if flag is not None:
+                oflag |= flag
+
+        for name in ("ECHO", "ECHOE", "ECHOK", "ICANON", "IEXTEN", "ISIG"):
+            flag = getattr(termios, name, None)
+            if flag is not None:
+                lflag |= flag
+
+        vmin = getattr(termios, "VMIN", None)
+        vtime = getattr(termios, "VTIME", None)
+        if vmin is not None and isinstance(cc, list) and vmin < len(cc):
+            cc[vmin] = 1
+        if vtime is not None and isinstance(cc, list) and vtime < len(cc):
+            cc[vtime] = 0
+
+        termios.tcsetattr(
+            fd,
+            getattr(termios, "TCSANOW"),
+            [iflag, oflag, cflag, lflag, ispeed, ospeed, cc],
+        )
+        return True
+    except Exception:
+        return False
