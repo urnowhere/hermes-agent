@@ -10374,8 +10374,15 @@ class AIAgent:
                     final_response = "I reached the iteration limit and couldn't generate a summary."
 
         except Exception as e:
-            logging.warning(f"Failed to get summary response: {e}")
-            final_response = f"I reached the maximum iterations ({self.max_iterations}) but couldn't summarize. Error: {str(e)}"
+            logger.error(
+                "Failed to generate max-iterations summary: %s (api_calls=%d/%d, session=%s). "
+                "Model may have been interrupted mid-tool-call — check tool results for partial work.",
+                e, api_call_count, self.max_iterations, self.session_id or "none",
+            )
+            final_response = (
+                f"I reached the maximum iterations ({self.max_iterations}) "
+                f"but couldn'\''t generate a summary. Error: {e}"
+            )
 
         return final_response
 
