@@ -286,6 +286,35 @@ class TestCodeExpiry:
             result = store.approve_code("telegram", code)
         assert result is None
 
+    def test_list_pending_skips_entries_missing_created_at(self, tmp_path):
+        with patch("gateway.pairing.PAIRING_DIR", tmp_path):
+            store = PairingStore()
+            store._save_json(
+                store._pending_path("telegram"),
+                {"CODE1234": {"user_id": "user1", "user_name": "Alice"}},
+            )
+
+            remaining = store.list_pending("telegram")
+            pending = store._load_json(store._pending_path("telegram"))
+
+        assert remaining == []
+        assert pending == {}
+
+    def test_generate_code_cleans_up_entries_missing_created_at(self, tmp_path):
+        with patch("gateway.pairing.PAIRING_DIR", tmp_path):
+            store = PairingStore()
+            store._save_json(
+                store._pending_path("telegram"),
+                {"CODE1234": {"user_id": "user1", "user_name": "Alice"}},
+            )
+
+            code = store.generate_code("telegram", "user2", "Bob")
+            pending = store._load_json(store._pending_path("telegram"))
+
+        assert isinstance(code, str) and len(code) == CODE_LENGTH
+        assert list(pending.keys()) == [code]
+        assert pending[code]["user_id"] == "user2"
+
 
 # ---------------------------------------------------------------------------
 # Revoke

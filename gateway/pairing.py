@@ -286,13 +286,15 @@ class PairingStore:
     # ----- Cleanup -----
 
     def _cleanup_expired(self, platform: str) -> None:
-        """Remove expired pending codes."""
+        """Remove expired or malformed pending codes."""
         path = self._pending_path(platform)
         pending = self._load_json(path)
         now = time.time()
         expired = [
             code for code, info in pending.items()
-            if (now - info["created_at"]) > CODE_TTL_SECONDS
+            if not isinstance(info, dict)
+            or not isinstance(info.get("created_at"), (int, float))
+            or (now - info["created_at"]) > CODE_TTL_SECONDS
         ]
         if expired:
             for code in expired:
