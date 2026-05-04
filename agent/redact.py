@@ -328,6 +328,10 @@ def redact_sensitive_text(text: str, *, force: bool = False) -> str:
     # ENV assignments: OPENAI_API_KEY=sk-abc...
     def _redact_env(m):
         name, quote, value = m.group(1), m.group(2), m.group(3)
+        
+        if not quote and value.lower() in ("await", "new", "true", "false", "null", "undefined"):
+            return m.group(0)
+            
         return f"{name}={quote}{_mask_token(value)}{quote}"
     text = _ENV_ASSIGN_RE.sub(_redact_env, text)
 
