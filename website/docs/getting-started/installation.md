@@ -97,6 +97,8 @@ If you use Nix (on NixOS, macOS, or Linux), there's a dedicated setup path with 
 
 If you want to clone the repo and install from source — for contributing, running from a specific branch, or having full control over the virtual environment — see the [Development Setup](../developer-guide/contributing.md#development-setup) section in the Contributing guide.
 
+That setup uses `uv sync` with the checked-in `uv.lock`; you do not need to create or activate a virtual environment manually.
+
 ---
 
 ## Troubleshooting
