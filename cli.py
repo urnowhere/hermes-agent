@@ -459,26 +459,27 @@ def load_cli_config() -> Dict[str, Any]:
     if "backend" in terminal_config:
         terminal_config["env_type"] = terminal_config["backend"]
     
-    # Handle special cwd values: "." or "auto" means use current working directory.
-    # Only resolve to the host's CWD for the local backend where the host
-    # filesystem is directly accessible.  For ALL remote/container backends
-    # (ssh, docker, modal, singularity), the host path doesn't exist on the
-    # target -- remove the key so terminal_tool.py uses its per-backend default.
+    # Interactive CLI/TUI sessions use the directory the user launched from.
+    # terminal.cwd is still consumed by gateway/daemon startup, where there is
+    # no meaningful shell cwd and a configured anchor is required.
     #
-    # GUARD: If TERMINAL_CWD is already set to a real absolute path (by the
-    # gateway's config bridge earlier in the process), don't clobber it.
-    # This prevents a lazy import of cli.py during gateway runtime from
-    # rewriting TERMINAL_CWD to the service's working directory.
-    # See issue #10817.
+    # For gateway runtime, preserve the historical placeholder handling:
+    # if TERMINAL_CWD was already resolved by gateway/run.py, a lazy import of
+    # cli.py must not rewrite it to the service process cwd. See issue #10817.
     _CWD_PLACEHOLDERS = (".", "auto", "cwd")
-    if terminal_config.get("cwd") in _CWD_PLACEHOLDERS:
+    _gateway_runtime = os.environ.get("HERMES_GATEWAY_PROCESS") == "1"
+    effective_backend = terminal_config.get("env_type", "local")
+    _force_interactive_cwd = not _gateway_runtime and effective_backend == "local"
+    if _force_interactive_cwd:
+        terminal_config["cwd"] = os.getcwd()
+        defaults["terminal"]["cwd"] = terminal_config["cwd"]
+    elif terminal_config.get("cwd") in _CWD_PLACEHOLDERS:
         _existing_cwd = os.environ.get("TERMINAL_CWD", "")
         if _existing_cwd and _existing_cwd not in _CWD_PLACEHOLDERS and os.path.isabs(_existing_cwd):
             # Gateway (or earlier startup) already resolved a real path — keep it
             terminal_config["cwd"] = _existing_cwd
             defaults["terminal"]["cwd"] = _existing_cwd
         else:
-            effective_backend = terminal_config.get("env_type", "local")
             if effective_backend == "local":
                 terminal_config["cwd"] = os.getcwd()
                 defaults["terminal"]["cwd"] = terminal_config["cwd"]
@@ -524,7 +525,11 @@ def load_cli_config() -> Dict[str, Any]:
     # were already set by .env -- the user's .env is the fallback source.
     for config_key, env_var in env_mappings.items():
         if config_key in terminal_config:
-            if _file_has_terminal_config or env_var not in os.environ:
+            if (
+                (config_key == "cwd" and _force_interactive_cwd)
+                or _file_has_terminal_config
+                or env_var not in os.environ
+            ):
                 val = terminal_config[config_key]
                 if isinstance(val, list):
                     os.environ[env_var] = json.dumps(val)

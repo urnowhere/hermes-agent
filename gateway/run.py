@@ -333,6 +333,11 @@ from hermes_cli.env_loader import load_hermes_dotenv
 _env_path = _hermes_home / '.env'
 load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).resolve().parents[1] / '.env')
 
+# Marks this process for modules that are shared with interactive CLI/TUI
+# startup. In particular, cli.load_cli_config() must preserve the gateway's
+# configured TERMINAL_CWD during lazy imports.
+os.environ["HERMES_GATEWAY_PROCESS"] = "1"
+
 
 _DOCKER_VOLUME_SPEC_RE = re.compile(r"^(?P<host>.+):(?P<container>/[^:]+?)(?::(?P<options>[^:]+))?$")
 _DOCKER_MEDIA_OUTPUT_CONTAINER_PATHS = {"/output", "/outputs"}
