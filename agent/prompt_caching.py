@@ -38,6 +38,18 @@ def _apply_cache_marker(msg: dict, cache_marker: dict, native_anthropic: bool = 
             last["cache_control"] = cache_marker
 
 
+def _strip_all_cache_control(msg: dict) -> None:
+    """Remove any cache_control markers that may have leaked in from previous
+    turns or upstream history. Prevents accumulation across turns which would
+    otherwise exceed Anthropic/Bedrock's 4-breakpoint limit."""
+    msg.pop("cache_control", None)
+    content = msg.get("content")
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict):
+                block.pop("cache_control", None)
+
+
 def apply_anthropic_cache_control(
     api_messages: List[Dict[str, Any]],
     cache_ttl: str = "5m",
@@ -53,6 +65,12 @@ def apply_anthropic_cache_control(
     messages = copy.deepcopy(api_messages)
     if not messages:
         return messages
+
+    # Scrub any pre-existing cache_control markers so we don't accumulate
+    # breakpoints across turns (would exceed the 4-breakpoint limit and
+    # trigger HTTP 400 on Anthropic/Bedrock).
+    for m in messages:
+        _strip_all_cache_control(m)
 
     marker = {"type": "ephemeral"}
     if cache_ttl == "1h":

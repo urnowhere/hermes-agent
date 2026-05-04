@@ -1749,6 +1749,47 @@ def convert_messages_to_anthropic(
     return system, result
 
 
+def _cap_cache_control_markers(kwargs: dict, max_markers: int = 4) -> None:
+    """Cap total cache_control markers in the final kwargs at Anthropic's limit.
+
+    The system_and_3 caching strategy assumes 4 distinct messages each get
+    ONE marker. But when multiple consecutive tool-role messages merge into
+    a single Anthropic user message (each carrying its own cache_control on
+    the resulting tool_result block), the total marker count can exceed 4 —
+    producing HTTP 400 "A maximum of 4 blocks with cache_control may be
+    provided".
+
+    Scan system + messages in order (oldest first), keep the rightmost
+    max_markers, strip the rest. Rightmost wins because the end of the
+    conversation is where cache-prefix boundaries are most valuable.
+    Tool definitions are untouched (they live in kwargs['tools'] and are
+    caller-managed).
+    """
+    locations = []  # dicts carrying cache_control, oldest first
+
+    system = kwargs.get("system")
+    if isinstance(system, list):
+        for block in system:
+            if isinstance(block, dict) and block.get("cache_control"):
+                locations.append(block)
+
+    for msg in kwargs.get("messages", []) or []:
+        if isinstance(msg, dict):
+            if isinstance(msg.get("cache_control"), dict):
+                locations.append(msg)
+            content = msg.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("cache_control"):
+                        locations.append(block)
+
+    excess = len(locations) - max_markers
+    if excess <= 0:
+        return
+    for container in locations[:excess]:
+        container.pop("cache_control", None)
+
+
 def build_anthropic_kwargs(
     model: str,
     messages: List[Dict],
@@ -1964,6 +2005,18 @@ def build_anthropic_kwargs(
             betas.extend(_OAUTH_ONLY_BETAS)
         betas.append(_FAST_MODE_BETA)
         kwargs["extra_headers"] = {"anthropic-beta": ",".join(betas)}
+
+    # Safety net: cap cache_control markers at Anthropic's 4-breakpoint limit.
+    # Prevents HTTP 400 when tool-result merging clusters multiple markers
+    # onto a single Anthropic message.
+    # For third-party Anthropic-compatible proxies (LiteLLM-style, e.g.
+    # llm.echo.tech) strip ALL markers — the proxy auto-injects its own
+    # cache hints upstream, and anything we send stacks on top and
+    # deterministically exceeds 4.
+    if _is_third_party_anthropic_endpoint(base_url):
+        _cap_cache_control_markers(kwargs, max_markers=0)
+    else:
+        _cap_cache_control_markers(kwargs, max_markers=4)
 
     return kwargs
 
