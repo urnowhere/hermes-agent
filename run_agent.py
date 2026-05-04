@@ -1635,10 +1635,12 @@ class AIAgent:
         self._parent_session_id = parent_session_id
         self._last_flushed_db_idx = 0  # tracks DB-write cursor to prevent duplicate writes
         self._session_db_created = False  # DB row deferred to run_conversation()
+        self._system_prompt_identity_fingerprint = self._system_prompt_identity_digest()
         self._session_init_model_config = {
             "max_iterations": self.max_iterations,
             "reasoning_config": reasoning_config,
             "max_tokens": max_tokens,
+            "system_prompt_identity_digest": self._system_prompt_identity_fingerprint,
         }
         
         # In-memory todo list for task planning (one per agent/session)
@@ -2153,6 +2155,47 @@ class AIAgent:
                 "anthropic_base_url": self._anthropic_base_url,
                 "is_anthropic_oauth": self._is_anthropic_oauth,
             })
+
+    @staticmethod
+    def _system_prompt_identity_digest() -> str:
+        """Fingerprint identity files that affect persisted system prompt reuse."""
+        home = get_hermes_home()
+        soul_path = home / "SOUL.md"
+        h = hashlib.sha256()
+        h.update(str(home).encode("utf-8", errors="ignore"))
+        h.update(b"\0")
+        try:
+            if soul_path.is_file():
+                h.update(b"SOUL.md\0present\0")
+                h.update(soul_path.read_bytes())
+            else:
+                h.update(b"SOUL.md\0missing")
+        except Exception as exc:
+            h.update(f"SOUL.md\0error\0{type(exc).__name__}".encode())
+        return h.hexdigest()[:16]
+
+    def _stored_system_prompt_identity_matches(self, session_row: Optional[Dict[str, Any]]) -> bool:
+        """Return whether a stored prompt snapshot matches current identity."""
+        if not session_row:
+            return False
+        try:
+            cfg_raw = session_row.get("model_config") or ""
+            cfg = json.loads(cfg_raw) if isinstance(cfg_raw, str) and cfg_raw else {}
+        except Exception:
+            cfg = {}
+        stored = cfg.get("system_prompt_identity_digest") if isinstance(cfg, dict) else None
+        current = getattr(self, "_system_prompt_identity_fingerprint", None)
+        return bool(stored and current and stored == current)
+
+    def _persist_current_system_prompt_identity(self) -> None:
+        """Persist current identity digest in the session's model_config metadata."""
+        if not self._session_db:
+            return
+        try:
+            if hasattr(self._session_db, "update_model_config"):
+                self._session_db.update_model_config(self.session_id, self._session_init_model_config)
+        except Exception as exc:
+            logger.debug("Session DB update_model_config failed: %s", exc)
 
     def _ensure_db_session(self) -> None:
         """Create session DB row on first use. Disables _session_db on failure."""
@@ -10537,7 +10580,7 @@ class AIAgent:
             if conversation_history and self._session_db:
                 try:
                     session_row = self._session_db.get_session(self.session_id)
-                    if session_row:
+                    if session_row and self._stored_system_prompt_identity_matches(session_row):
                         stored_prompt = session_row.get("system_prompt") or None
                 except Exception:
                     pass  # Fall through to build fresh
@@ -10568,6 +10611,7 @@ class AIAgent:
                 if self._session_db:
                     try:
                         self._session_db.update_system_prompt(self.session_id, self._cached_system_prompt)
+                        self._persist_current_system_prompt_identity()
                     except Exception as e:
                         logger.debug("Session DB update_system_prompt failed: %s", e)
 

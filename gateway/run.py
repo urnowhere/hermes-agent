@@ -6755,7 +6755,8 @@ class GatewayRunner:
 
         # Snapshot the old entry so on_session_finalize can report the
         # expiring session id before reset_session() rotates it.
-        old_entry = self.session_store._entries.get(session_key)
+        active_session_store = self._session_store_for_source(source)
+        old_entry = active_session_store._entries.get(session_key)
 
         # Close tool resources on the old agent (terminal sandboxes, browser
         # daemons, background processes) before evicting from cache.
@@ -6789,7 +6790,7 @@ class GatewayRunner:
             pass
 
         # Reset the session
-        new_entry = self.session_store.reset_session(session_key)
+        new_entry = active_session_store.reset_session(session_key)
 
         # Clear any session-scoped model/reasoning overrides so the next agent
         # picks up configured defaults instead of previous session switches.
@@ -6836,7 +6837,7 @@ class GatewayRunner:
             header = "✨ Session reset! Starting fresh."
         else:
             # No existing session, just create one
-            new_entry = self.session_store.get_or_create_session(source, force_new=True)
+            new_entry = active_session_store.get_or_create_session(source, force_new=True)
             header = "✨ New session started!"
 
         # Fire plugin on_session_reset hook (new session guaranteed to exist)
@@ -7713,6 +7714,11 @@ class GatewayRunner:
         from hermes_constants import display_hermes_home
 
         args = event.get_command_args().strip().lower()
+        if getattr(event.source, "agent_profile", None):
+            return (
+                "`/personality` is disabled in routed profile topics. "
+                "Edit that profile's SOUL.md or config.yaml directly."
+            )
         config_path = _hermes_home / 'config.yaml'
 
         try:
@@ -11081,6 +11087,18 @@ class GatewayRunner:
         return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
     @staticmethod
+    def _file_content_digest(path: Path) -> str:
+        """Return a cache-safe digest for a file that may not exist."""
+        import hashlib
+
+        try:
+            if not path.is_file():
+                return "missing"
+            return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+        except Exception as exc:
+            return f"error:{type(exc).__name__}"
+
+    @staticmethod
     def _agent_config_signature(
         model: str,
         runtime: dict,
@@ -12486,6 +12504,9 @@ class GatewayRunner:
 
             turn_route = self._resolve_turn_agent_config(message, model, runtime_kwargs)
             cache_keys = self._extract_cache_busting_config(user_config)
+            active_home = _profile_home or get_hermes_home()
+            cache_keys["hermes_home"] = str(active_home)
+            cache_keys["soul_md.digest"] = self._file_content_digest(active_home / "SOUL.md")
             cache_keys["provider_routing.digest"] = self._stable_config_digest(pr)
             cache_keys["prefill_messages.digest"] = self._stable_config_digest(
                 turn_prefill_messages or []

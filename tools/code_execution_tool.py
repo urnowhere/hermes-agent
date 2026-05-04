@@ -1074,9 +1074,11 @@ def execute_code(
             child_env["TZ"] = _tz_name
         child_env.pop("HERMES_TIMEZONE", None)
 
-        # Per-profile HOME isolation: redirect system tool configs into
-        # {HERMES_HOME}/home/ when that directory exists.
-        from hermes_constants import get_subprocess_home
+        # Per-profile HOME/HERMES_HOME isolation: redirect system tool configs into
+        # {HERMES_HOME}/home/ when that directory exists and ensure child scripts
+        # see the active ContextVar-scoped HERMES_HOME.
+        from hermes_constants import get_hermes_home, get_subprocess_home
+        child_env["HERMES_HOME"] = str(get_hermes_home())
         _profile_home = get_subprocess_home()
         if _profile_home:
             child_env["HOME"] = _profile_home

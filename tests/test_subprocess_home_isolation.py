@@ -72,6 +72,21 @@ class TestGetSubprocessHome:
         assert home_a.endswith("alpha/home")
         assert home_b.endswith("beta/home")
 
+    def test_honors_context_override_when_process_env_points_at_gateway_home(self, tmp_path, monkeypatch):
+        """Topic-routed subprocess HOME must follow the active profile context."""
+        gateway_home = tmp_path / "gateway"
+        profile_dir = tmp_path / "profiles" / "cybrel-test"
+        gateway_home.mkdir()
+        profile_dir.mkdir(parents=True)
+        (gateway_home / "home").mkdir()
+        (profile_dir / "home").mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(gateway_home))
+
+        from hermes_constants import get_subprocess_home, hermes_home_context
+
+        with hermes_home_context(profile_dir):
+            assert get_subprocess_home() == str(profile_dir / "home")
+
 
 # ---------------------------------------------------------------------------
 # _make_run_env() injection
@@ -116,6 +131,26 @@ class TestMakeRunEnvHomeInjection:
 
         assert result["HOME"] == "/home/user"
 
+    def test_injects_profile_hermes_home_when_context_override_is_active(self, tmp_path, monkeypatch):
+        gateway_home = tmp_path / "gateway"
+        profile_dir = tmp_path / "profiles" / "cybrel-test"
+        gateway_home.mkdir()
+        profile_dir.mkdir(parents=True)
+        (gateway_home / "home").mkdir()
+        (profile_dir / "home").mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(gateway_home))
+        monkeypatch.setenv("HOME", "/root")
+        monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+        from hermes_constants import hermes_home_context
+        from tools.environments.local import _make_run_env
+
+        with hermes_home_context(profile_dir):
+            result = _make_run_env({})
+
+        assert result["HERMES_HOME"] == str(profile_dir)
+        assert result["HOME"] == str(profile_dir / "home")
+
 
 # ---------------------------------------------------------------------------
 # _sanitize_subprocess_env() injection
@@ -146,6 +181,25 @@ class TestSanitizeSubprocessEnvHomeInjection:
         result = _sanitize_subprocess_env(base_env)
 
         assert result["HOME"] == "/root"
+
+    def test_injects_profile_hermes_home_when_context_override_is_active(self, tmp_path, monkeypatch):
+        gateway_home = tmp_path / "gateway"
+        profile_dir = tmp_path / "profiles" / "cybrel-test"
+        gateway_home.mkdir()
+        profile_dir.mkdir(parents=True)
+        (gateway_home / "home").mkdir()
+        (profile_dir / "home").mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(gateway_home))
+
+        base_env = {"HOME": "/root", "PATH": "/usr/bin"}
+        from hermes_constants import hermes_home_context
+        from tools.environments.local import _sanitize_subprocess_env
+
+        with hermes_home_context(profile_dir):
+            result = _sanitize_subprocess_env(base_env)
+
+        assert result["HERMES_HOME"] == str(profile_dir)
+        assert result["HOME"] == str(profile_dir / "home")
 
 
 # ---------------------------------------------------------------------------

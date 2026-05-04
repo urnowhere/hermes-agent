@@ -159,10 +159,8 @@ def get_subprocess_home() -> str | None:
     Activation is directory-based: if the ``home/`` subdirectory doesn't
     exist, returns ``None`` and behavior is unchanged.
     """
-    hermes_home = os.getenv("HERMES_HOME")
-    if not hermes_home:
-        return None
-    profile_home = os.path.join(hermes_home, "home")
+    active_home = get_hermes_home()
+    profile_home = os.path.join(str(active_home), "home")
     if os.path.isdir(profile_home):
         return profile_home
     return None

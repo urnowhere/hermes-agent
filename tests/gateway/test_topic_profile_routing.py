@@ -12,6 +12,7 @@ import pytest
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import (
+    MessageEvent,
     MessageType,
     TopicProfileConfigError,
     resolve_topic_profile,
@@ -730,7 +731,7 @@ def test_agent_cache_signature_changes_when_profile_prompt_provider_or_prefill_c
         "provider": "openrouter",
         "base_url": "https://openrouter.ai/api/v1",
         "api_mode": "chat_completions",
-        "api_key": "sk-test-key",
+        "api_key": "***",
     }
     base_keys = {
         "provider_routing.digest": GatewayRunner._stable_config_digest({"order": ["anthropic"]}),
@@ -778,6 +779,193 @@ def test_agent_cache_signature_changes_when_profile_prompt_provider_or_prefill_c
     assert changed_prompt != base
     assert changed_provider != base
     assert changed_prefill != base
+
+
+def test_agent_cache_signature_changes_when_profile_home_or_soul_changes(tmp_path):
+    from gateway.run import GatewayRunner
+
+    profile_a = tmp_path / "profiles" / "cybrel-test"
+    profile_b = tmp_path / "profiles" / "vault-test"
+    profile_a.mkdir(parents=True)
+    profile_b.mkdir(parents=True)
+    (profile_a / "SOUL.md").write_text("SOUL A", encoding="utf-8")
+    (profile_b / "SOUL.md").write_text("SOUL A", encoding="utf-8")
+    runtime = {"provider": "openrouter", "base_url": "", "api_mode": "chat_completions", "api_key": "***"}
+
+    base = GatewayRunner._agent_config_signature(
+        "model-a",
+        runtime,
+        ["web"],
+        "prompt-a",
+        cache_keys={
+            "hermes_home": str(profile_a),
+            "soul_md.digest": GatewayRunner._file_content_digest(profile_a / "SOUL.md"),
+        },
+    )
+    changed_home = GatewayRunner._agent_config_signature(
+        "model-a",
+        runtime,
+        ["web"],
+        "prompt-a",
+        cache_keys={
+            "hermes_home": str(profile_b),
+            "soul_md.digest": GatewayRunner._file_content_digest(profile_b / "SOUL.md"),
+        },
+    )
+    (profile_a / "SOUL.md").write_text("SOUL B", encoding="utf-8")
+    changed_soul = GatewayRunner._agent_config_signature(
+        "model-a",
+        runtime,
+        ["web"],
+        "prompt-a",
+        cache_keys={
+            "hermes_home": str(profile_a),
+            "soul_md.digest": GatewayRunner._file_content_digest(profile_a / "SOUL.md"),
+        },
+    )
+
+    assert changed_home != base
+    assert changed_soul != base
+
+
+@pytest.mark.asyncio
+async def test_routed_profile_soul_change_busts_cached_agent(monkeypatch, tmp_path):
+    gateway_home = tmp_path / "gateway"
+    profiles_root = gateway_home / "profiles"
+    profile_home = profiles_root / "cybrel-test"
+    profile_home.mkdir(parents=True)
+    _write_profile_config(profile_home, prompt="Profile prompt", model="profile-model", toolsets=["web"])
+    config = GatewayConfig(
+        platforms={
+            Platform.TELEGRAM: PlatformConfig(
+                extra={"topic_profiles_safe_root": str(profiles_root)}
+            )
+        }
+    )
+
+    with hermes_home_context(gateway_home):
+        runner = _make_runner(config)
+    source = _source(agent_profile="cybrel-test", agent_hermes_home=str(profile_home))
+
+    _install_fake_agent(monkeypatch)
+    monkeypatch.delenv("HERMES_EPHEMERAL_SYSTEM_PROMPT", raising=False)
+    monkeypatch.delenv("HERMES_PREFILL_MESSAGES_FILE", raising=False)
+    from gateway import run as gateway_run
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", _provider_runtime)
+    monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
+
+    with hermes_home_context(profile_home):
+        await runner._run_agent(
+            message="hi",
+            context_prompt="",
+            history=[],
+            source=source,
+            session_id=f"session-{source.thread_id or 'main'}",
+            session_key=build_session_key(source),
+        )
+    (profile_home / "SOUL.md").write_text("Profile SOUL after first turn", encoding="utf-8")
+    with hermes_home_context(profile_home):
+        await runner._run_agent(
+            message="hi",
+            context_prompt="",
+            history=[],
+            source=source,
+            session_id=f"session-{source.thread_id or 'main'}",
+            session_key=build_session_key(source),
+        )
+
+    assert len(_CapturingAgent.inits) == 2
+    assert _CapturingAgent.inits[-1]["soul"] == "Profile SOUL after first turn"
+
+
+@pytest.mark.asyncio
+async def test_reset_command_uses_profile_session_store_for_routed_topic(tmp_path):
+    from gateway import run as gateway_run
+
+    gateway_home = tmp_path / "gateway"
+    profile_home = gateway_home / "profiles" / "cybrel-test"
+    profile_home.mkdir(parents=True)
+    config = GatewayConfig(
+        platforms={
+            Platform.TELEGRAM: PlatformConfig(
+                extra={"topic_profiles_safe_root": str(gateway_home / "profiles")}
+            )
+        }
+    )
+
+    with hermes_home_context(gateway_home):
+        runner = _make_runner(config)
+        runner.hooks = SimpleNamespace(loaded_hooks=False, emit=AsyncMock())
+        source = _source(agent_profile="cybrel-test", agent_hermes_home=str(profile_home))
+        profile_store = runner._session_store_for_source(source)
+        old_entry = profile_store.get_or_create_session(source)
+        gateway_store = runner.session_store
+        gateway_run._hermes_home = gateway_home
+
+        event = MessageEvent(text="/new", message_type=MessageType.TEXT, source=source)
+        await runner._handle_reset_command(event)
+
+    profile_entry = profile_store.get_or_create_session(source)
+    assert profile_entry.session_id != old_entry.session_id
+    assert runner._session_key_for_source(source) not in gateway_store._entries
+
+
+@pytest.mark.asyncio
+async def test_personality_command_is_disabled_for_routed_profile_topics(tmp_path):
+    from gateway import run as gateway_run
+
+    gateway_home = tmp_path / "gateway"
+    profile_home = gateway_home / "profiles" / "cybrel-test"
+    profile_home.mkdir(parents=True)
+    gateway_home.mkdir(exist_ok=True)
+    gateway_config = gateway_home / "config.yaml"
+    gateway_config.write_text('agent:\n  system_prompt: "Gateway prompt"\n', encoding="utf-8")
+    (profile_home / "config.yaml").write_text(
+        "agent:\n"
+        "  personalities:\n"
+        "    analyst: Routed analyst prompt\n",
+        encoding="utf-8",
+    )
+    config = GatewayConfig()
+
+    with hermes_home_context(gateway_home):
+        runner = _make_runner(config)
+        gateway_run._hermes_home = gateway_home
+    source = _source(agent_profile="cybrel-test", agent_hermes_home=str(profile_home))
+    event = MessageEvent(text="/personality analyst", message_type=MessageType.TEXT, source=source)
+
+    with hermes_home_context(profile_home):
+        response = await runner._handle_personality_command(event)
+
+    assert "disabled" in response.lower()
+    assert "Gateway prompt" in gateway_config.read_text(encoding="utf-8")
+    assert "Routed analyst prompt" not in gateway_config.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_personality_command_still_works_for_non_routed_gateway_sessions(tmp_path):
+    from gateway import run as gateway_run
+
+    gateway_home = tmp_path / "gateway"
+    gateway_home.mkdir()
+    gateway_config = gateway_home / "config.yaml"
+    gateway_config.write_text(
+        "agent:\n"
+        "  personalities:\n"
+        "    analyst: Gateway analyst prompt\n",
+        encoding="utf-8",
+    )
+    config = GatewayConfig()
+
+    with hermes_home_context(gateway_home):
+        runner = _make_runner(config)
+        gateway_run._hermes_home = gateway_home
+        source = _source(agent_profile=None, agent_hermes_home=None)
+        event = MessageEvent(text="/personality analyst", message_type=MessageType.TEXT, source=source)
+        response = await runner._handle_personality_command(event)
+
+    assert "set to" in response.lower()
+    assert "Gateway analyst prompt" in gateway_config.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
