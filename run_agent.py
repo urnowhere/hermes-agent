@@ -2554,9 +2554,10 @@ class AIAgent:
             self._vprint(f"{self.log_prefix}{message}", force=True)
         except Exception:
             pass
-        if self.status_callback:
+        status_cb = getattr(self, "status_callback", None)
+        if status_cb:
             try:
-                self.status_callback("lifecycle", message)
+                status_cb("lifecycle", message)
             except Exception:
                 logger.debug("status_callback error in _emit_status", exc_info=True)
 
@@ -6279,6 +6280,11 @@ class AIAgent:
                     getattr(next_entry, "id", "?"),
                 )
                 self._swap_credential(next_entry)
+                # Emit status notification to inform user of provider switch (#10476)
+                self._emit_status(
+                    f"🔄 Credential exhausted ({rotate_status}) — rotated to: "
+                    f"{getattr(next_entry, 'id', 'next credential')}"
+                )
                 return True, False
             return False, has_retried_429
 
@@ -6294,6 +6300,11 @@ class AIAgent:
                     getattr(next_entry, "id", "?"),
                 )
                 self._swap_credential(next_entry)
+                # Emit status notification to inform user of provider switch (#10476)
+                self._emit_status(
+                    f"🔄 Rate limited ({rotate_status}) — rotated to: "
+                    f"{getattr(next_entry, 'id', 'next credential')}"
+                )
                 return True, False
             return False, True
 
@@ -6314,6 +6325,11 @@ class AIAgent:
                     getattr(next_entry, "id", "?"),
                 )
                 self._swap_credential(next_entry)
+                # Emit status notification to inform user of provider switch (#10476)
+                self._emit_status(
+                    f"🔄 Auth failed ({rotate_status}) — rotated to: "
+                    f"{getattr(next_entry, 'id', 'next credential')}"
+                )
                 return True, False
 
         return False, has_retried_429
