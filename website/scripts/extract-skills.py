@@ -55,6 +55,12 @@ SOURCE_LABELS = {
     "lobehub": "LobeHub",
 }
 
+# CLI namespace prefix required by `hermes skills install <prefix>/<name>`.
+# Sources not listed here can be installed by bare name.
+SOURCE_INSTALL_PREFIX = {
+    "lobehub": "lobehub",
+}
+
 
 def extract_local_skills():
     skills = []
@@ -107,6 +113,7 @@ def extract_local_skills():
                 "category": category,
                 "categoryLabel": CATEGORY_LABELS.get(category, category.replace("-", " ").title()),
                 "source": source_label,
+                "installPrefix": "",
                 "tags": tags or [],
                 "platforms": fm.get("platforms", []),
                 "author": fm.get("author", ""),
@@ -135,9 +142,11 @@ def extract_cached_index_skills():
 
         stem = filename.replace(".json", "")
         source_label = "community"
+        install_prefix = ""
         for key, label in SOURCE_LABELS.items():
             if key in stem:
                 source_label = label
+                install_prefix = SOURCE_INSTALL_PREFIX.get(key, "")
                 break
 
         if isinstance(data, dict) and "agents" in data:
@@ -150,6 +159,7 @@ def extract_cached_index_skills():
                     "category": _guess_category(agent.get("meta", {}).get("tags", [])),
                     "categoryLabel": "",  # filled below
                     "source": source_label,
+                    "installPrefix": install_prefix,
                     "tags": agent.get("meta", {}).get("tags", []),
                     "platforms": [],
                     "author": agent.get("author", ""),
@@ -169,6 +179,7 @@ def extract_cached_index_skills():
                     "category": "uncategorized",
                     "categoryLabel": "",
                     "source": source_label,
+                    "installPrefix": install_prefix,
                     "tags": entry.get("tags", []),
                     "platforms": [],
                     "author": "",
