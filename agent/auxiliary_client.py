@@ -3099,9 +3099,12 @@ def _resolve_task_provider_model(
       3. "auto" (full auto-detection chain)
 
     Returns (provider, model, base_url, api_key, api_mode) where model may
-    be None (use provider default). When base_url is set, provider is forced
-    to "custom" and the task uses that direct endpoint. api_mode is one of
-    "chat_completions", "codex_responses", or None (auto-detect).
+    be None (use provider default). When base_url is set without a provider,
+    provider is forced to "custom" and the task uses that direct endpoint;
+    when a provider is configured alongside base_url, the provider is
+    preserved so provider-specific credential resolution still applies.
+    api_mode is one of "chat_completions", "codex_responses", or None
+    (auto-detect).
     """
     cfg_provider = None
     cfg_model = None
@@ -3121,13 +3124,15 @@ def _resolve_task_provider_model(
     resolved_api_mode = cfg_api_mode
 
     if base_url:
-        return "custom", resolved_model, base_url, api_key, resolved_api_mode
+        return (provider or "custom"), resolved_model, base_url, api_key, resolved_api_mode
     if provider:
         return provider, resolved_model, base_url, api_key, resolved_api_mode
 
     if task:
         # Config.yaml is the primary source for per-task overrides.
         if cfg_base_url:
+            if cfg_provider and cfg_provider != "auto":
+                return cfg_provider, resolved_model, cfg_base_url, cfg_api_key, resolved_api_mode
             return "custom", resolved_model, cfg_base_url, cfg_api_key, resolved_api_mode
         if cfg_provider and cfg_provider != "auto":
             return cfg_provider, resolved_model, None, None, resolved_api_mode
