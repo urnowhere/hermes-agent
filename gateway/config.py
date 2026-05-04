@@ -108,6 +108,8 @@ class Platform(Enum):
     BLUEBUBBLES = "bluebubbles"
     QQBOT = "qqbot"
     YUANBAO = "yuanbao"
+    LIVEKIT = "livekit"
+
     @classmethod
     def _missing_(cls, value):
         """Accept unknown platform names only for known plugin adapters.
@@ -383,6 +385,7 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
         (cfg.extra.get("client_id") or os.getenv("DINGTALK_CLIENT_ID"))
         and (cfg.extra.get("client_secret") or os.getenv("DINGTALK_CLIENT_SECRET"))
     ),
+    Platform.LIVEKIT: lambda cfg: bool(cfg.extra.get("url")),
 }
 
 
@@ -1566,6 +1569,36 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         yuanbao_group_allow_from = os.getenv("YUANBAO_GROUP_ALLOW_FROM")
         if yuanbao_group_allow_from:
             extra["group_allow_from"] = yuanbao_group_allow_from
+
+    # LiveKit
+    livekit_url = os.getenv("LIVEKIT_URL")
+    livekit_api_key = os.getenv("LIVEKIT_API_KEY")
+    livekit_api_secret = os.getenv("LIVEKIT_API_SECRET")
+    if livekit_url and livekit_api_key and livekit_api_secret:
+        if Platform.LIVEKIT not in config.platforms:
+            config.platforms[Platform.LIVEKIT] = PlatformConfig()
+        config.platforms[Platform.LIVEKIT].enabled = True
+        livekit_room = os.getenv("LIVEKIT_ROOM", "hermes")
+        config.platforms[Platform.LIVEKIT].extra.update({
+            "url": livekit_url,
+            "api_key": livekit_api_key,
+            "api_secret": livekit_api_secret,
+            "room": livekit_room,
+            "agent_name": os.getenv("LIVEKIT_AGENT_NAME", "Hermes"),
+            "agent_avatar": os.getenv("LIVEKIT_AGENT_AVATAR", ""),
+        })
+        # LiveKit's adapter only ever joins one room, so the room IS the home
+        # channel by definition. Default LIVEKIT_HOME_CHANNEL to LIVEKIT_ROOM
+        # unless explicitly overridden — keeps cron/cross-platform delivery
+        # and the first-message onboarding gate sensible without requiring
+        # the user to duplicate the value in their env.
+        livekit_home = os.getenv("LIVEKIT_HOME_CHANNEL") or livekit_room
+        os.environ.setdefault("LIVEKIT_HOME_CHANNEL", livekit_home)
+        config.platforms[Platform.LIVEKIT].home_channel = HomeChannel(
+            platform=Platform.LIVEKIT,
+            chat_id=livekit_home,
+            name=os.getenv("LIVEKIT_HOME_CHANNEL_NAME", "Home"),
+        )
 
     # Session settings
     idle_minutes = os.getenv("SESSION_IDLE_MINUTES")

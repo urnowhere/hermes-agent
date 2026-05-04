@@ -2557,6 +2557,7 @@ _PLATFORMS = [
         "label": "Matrix",
         "emoji": "🔐",
         "token_var": "MATRIX_ACCESS_TOKEN",
+        "extras": "matrix",
         "setup_instructions": [
             "1. Works with any Matrix homeserver (self-hosted Synapse/Conduit/Dendrite or matrix.org)",
             "2. Create a bot user on your homeserver, or use your own account",
@@ -2680,6 +2681,7 @@ _PLATFORMS = [
         "label": "DingTalk",
         "emoji": "💬",
         "token_var": "DINGTALK_CLIENT_ID",
+        "extras": "dingtalk",
         "setup_instructions": [
             "1. Go to https://open-dev.dingtalk.com → Create Application",
             "2. Under 'Credentials', copy the AppKey (Client ID) and AppSecret (Client Secret)",
@@ -2698,6 +2700,7 @@ _PLATFORMS = [
         "label": "Feishu / Lark",
         "emoji": "🪽",
         "token_var": "FEISHU_APP_ID",
+        "extras": "feishu",
         "setup_instructions": [
             "1. Go to https://open.feishu.cn/ (or https://open.larksuite.com/ for Lark)",
             "2. Create an app and copy the App ID and App Secret",
@@ -2850,6 +2853,39 @@ _PLATFORMS = [
              "help": "The App ID from your Yuanbao IM Bot credentials."},
             {"name": "YUANBAO_APP_SECRET", "prompt": "App Secret", "password": True,
              "help": "The App Secret (used for HMAC signing) from your Yuanbao IM Bot."},
+        ],
+    },
+    {
+        "key": "livekit",
+        "label": "LiveKit",
+        "emoji": "🎙️",
+        "token_var": "LIVEKIT_URL",
+        "extras": "livekit",
+        "setup_instructions": [
+            "1. Self-host LiveKit (https://docs.livekit.io/home/self-hosting/local/)",
+            "   or sign up for LiveKit Cloud (https://cloud.livekit.io)",
+            "2. Copy the WebSocket URL (e.g., wss://your-project.livekit.cloud)",
+            "3. Generate an API key and secret from your project settings",
+            "4. Connect to the room using any LiveKit client (web, mobile, or CLI)",
+        ],
+        "vars": [
+            {"name": "LIVEKIT_URL", "prompt": "LiveKit server URL", "password": False,
+             "help": "WebSocket URL for your LiveKit server (e.g. wss://your-project.livekit.cloud)."},
+            {"name": "LIVEKIT_API_KEY", "prompt": "API Key", "password": False,
+             "help": "API key from your LiveKit project settings."},
+            {"name": "LIVEKIT_API_SECRET", "prompt": "API Secret", "password": True,
+             "help": "API secret from your LiveKit project settings."},
+            {"name": "LIVEKIT_AGENT_NAME", "prompt": "Agent display name (default: Hermes)", "password": False,
+             "help": "The name shown for the agent in LiveKit rooms. Default is 'Hermes'. If not set, the agent will ask the LLM for its name."},
+            {"name": "LIVEKIT_AGENT_AVATAR", "prompt": "Agent avatar URL (optional)", "password": False,
+             "help": "URL to an image shown as the agent's avatar in LiveKit clients."},
+            {"name": "LIVEKIT_ROOM", "prompt": "Room name (default: hermes)", "password": False,
+             "help": "The LiveKit room the agent will join. Default is 'hermes'."},
+            {"name": "LIVEKIT_ALLOWED_USERS", "prompt": "Allowed participant identities (comma-separated, or empty)", "password": False,
+             "is_allowlist": True,
+             "help": "Restrict which LiveKit participants can interact with the agent."},
+            {"name": "LIVEKIT_PRESENCE_POLL_INTERVAL", "prompt": "Presence poll interval seconds (empty = auto)", "password": False,
+             "help": "Seconds between room-presence checks when no humans are in the room. Leave empty to auto-select: 30s for *.livekit.cloud, 5s for self-hosted."},
         ],
     },
 ]
@@ -3035,7 +3071,10 @@ def _setup_standard_platform(platform: dict):
         print_info(f"  {var['help']}")
         existing = get_env_value(var["name"])
         if existing and var["name"] != token_var:
-            print_info(f"  Current: {existing}")
+            if var.get("password"):
+                print_info(f"  Current: {'*' * min(len(existing), 12)}")
+            else:
+                print_info(f"  Current: {existing}")
 
         # Allowlist fields get special handling for the deny-by-default security model
         if var.get("is_allowlist"):
@@ -3098,6 +3137,35 @@ def _setup_standard_platform(platform: dict):
         if first_id and prompt_yes_no(f"  Use your user ID ({first_id}) as the home channel?", True):
             save_env_value(home_var, first_id)
             print_success(f"  Home channel set to {first_id}")
+
+    # Auto-install optional dependencies if the platform declares an extras group
+    extras_group = platform.get("extras")
+    if extras_group:
+        try:
+            # Check if deps are already available by trying the platform's import
+            _check_fn_name = f"check_{platform['key']}_requirements"
+            _mod = __import__(f"gateway.platforms.{platform['key']}", fromlist=[_check_fn_name])
+            _check_fn = getattr(_mod, _check_fn_name, None)
+            deps_ok = _check_fn() if _check_fn else True
+        except (ImportError, Exception):
+            deps_ok = False
+
+        if not deps_ok:
+            print()
+            print_info(f"  {label} requires additional Python packages.")
+            if prompt_yes_no(f"  Install them now? (pip install 'hermes-agent[{extras_group}]')", True):
+                import subprocess, sys, shutil
+                pip_cmd = "uv" if shutil.which("uv") else "pip"
+                install_args = [sys.executable, "-m", pip_cmd, "install", f"hermes-agent[{extras_group}]"]
+                if pip_cmd == "uv":
+                    install_args = ["uv", "pip", "install", f"hermes-agent[{extras_group}]"]
+                try:
+                    subprocess.run(install_args, check=True)
+                    print_success(f"  Installed {label} dependencies.")
+                except subprocess.CalledProcessError:
+                    print_warning(f"  Install failed — run manually: pip install 'hermes-agent[{extras_group}]'")
+            else:
+                print_info(f"  Skipped — install later: pip install 'hermes-agent[{extras_group}]'")
 
     print()
     print_success(f"{emoji} {label} configured!")

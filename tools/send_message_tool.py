@@ -633,6 +633,8 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             result = await _send_qqbot(pconfig, chat_id, chunk)
         elif platform == Platform.YUANBAO:
             result = await _send_yuanbao(chat_id, chunk)
+        elif platform == Platform.LIVEKIT:
+            result = {"error": "LiveKit is a real-time voice channel — use voice replies instead of send_message."}
         else:
             # Plugin platform — route through the gateway's live adapter
             # if available, otherwise report the error.

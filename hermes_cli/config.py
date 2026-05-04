@@ -4542,11 +4542,11 @@ def show_config():
     print()
     print(color("◆ Messaging Platforms", Colors.CYAN, Colors.BOLD))
     
-    telegram_token = get_env_value('TELEGRAM_BOT_TOKEN')
-    discord_token = get_env_value('DISCORD_BOT_TOKEN')
-    
-    print(f"  Telegram:     {'configured' if telegram_token else color('not configured', Colors.DIM)}")
-    print(f"  Discord:      {'configured' if discord_token else color('not configured', Colors.DIM)}")
+    from hermes_cli.status import MESSAGING_PLATFORMS
+    for name, (token_var, _home_var) in MESSAGING_PLATFORMS.items():
+        configured = bool(get_env_value(token_var))
+        status = "configured" if configured else color("not configured", Colors.DIM)
+        print(f"  {name + ':':14s}{status}")
     
     # Skill config
     try:
