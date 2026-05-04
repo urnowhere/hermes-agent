@@ -181,6 +181,44 @@ def _find_bash() -> str:
 _find_shell = _find_bash
 
 
+def _win_to_posix_path(path: str) -> str:
+    """Convert a Windows path (``C:\\Users\\…``) to a Git Bash POSIX path
+    (``/c/Users/…``).
+
+    Git Bash's ``builtin cd`` does not accept single-quoted Windows paths with
+    backslashes — it requires POSIX form — so ``builtin cd 'C:\\Users\\…'``
+    fails and the wrapper script exits 126.  Converting to ``/c/Users/…``
+    before interpolating into the script fixes it.  No-op off Windows.
+    """
+    if not _IS_WINDOWS:
+        return path
+    if len(path) >= 2 and path[1] == ':' and path[0].isalpha():
+        drive = path[0].lower()
+        rest = path[2:].replace('\\', '/')
+        if rest and not rest.startswith('/'):
+            rest = '/' + rest
+        return f"/{drive}{rest}"
+    return path
+
+
+def _posix_to_win_path(path: str) -> str:
+    """Convert a Git Bash POSIX path (``/c/Users/…``) back to a Windows path
+    (``C:/Users/…``).
+
+    After ``init_session``, ``self.cwd`` can be updated from Git Bash's
+    ``pwd -P`` output, which emits ``/c/Users/…``.  Windows ``CreateProcess``
+    (invoked via ``subprocess.Popen(cwd=…)``) does not understand that form.
+    Convert back so Popen succeeds.  No-op off Windows.
+    """
+    if not _IS_WINDOWS:
+        return path
+    if len(path) >= 3 and path[0] == '/' and path[2] == '/' and path[1].isalpha():
+        drive = path[1].upper()
+        rest = path[3:]
+        return f"{drive}:/{rest}"
+    return path
+
+
 # Standard PATH entries for environments with minimal PATH.
 _SANE_PATH = (
     "/opt/homebrew/bin:/opt/homebrew/sbin:"
@@ -318,6 +356,12 @@ class LocalEnvironment(BaseEnvironment):
     def get_temp_dir(self) -> str:
         """Return a shell-safe writable temp dir for local execution.
 
+        On Windows, return the system temp dir (``C:/Users/…/Temp``) with
+        forward slashes — that path is valid for both Windows ``open()`` and
+        Git Bash ``source``/``pwd``, so the session snapshot and CWD files
+        are readable from both sides. The old ``/tmp`` fallback resolved to
+        ``C:\\tmp`` under Windows Python and silently ``FileNotFoundError``'d.
+
         Termux does not provide /tmp by default, but exposes a POSIX TMPDIR.
         Prefer POSIX-style env vars when available, keep using /tmp on regular
         Unix systems, and only fall back to tempfile.gettempdir() when it also
@@ -327,6 +371,10 @@ class LocalEnvironment(BaseEnvironment):
         override the temp root explicitly (for example via terminal.env or a
         custom TMPDIR), then fall back to the host process environment.
         """
+        if _IS_WINDOWS:
+            td = tempfile.gettempdir().replace('\\', '/')
+            return td.rstrip('/') or 'C:/Temp'
+
         for env_var in ("TMPDIR", "TMP", "TEMP"):
             candidate = self.env.get(env_var) or os.environ.get(env_var)
             if candidate and candidate.startswith("/"):
@@ -340,6 +388,21 @@ class LocalEnvironment(BaseEnvironment):
             return candidate.rstrip("/") or "/"
 
         return "/tmp"
+
+    def _wrap_command(self, command: str, cwd: str) -> str:
+        """Override to convert a Windows cwd to POSIX form before it reaches
+        the generated bash script.
+
+        ``BaseEnvironment._wrap_command`` emits ``builtin cd {shlex.quote(cwd)}
+        || exit 126``.  When ``cwd`` is a Windows path, ``shlex.quote`` wraps
+        it in single quotes with literal backslashes
+        (``'C:\\Users\\…'``), which Git Bash's ``builtin cd`` does not accept —
+        producing exit code 126 on every command.  Converting to POSIX form
+        (``/c/Users/…``) restores expected behavior. No-op off Windows.
+        """
+        if _IS_WINDOWS:
+            cwd = _win_to_posix_path(cwd)
+        return super()._wrap_command(command, cwd)
 
     def _run_bash(self, cmd_string: str, *, login: bool = False,
                   timeout: int = 120,
@@ -358,6 +421,12 @@ class LocalEnvironment(BaseEnvironment):
         args = [bash, "-l", "-c", cmd_string] if login else [bash, "-c", cmd_string]
         run_env = _make_run_env(self.env)
 
+        # On Windows, self.cwd may be a Git Bash POSIX path (/c/Users/…)
+        # after init_session updates it from the pwd -P marker. Windows
+        # CreateProcess (via subprocess.Popen(cwd=)) does not understand that
+        # form, so convert back to a Windows path for the Popen call only.
+        popen_cwd = _posix_to_win_path(self.cwd) if _IS_WINDOWS else self.cwd
+
         proc = subprocess.Popen(
             args,
             text=True,
@@ -368,7 +437,7 @@ class LocalEnvironment(BaseEnvironment):
             stderr=subprocess.STDOUT,
             stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
             preexec_fn=None if _IS_WINDOWS else os.setsid,
-            cwd=self.cwd,
+            cwd=popen_cwd,
         )
         if not _IS_WINDOWS:
             try:

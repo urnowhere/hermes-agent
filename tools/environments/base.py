@@ -10,6 +10,7 @@ import codecs
 import json
 import logging
 import os
+import platform as _platform
 import select
 import shlex
 import subprocess
@@ -19,6 +20,8 @@ import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import IO, Callable, Protocol
+
+_IS_WINDOWS_BASE = _platform.system() == "Windows"
 
 from hermes_constants import get_hermes_home
 from tools.interrupt import is_interrupted
@@ -488,6 +491,24 @@ class BaseEnvironment(ABC):
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
         def _drain():
+            # Windows: select.select does not work with pipe file descriptors —
+            # it raises OSError (WinError 10038: not a socket).  Without this
+            # branch the drain thread exits immediately on the first iteration,
+            # no stdout is ever captured, and self.cwd is never updated from
+            # the __HERMES_CWD__ marker.  Use blocking reads instead: Python
+            # 3.7+ subprocess on Windows does not propagate pipe handles to
+            # grandchild processes, so EOF arrives promptly when bash exits.
+            if _IS_WINDOWS_BASE:
+                try:
+                    while True:
+                        chunk = proc.stdout.read(4096)
+                        if not chunk:
+                            break
+                        output_chunks.append(chunk)
+                except Exception:
+                    pass
+                return
+
             fd = proc.stdout.fileno()
             idle_after_exit = 0
             try:
