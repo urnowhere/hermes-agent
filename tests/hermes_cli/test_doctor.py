@@ -623,3 +623,36 @@ def test_run_doctor_opencode_go_skips_invalid_models_probe(monkeypatch, tmp_path
     )
     assert not any(url == "https://opencode.ai/zen/go/v1/models" for url, _, _ in calls)
     assert not any("opencode" in url.lower() and "models" in url.lower() for url, _, _ in calls)
+
+
+def test_minimax_provider_health_check_disabled():
+    """MiniMax APIs don't expose a /v1/models endpoint on any surface.
+
+    Both ``api.minimax.io/v1/models`` and ``api.minimaxi.com/v1/models`` return
+    HTTP 404 — the real chat endpoint (``POST /v1/text/chatcompletion_v2``) is
+    available, but doctor's OpenAI-style ``/models`` probe is not a valid
+    health check for MiniMax. Regression guard for issue #811: an earlier
+    attempt to enable the health check caused doctor to spam HTTP 404 warnings
+    for every user with a MiniMax key.
+    """
+    import inspect
+
+    source = inspect.getsource(doctor_mod.run_doctor)
+
+    minimax_entries = [
+        line.strip()
+        for line in source.splitlines()
+        if line.lstrip().startswith('("MiniMax"')
+        or line.lstrip().startswith('("MiniMax (China)"')
+    ]
+    assert len(minimax_entries) == 2, (
+        f"expected two MiniMax entries in _apikey_providers, found {len(minimax_entries)}"
+    )
+    for entry in minimax_entries:
+        # The last tuple field is supports_health_check; it must be False so
+        # doctor skips the /models probe and just prints "(key configured)".
+        assert entry.rstrip().endswith("False),"), (
+            "MiniMax provider entry must keep supports_health_check=False; "
+            "see https://github.com/NousResearch/hermes-agent/issues/811\n"
+            f"Offending line: {entry!r}"
+        )
