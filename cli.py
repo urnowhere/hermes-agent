@@ -10541,13 +10541,13 @@ class HermesCLI:
 
             if self._agent_running and self.agent:
                 if now - self._last_ctrl_c_time < 2.0:
-                    print("\n⚡ Force exiting...")
+                    print("\n⚡ " + format_zh("Force exiting..."))
                     self._should_exit = True
                     event.app.exit()
                     return
                 
                 self._last_ctrl_c_time = now
-                print("\n⚡ Interrupting agent... (press Ctrl+C again to force exit)")
+                print("\n⚡ " + format_zh("Interrupting agent... (press Ctrl+C again to force exit)"))
                 self.agent.interrupt()
             else:
                 # If there's text or images, clear them (like bash).
