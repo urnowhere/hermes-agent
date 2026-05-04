@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
@@ -943,15 +943,46 @@ def read_credential_pool(provider_id: Optional[str] = None) -> Dict[str, Any]:
     return list(provider_entries) if isinstance(provider_entries, list) else []
 
 
-def write_credential_pool(provider_id: str, entries: List[Dict[str, Any]]) -> Path:
-    """Persist one provider's credential pool under auth.json."""
+def write_credential_pool(
+    provider_id: str,
+    entries: List[Dict[str, Any]],
+    *,
+    removed_ids: Optional[Iterable[str]] = None,
+) -> Path:
+    """Persist one provider's credential pool under auth.json.
+
+    Re-reads the on-disk pool under the lock and merges any entries present
+    on disk but missing from ``entries`` — those were added by a concurrent
+    process after the caller's in-memory snapshot was taken. Without this
+    merge a rotation/exhaustion rewrite from a stale snapshot drops
+    credentials added by other processes (issue #19566).
+
+    Pass ``removed_ids`` to suppress that merge for credentials the caller
+    intentionally removed (otherwise they reappear from disk).
+    """
+    removed = {rid for rid in (removed_ids or ()) if rid}
     with _auth_store_lock():
         auth_store = _load_auth_store()
         pool = auth_store.get("credential_pool")
         if not isinstance(pool, dict):
             pool = {}
             auth_store["credential_pool"] = pool
-        pool[provider_id] = list(entries)
+        existing = pool.get(provider_id)
+        existing_list = existing if isinstance(existing, list) else []
+        new_ids = {
+            entry.get("id")
+            for entry in entries
+            if isinstance(entry, dict) and entry.get("id")
+        }
+        merged: List[Dict[str, Any]] = list(entries)
+        for disk_entry in existing_list:
+            if not isinstance(disk_entry, dict):
+                continue
+            disk_id = disk_entry.get("id")
+            if not disk_id or disk_id in new_ids or disk_id in removed:
+                continue
+            merged.append(disk_entry)
+        pool[provider_id] = merged
         return _save_auth_store(auth_store)
 
 
