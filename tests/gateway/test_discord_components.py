@@ -11,8 +11,6 @@ from unittest.mock import AsyncMock, MagicMock
 import sys
 import time
 
-import pytest
-
 
 # ---------------------------------------------------------------------------
 # Discord mock — must be injected before any module that does
@@ -57,7 +55,8 @@ def _install_full_mock(discord_mod):
             self.default = kw.get("default", False)
 
     # discord.ui.button is a decorator (returns the decorated fn unchanged)
-    _button_decorator = lambda *a, **kw: (lambda fn: fn)
+    def _button_decorator(*a, **kw):
+        return lambda fn: fn
 
     discord_mod.ui = SimpleNamespace(
         View=MockView,
@@ -116,7 +115,6 @@ from gateway.platforms.discord_components import (
     is_agent_component,
     build_view_from_spec,
     AgentComponentView,
-    component_store,
     CUSTOM_ID_PREFIX,
     DISCORD_CUSTOM_ID_MAX,
 )

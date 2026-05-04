@@ -474,7 +474,6 @@ async def _send_via_adapter(platform, pconfig, chat_id, chunk, components=None):
         if runner:
             adapter = runner.adapters.get(platform)
             if adapter:
-                from gateway.platforms.base import SendResult
                 metadata = {}
                 if components:
                     metadata["components"] = components
