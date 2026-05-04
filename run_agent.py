@@ -10547,17 +10547,11 @@ class AIAgent:
         # Preserve the original user message (no nudge injection).
         original_user_message = persist_user_message if persist_user_message is not None else user_message
 
-        # Track memory nudge trigger (turn-based, checked here).
-        # Skill trigger is checked AFTER the agent loop completes, based on
-        # how many tool iterations THIS turn used.
-        _should_review_memory = False
+        # Track memory nudge trigger (turn-based).
         if (self._memory_nudge_interval > 0
                 and "memory" in self.valid_tool_names
                 and self._memory_store):
             self._turns_since_memory += 1
-            if self._turns_since_memory >= self._memory_nudge_interval:
-                _should_review_memory = True
-                self._turns_since_memory = 0
 
         # Add user message
         user_msg = {"role": "user", "content": user_message}
@@ -13879,13 +13873,20 @@ class AIAgent:
         # Clear stream callback so it doesn't leak into future calls
         self._stream_callback = None
 
+        # Check memory trigger NOW — turn-based.
+        _should_review_memory = False
+        if (self._memory_nudge_interval > 0
+                and self._turns_since_memory >= self._memory_nudge_interval
+                and "memory" in self.valid_tool_names):
+            if self._turns_since_memory >= self._memory_nudge_interval:
+                _should_review_memory = True
+
         # Check skill trigger NOW — based on how many tool iterations THIS turn used.
         _should_review_skills = False
         if (self._skill_nudge_interval > 0
                 and self._iters_since_skill >= self._skill_nudge_interval
                 and "skill_manage" in self.valid_tool_names):
             _should_review_skills = True
-            self._iters_since_skill = 0
 
         # External memory provider: sync the completed turn + queue next prefetch.
         self._sync_external_memory_for_turn(
@@ -13897,6 +13898,11 @@ class AIAgent:
         # Background memory/skill review — runs AFTER the response is delivered
         # so it never competes with the user's task for model attention.
         if final_response and not interrupted and (_should_review_memory or _should_review_skills):
+            # Only reset memory/skill nudge counters when we actually trigger the review.
+            if _should_review_memory:
+                self._turns_since_memory = 0
+            if _should_review_skills:
+                self._iters_since_skill = 0
             try:
                 self._spawn_background_review(
                     messages_snapshot=list(messages),
