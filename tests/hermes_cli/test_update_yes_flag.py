@@ -174,7 +174,16 @@ class TestUpdateYesStashRestore:
 
         args = SimpleNamespace(yes=True)
 
-        cmd_update(args)
+        # `cmd_update` is imported at module import time, and some full-suite
+        # runs exercise update paths that can reload/replace hermes_cli.main
+        # symbols. Patch the exact globals dict used by this function as well
+        # as the module attribute so this regression guard stays order-proof.
+        original_restore = cmd_update.__globals__.get("_restore_stashed_changes")
+        cmd_update.__globals__["_restore_stashed_changes"] = mock_restore
+        try:
+            cmd_update(args)
+        finally:
+            cmd_update.__globals__["_restore_stashed_changes"] = original_restore
 
         # _restore_stashed_changes was called, and called with prompt_user=False
         # every time (so the user never sees "Restore local changes now?").
