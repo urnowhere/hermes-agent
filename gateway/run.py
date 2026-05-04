@@ -1107,6 +1107,7 @@ class GatewayRunner:
     _stop_task: Optional[asyncio.Task] = None
     _session_model_overrides: Dict[str, Dict[str, str]] = {}
     _session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
+    _pending_clarify_responses: Dict[str, Any] = {}
     # Stale-code self-check defaults (see _detect_stale_code()).  Class-level
     # so tests that construct GatewayRunner via ``object.__new__`` without
     # running __init__ don't crash when _handle_message reads these.
@@ -1221,6 +1222,9 @@ class GatewayRunner:
         # Track pending exec approvals per session
         # Key: session_key, Value: {"command": str, "pattern_key": str, ...}
         self._pending_approvals: Dict[str, Dict[str, Any]] = {}
+        # Track live clarify prompts per session. The value is a thread-safe
+        # callback that accepts the user's answer and unblocks the agent thread.
+        self._pending_clarify_responses: Dict[str, Any] = {}
 
         # Track platforms that failed to connect for background reconnection.
         # Key: Platform enum, Value: {"config": platform_config, "attempts": int, "next_retry": float}
@@ -2347,6 +2351,20 @@ class GatewayRunner:
         adapter = self.adapters.get(event.source.platform)
         if not adapter:
             return False  # let default path handle it
+
+        clarify_responder = getattr(self, "_pending_clarify_responses", {}).get(session_key)
+        if clarify_responder:
+            answer = (event.text or "").strip()
+            if answer:
+                try:
+                    clarify_responder(answer)
+                except Exception as exc:
+                    logger.warning(
+                        "Gateway clarify text response failed for session %s: %s",
+                        session_key,
+                        exc,
+                    )
+                return True
 
         running_agent = self._running_agents.get(session_key)
 
@@ -13418,6 +13436,63 @@ class GatewayRunner:
             except Exception as _e:
                 logger.debug("status_callback error (%s): %s", event_type, _e)
 
+        def _discord_clarify_callback(question, choices):
+            """Block the agent thread while Discord collects a clarify answer."""
+            if source.platform != Platform.DISCORD:
+                raise RuntimeError("Clarify tool is not available on this platform.")
+
+            adapter = self.adapters.get(source.platform)
+            send_prompt = getattr(adapter, "send_clarify_prompt", None)
+            if not adapter or not callable(send_prompt):
+                raise RuntimeError("Discord clarify prompts are not supported by this adapter.")
+
+            response_queue = queue.Queue(maxsize=1)
+            resolved = threading.Event()
+
+            def _answer_callback(answer: str) -> None:
+                if resolved.is_set():
+                    return
+                resolved.set()
+                try:
+                    response_queue.put_nowait(str(answer).strip())
+                except queue.Full:
+                    pass
+
+            if session_key:
+                self._pending_clarify_responses[session_key] = _answer_callback
+
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    send_prompt(
+                        chat_id=source.chat_id,
+                        question=question,
+                        choices=choices or [],
+                        session_key=session_key or "",
+                        on_answer=_answer_callback,
+                        metadata=_status_thread_metadata,
+                    ),
+                    _loop_for_step,
+                )
+                send_result = future.result(timeout=10)
+                if not getattr(send_result, "success", False):
+                    error = getattr(send_result, "error", None) or "unknown error"
+                    raise RuntimeError(f"Failed to send Discord clarify prompt: {error}")
+
+                clarify_cfg = user_config.get("clarify") if isinstance(user_config, dict) else {}
+                try:
+                    timeout = int((clarify_cfg or {}).get("timeout", 120))
+                except (TypeError, ValueError):
+                    timeout = 120
+                try:
+                    return response_queue.get(timeout=max(1, timeout))
+                except queue.Empty:
+                    return "No response; clarify timed out."
+            finally:
+                if session_key:
+                    current = self._pending_clarify_responses.get(session_key)
+                    if current is _answer_callback:
+                        self._pending_clarify_responses.pop(session_key, None)
+
         def run_sync():
             # The conditional re-assignment of `message` further below
             # (prepending model-switch notes) makes Python treat it as a
@@ -13659,6 +13734,9 @@ class GatewayRunner:
             agent.stream_delta_callback = _stream_delta_cb
             agent.interim_assistant_callback = _interim_assistant_cb if _want_interim_messages else None
             agent.status_callback = _status_callback_sync
+            agent.clarify_callback = (
+                _discord_clarify_callback if source.platform == Platform.DISCORD else None
+            )
             agent.reasoning_config = reasoning_config
             agent.service_tier = self._service_tier
             agent.request_overrides = turn_route.get("request_overrides") or {}

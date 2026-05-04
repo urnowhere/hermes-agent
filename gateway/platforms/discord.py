@@ -3462,6 +3462,65 @@ class DiscordAdapter(BasePlatformAdapter):
         except Exception as e:
             return SendResult(success=False, error=str(e))
 
+    async def send_clarify_prompt(
+        self,
+        chat_id: str,
+        question: str,
+        choices: List[str],
+        session_key: str,
+        on_answer: Callable[[str], None],
+        metadata: Optional[dict] = None,
+    ) -> SendResult:
+        """Send a Discord button prompt for the clarify tool."""
+        if not self._client or not DISCORD_AVAILABLE:
+            return SendResult(success=False, error="Not connected")
+
+        try:
+            target_id = chat_id
+            if metadata and metadata.get("thread_id"):
+                target_id = metadata["thread_id"]
+
+            channel = self._client.get_channel(int(target_id))
+            if not channel:
+                channel = await self._client.fetch_channel(int(target_id))
+
+            clean_choices = [str(choice).strip() for choice in (choices or []) if str(choice).strip()]
+            clean_choices = clean_choices[:4]
+
+            body = str(question or "").strip()
+            max_desc = 4088
+            if len(body) > max_desc:
+                body = body[: max_desc - 3] + "..."
+
+            embed = discord.Embed(
+                title="Hermes needs your input",
+                description=body,
+                color=discord.Color.orange(),
+            )
+            if clean_choices:
+                embed.add_field(
+                    name="Choices",
+                    value="Pick one below, or reply with a custom answer.",
+                    inline=False,
+                )
+            else:
+                embed.add_field(
+                    name="Reply",
+                    value="Reply with your answer.",
+                    inline=False,
+                )
+
+            view = ClarifyChoiceView(
+                choices=clean_choices,
+                on_answer=on_answer,
+                allowed_user_ids=self._allowed_user_ids,
+                allowed_role_ids=self._allowed_role_ids,
+            )
+            msg = await channel.send(embed=embed, view=view if clean_choices else None)
+            return SendResult(success=True, message_id=str(msg.id))
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+
     async def send_update_prompt(
         self, chat_id: str, prompt: str, default: str = "",
         session_key: str = "",
@@ -4369,6 +4428,75 @@ if DISCORD_AVAILABLE:
             self, interaction: discord.Interaction, button: discord.ui.Button,
         ):
             await self._resolve(interaction, "cancel", discord.Color.greyple(), "Cancelled")
+
+        async def on_timeout(self):
+            self.resolved = True
+            for child in self.children:
+                child.disabled = True
+
+    class ClarifyChoiceView(discord.ui.View):
+        """Button view for clarify tool choices."""
+
+        def __init__(
+            self,
+            choices: List[str],
+            on_answer: Callable[[str], None],
+            allowed_user_ids: set,
+            allowed_role_ids: Optional[set] = None,
+        ):
+            super().__init__(timeout=300)
+            self.choices = choices[:4]
+            self.on_answer = on_answer
+            self.allowed_user_ids = allowed_user_ids
+            self.allowed_role_ids = allowed_role_ids or set()
+            self.resolved = False
+
+            for index, choice in enumerate(self.choices, start=1):
+                label = choice if len(choice) <= 80 else choice[:77] + "..."
+                button = discord.ui.Button(
+                    label=label,
+                    style=discord.ButtonStyle.primary,
+                    custom_id=f"clarify_choice_{index}",
+                )
+                button.callback = self._choice_callback(choice)
+                self.add_item(button)
+
+        def _check_auth(self, interaction: discord.Interaction) -> bool:
+            return _component_check_auth(
+                interaction, self.allowed_user_ids, self.allowed_role_ids,
+            )
+
+        def _choice_callback(self, choice: str):
+            async def _callback(interaction: discord.Interaction):
+                await self._resolve(interaction, choice)
+
+            return _callback
+
+        async def _resolve(self, interaction: discord.Interaction, choice: str):
+            if self.resolved:
+                await interaction.response.send_message(
+                    "This prompt has already been answered~", ephemeral=True,
+                )
+                return
+            if not self._check_auth(interaction):
+                await interaction.response.send_message(
+                    "You're not authorized to answer this prompt~", ephemeral=True,
+                )
+                return
+
+            self.resolved = True
+            for child in self.children:
+                child.disabled = True
+
+            embed = interaction.message.embeds[0] if interaction.message.embeds else None
+            if embed:
+                user = getattr(interaction, "user", None)
+                display_name = getattr(user, "display_name", "user")
+                embed.color = discord.Color.green()
+                embed.set_footer(text=f"Answered by {display_name}")
+
+            await interaction.response.edit_message(embed=embed, view=self)
+            self.on_answer(choice)
 
         async def on_timeout(self):
             self.resolved = True

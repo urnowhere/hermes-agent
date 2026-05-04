@@ -1593,6 +1593,18 @@ class BasePlatformAdapter(ABC):
         """
         return SendResult(success=False, error="Not supported")
 
+    async def send_clarify_prompt(
+        self,
+        chat_id: str,
+        question: str,
+        choices: List[str],
+        session_key: str,
+        on_answer: Callable[[str], None],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send an interactive clarify prompt when the platform supports it."""
+        return SendResult(success=False, error="Not supported")
+
     async def send_private_notice(
         self,
         chat_id: str,
