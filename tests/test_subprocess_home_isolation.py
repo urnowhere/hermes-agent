@@ -10,6 +10,7 @@ See: https://github.com/NousResearch/hermes-agent/issues/4426
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -209,6 +210,116 @@ class TestSanitizeSubprocessEnvHomeInjection:
 
 class TestTerminalRuntimeProfileIsolation:
     """Regression tests for profile-scoped terminal/process runtime caches."""
+
+    def test_environment_cache_key_returns_tuple(self, tmp_path, monkeypatch):
+        profile_home = tmp_path / "profiles" / "alpha"
+        profile_home.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "gateway"))
+
+        from hermes_constants import hermes_home_context
+        from tools.terminal_tool import _environment_cache_key
+
+        with hermes_home_context(profile_home):
+            key = _environment_cache_key("default")
+
+        assert key == (str(profile_home), "default")
+
+    def test_file_ops_cache_isolated_per_profile(self, tmp_path, monkeypatch):
+        gateway_home = tmp_path / "gateway"
+        profile_a = tmp_path / "profiles" / "alpha"
+        profile_b = tmp_path / "profiles" / "beta"
+        for home in (gateway_home, profile_a, profile_b):
+            home.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(gateway_home))
+
+        from hermes_constants import hermes_home_context
+        from tools import file_tools
+        from tools import terminal_tool
+
+        terminal_tool._active_environments.clear()
+        terminal_tool._last_activity.clear()
+        terminal_tool._creation_locks.clear()
+        file_tools._file_ops_cache.clear()
+
+        created = []
+
+        def fake_create_environment(**kwargs):
+            env = SimpleNamespace(
+                cwd=f"/workspace/{len(created)}",
+                execute=lambda *args, **kw: {"output": "", "returncode": 0},
+            )
+            created.append((kwargs, env))
+            return env
+
+        monkeypatch.setattr(terminal_tool, "_create_environment", fake_create_environment)
+        monkeypatch.setattr(terminal_tool, "_start_cleanup_thread", lambda: None)
+
+        with hermes_home_context(profile_a):
+            ops_a = file_tools._get_file_ops("default")
+        with hermes_home_context(profile_b):
+            ops_b = file_tools._get_file_ops("default")
+
+        assert ops_a is not ops_b
+        assert set(file_tools._file_ops_cache) == {
+            (str(profile_a), "default"),
+            (str(profile_b), "default"),
+        }
+
+    def test_execute_code_env_isolated_per_profile(self, tmp_path, monkeypatch):
+        gateway_home = tmp_path / "gateway"
+        profile_a = tmp_path / "profiles" / "alpha"
+        profile_b = tmp_path / "profiles" / "beta"
+        for home in (gateway_home, profile_a, profile_b):
+            home.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(gateway_home))
+
+        from hermes_constants import hermes_home_context
+        from tools import code_execution_tool
+        from tools import terminal_tool
+
+        terminal_tool._active_environments.clear()
+        terminal_tool._last_activity.clear()
+        terminal_tool._creation_locks.clear()
+
+        created = []
+
+        def fake_create_environment(**kwargs):
+            env = SimpleNamespace(cwd=f"/workspace/{len(created)}")
+            created.append((kwargs, env))
+            return env
+
+        monkeypatch.setattr(terminal_tool, "_create_environment", fake_create_environment)
+        monkeypatch.setattr(terminal_tool, "_start_cleanup_thread", lambda: None)
+
+        with hermes_home_context(profile_a):
+            env_a, _ = code_execution_tool._get_or_create_env("default")
+        with hermes_home_context(profile_b):
+            env_b, _ = code_execution_tool._get_or_create_env("default")
+
+        assert env_a is not env_b
+        assert set(terminal_tool._active_environments) == {
+            (str(profile_a), "default"),
+            (str(profile_b), "default"),
+        }
+
+    def test_legacy_string_cache_key_does_not_crash_eviction_loop(self, tmp_path):
+        from tools import terminal_tool
+        from tools.process_registry import process_registry
+
+        cleaned = []
+        legacy_key = f"{tmp_path / 'legacy'}::default"
+        env = SimpleNamespace(cleanup=lambda: cleaned.append(True))
+        terminal_tool._active_environments.clear()
+        terminal_tool._last_activity.clear()
+        terminal_tool._creation_locks.clear()
+        process_registry._running.clear()
+        terminal_tool._active_environments[legacy_key] = env
+        terminal_tool._last_activity[legacy_key] = 0.0
+
+        terminal_tool._cleanup_inactive_envs(lifetime_seconds=1)
+
+        assert cleaned == [True]
+        assert legacy_key not in terminal_tool._active_environments
 
     def test_process_registry_writes_global_checkpoint_with_profile_metadata(
         self, tmp_path, monkeypatch

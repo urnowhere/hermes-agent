@@ -914,10 +914,11 @@ Do NOT use vim/nano/interactive tools without pty=true — they hang without a p
 """
 
 # Global state for environment lifecycle management
-_active_environments: Dict[str, Any] = {}
-_last_activity: Dict[str, float] = {}
+EnvCacheKey = tuple[str, str]
+_active_environments: Dict[EnvCacheKey | str, Any] = {}
+_last_activity: Dict[EnvCacheKey | str, float] = {}
 _env_lock = threading.Lock()
-_creation_locks: Dict[str, threading.Lock] = {}  # Per-task locks for sandbox creation
+_creation_locks: Dict[EnvCacheKey | str, threading.Lock] = {}  # Per-task locks for sandbox creation
 _creation_locks_lock = threading.Lock()  # Protects _creation_locks dict itself
 _cleanup_thread = None
 _cleanup_running = False
@@ -983,6 +984,32 @@ def _resolve_container_task_id(task_id: Optional[str]) -> str:
     if task_id and task_id in _task_env_overrides:
         return task_id
     return "default"
+
+
+def _active_hermes_home_key() -> str:
+    try:
+        from hermes_constants import get_hermes_home
+        return str(get_hermes_home().expanduser().resolve(strict=False))
+    except Exception:
+        return os.environ.get("HERMES_HOME", "") or str(Path.home() / ".hermes")
+
+
+def _environment_cache_key(task_id: Optional[str]) -> EnvCacheKey:
+    logical_task_id = _resolve_container_task_id(task_id)
+    return (_active_hermes_home_key(), logical_task_id)
+
+
+def _normalize_cache_key(key: EnvCacheKey | str | None) -> EnvCacheKey:
+    if isinstance(key, tuple) and len(key) == 2:
+        return (str(key[0]), str(key[1]) or "default")
+    if isinstance(key, str) and "::" in key:
+        home, logical_task_id = key.split("::", 1)
+        return (home, logical_task_id or "default")
+    return ("", str(key or "default"))
+
+
+def _logical_task_id_from_cache_key(key: EnvCacheKey | str | None) -> str:
+    return _normalize_cache_key(key)[1]
 
 
 # Configuration from environment variables
@@ -1255,9 +1282,10 @@ def _cleanup_inactive_envs(lifetime_seconds: int = 300):
     # background processes (their _last_activity gets refreshed to keep them alive).
     try:
         from tools.process_registry import process_registry
-        for task_id in list(_last_activity.keys()):
+        for cache_key in list(_last_activity.keys()):
+            task_id = _logical_task_id_from_cache_key(cache_key)
             if process_registry.has_active_processes(task_id):
-                _last_activity[task_id] = current_time  # Keep sandbox alive
+                _last_activity[cache_key] = current_time  # Keep sandbox alive
     except ImportError:
         pass
 
@@ -1268,21 +1296,22 @@ def _cleanup_inactive_envs(lifetime_seconds: int = 300):
     envs_to_stop = []  # list of (task_id, env) pairs
 
     with _env_lock:
-        for task_id, last_time in list(_last_activity.items()):
+        for cache_key, last_time in list(_last_activity.items()):
             if current_time - last_time > lifetime_seconds:
-                env = _active_environments.pop(task_id, None)
-                _last_activity.pop(task_id, None)
+                env = _active_environments.pop(cache_key, None)
+                _last_activity.pop(cache_key, None)
                 if env is not None:
-                    envs_to_stop.append((task_id, env))
+                    envs_to_stop.append((cache_key, env))
 
         # Also purge per-task creation locks for cleaned-up tasks
         with _creation_locks_lock:
-            for task_id, _ in envs_to_stop:
-                _creation_locks.pop(task_id, None)
+            for cache_key, _ in envs_to_stop:
+                _creation_locks.pop(cache_key, None)
 
     # Phase 2: stop the actual sandboxes OUTSIDE the lock so other tool calls
     # are not blocked while Modal/Docker sandboxes shut down.
-    for task_id, env in envs_to_stop:
+    for cache_key, env in envs_to_stop:
+        task_id = _logical_task_id_from_cache_key(cache_key)
         # Invalidate stale file_ops cache entry (Bug fix: prevents
         # ShellFileOperations from referencing a dead sandbox)
         try:
@@ -1349,8 +1378,12 @@ def _stop_cleanup_thread():
 def get_active_env(task_id: str):
     """Return the active BaseEnvironment for *task_id*, or None."""
     lookup = _resolve_container_task_id(task_id)
+    cache_key = _environment_cache_key(task_id)
     with _env_lock:
-        return _active_environments.get(lookup) or _active_environments.get(task_id)
+        return (
+            _active_environments.get(cache_key)
+            or _active_environments.get(lookup)
+        )
 
 
 def is_persistent_env(task_id: str) -> bool:
@@ -1399,23 +1432,36 @@ def cleanup_all_environments():
     return cleaned
 
 
-def cleanup_vm(task_id: str):
+def cleanup_vm(task_id: EnvCacheKey | str):
     """Manually clean up a specific environment by task_id."""
     # Remove from tracking dicts while holding the lock, but defer the
     # actual (potentially slow) env.cleanup() call to outside the lock
     # so other tool calls aren't blocked.
+    cache_key = (
+        _normalize_cache_key(task_id)
+        if isinstance(task_id, tuple) or (isinstance(task_id, str) and "::" in task_id)
+        else _environment_cache_key(task_id)
+    )
+    legacy_key = _logical_task_id_from_cache_key(cache_key)
+    env = None
     with _env_lock:
-        env = _active_environments.pop(task_id, None)
-        _last_activity.pop(task_id, None)
+        for key in (task_id, cache_key, legacy_key):
+            if env is None:
+                env = _active_environments.pop(key, None)
+            else:
+                _active_environments.pop(key, None)
+            _last_activity.pop(key, None)
 
     # Clean up per-task creation lock
     with _creation_locks_lock:
-        _creation_locks.pop(task_id, None)
+        for key in (task_id, cache_key, legacy_key):
+            _creation_locks.pop(key, None)
 
     # Invalidate stale file_ops cache entry
     try:
         from tools.file_tools import clear_file_ops_cache
-        clear_file_ops_cache(task_id)
+        clear_file_ops_cache(cache_key)
+        clear_file_ops_cache(legacy_key)
     except ImportError:
         pass
 
@@ -1687,6 +1733,7 @@ def terminal_tool(
         # every delegate_task child share one container; only task_ids with
         # a registered env override (RL benchmarks) get isolated sandboxes.
         effective_task_id = _resolve_container_task_id(task_id)
+        effective_cache_key = _environment_cache_key(task_id)
 
         # Check per-task overrides (set by environments like TerminalBench2Env)
         # before falling back to global env var config
@@ -1739,9 +1786,9 @@ def terminal_tool(
         # task_id wait for the first one to finish creating the sandbox,
         # instead of each creating their own (wasting Modal resources).
         with _env_lock:
-            if effective_task_id in _active_environments:
-                _last_activity[effective_task_id] = time.time()
-                env = _active_environments[effective_task_id]
+            if effective_cache_key in _active_environments:
+                _last_activity[effective_cache_key] = time.time()
+                env = _active_environments[effective_cache_key]
                 needs_creation = False
             else:
                 needs_creation = True
@@ -1749,16 +1796,16 @@ def terminal_tool(
         if needs_creation:
             # Per-task lock: only one thread creates the sandbox, others wait
             with _creation_locks_lock:
-                if effective_task_id not in _creation_locks:
-                    _creation_locks[effective_task_id] = threading.Lock()
-                task_lock = _creation_locks[effective_task_id]
+                if effective_cache_key not in _creation_locks:
+                    _creation_locks[effective_cache_key] = threading.Lock()
+                task_lock = _creation_locks[effective_cache_key]
 
             with task_lock:
                 # Double-check after acquiring the per-task lock
                 with _env_lock:
-                    if effective_task_id in _active_environments:
-                        _last_activity[effective_task_id] = time.time()
-                        env = _active_environments[effective_task_id]
+                    if effective_cache_key in _active_environments:
+                        _last_activity[effective_cache_key] = time.time()
+                        env = _active_environments[effective_cache_key]
                         needs_creation = False
 
                 if needs_creation:
@@ -1818,8 +1865,8 @@ def terminal_tool(
                         }, ensure_ascii=False)
 
                     with _env_lock:
-                        _active_environments[effective_task_id] = new_env
-                        _last_activity[effective_task_id] = time.time()
+                        _active_environments[effective_cache_key] = new_env
+                        _last_activity[effective_cache_key] = time.time()
                         env = new_env
                     logger.info("%s environment ready for task %s", env_type, effective_task_id[:8])
 
