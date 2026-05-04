@@ -11389,7 +11389,7 @@ class HermesCLI:
             key_bindings=kb,
             style=style,
             full_screen=False,
-            mouse_support=False,
+            mouse_support=self.config.get("tui", {}).get("mouse_support", False),
             **({'cursor': _STEADY_CURSOR} if _STEADY_CURSOR is not None else {}),
         )
         self._app = app  # Store reference for clarify_callback
