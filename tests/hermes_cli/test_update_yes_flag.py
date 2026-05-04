@@ -9,10 +9,30 @@ Covers:
 """
 
 import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from hermes_cli.main import cmd_update
+
+
+class _TtyProxy:
+    """Proxy stdout/stdin with a deterministic TTY answer for update tests."""
+
+    def __init__(self, wrapped):
+        self._wrapped = wrapped
+
+    def isatty(self):
+        return True
+
+    def write(self, data):
+        return self._wrapped.write(data)
+
+    def flush(self):
+        return self._wrapped.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
 
 
 def _make_run_side_effect(
@@ -114,10 +134,8 @@ class TestUpdateYesConfigMigration:
         args = SimpleNamespace(yes=False)
 
         with patch("builtins.input", return_value="n") as mock_input, patch(
-            "hermes_cli.main.sys"
-        ) as mock_sys:
-            mock_sys.stdin.isatty.return_value = True
-            mock_sys.stdout.isatty.return_value = True
+            "hermes_cli.main.sys.stdin", _TtyProxy(sys.stdin)
+        ), patch("hermes_cli.main.sys.stdout", _TtyProxy(sys.stdout)):
             cmd_update(args)
             # The user was actually prompted.
             assert mock_input.called
