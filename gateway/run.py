@@ -11848,6 +11848,18 @@ class GatewayRunner:
         This is run in a thread pool to not block the event loop.
         Supports interruption via new messages.
         """
+        # Resolve the routed profile's SessionStore/SessionDB once so every
+        # post-turn write inside _run_agent (compression split entry update,
+        # auto-title, resume_pending lookup) targets the profile that owns
+        # this conversation. Without this, lines below silently fell back
+        # to self.session_store / self._session_db — the gateway-global
+        # stores — which caused routed compressed sessions to become
+        # unreachable on the next turn and routed auto-titles to land in
+        # the wrong DB (bug E in the topic-profile-routing review).
+        session_store = self._session_store_for_source(source)
+        if session_db is None:
+            session_db = self._session_db_for_source(source)
+
         # ---- Proxy mode: delegate to remote API server ----
         if self._get_proxy_url():
             return await self._run_agent_via_proxy(
@@ -12861,7 +12873,7 @@ class GatewayRunner:
             _resume_entry = None
             if session_key:
                 try:
-                    _resume_entry = self.session_store._entries.get(session_key)
+                    _resume_entry = session_store._entries.get(session_key)
                 except Exception:
                     _resume_entry = None
             _is_resume_pending = bool(
@@ -13038,10 +13050,10 @@ class GatewayRunner:
                     "Session split detected: %s → %s (compression)",
                     session_id, agent.session_id,
                 )
-                entry = self.session_store._entries.get(session_key)
+                entry = session_store._entries.get(session_key)
                 if entry:
                     entry.session_id = agent.session_id
-                    self.session_store._save()
+                    session_store._save()
 
             effective_session_id = getattr(agent, 'session_id', session_id) if agent else session_id
 
@@ -13053,7 +13065,7 @@ class GatewayRunner:
             _effective_history_offset = 0 if _session_was_split else len(agent_history)
 
             # Auto-generate session title after first exchange (non-blocking)
-            if final_response and self._session_db:
+            if final_response and session_db:
                 try:
                     from agent.title_generator import maybe_auto_title
                     all_msgs = result_holder[0].get("messages", []) if result_holder[0] else []
@@ -13065,7 +13077,7 @@ class GatewayRunner:
                         agent, "_emit_auxiliary_failure", None
                     )
                     maybe_auto_title(
-                        self._session_db,
+                        session_db,
                         effective_session_id,
                         message,
                         final_response,

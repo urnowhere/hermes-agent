@@ -6,7 +6,7 @@ import threading
 import types
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -516,6 +516,168 @@ async def _run_captured_agent(monkeypatch, runner, source, hermes_home, *, conte
     assert result["final_response"] == "ok"
     assert _CapturingAgent.last_init is not None
     return _CapturingAgent.last_init
+
+
+class _CompressingAgent(_CapturingAgent):
+    """Capturing agent that mutates ``session_id`` mid-turn to simulate the
+    auto-compression code path: when ``run_conversation`` finishes, the
+    agent's ``session_id`` differs from the one ``_run_agent`` was invoked
+    with, which triggers the compression-split entry update at
+    ``gateway/run.py:13041`` (bug E)."""
+
+    new_session_id = "session-after-compression"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Constructor is invoked with ``session_id=...``; rewrite to a
+        # different value so the post-result block sees a split.
+        self.session_id = self.new_session_id
+
+
+@pytest.mark.asyncio
+async def test_run_agent_compression_split_writes_to_profile_session_store(
+    monkeypatch, tmp_path
+):
+    """Bug E regression: when auto-compression mid-turn rotates the
+    agent's ``session_id``, ``_run_agent`` must update the entry on the
+    routed profile's SessionStore — not the gateway-global store.
+
+    Before the fix, ``self.session_store._entries.get(...)`` and
+    ``self.session_store._save()`` (gateway/run.py:13041 + :13044) wrote
+    to the gateway store, leaving the profile entry stuck on the old
+    ``session_id`` and making the compressed transcript unreachable on
+    the next routed turn.
+    """
+    from gateway import run as gateway_run
+
+    gateway_home = tmp_path / "gateway"
+    profiles_root = gateway_home / "profiles"
+    profile_home = profiles_root / "cybrel-test"
+    profile_home.mkdir(parents=True)
+    config = GatewayConfig(
+        platforms={
+            Platform.TELEGRAM: PlatformConfig(
+                extra={"topic_profiles_safe_root": str(profiles_root)}
+            )
+        }
+    )
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = _CompressingAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+    _CompressingAgent.last_init = None
+    _CompressingAgent.inits = []
+    monkeypatch.delenv("HERMES_EPHEMERAL_SYSTEM_PROMPT", raising=False)
+    monkeypatch.delenv("HERMES_PREFILL_MESSAGES_FILE", raising=False)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", _provider_runtime)
+    monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
+
+    with hermes_home_context(gateway_home):
+        runner = _make_runner(config)
+        source = _source(
+            agent_profile="cybrel-test",
+            agent_hermes_home=str(profile_home),
+        )
+        session_key = build_session_key(source)
+
+        profile_store = runner._session_store_for_source(source)
+        gateway_store = runner.session_store
+
+        original_session_id = "session-before-compression"
+        profile_entry = profile_store.get_or_create_session(source)
+        profile_entry.session_id = original_session_id
+        profile_store._save()
+        gateway_entry = gateway_store.get_or_create_session(source)
+        gateway_entry.session_id = "gateway-untouched"
+        gateway_store._save()
+
+        with hermes_home_context(profile_home):
+            result = await runner._run_agent(
+                message="hi",
+                context_prompt="",
+                history=[],
+                source=source,
+                session_id=original_session_id,
+                session_key=session_key,
+            )
+
+    assert result["final_response"] == "ok"
+
+    # Profile store entry must reflect the post-compression session id.
+    profile_entry_after = profile_store._entries.get(session_key)
+    assert profile_entry_after is not None
+    assert profile_entry_after.session_id == _CompressingAgent.new_session_id
+
+    # Gateway store must NOT have been written. Its entry, if present, keeps
+    # the original placeholder id; either the entry is absent or untouched.
+    gw_entry_after = gateway_store._entries.get(session_key)
+    if gw_entry_after is not None:
+        assert gw_entry_after.session_id == "gateway-untouched"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_auto_title_writes_to_profile_session_db(
+    monkeypatch, tmp_path
+):
+    """Bug E regression: auto-title generation at ``gateway/run.py:13056``
+    must call ``maybe_auto_title`` with the routed profile's SessionDB,
+    not ``self._session_db`` (which is the gateway-global one)."""
+    from gateway import run as gateway_run
+
+    gateway_home = tmp_path / "gateway"
+    profiles_root = gateway_home / "profiles"
+    profile_home = profiles_root / "cybrel-test"
+    profile_home.mkdir(parents=True)
+    config = GatewayConfig(
+        platforms={
+            Platform.TELEGRAM: PlatformConfig(
+                extra={"topic_profiles_safe_root": str(profiles_root)}
+            )
+        }
+    )
+
+    _install_fake_agent(monkeypatch)
+    monkeypatch.delenv("HERMES_EPHEMERAL_SYSTEM_PROMPT", raising=False)
+    monkeypatch.delenv("HERMES_PREFILL_MESSAGES_FILE", raising=False)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", _provider_runtime)
+    monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
+
+    captured_dbs = []
+
+    def _fake_maybe_auto_title(session_db, session_id, message, final_response, all_msgs, **kwargs):
+        captured_dbs.append(session_db)
+
+    import agent.title_generator as title_module
+    monkeypatch.setattr(title_module, "maybe_auto_title", _fake_maybe_auto_title)
+
+    with hermes_home_context(gateway_home):
+        runner = _make_runner(config)
+        # Force the gateway-global _session_db to a sentinel so any leak is
+        # observable in the captured arguments.
+        gateway_db_sentinel = MagicMock(name="gateway_session_db")
+        runner._session_db = gateway_db_sentinel
+
+        source = _source(
+            agent_profile="cybrel-test",
+            agent_hermes_home=str(profile_home),
+        )
+        profile_store = runner._session_store_for_source(source)
+        profile_db = profile_store._db
+        assert profile_db is not gateway_db_sentinel
+
+        with hermes_home_context(profile_home):
+            await runner._run_agent(
+                message="hi",
+                context_prompt="",
+                history=[],
+                source=source,
+                session_id="session-init",
+                session_key=build_session_key(source),
+            )
+
+    assert captured_dbs, "maybe_auto_title was never called"
+    assert captured_dbs[0] is profile_db
+    assert captured_dbs[0] is not gateway_db_sentinel
 
 
 @pytest.mark.asyncio
