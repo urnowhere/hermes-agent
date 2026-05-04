@@ -320,7 +320,8 @@ async def test_reload_mcp_reads_profile_cli_config_for_routed_topic(monkeypatch,
     from tools import mcp_tool
 
     gateway_home = tmp_path / "gateway"
-    profile_home = tmp_path / "profiles" / "cybrel-test"
+    profiles_root = tmp_path / "profiles"
+    profile_home = profiles_root / "cybrel-test"
     gateway_home.mkdir()
     profile_home.mkdir(parents=True)
     captured_homes = []
@@ -337,7 +338,13 @@ async def test_reload_mcp_reads_profile_cli_config_for_routed_topic(monkeypatch,
 
     with hermes_home_context(gateway_home):
         runner = object.__new__(GatewayRunner)
-        runner.config = GatewayConfig()
+        runner.config = GatewayConfig(
+            platforms={
+                Platform.TELEGRAM: PlatformConfig(
+                    extra={"topic_profiles_safe_root": str(profiles_root)}
+                )
+            }
+        )
         runner.session_store = SessionStore(gateway_home / "sessions", runner.config)
         source = _source(agent_profile="cybrel-test", agent_hermes_home=str(profile_home))
         event = MessageEvent(
@@ -345,11 +352,51 @@ async def test_reload_mcp_reads_profile_cli_config_for_routed_topic(monkeypatch,
             message_type=MessageType.COMMAND,
             source=source,
         )
-        with hermes_home_context(profile_home):
-            result = await runner._execute_mcp_reload(event)
+        result = await runner._execute_mcp_reload(event)
 
     assert captured_homes == [str(profile_home)]
     assert "profile-server" in result
+
+
+@pytest.mark.asyncio
+async def test_reload_skills_reads_profile_home_for_routed_topic(monkeypatch, tmp_path):
+    from agent import skill_commands
+    from gateway.run import GatewayRunner
+
+    gateway_home = tmp_path / "gateway"
+    profiles_root = tmp_path / "profiles"
+    profile_home = profiles_root / "cybrel-test"
+    gateway_home.mkdir()
+    profile_home.mkdir(parents=True)
+    captured_homes = []
+
+    def fake_reload_skills():
+        captured_homes.append(str(get_hermes_home()))
+        return {"added": [], "removed": [], "total": 0}
+
+    monkeypatch.setattr(skill_commands, "reload_skills", fake_reload_skills)
+
+    with hermes_home_context(gateway_home):
+        runner = object.__new__(GatewayRunner)
+        runner.config = GatewayConfig(
+            platforms={
+                Platform.TELEGRAM: PlatformConfig(
+                    extra={"topic_profiles_safe_root": str(profiles_root)}
+                )
+            }
+        )
+        runner.adapters = {}
+        runner.session_store = SessionStore(gateway_home / "sessions", runner.config)
+        source = _source(agent_profile="cybrel-test", agent_hermes_home=str(profile_home))
+        event = MessageEvent(
+            text="/reload-skills",
+            message_type=MessageType.COMMAND,
+            source=source,
+        )
+        result = await runner._handle_reload_skills_command(event)
+
+    assert captured_homes == [str(profile_home)]
+    assert "Skills Reloaded" in result
 
 
 def test_profile_session_store_uses_routed_home_without_changing_global_home(tmp_path):

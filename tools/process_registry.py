@@ -828,21 +828,30 @@ class ProcessRegistry:
         except Exception:
             return value
 
-    def _get_for_current_scope(self, session_id: str) -> Optional[ProcessSession]:
-        """Return a process only when it belongs to the active routed profile."""
-        session = self.get(session_id)
-        if session is None:
-            return None
-
+    def _current_scope(self) -> tuple[bool, str]:
         try:
             from gateway.session_context import get_session_env
+            active_profile = get_session_env("HERMES_SESSION_AGENT_PROFILE", "")
             active_home = get_session_env("HERMES_SESSION_AGENT_HERMES_HOME", "")
         except Exception:
+            active_profile = ""
             active_home = ""
 
         active_home = self._normalize_home(active_home)
+        is_routed = bool(str(active_profile or "").strip() or active_home)
+        return is_routed, active_home
+
+    def _in_current_scope(self, session: ProcessSession) -> bool:
+        is_routed, active_home = self._current_scope()
         session_home = self._normalize_home(session.agent_hermes_home)
-        if active_home and session_home and active_home != session_home:
+        if is_routed:
+            return bool(active_home and session_home and session_home == active_home)
+        return not bool(session_home)
+
+    def _get_for_current_scope(self, session_id: str) -> Optional[ProcessSession]:
+        """Return a process only when it belongs to the active profile scope."""
+        session = self.get(session_id)
+        if session is None or not self._in_current_scope(session):
             return None
         return session
 
@@ -1177,6 +1186,7 @@ class ProcessRegistry:
             all_sessions = list(self._running.values()) + list(self._finished.values())
 
         all_sessions = [self._refresh_detached_session(s) for s in all_sessions]
+        all_sessions = [s for s in all_sessions if self._in_current_scope(s)]
 
         if task_id:
             all_sessions = [s for s in all_sessions if s.task_id == task_id]

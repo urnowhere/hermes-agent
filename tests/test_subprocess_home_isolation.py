@@ -479,28 +479,163 @@ class TestTerminalRuntimeProfileIsolation:
         from gateway.session_context import clear_session_vars, set_session_vars
         from tools.process_registry import ProcessSession, _handle_process, process_registry
 
-        process_registry._running.clear()
-        process_registry._finished.clear()
-        process_registry._running["proc_alpha"] = ProcessSession(
-            id="proc_alpha",
-            command="sleep 60",
-            task_id="default",
-            session_key="agent:alpha:telegram:group:-1001:101",
-            agent_profile="alpha",
-            agent_hermes_home=str(profile_a),
-            pid=12345,
-            started_at=1.0,
-        )
-
-        tokens = set_session_vars(agent_profile="beta", agent_hermes_home=str(profile_b))
         try:
-            for action in ("log", "kill", "submit"):
+            process_registry._running.clear()
+            process_registry._finished.clear()
+            process_registry._running["proc_alpha"] = ProcessSession(
+                id="proc_alpha",
+                command="sleep 60",
+                task_id="default",
+                session_key="agent:alpha:telegram:group:-1001:101",
+                agent_profile="alpha",
+                agent_hermes_home=str(profile_a),
+                pid=12345,
+                started_at=1.0,
+            )
+
+            tokens = set_session_vars(agent_profile="beta", agent_hermes_home=str(profile_b))
+            try:
+                for action in ("poll", "log", "wait", "kill", "write", "submit", "close"):
+                    result = json.loads(
+                        _handle_process(
+                            {
+                                "action": action,
+                                "session_id": "proc_alpha",
+                                "data": "x",
+                                "timeout": 0,
+                            }
+                        )
+                    )
+                    assert result["status"] == "not_found"
+            finally:
+                clear_session_vars(tokens)
+        finally:
+            process_registry._running.clear()
+            process_registry._finished.clear()
+
+    def test_routed_profile_rejects_legacy_process_without_profile_home(
+        self, tmp_path
+    ):
+        profile_home = tmp_path / "profiles" / "beta"
+        profile_home.mkdir(parents=True)
+
+        from gateway.session_context import clear_session_vars, set_session_vars
+        from tools.process_registry import ProcessSession, _handle_process, process_registry
+
+        try:
+            process_registry._running.clear()
+            process_registry._finished.clear()
+            process_registry._running["proc_legacy"] = ProcessSession(
+                id="proc_legacy",
+                command="sleep 60",
+                task_id="default",
+                session_key="agent:main:telegram:group:-1001:101",
+                pid=12345,
+                started_at=1.0,
+            )
+
+            tokens = set_session_vars(agent_profile="beta", agent_hermes_home=str(profile_home))
+            try:
                 result = json.loads(
-                    _handle_process({"action": action, "session_id": "proc_alpha", "data": "x"})
+                    _handle_process({"action": "log", "session_id": "proc_legacy"})
                 )
                 assert result["status"] == "not_found"
+            finally:
+                clear_session_vars(tokens)
         finally:
-            clear_session_vars(tokens)
+            process_registry._running.clear()
+            process_registry._finished.clear()
+
+    def test_main_context_rejects_routed_process_session_id(
+        self, tmp_path
+    ):
+        profile_home = tmp_path / "profiles" / "alpha"
+        profile_home.mkdir(parents=True)
+
+        from gateway.session_context import clear_session_vars, set_session_vars
+        from tools.process_registry import ProcessSession, _handle_process, process_registry
+
+        try:
+            process_registry._running.clear()
+            process_registry._finished.clear()
+            process_registry._running["proc_alpha"] = ProcessSession(
+                id="proc_alpha",
+                command="sleep 60",
+                task_id="default",
+                session_key="agent:alpha:telegram:group:-1001:101",
+                agent_profile="alpha",
+                agent_hermes_home=str(profile_home),
+                pid=12345,
+                started_at=1.0,
+            )
+
+            tokens = set_session_vars(agent_profile="", agent_hermes_home="")
+            try:
+                result = json.loads(
+                    _handle_process({"action": "log", "session_id": "proc_alpha"})
+                )
+                assert result["status"] == "not_found"
+            finally:
+                clear_session_vars(tokens)
+        finally:
+            process_registry._running.clear()
+            process_registry._finished.clear()
+
+    def test_process_list_filters_to_current_profile_scope(
+        self, tmp_path
+    ):
+        profile_a = tmp_path / "profiles" / "alpha"
+        profile_b = tmp_path / "profiles" / "beta"
+        profile_a.mkdir(parents=True)
+        profile_b.mkdir(parents=True)
+
+        from gateway.session_context import clear_session_vars, set_session_vars
+        from tools.process_registry import ProcessSession, _handle_process, process_registry
+
+        try:
+            process_registry._running.clear()
+            process_registry._finished.clear()
+            process_registry._running["proc_main"] = ProcessSession(
+                id="proc_main",
+                command="sleep 60",
+                task_id="default",
+                session_key="agent:main:telegram:group:-1001:1",
+                pid=111,
+                started_at=1.0,
+            )
+            process_registry._running["proc_alpha"] = ProcessSession(
+                id="proc_alpha",
+                command="sleep 60",
+                task_id="default",
+                session_key="agent:alpha:telegram:group:-1001:101",
+                agent_profile="alpha",
+                agent_hermes_home=str(profile_a),
+                pid=222,
+                started_at=2.0,
+            )
+            process_registry._running["proc_beta"] = ProcessSession(
+                id="proc_beta",
+                command="sleep 60",
+                task_id="default",
+                session_key="agent:beta:telegram:group:-1001:202",
+                agent_profile="beta",
+                agent_hermes_home=str(profile_b),
+                pid=333,
+                started_at=3.0,
+            )
+
+            tokens = set_session_vars(agent_profile="beta", agent_hermes_home=str(profile_b))
+            try:
+                routed = json.loads(_handle_process({"action": "list"}))
+                assert [p["session_id"] for p in routed["processes"]] == ["proc_beta"]
+            finally:
+                clear_session_vars(tokens)
+
+            main = json.loads(_handle_process({"action": "list"}))
+            assert [p["session_id"] for p in main["processes"]] == ["proc_main"]
+        finally:
+            process_registry._running.clear()
+            process_registry._finished.clear()
 
 
 # ---------------------------------------------------------------------------

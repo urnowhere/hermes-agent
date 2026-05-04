@@ -1581,6 +1581,13 @@ class GatewayRunner:
             pass
         return getattr(self, "_session_db", None)
 
+    def _set_command_hermes_home_for_source(self, source: SessionSource):
+        """Install the routed profile HERMES_HOME for gateway-handled commands."""
+        profile_home = self._profile_home_for_source(source)
+        if profile_home is None:
+            return None
+        return set_hermes_home_override(profile_home)
+
     def _resolve_session_agent_runtime(
         self,
         *,
@@ -10198,7 +10205,9 @@ class GatewayRunner:
         button, text reply, or has the confirm gate disabled.
         """
         loop = asyncio.get_running_loop()
+        profile_home_token = None
         try:
+            profile_home_token = self._set_command_hermes_home_for_source(event.source)
             from tools.mcp_tool import shutdown_mcp_servers, discover_mcp_tools, _servers, _lock
 
             # Capture old server names before shutdown
@@ -10263,6 +10272,9 @@ class GatewayRunner:
         except Exception as e:
             logger.warning("MCP reload failed: %s", e)
             return f"❌ MCP reload failed: {e}"
+        finally:
+            if profile_home_token is not None:
+                reset_hermes_home_override(profile_home_token)
 
     async def _handle_reload_skills_command(self, event: MessageEvent) -> str:
         """Handle /reload-skills — rescan skills dir, queue a note for next turn.
@@ -10280,10 +10292,13 @@ class GatewayRunner:
         alternation is preserved.
         """
         loop = asyncio.get_running_loop()
+        profile_home_token = None
         try:
+            profile_home_token = self._set_command_hermes_home_for_source(event.source)
             from agent.skill_commands import reload_skills
 
-            result = await loop.run_in_executor(None, reload_skills)
+            ctx = copy_context()
+            result = await loop.run_in_executor(None, lambda: ctx.run(reload_skills))
             added = result.get("added", [])      # [{"name", "description"}, ...]
             removed = result.get("removed", [])  # [{"name", "description"}, ...]
             total = result.get("total", 0)
@@ -10361,6 +10376,9 @@ class GatewayRunner:
         except Exception as e:
             logger.warning("Skills reload failed: %s", e)
             return f"❌ Skills reload failed: {e}"
+        finally:
+            if profile_home_token is not None:
+                reset_hermes_home_override(profile_home_token)
 
     # ------------------------------------------------------------------
     # Slash-command confirmation primitive (generic)
