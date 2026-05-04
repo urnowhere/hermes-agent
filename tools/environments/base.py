@@ -310,6 +310,7 @@ class BaseEnvironment(ABC):
         login: bool = False,
         timeout: int = 120,
         stdin_data: str | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> ProcessHandle:
         """Spawn a bash process to run *cmd_string*.
 
@@ -723,6 +724,7 @@ class BaseEnvironment(ABC):
         *,
         timeout: int | None = None,
         stdin_data: str | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> dict:
         """Execute a command, return {"output": str, "returncode": int}."""
         self._before_execute()
@@ -756,9 +758,15 @@ class BaseEnvironment(ABC):
         # Use login shell if snapshot failed (so user's profile still loads)
         login = not self._snapshot_ready
 
-        proc = self._run_bash(
-            wrapped, login=login, timeout=effective_timeout, stdin_data=effective_stdin
-        )
+        run_kwargs = {
+            "login": login,
+            "timeout": effective_timeout,
+            "stdin_data": effective_stdin,
+        }
+        if extra_env:
+            run_kwargs["extra_env"] = extra_env
+
+        proc = self._run_bash(wrapped, **run_kwargs)
         result = self._wait_for_process(proc, timeout=effective_timeout)
         self._update_cwd(result)
 
@@ -783,4 +791,3 @@ class BaseEnvironment(ABC):
         from tools.terminal_tool import _transform_sudo_command
 
         return _transform_sudo_command(command)
-
