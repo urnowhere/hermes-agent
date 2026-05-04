@@ -874,12 +874,19 @@ def _gemini_http_error(response: httpx.Response) -> CodeAssistError:
         if retry_delay_seconds is not None:
             message += f" Retry suggested in {retry_delay_seconds:g}s."
     elif status == 404:
-        # Google returns 404 when a model has been retired or renamed.
+        # Google returns 404 when a model is not available via Code Assist.
+        # Note: gemini-3.x models ARE supported per Google docs:
+        # https://developers.google.com/gemini-code-assist/docs/gemini-3
+        # 404 may indicate: wrong project setup, missing Code Assist
+        # subscription, or the specific preview name has changed.
         target = model_hint or (err_message or "model")
         message = (
             f"Code Assist 404: {target} is not available at "
-            f"cloudcode-pa.googleapis.com. It may have been renamed or "
-            f"retired. Check hermes_cli/models.py for the current list."
+            f"cloudcode-pa.googleapis.com. Possible causes: "
+            f"(1) Code Assist not enabled for your Google project — "
+            f"see https://developers.google.com/gemini-code-assist/docs/gemini-3 "
+            f"(2) Model name changed — try: hermes model gemini-2.5-flash "
+            f"(3) Run: hermes auth to re-authenticate"
         )
     elif err_message:
         # Generic fallback with the parsed message.
