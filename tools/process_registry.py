@@ -548,24 +548,32 @@ class ProcessRegistry:
             preexec_fn=None if _IS_WINDOWS else os.setsid,
         )
 
-        session.process = proc
-        session.pid = proc.pid
+        # FIX: ensure process is killed if setup after Popen fails,
+        # preventing orphaned subprocesses from leaking resources.
+        try:
+            session.process = proc
+            session.pid = proc.pid
 
-        # Start output reader thread
-        reader = threading.Thread(
-            target=self._reader_loop,
-            args=(session,),
-            daemon=True,
-            name=f"proc-reader-{session.id}",
-        )
-        session._reader_thread = reader
-        reader.start()
+            # Start output reader thread
+            reader = threading.Thread(
+                target=self._reader_loop,
+                args=(session,),
+                daemon=True,
+                name=f"proc-reader-{session.id}",
+            )
+            session._reader_thread = reader
+            reader.start()
 
-        with self._lock:
-            self._prune_if_needed()
-            self._running[session.id] = session
+            with self._lock:
+                self._prune_if_needed()
+                self._running[session.id] = session
 
-        self._write_checkpoint()
+            self._write_checkpoint()
+        except Exception:
+            proc.kill()
+            proc.wait()
+            raise
+
         return session
 
     def spawn_via_env(
