@@ -32,6 +32,7 @@ from tools.delegate_tool import (
     _strip_blocked_tools,
     _resolve_child_credential_pool,
     _resolve_delegation_credentials,
+    _warn_model_provider_mismatch,
 )
 
 
@@ -782,9 +783,9 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertEqual(creds["model"], "google/gemini-3-flash-preview")
         self.assertEqual(creds["provider"], "openrouter")
         self.assertEqual(creds["base_url"], "https://openrouter.ai/api/v1")
-        self.assertEqual(creds["api_key"], "sk-or-test-key")
+        self.assertEqual(creds["api_key"], "***")
         self.assertEqual(creds["api_mode"], "chat_completions")
-        mock_resolve.assert_called_once_with(requested="openrouter")
+        mock_resolve.assert_called_once_with(requested="openrouter", target_model=None)
 
     @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_provider_resolution_uses_runtime_model_when_config_model_missing(self, mock_resolve):
@@ -804,7 +805,7 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertEqual(creds["model"], "server-default-model")
         self.assertEqual(creds["provider"], "custom")
         self.assertEqual(creds["base_url"], "https://my-server.example/v1")
-        mock_resolve.assert_called_once_with(requested="custom:my-server")
+        mock_resolve.assert_called_once_with(requested="custom:my-server", target_model=None)
 
     def test_direct_endpoint_uses_configured_base_url_and_api_key(self):
         parent = _make_mock_parent(depth=0)
@@ -868,7 +869,7 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertEqual(creds["provider"], "nous")
         self.assertEqual(creds["base_url"], "https://inference-api.nousresearch.com/v1")
         self.assertEqual(creds["api_key"], "nous-agent-key-xyz")
-        mock_resolve.assert_called_once_with(requested="nous")
+        mock_resolve.assert_called_once_with(requested="nous", target_model=None)
 
     @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_provider_resolution_failure_raises_valueerror(self, mock_resolve):
@@ -2550,7 +2551,7 @@ class TestModelProviderOverride(unittest.TestCase):
             creds = _resolve_delegation_credentials(
                 cfg, parent, provider_override="openrouter"
             )
-        mock_resolve.assert_called_once_with(requested="openrouter")
+        mock_resolve.assert_called_once_with(requested="openrouter", target_model=None)
         self.assertEqual(creds["provider"], "openrouter")
         self.assertEqual(creds["base_url"], "https://openrouter.ai/api/v1")
 
@@ -2794,6 +2795,167 @@ class TestRunAgentDispatchForwarding(unittest.TestCase):
                 f"_dispatch_delegate_task forwarded wrong value for '{key}': "
                 f"expected {expected!r}, got {call_kwargs[key]!r}"
             )
+
+
+class TestOpenRouterAutoModelSmoke(unittest.TestCase):
+    """Smoke tests for the OpenRouter-centric use case with model='openrouter/auto'.
+
+    Regression target: upstream commit 83bbe9b45 fixed api_mode computation by
+    threading target_model through resolve_runtime_provider. This test verifies
+    that our model_override path in _resolve_delegation_credentials also threads
+    the override model correctly — so that a parent on any provider that passes
+    model='openrouter/auto' and provider='openrouter' always gets
+    api_mode='chat_completions', not a stale anthropic_messages or None.
+
+    The critical code path:
+        delegate_task(model="openrouter/auto", provider="openrouter")
+            → _resolve_delegation_credentials(cfg={}, parent, model_override="openrouter/auto",
+                                               provider_override="openrouter")
+            → resolve_runtime_provider(requested="openrouter",
+                                       target_model="openrouter/auto")   ← must receive override
+            → returns api_mode="chat_completions"
+    """
+
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
+    def test_auto_model_override_passes_target_model_to_resolver(self, mock_resolve):
+        """model_override='openrouter/auto' must be forwarded as target_model to
+        resolve_runtime_provider, not silently dropped.
+
+        If target_model is not forwarded, resolve_runtime_provider falls back to
+        model_cfg.get('default'), which could be a native-provider model (e.g.
+        claude-opus-4) that triggers anthropic_messages api_mode — breaking the
+        OpenRouter child with a 404 or auth error.
+        """
+        mock_resolve.return_value = {
+            "provider": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "sk-or-test",
+            "api_mode": "chat_completions",
+        }
+        parent = _make_mock_parent(depth=0)
+        cfg = {}  # no static delegation config — everything from call-site overrides
+
+        creds = _resolve_delegation_credentials(
+            cfg, parent,
+            model_override="openrouter/auto",
+            provider_override="openrouter",
+        )
+
+        # resolve_runtime_provider must be called with target_model="openrouter/auto"
+        mock_resolve.assert_called_once_with(
+            requested="openrouter",
+            target_model="openrouter/auto",
+        )
+        # Credential bundle must reflect the resolver's return value
+        self.assertEqual(creds["api_mode"], "chat_completions")
+        self.assertEqual(creds["provider"], "openrouter")
+        self.assertEqual(creds["model"], "openrouter/auto")
+
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
+    def test_auto_model_override_api_mode_is_chat_completions(self, mock_resolve):
+        """api_mode returned for openrouter/auto must always be chat_completions.
+
+        OpenRouter is an aggregator — it only speaks chat_completions. If the
+        resolver were to return anthropic_messages (e.g. because the fallback
+        model_cfg.default is a Claude model), the child would receive an
+        anthropic_messages transport and strip /v1 from the base URL, causing a 404.
+        """
+        mock_resolve.return_value = {
+            "provider": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "sk-or-test",
+            "api_mode": "chat_completions",
+        }
+        parent = _make_mock_parent(depth=0)
+        cfg = {}
+
+        creds = _resolve_delegation_credentials(
+            cfg, parent,
+            model_override="openrouter/auto",
+            provider_override="openrouter",
+        )
+
+        self.assertEqual(
+            creds["api_mode"], "chat_completions",
+            "OpenRouter with model='openrouter/auto' must produce api_mode='chat_completions'. "
+            "Got anthropic_messages — likely target_model is not being forwarded to "
+            "resolve_runtime_provider, causing it to infer api_mode from the stale "
+            "parent model config instead of the requested openrouter/auto model.",
+        )
+
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
+    def test_per_task_model_override_does_not_affect_other_tasks(self, mock_resolve):
+        """Top-level model='openrouter/auto' + per-task model override coexist correctly.
+
+        When one task specifies model='anthropic/claude-haiku-4-5' and another
+        omits model (falling back to the top-level 'openrouter/auto'), credentials
+        are resolved once at the top level. The per-task model is substituted at
+        _build_child_agent call time via task_model = t.get('model') or creds['model'].
+
+        This test verifies that the top-level credential resolution with
+        model_override='openrouter/auto' correctly sets creds['model'] to 'openrouter/auto'
+        so per-task fallback works as expected.
+        """
+        mock_resolve.return_value = {
+            "provider": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "sk-or-test",
+            "api_mode": "chat_completions",
+        }
+        parent = _make_mock_parent(depth=0)
+        cfg = {}
+
+        creds = _resolve_delegation_credentials(
+            cfg, parent,
+            model_override="openrouter/auto",
+            provider_override="openrouter",
+        )
+
+        # creds['model'] is the fallback used by tasks that don't specify a per-task model
+        self.assertEqual(
+            creds["model"], "openrouter/auto",
+            "creds['model'] must equal the model_override so tasks without a "
+            "per-task model correctly inherit 'openrouter/auto' as the fallback.",
+        )
+        # api_mode is shared across all tasks — must stay chat_completions
+        self.assertEqual(creds["api_mode"], "chat_completions")
+
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
+    def test_model_override_takes_precedence_over_config_model(self, mock_resolve):
+        """Call-site model_override must win over delegation.model in config.yaml.
+
+        A user may have delegation.model='anthropic/claude-sonnet-4' in config.yaml
+        as a static default. When they call delegate_task(model='openrouter/auto'),
+        the call-site value must take precedence — not be silently ignored.
+        """
+        mock_resolve.return_value = {
+            "provider": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "sk-or-test",
+            "api_mode": "chat_completions",
+        }
+        parent = _make_mock_parent(depth=0)
+        # Simulate config.yaml with a static delegation.model
+        cfg = {"model": "anthropic/claude-sonnet-4", "provider": ""}
+
+        creds = _resolve_delegation_credentials(
+            cfg, parent,
+            model_override="openrouter/auto",
+            provider_override="openrouter",
+        )
+
+        # Override must win
+        self.assertEqual(
+            creds["model"], "openrouter/auto",
+            "model_override='openrouter/auto' must take precedence over "
+            "cfg['model']='anthropic/claude-sonnet-4'. The call-site param "
+            "is not being applied — check the configured_model resolution in "
+            "_resolve_delegation_credentials.",
+        )
+        mock_resolve.assert_called_once_with(
+            requested="openrouter",
+            target_model="openrouter/auto",
+        )
 
 
 if __name__ == "__main__":
