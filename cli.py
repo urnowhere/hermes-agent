@@ -4020,8 +4020,13 @@ class HermesCLI:
         args = parts[1:] if len(parts) > 1 else []
 
         if not args:
-            # List checkpoints
+            # List checkpoints - fall back to all checkpoints if none for cwd (#10505)
             checkpoints = mgr.list_checkpoints(cwd)
+            if not checkpoints:
+                checkpoints = mgr.list_all_checkpoints()
+                if checkpoints:
+                    print(format_checkpoint_list(checkpoints, "all directories"))
+                    return
             print(format_checkpoint_list(checkpoints, cwd))
             return
 

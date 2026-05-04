@@ -386,6 +386,65 @@ class CheckpointManager:
                 results.append(entry)
         return results
 
+    def list_all_checkpoints(self) -> List[Dict]:
+        """List all checkpoints across all directories.
+
+        Returns a list of dicts with keys: hash, short_hash, timestamp, reason,
+        files_changed, insertions, deletions, workdir. Most recent first.
+        """
+        results = []
+        if not CHECKPOINT_BASE.exists():
+            return results
+
+        for shadow_dir in CHECKPOINT_BASE.iterdir():
+            if not shadow_dir.is_dir():
+                continue
+            head_file = shadow_dir / "HEAD"
+            workdir_file = shadow_dir / "HERMES_WORKDIR"
+            if not head_file.exists():
+                continue
+
+            # Read the original workdir
+            workdir = ""
+            if workdir_file.exists():
+                try:
+                    workdir = workdir_file.read_text().strip()
+                except Exception:
+                    pass
+
+            ok, stdout, _ = _run_git(
+                ["log", "--format=%H|%h|%aI|%s", "-n", str(self.max_snapshots)],
+                shadow_dir, workdir if workdir else str(shadow_dir),
+            )
+
+            if ok and stdout:
+                for line in stdout.splitlines():
+                    parts = line.split("|", 3)
+                    if len(parts) == 4:
+                        entry = {
+                            "hash": parts[0],
+                            "short_hash": parts[1],
+                            "timestamp": parts[2],
+                            "reason": parts[3],
+                            "files_changed": 0,
+                            "insertions": 0,
+                            "deletions": 0,
+                            "workdir": workdir,
+                        }
+                        # Get diffstat for this commit
+                        stat_ok, stat_out, _ = _run_git(
+                            ["diff", "--shortstat", f"{parts[0]}~1", parts[0]],
+                            shadow_dir, workdir if workdir else str(shadow_dir),
+                            allowed_returncodes={128, 129},  # first commit has no parent
+                        )
+                        if stat_ok and stat_out:
+                            self._parse_shortstat(stat_out, entry)
+                        results.append(entry)
+
+        # Sort by timestamp, most recent first
+        results.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        return results
+
     @staticmethod
     def _parse_shortstat(stat_line: str, entry: Dict) -> None:
         """Parse git --shortstat output into entry dict."""
@@ -645,7 +704,14 @@ def format_checkpoint_list(checkpoints: List[Dict], directory: str) -> str:
         else:
             stat = ""
 
-        lines.append(f"  {i}. {cp['short_hash']}  {ts}  {cp['reason']}{stat}")
+        # Show workdir for all-directories view
+        workdir = cp.get("workdir", "")
+        if workdir and directory == "all directories":
+            from pathlib import Path
+            workdir_short = Path(workdir).name
+            lines.append(f"  {i}. {cp['short_hash']}  {ts}  [{workdir_short}]  {cp['reason']}{stat}")
+        else:
+            lines.append(f"  {i}. {cp['short_hash']}  {ts}  {cp['reason']}{stat}")
 
     lines.append("\n  /rollback <N>             restore to checkpoint N")
     lines.append("  /rollback diff <N>        preview changes since checkpoint N")
