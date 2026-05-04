@@ -781,11 +781,17 @@ async def _process_large_content_chunked(
     
     # Run all chunk summarizations in parallel
     tasks = [summarize_chunk(i, chunk) for i, chunk in enumerate(chunks)]
-    results = await asyncio.gather(*tasks)
-    
+    # FIX: use return_exceptions=True so a single task failure does not
+    # discard all other successfully fetched results.
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
     # Collect successful summaries in order
     summaries = []
-    for chunk_idx, summary in sorted(results, key=lambda x: x[0]):
+    for result_item in sorted(results, key=lambda x: (0, 0) if isinstance(x, BaseException) else x):
+        if isinstance(result_item, BaseException):
+            logger.warning("Task failed: %s", result_item)
+            continue
+        chunk_idx, summary = result_item
         if summary:
             summaries.append(f"## Section {chunk_idx + 1}\n{summary}")
     
@@ -1468,10 +1474,16 @@ async def web_extract_tool(
             # Run all LLM processing in parallel
             results_list = response.get('results', [])
             tasks = [process_single_result(result) for result in results_list]
-            processed_results = await asyncio.gather(*tasks)
-            
+            # FIX: use return_exceptions=True so a single task failure does not
+            # discard all other successfully fetched results.
+            processed_results = await asyncio.gather(*tasks, return_exceptions=True)
+
             # Collect metrics and print results
-            for result, metrics, status in processed_results:
+            for result_item in processed_results:
+                if isinstance(result_item, BaseException):
+                    logger.warning("Task failed: %s", result_item)
+                    continue
+                result, metrics, status = result_item
                 url = result.get('url', 'Unknown URL')
                 if status == "processed":
                     debug_call_data["compression_metrics"].append(metrics)
@@ -1653,8 +1665,14 @@ async def web_crawl_tool(
                     return result, metrics, "too_short"
 
                 tasks = [_process_tavily_crawl(r) for r in response.get('results', [])]
-                processed_results = await asyncio.gather(*tasks)
-                for result, metrics, status in processed_results:
+                # FIX: use return_exceptions=True so a single task failure does not
+                # discard all other successfully fetched results.
+                processed_results = await asyncio.gather(*tasks, return_exceptions=True)
+                for result_item in processed_results:
+                    if isinstance(result_item, BaseException):
+                        logger.warning("Task failed: %s", result_item)
+                        continue
+                    result, metrics, status = result_item
                     if status == "processed":
                         debug_call_data["compression_metrics"].append(metrics)
                         debug_call_data["pages_processed_with_llm"] += 1
@@ -1887,10 +1905,16 @@ async def web_crawl_tool(
             # Run all LLM processing in parallel
             results_list = response.get('results', [])
             tasks = [process_single_crawl_result(result) for result in results_list]
-            processed_results = await asyncio.gather(*tasks)
-            
+            # FIX: use return_exceptions=True so a single task failure does not
+            # discard all other successfully fetched results.
+            processed_results = await asyncio.gather(*tasks, return_exceptions=True)
+
             # Collect metrics and print results
-            for result, metrics, status in processed_results:
+            for result_item in processed_results:
+                if isinstance(result_item, BaseException):
+                    logger.warning("Task failed: %s", result_item)
+                    continue
+                result, metrics, status = result_item
                 page_url = result.get('url', 'Unknown URL')
                 if status == "processed":
                     debug_call_data["compression_metrics"].append(metrics)
