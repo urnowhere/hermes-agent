@@ -253,6 +253,8 @@ class TestDoctorCommandInstallation:
         monkeypatch.setattr(doctor_mod, "PROJECT_ROOT", project)
         monkeypatch.setattr(doctor_mod, "_DHH", str(home))
         monkeypatch.setattr(sys, "platform", "win32")
+        # shutil.which uses _winapi on win32 which is None on non-Windows hosts
+        monkeypatch.setattr(doctor_mod.shutil, "which", lambda cmd: None)
 
         fake_model_tools = types.SimpleNamespace(
             check_tool_availability=lambda *a, **kw: ([], []),
