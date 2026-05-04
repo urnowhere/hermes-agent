@@ -453,6 +453,15 @@ class LocalEnvironment(BaseEnvironment):
 
     def _update_cwd(self, result: dict):
         """Read CWD from temp file (local-only, no round-trip needed)."""
+        if _IS_WINDOWS:
+            # Windows: Git Bash pwd -P outputs POSIX paths (/c/Users/msn)
+            # that are invalid for subprocess.Popen(cwd=...). Strip the
+            # marker from output without overwriting self.cwd.
+            saved = self.cwd
+            self._extract_cwd_from_output(result)
+            self.cwd = saved
+            return
+
         try:
             with open(self._cwd_file) as f:
                 cwd_path = f.read().strip()
