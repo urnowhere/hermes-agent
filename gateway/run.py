@@ -554,6 +554,7 @@ from gateway.config import (
     load_gateway_config,
 )
 from gateway.session import (
+    _PROFILE_ID_RE,
     SessionStore,
     SessionSource,
     SessionContext,
@@ -952,7 +953,7 @@ def _parse_session_key(session_key: str) -> "dict | None":
     """Parse a session key into its component parts.
 
     Session keys follow the format
-    ``agent:main:{platform}:{chat_type}:{chat_id}[:{extra}...]``.
+    ``agent:{profile}:{platform}:{chat_type}:{chat_id}[:{extra}...]``.
     Returns a dict with ``platform``, ``chat_type``, ``chat_id``, and
     optionally ``thread_id`` keys, or None if the key doesn't match.
 
@@ -962,8 +963,9 @@ def _parse_session_key(session_key: str) -> "dict | None":
     thread_id, so we leave ``thread_id`` out to avoid mis-routing.
     """
     parts = session_key.split(":")
-    if len(parts) >= 5 and parts[0] == "agent" and parts[1] == "main":
+    if len(parts) >= 5 and parts[0] == "agent" and _PROFILE_ID_RE.match(parts[1]):
         result = {
+            "agent_profile": parts[1],
             "platform": parts[2],
             "chat_type": parts[3],
             "chat_id": parts[4],
@@ -11153,6 +11155,8 @@ class GatewayRunner:
             user_id=str(context.source.user_id) if context.source.user_id else "",
             user_name=str(context.source.user_name) if context.source.user_name else "",
             session_key=context.session_key,
+            agent_profile=str(getattr(context.source, "agent_profile", None) or ""),
+            agent_hermes_home=str(getattr(context.source, "agent_hermes_home", None) or ""),
         )
 
     def _clear_session_env(self, tokens: list) -> None:
@@ -11401,7 +11405,7 @@ class GatewayRunner:
             )
             return None
 
-        return SessionSource(
+        source = SessionSource(
             platform=platform,
             chat_id=chat_id,
             chat_type=chat_type,
@@ -11409,6 +11413,9 @@ class GatewayRunner:
             user_id=str(evt.get("user_id") or "").strip() or None,
             user_name=str(evt.get("user_name") or "").strip() or None,
         )
+        source.agent_profile = str(evt.get("agent_profile") or "").strip() or None
+        source.agent_hermes_home = str(evt.get("agent_hermes_home") or "").strip() or None
+        return source
 
     async def _inject_watch_notification(self, synth_text: str, evt: dict) -> None:
         """Inject a watch-pattern notification as a synthetic message event.
@@ -11471,6 +11478,8 @@ class GatewayRunner:
         thread_id = watcher.get("thread_id", "")
         user_id = watcher.get("user_id", "")
         user_name = watcher.get("user_name", "")
+        agent_profile = watcher.get("agent_profile", "")
+        agent_hermes_home = watcher.get("agent_hermes_home", "")
         agent_notify = watcher.get("notify_on_complete", False)
         notify_mode = self._load_background_notifications_mode()
 
@@ -11521,6 +11530,8 @@ class GatewayRunner:
                         "thread_id": thread_id,
                         "user_id": user_id,
                         "user_name": user_name,
+                        "agent_profile": agent_profile,
+                        "agent_hermes_home": agent_hermes_home,
                     })
                     if not source:
                         logger.warning(

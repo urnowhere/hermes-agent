@@ -39,6 +39,7 @@ import subprocess
 import threading
 import time
 import uuid
+from pathlib import Path
 
 _IS_WINDOWS = platform.system() == "Windows"
 from tools.environments.local import _find_shell, _sanitize_subprocess_env
@@ -92,6 +93,8 @@ class ProcessSession:
     command: str                                 # Original command string
     task_id: str = ""                           # Task/sandbox isolation key
     session_key: str = ""                       # Gateway session key (for reset protection)
+    agent_profile: str = ""                     # Routed gateway profile name
+    agent_hermes_home: str = ""                 # Routed profile HERMES_HOME
     pid: Optional[int] = None                   # OS process ID
     process: Optional[subprocess.Popen] = None  # Popen handle (local only)
     env_ref: Any = None                         # Reference to the environment object
@@ -270,6 +273,8 @@ class ProcessRegistry:
                 self.completion_queue.put({
                     "session_id": session.id,
                     "session_key": session.session_key,
+                    "agent_profile": session.agent_profile,
+                    "agent_hermes_home": session.agent_hermes_home,
                     "command": session.command,
                     "type": "watch_disabled",
                     "suppressed": session._watch_suppressed,
@@ -300,6 +305,8 @@ class ProcessRegistry:
         self.completion_queue.put({
             "session_id": session.id,
             "session_key": session.session_key,
+            "agent_profile": session.agent_profile,
+            "agent_hermes_home": session.agent_hermes_home,
             "command": session.command,
             "type": "watch_match",
             "pattern": matched_pattern,
@@ -464,6 +471,8 @@ class ProcessRegistry:
         session_key: str = "",
         env_vars: dict = None,
         use_pty: bool = False,
+        agent_profile: str = "",
+        agent_hermes_home: str = "",
     ) -> ProcessSession:
         """
         Spawn a background process locally.
@@ -480,6 +489,8 @@ class ProcessRegistry:
             command=command,
             task_id=task_id,
             session_key=session_key,
+            agent_profile=agent_profile,
+            agent_hermes_home=agent_hermes_home,
             cwd=cwd or os.getcwd(),
             started_at=time.time(),
         )
@@ -576,6 +587,8 @@ class ProcessRegistry:
         task_id: str = "",
         session_key: str = "",
         timeout: int = 10,
+        agent_profile: str = "",
+        agent_hermes_home: str = "",
     ) -> ProcessSession:
         """
         Spawn a background process through a non-local environment backend.
@@ -593,6 +606,8 @@ class ProcessRegistry:
             command=command,
             task_id=task_id,
             session_key=session_key,
+            agent_profile=agent_profile,
+            agent_hermes_home=agent_hermes_home,
             cwd=cwd,
             started_at=time.time(),
             env_ref=env,
@@ -783,6 +798,9 @@ class ProcessRegistry:
             self.completion_queue.put({
                 "type": "completion",
                 "session_id": session.id,
+                "session_key": session.session_key,
+                "agent_profile": session.agent_profile,
+                "agent_hermes_home": session.agent_hermes_home,
                 "command": session.command,
                 "exit_code": session.exit_code,
                 "output": output_tail,
@@ -799,6 +817,34 @@ class ProcessRegistry:
         with self._lock:
             session = self._running.get(session_id) or self._finished.get(session_id)
         return self._refresh_detached_session(session)
+
+    @staticmethod
+    def _normalize_home(value: str) -> str:
+        value = str(value or "").strip()
+        if not value:
+            return ""
+        try:
+            return str(Path(value).expanduser().resolve(strict=False))
+        except Exception:
+            return value
+
+    def _get_for_current_scope(self, session_id: str) -> Optional[ProcessSession]:
+        """Return a process only when it belongs to the active routed profile."""
+        session = self.get(session_id)
+        if session is None:
+            return None
+
+        try:
+            from gateway.session_context import get_session_env
+            active_home = get_session_env("HERMES_SESSION_AGENT_HERMES_HOME", "")
+        except Exception:
+            active_home = ""
+
+        active_home = self._normalize_home(active_home)
+        session_home = self._normalize_home(session.agent_hermes_home)
+        if active_home and session_home and active_home != session_home:
+            return None
+        return session
 
     def _reconcile_local_exit(self, session: "ProcessSession") -> None:
         """Reconcile session.exited against the real child process state.
@@ -1246,6 +1292,8 @@ class ProcessRegistry:
                             "started_at": s.started_at,
                             "task_id": s.task_id,
                             "session_key": s.session_key,
+                            "agent_profile": s.agent_profile,
+                            "agent_hermes_home": s.agent_hermes_home,
                             "watcher_platform": s.watcher_platform,
                             "watcher_chat_id": s.watcher_chat_id,
                             "watcher_user_id": s.watcher_user_id,
@@ -1304,6 +1352,8 @@ class ProcessRegistry:
                     command=entry.get("command", "unknown"),
                     task_id=entry.get("task_id", ""),
                     session_key=entry.get("session_key", ""),
+                    agent_profile=entry.get("agent_profile", ""),
+                    agent_hermes_home=entry.get("agent_hermes_home", ""),
                     pid=pid,
                     pid_scope=pid_scope,
                     cwd=entry.get("cwd"),
@@ -1329,6 +1379,8 @@ class ProcessRegistry:
                         "session_id": session.id,
                         "check_interval": session.watcher_interval,
                         "session_key": session.session_key,
+                        "agent_profile": session.agent_profile,
+                        "agent_hermes_home": session.agent_hermes_home,
                         "platform": session.watcher_platform,
                         "chat_id": session.watcher_chat_id,
                         "user_id": session.watcher_user_id,
@@ -1407,6 +1459,12 @@ def _handle_process(args, **kw):
     elif action in ("poll", "log", "wait", "kill", "write", "submit", "close"):
         if not session_id:
             return tool_error(f"session_id is required for {action}")
+        scoped = process_registry._get_for_current_scope(session_id)
+        if scoped is None:
+            return json.dumps({
+                "status": "not_found",
+                "error": "No process with ID in current profile scope",
+            }, ensure_ascii=False)
         if action == "poll":
             return json.dumps(process_registry.poll(session_id), ensure_ascii=False)
         elif action == "log":

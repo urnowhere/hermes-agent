@@ -7,6 +7,7 @@ and Path.home() remain unchanged.
 See: https://github.com/NousResearch/hermes-agent/issues/4426
 """
 
+import json
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -200,6 +201,195 @@ class TestSanitizeSubprocessEnvHomeInjection:
 
         assert result["HERMES_HOME"] == str(profile_dir)
         assert result["HOME"] == str(profile_dir / "home")
+
+
+# ---------------------------------------------------------------------------
+# Terminal/process runtime cache isolation
+# ---------------------------------------------------------------------------
+
+class TestTerminalRuntimeProfileIsolation:
+    """Regression tests for profile-scoped terminal/process runtime caches."""
+
+    def test_process_registry_writes_global_checkpoint_with_profile_metadata(
+        self, tmp_path, monkeypatch
+    ):
+        gateway_home = tmp_path / "gateway"
+        profile_a = tmp_path / "profiles" / "alpha"
+        profile_b = tmp_path / "profiles" / "beta"
+        gateway_home.mkdir()
+        profile_a.mkdir(parents=True)
+        profile_b.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(gateway_home))
+
+        from hermes_constants import hermes_home_context
+        from tools import process_registry as process_registry_mod
+        from tools.process_registry import ProcessRegistry, ProcessSession
+
+        checkpoint = gateway_home / "processes.json"
+        monkeypatch.setattr(process_registry_mod, "CHECKPOINT_PATH", checkpoint)
+        registry = ProcessRegistry()
+        with hermes_home_context(profile_a):
+            registry._running["proc_alpha"] = ProcessSession(
+                id="proc_alpha",
+                command="sleep 60",
+                task_id="default",
+                session_key="agent:alpha:telegram:group:-1001:101",
+                agent_profile="alpha",
+                agent_hermes_home=str(profile_a),
+                pid=12345,
+                started_at=1.0,
+            )
+        with hermes_home_context(profile_b):
+            registry._running["proc_beta"] = ProcessSession(
+                id="proc_beta",
+                command="sleep 60",
+                task_id="default",
+                session_key="agent:beta:telegram:group:-1001:202",
+                agent_profile="beta",
+                agent_hermes_home=str(profile_b),
+                pid=23456,
+                started_at=2.0,
+            )
+            registry._write_checkpoint()
+
+        rows = json.loads(checkpoint.read_text(encoding="utf-8"))
+        by_id = {row["session_id"]: row for row in rows}
+        assert set(by_id) == {"proc_alpha", "proc_beta"}
+        assert by_id["proc_alpha"]["agent_hermes_home"] == str(profile_a)
+        assert by_id["proc_beta"]["agent_hermes_home"] == str(profile_b)
+
+    def test_process_registry_recovers_routed_processes_after_crash(
+        self, tmp_path, monkeypatch
+    ):
+        gateway_home = tmp_path / "gateway"
+        profile_a = tmp_path / "profiles" / "alpha"
+        profile_b = tmp_path / "profiles" / "beta"
+        gateway_home.mkdir()
+        profile_a.mkdir(parents=True)
+        profile_b.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(gateway_home))
+
+        from tools import process_registry as process_registry_mod
+        from tools.process_registry import ProcessRegistry, ProcessSession
+
+        checkpoint = gateway_home / "processes.json"
+        monkeypatch.setattr(process_registry_mod, "CHECKPOINT_PATH", checkpoint)
+        before = ProcessRegistry()
+        before._running["proc_alpha"] = ProcessSession(
+            id="proc_alpha",
+            command="sleep 60",
+            task_id="default",
+            session_key="agent:alpha:telegram:group:-1001:101",
+            agent_profile="alpha",
+            agent_hermes_home=str(profile_a),
+            pid=12345,
+            started_at=1.0,
+            watcher_platform="telegram",
+            watcher_chat_id="-1001",
+            watcher_thread_id="101",
+            watcher_interval=5,
+            notify_on_complete=True,
+        )
+        before._running["proc_beta"] = ProcessSession(
+            id="proc_beta",
+            command="sleep 60",
+            task_id="default",
+            session_key="agent:beta:telegram:group:-1001:202",
+            agent_profile="beta",
+            agent_hermes_home=str(profile_b),
+            pid=23456,
+            started_at=2.0,
+            watcher_platform="telegram",
+            watcher_chat_id="-1001",
+            watcher_thread_id="202",
+            watcher_interval=5,
+            notify_on_complete=True,
+        )
+        before._write_checkpoint()
+
+        after = ProcessRegistry()
+        monkeypatch.setattr(after, "_is_host_pid_alive", lambda _pid: True)
+
+        assert after.recover_from_checkpoint() == 2
+        assert set(after._running) == {"proc_alpha", "proc_beta"}
+        assert after._running["proc_alpha"].agent_hermes_home == str(profile_a)
+        assert after._running["proc_beta"].agent_hermes_home == str(profile_b)
+        assert {w["agent_hermes_home"] for w in after.pending_watchers} == {
+            str(profile_a),
+            str(profile_b),
+        }
+
+    def test_session_context_propagates_routed_profile_to_terminal_tool(
+        self, tmp_path, monkeypatch
+    ):
+        gateway_home = tmp_path / "gateway"
+        profile_home = tmp_path / "profiles" / "alpha"
+        for home in (gateway_home, profile_home):
+            (home / "home").mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(gateway_home))
+        monkeypatch.setenv("TERMINAL_ENV", "local")
+        monkeypatch.setenv("TERMINAL_LOCAL_PERSISTENT", "false")
+
+        from gateway.session_context import clear_session_vars, set_session_vars
+        from tools.process_registry import process_registry
+        from tools.terminal_tool import cleanup_all_environments, terminal_tool
+
+        process_registry._running.clear()
+        process_registry._finished.clear()
+        tokens = set_session_vars(
+            platform="telegram",
+            chat_id="-1001",
+            thread_id="101",
+            session_key="agent:alpha:telegram:group:-1001:101",
+            agent_profile="alpha",
+            agent_hermes_home=str(profile_home),
+        )
+        try:
+            started = json.loads(
+                terminal_tool("printf ok", background=True, notify_on_complete=True, timeout=5)
+            )
+            session = process_registry.get(started["session_id"])
+        finally:
+            clear_session_vars(tokens)
+            cleanup_all_environments()
+
+        assert session is not None
+        assert session.agent_profile == "alpha"
+        assert session.agent_hermes_home == str(profile_home)
+
+    def test_process_action_rejects_cross_profile_session_id(
+        self, tmp_path
+    ):
+        profile_a = tmp_path / "profiles" / "alpha"
+        profile_b = tmp_path / "profiles" / "beta"
+        profile_a.mkdir(parents=True)
+        profile_b.mkdir(parents=True)
+
+        from gateway.session_context import clear_session_vars, set_session_vars
+        from tools.process_registry import ProcessSession, _handle_process, process_registry
+
+        process_registry._running.clear()
+        process_registry._finished.clear()
+        process_registry._running["proc_alpha"] = ProcessSession(
+            id="proc_alpha",
+            command="sleep 60",
+            task_id="default",
+            session_key="agent:alpha:telegram:group:-1001:101",
+            agent_profile="alpha",
+            agent_hermes_home=str(profile_a),
+            pid=12345,
+            started_at=1.0,
+        )
+
+        tokens = set_session_vars(agent_profile="beta", agent_hermes_home=str(profile_b))
+        try:
+            for action in ("log", "kill", "submit"):
+                result = json.loads(
+                    _handle_process({"action": action, "session_id": "proc_alpha", "data": "x"})
+                )
+                assert result["status"] == "not_found"
+        finally:
+            clear_session_vars(tokens)
 
 
 # ---------------------------------------------------------------------------

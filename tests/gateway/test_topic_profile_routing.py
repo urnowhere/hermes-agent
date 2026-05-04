@@ -250,6 +250,18 @@ def test_session_key_includes_valid_profile_and_ignores_invalid_profile():
     assert invalid == "agent:main:telegram:group:-1001:101"
 
 
+def test_parse_session_key_accepts_routed_profiles():
+    from gateway.run import _parse_session_key
+
+    parsed = _parse_session_key("agent:cybrel-test:telegram:group:-1001:101")
+
+    assert parsed is not None
+    assert parsed["agent_profile"] == "cybrel-test"
+    assert parsed["platform"] == "telegram"
+    assert parsed["chat_type"] == "group"
+    assert parsed["chat_id"] == "-1001"
+
+
 def test_session_key_treats_empty_profile_as_main_without_warning(caplog):
     source = _source(agent_profile="")
 
@@ -267,6 +279,39 @@ def test_session_source_roundtrip_preserves_agent_profile_fields(tmp_path):
 
     assert restored.agent_profile == "vault-test"
     assert restored.agent_hermes_home == str(tmp_path / "vault-test")
+
+
+def test_completion_event_rebuilds_source_with_routed_profile(tmp_path):
+    from gateway.run import GatewayRunner
+
+    gateway_home = tmp_path / "gateway"
+    profile_home = tmp_path / "profiles" / "cybrel-test"
+    gateway_home.mkdir()
+    profile_home.mkdir(parents=True)
+
+    with hermes_home_context(gateway_home):
+        runner = object.__new__(GatewayRunner)
+        runner.config = GatewayConfig()
+        runner.session_store = SessionStore(gateway_home / "sessions", runner.config)
+
+        source = runner._build_process_event_source(
+            {
+                "session_id": "proc_alpha",
+                "session_key": "agent:cybrel-test:telegram:group:-1001:101",
+                "platform": "telegram",
+                "chat_type": "group",
+                "chat_id": "-1001",
+                "thread_id": "101",
+                "user_id": "42",
+                "agent_profile": "cybrel-test",
+                "agent_hermes_home": str(profile_home),
+            }
+        )
+
+    assert source is not None
+    assert source.agent_profile == "cybrel-test"
+    assert source.agent_hermes_home == str(profile_home)
+    assert source.thread_id == "101"
 
 
 def test_profile_session_store_uses_routed_home_without_changing_global_home(tmp_path):

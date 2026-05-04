@@ -1404,7 +1404,6 @@ def cleanup_vm(task_id: str):
     # Remove from tracking dicts while holding the lock, but defer the
     # actual (potentially slow) env.cleanup() call to outside the lock
     # so other tool calls aren't blocked.
-    env = None
     with _env_lock:
         env = _active_environments.pop(task_id, None)
         _last_activity.pop(task_id, None)
@@ -1892,9 +1891,12 @@ def terminal_tool(
             # For non-local backends: runs inside the sandbox via env.execute().
             from tools.approval import get_current_session_key
             from tools.process_registry import process_registry
+            from gateway.session_context import get_session_env as _gse
 
             session_key = get_current_session_key(default="")
             effective_cwd = workdir or cwd
+            agent_profile = _gse("HERMES_SESSION_AGENT_PROFILE", "")
+            agent_hermes_home = _gse("HERMES_SESSION_AGENT_HERMES_HOME", "")
             try:
                 if env_type == "local":
                     proc_session = process_registry.spawn_local(
@@ -1904,6 +1906,8 @@ def terminal_tool(
                         session_key=session_key,
                         env_vars=env.env if hasattr(env, 'env') else None,
                         use_pty=effective_pty,
+                        agent_profile=agent_profile,
+                        agent_hermes_home=agent_hermes_home,
                     )
                 else:
                     proc_session = process_registry.spawn_via_env(
@@ -1912,6 +1916,8 @@ def terminal_tool(
                         cwd=effective_cwd,
                         task_id=effective_task_id,
                         session_key=session_key,
+                        agent_profile=agent_profile,
+                        agent_hermes_home=agent_hermes_home,
                     )
 
                 result_data = {
@@ -1930,7 +1936,6 @@ def terminal_tool(
                 # watch-pattern and completion notifications can be
                 # routed back to the correct chat/thread.
                 if background and (notify_on_complete or watch_patterns):
-                    from gateway.session_context import get_session_env as _gse
                     _gw_platform = _gse("HERMES_SESSION_PLATFORM", "")
                     if _gw_platform:
                         _gw_chat_id = _gse("HERMES_SESSION_CHAT_ID", "")
@@ -1973,6 +1978,8 @@ def terminal_tool(
                             "session_id": proc_session.id,
                             "check_interval": 5,
                             "session_key": session_key,
+                            "agent_profile": proc_session.agent_profile,
+                            "agent_hermes_home": proc_session.agent_hermes_home,
                             "platform": proc_session.watcher_platform,
                             "chat_id": proc_session.watcher_chat_id,
                             "user_id": proc_session.watcher_user_id,
@@ -1986,6 +1993,7 @@ def terminal_tool(
                     proc_session.watch_patterns = list(watch_patterns)
                     result_data["watch_patterns"] = proc_session.watch_patterns
 
+                process_registry._write_checkpoint()
                 return json.dumps(result_data, ensure_ascii=False)
             except Exception as e:
                 return json.dumps({
