@@ -6280,6 +6280,8 @@ class AIAgent:
                 )
                 self._swap_credential(next_entry)
                 return True, False
+            if self._try_activate_fallback():
+                return True, False
             return False, has_retried_429
 
         if effective_reason == FailoverReason.rate_limit:
