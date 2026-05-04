@@ -81,6 +81,11 @@ _BLOCKED_DEVICE_PATHS = frozenset({
 def _resolve_path(filepath: str, task_id: str = "default") -> Path:
     """Resolve a path relative to TERMINAL_CWD (the worktree base directory)
     instead of the main repository root.
+
+    Absolute paths keep their lexical location so macOS symlink aliases like
+    ``/etc -> /private/etc`` and ``/var -> /private/var`` don't get rewritten
+    into different paths. Relative paths are still resolved against
+    ``TERMINAL_CWD`` so worktree isolation works as expected.
     """
     return _resolve_path_for_task(filepath, task_id)
 
@@ -117,14 +122,20 @@ def _get_live_tracking_cwd(task_id: str = "default") -> str | None:
 
 
 def _resolve_path_for_task(filepath: str, task_id: str = "default") -> Path:
-    """Resolve *filepath* against the task's live terminal cwd when possible."""
+    """Resolve *filepath* against the task's live terminal cwd when possible.
+
+    Absolute paths keep their lexical location so macOS symlink aliases like
+    ``/etc -> /private/etc`` and ``/var -> /private/var`` don't get rewritten
+    into different paths. Relative paths prefer the task's live tracked cwd
+    before falling back to ``TERMINAL_CWD``.
+    """
     p = Path(filepath).expanduser()
-    if not p.is_absolute():
-        base = _get_live_tracking_cwd(task_id) or os.environ.get(
-            "TERMINAL_CWD", os.getcwd()
-        )
-        p = Path(base) / p
-    return p.resolve()
+    if p.is_absolute():
+        return Path(os.path.normpath(str(p)))
+    base = _get_live_tracking_cwd(task_id) or os.environ.get(
+        "TERMINAL_CWD", os.getcwd()
+    )
+    return (Path(base).expanduser() / p).resolve()
 
 
 def _is_blocked_device(filepath: str) -> bool:
@@ -147,12 +158,17 @@ def _is_blocked_device(filepath: str) -> bool:
 
 
 # Paths that file tools should refuse to write to without going through the
-# terminal tool's approval system.  These match prefixes after os.path.realpath.
+# terminal tool's approval system. Match literal/normalized system locations,
+# not every realpath alias under /private/var — otherwise normal macOS temp
+# files get treated like protected system paths.
 _SENSITIVE_PATH_PREFIXES = (
     "/etc/", "/boot/", "/usr/lib/systemd/",
-    "/private/etc/", "/private/var/",
+    "/private/etc/",
+    # macOS system state under /var/db resolves lexically to /private/var/db.
+    # Keep temp directories writable while still blocking this protected area.
+    "/var/db/", "/private/var/db/",
 )
-_SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/run/docker.sock"}
+_SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/private/var/run/docker.sock", "/run/docker.sock"}
 
 
 def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None:

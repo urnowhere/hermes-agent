@@ -2314,6 +2314,8 @@ class AIAgent:
 
         old_model = self.model
         old_provider = self.provider
+        old_base_url = self.base_url
+        old_api_mode = getattr(self, "api_mode", "")
 
         # ── Swap core runtime fields ──
         self.model = new_model
@@ -2439,13 +2441,24 @@ class AIAgent:
         self._fallback_activated = False
         self._fallback_index = 0
 
+        # Legacy Codex reasoning items saved before origin metadata was added are
+        # only safe to replay within the same backend lineage. After an in-place
+        # provider/backend switch, suppress legacy replay and rely on newly tagged
+        # reasoning items from the active backend going forward.
+        self._allow_legacy_codex_reasoning_replay = not self._codex_runtime_identity_changed(
+            provider_a=old_provider,
+            base_url_a=old_base_url,
+            api_mode_a=old_api_mode,
+            provider_b=self.provider,
+            base_url_b=self.base_url,
+            api_mode_b=self.api_mode,
+        )
+
         # When the user deliberately swaps primary providers (e.g. openrouter
         # → anthropic), drop any fallback entries that target the OLD primary
-        # or the NEW one.  The chain was seeded from config at agent init for
+        # or the NEW one. The chain was seeded from config at agent init for
         # the original provider — without pruning, a failed turn on the new
-        # primary silently re-activates the provider the user just rejected,
-        # which is exactly what was reported during TUI v2 blitz testing
-        # ("switched to anthropic, tui keeps trying openrouter").
+        # primary silently re-activates the provider the user just rejected.
         old_norm = (old_provider or "").strip().lower()
         new_norm = (new_provider or "").strip().lower()
         fallback_chain = list(getattr(self, "_fallback_chain", []) or [])
@@ -2596,6 +2609,40 @@ class AIAgent:
             "base_url": getattr(self, "base_url", "") or "",
             "api_key": getattr(self, "api_key", "") or "",
             "api_mode": getattr(self, "api_mode", "") or "",
+        }
+
+    @staticmethod
+    def _normalize_runtime_identity_field(value: Any) -> str:
+        if not isinstance(value, str):
+            return ""
+        return value.strip().rstrip("/").lower()
+
+    @classmethod
+    def _codex_runtime_identity_changed(
+        cls,
+        *,
+        provider_a: Any,
+        base_url_a: Any,
+        api_mode_a: Any,
+        provider_b: Any,
+        base_url_b: Any,
+        api_mode_b: Any,
+    ) -> bool:
+        return (
+            cls._normalize_runtime_identity_field(provider_a),
+            cls._normalize_runtime_identity_field(base_url_a),
+            cls._normalize_runtime_identity_field(api_mode_a),
+        ) != (
+            cls._normalize_runtime_identity_field(provider_b),
+            cls._normalize_runtime_identity_field(base_url_b),
+            cls._normalize_runtime_identity_field(api_mode_b),
+        )
+
+    def _current_codex_reasoning_origin(self) -> Dict[str, str]:
+        return {
+            "_origin_provider": self._normalize_runtime_identity_field(getattr(self, "provider", "")),
+            "_origin_base_url": self._normalize_runtime_identity_field(getattr(self, "base_url", "")),
+            "_origin_api_mode": self._normalize_runtime_identity_field(getattr(self, "api_mode", "")),
         }
 
     def _check_compression_model_feasibility(self) -> None:
@@ -3328,6 +3375,8 @@ class AIAgent:
         intent of this hook for the Morph backend, see commit fbd3a2fd).
         """
         try:
+            from tools import terminal_tool as _terminal_tool
+
             if is_persistent_env(task_id):
                 if self.verbose_logging:
                     logging.debug(
@@ -3335,12 +3384,14 @@ class AIAgent:
                         f"idle reaper will handle it."
                     )
             else:
-                cleanup_vm(task_id)
+                _terminal_tool.cleanup_vm(task_id)
         except Exception as e:
             if self.verbose_logging:
                 logging.warning(f"Failed to cleanup VM for task {task_id}: {e}")
         try:
-            cleanup_browser(task_id)
+            from tools import browser_tool as _browser_tool
+
+            _browser_tool.cleanup_browser(task_id)
         except Exception as e:
             if self.verbose_logging:
                 logging.warning(f"Failed to cleanup browser for task {task_id}: {e}")
@@ -4788,13 +4839,17 @@ class AIAgent:
 
         # 2. Clean terminal sandbox environments
         try:
-            cleanup_vm(task_id)
+            from tools import terminal_tool as _terminal_tool
+
+            _terminal_tool.cleanup_vm(task_id)
         except Exception:
             pass
 
         # 3. Clean browser daemon sessions
         try:
-            cleanup_browser(task_id)
+            from tools import browser_tool as _browser_tool
+
+            _browser_tool.cleanup_browser(task_id)
         except Exception:
             pass
 
@@ -8038,8 +8093,9 @@ class AIAgent:
     def _get_transport(self, api_mode: str = None):
         """Return the cached transport for the given (or current) api_mode.
 
-        Lazy-initializes on first call per api_mode. Returns None if no
-        transport is registered for the mode.
+        Lazy-initializes on first call per api_mode. If registry discovery was
+        disrupted by test-time module reloading, make one explicit best-effort
+        import for known transports before giving up.
         """
         mode = api_mode or self.api_mode
         cache = getattr(self, "_transport_cache", None)
@@ -8050,6 +8106,23 @@ class AIAgent:
         if t is None:
             from agent.transports import get_transport
             t = get_transport(mode)
+            if t is None:
+                try:
+                    direct_transports = {
+                        "anthropic_messages": ("agent.transports.anthropic", "AnthropicTransport"),
+                        "chat_completions": ("agent.transports.chat_completions", "ChatCompletionsTransport"),
+                        "codex_responses": ("agent.transports.codex", "ResponsesApiTransport"),
+                        "bedrock_converse": ("agent.transports.bedrock", "BedrockTransport"),
+                    }
+                    module_name, class_name = direct_transports.get(mode, (None, None))
+                    if module_name and class_name:
+                        import importlib
+                        module = importlib.import_module(module_name)
+                        transport_cls = getattr(module, class_name, None)
+                        if transport_cls is not None:
+                            t = transport_cls()
+                except Exception:
+                    pass
             cache[mode] = t
         return t
 
@@ -8328,6 +8401,9 @@ class AIAgent:
         """Build the keyword arguments dict for the active API mode."""
         if self.api_mode == "anthropic_messages":
             _transport = self._get_transport()
+            if _transport is None:
+                from agent.transports.anthropic import AnthropicTransport
+                _transport = AnthropicTransport()
             anthropic_messages = self._prepare_anthropic_messages_for_api(api_messages)
             ctx_len = getattr(self, "context_compressor", None)
             ctx_len = ctx_len.context_length if ctx_len else None
@@ -8390,6 +8466,8 @@ class AIAgent:
                 is_codex_backend=is_codex_backend,
                 is_xai_responses=is_xai_responses,
                 github_reasoning_extra=self._github_models_reasoning_extra_body() if is_github_responses else None,
+                allow_legacy_codex_reasoning_replay=getattr(self, "_allow_legacy_codex_reasoning_replay", True),
+                codex_reasoning_origin=self._current_codex_reasoning_origin(),
             )
 
         # ── chat_completions (default) ─────────────────────────────────────
@@ -8754,7 +8832,22 @@ class AIAgent:
         # multi-turn continuity. These get replayed as input on the next turn.
         codex_items = getattr(assistant_message, "codex_reasoning_items", None)
         if codex_items:
-            msg["codex_reasoning_items"] = codex_items
+            origin = self._current_codex_reasoning_origin()
+            tagged_items = []
+            for item in codex_items:
+                if isinstance(item, dict):
+                    tagged = dict(item)
+                elif hasattr(item, "model_dump"):
+                    tagged = item.model_dump()
+                elif hasattr(item, "__dict__"):
+                    tagged = dict(item.__dict__)
+                else:
+                    continue
+                for key, value in origin.items():
+                    tagged.setdefault(key, value)
+                tagged_items.append(tagged)
+            if tagged_items:
+                msg["codex_reasoning_items"] = tagged_items
 
         # Codex Responses API: preserve exact assistant message items (with
         # id/phase) so follow-up turns can replay structured items instead of

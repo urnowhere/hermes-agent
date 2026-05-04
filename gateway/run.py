@@ -15,6 +15,7 @@ Usage:
 
 import asyncio
 import dataclasses
+import hashlib
 import inspect
 import json
 import logging
@@ -48,6 +49,8 @@ from hermes_cli.config import cfg_get
 # from _enforce_agent_cache_cap() and _session_expiry_watcher() below.
 _AGENT_CACHE_MAX_SIZE = 128
 _AGENT_CACHE_IDLE_TTL_SECS = 3600.0  # evict agents idle for >1h
+_DUPLICATE_INBOUND_TTL_SECS = 5.0
+_DUPLICATE_INBOUND_CACHE_MAX = 4096
 _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT = 30.0
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
 
@@ -253,7 +256,6 @@ def _last_transcript_timestamp(history: Optional[List[Dict[str, Any]]]) -> Any:
         # Returning None lets the caller fall through to the legacy-fresh path.
         return None
     return None
-
 
 # ---------------------------------------------------------------------------
 # SSL certificate auto-detection for NixOS and other non-standard systems.
@@ -1080,6 +1082,9 @@ class GatewayRunner:
         self._pending_native_image_paths_by_session: Dict[str, List[str]] = {}
         self._busy_ack_ts: Dict[str, float] = {}  # last busy-ack timestamp per session (debounce)
         self._session_run_generation: Dict[str, int] = {}
+        self._duplicate_inbound_ttl_seconds = _DUPLICATE_INBOUND_TTL_SECS
+        self._recent_inbound_events: "OrderedDict[str, float]" = OrderedDict()
+        self._duplicate_inbound_drops = 0
 
         # Cache AIAgent instances per session to preserve prompt caching.
         # Without this, a new AIAgent is created per message, rebuilding the
@@ -1453,6 +1458,112 @@ class GatewayRunner:
             group_sessions_per_user=getattr(config, "group_sessions_per_user", True),
             thread_sessions_per_user=getattr(config, "thread_sessions_per_user", False),
         )
+
+    def _prune_duplicate_inbound_cache(self, *, now: Optional[float] = None) -> None:
+        cache = getattr(self, "_recent_inbound_events", None)
+        if cache is None:
+            self._recent_inbound_events = OrderedDict()
+            cache = self._recent_inbound_events
+        ttl = float(getattr(self, "_duplicate_inbound_ttl_seconds", _DUPLICATE_INBOUND_TTL_SECS) or 0.0)
+        if now is None:
+            now = time.time()
+
+        if ttl <= 0:
+            cache.clear()
+            return
+
+        expired_before = now - ttl
+        stale_keys = [key for key, seen_at in cache.items() if seen_at <= expired_before]
+        for key in stale_keys:
+            cache.pop(key, None)
+
+        max_size = int(getattr(self, "_duplicate_inbound_cache_max", _DUPLICATE_INBOUND_CACHE_MAX) or _DUPLICATE_INBOUND_CACHE_MAX)
+        while len(cache) > max_size:
+            cache.popitem(last=False)
+
+    @staticmethod
+    def _normalize_duplicate_inbound_text(value: Any) -> str:
+        if value is None:
+            return ""
+        text = str(value)
+        return re.sub(r"\s+", " ", text).strip()
+
+    @staticmethod
+    def _duplicate_inbound_exact_key(source: SessionSource, event: MessageEvent) -> Optional[str]:
+        if not getattr(event, "message_id", None):
+            return None
+        parts = tuple(
+            str(part or "")
+            for part in (
+                getattr(source.platform, "value", str(source.platform)),
+                source.chat_id,
+                source.user_id or source.user_id_alt,
+                source.thread_id,
+                event.message_id,
+            )
+        )
+        return "exact:" + "|".join(parts)
+
+    def _duplicate_inbound_semantic_key(self, source: SessionSource, event: MessageEvent) -> str:
+        timestamp = getattr(event, "timestamp", None)
+        if isinstance(timestamp, datetime):
+            timestamp_value = timestamp.isoformat()
+        else:
+            timestamp_value = str(timestamp or "")
+
+        message_type = getattr(event, "message_type", None)
+        message_type_value = str(getattr(message_type, "value", message_type or "") or "")
+        media_types = [str(mt) for mt in (getattr(event, "media_types", []) or [])]
+        media_urls = [str(url) for url in (getattr(event, "media_urls", []) or [])]
+        semantic_payload = {
+            "platform": str(getattr(source.platform, "value", str(source.platform)) or ""),
+            "chat_id": str(source.chat_id or ""),
+            "user_id": str(source.user_id or source.user_id_alt or ""),
+            "thread_id": str(source.thread_id or ""),
+            "message_type": message_type_value,
+            "reply_to": str(getattr(event, "reply_to_message_id", None) or ""),
+            "timestamp": timestamp_value,
+            "text": self._normalize_duplicate_inbound_text(getattr(event, "text", "")),
+            "media_types": media_types,
+            "media_count": len(media_urls),
+        }
+        digest = hashlib.sha1(
+            json.dumps(semantic_payload, sort_keys=True, ensure_ascii=False).encode("utf-8", errors="replace")
+        ).hexdigest()
+        return f"semantic:{digest}"
+
+    def _is_duplicate_inbound_event(self, event: MessageEvent) -> bool:
+        source = getattr(event, "source", None)
+        if source is None:
+            return False
+
+        now = time.time()
+        self._prune_duplicate_inbound_cache(now=now)
+        cache = getattr(self, "_recent_inbound_events", None)
+        if cache is None:
+            self._recent_inbound_events = OrderedDict()
+            cache = self._recent_inbound_events
+
+        dedup_keys = []
+        exact_key = self._duplicate_inbound_exact_key(source, event)
+        if exact_key:
+            dedup_keys.append(exact_key)
+        dedup_keys.append(self._duplicate_inbound_semantic_key(source, event))
+
+        for key in dedup_keys:
+            seen_at = cache.get(key)
+            if seen_at is not None:
+                ttl = float(getattr(self, "_duplicate_inbound_ttl_seconds", _DUPLICATE_INBOUND_TTL_SECS) or 0.0)
+                if ttl > 0 and (now - seen_at) < ttl:
+                    self._duplicate_inbound_drops = int(getattr(self, "_duplicate_inbound_drops", 0)) + 1
+                    return True
+
+        for key in dedup_keys:
+            cache[key] = now
+            if hasattr(cache, "move_to_end"):
+                cache.move_to_end(key)
+        self._prune_duplicate_inbound_cache(now=now)
+        return False
 
     def _resolve_session_agent_runtime(
         self,
@@ -4721,6 +4832,16 @@ class GatewayRunner:
         # Otherwise control/session commands like /new or /help get silently
         # consumed as update answers instead of being dispatched normally.
         _quick_key = self._session_key_for_source(source)
+        if self._is_duplicate_inbound_event(event):
+            logger.warning(
+                "Dropping duplicate inbound event: platform=%s chat=%s user=%s message_id=%s count=%d",
+                source.platform.value if source.platform else "?",
+                source.chat_id or "unknown",
+                source.user_id or source.user_id_alt or "unknown",
+                getattr(event, "message_id", None) or "",
+                int(getattr(self, "_duplicate_inbound_drops", 0)),
+            )
+            return None
         _update_prompts = getattr(self, "_update_prompt_pending", {})
         if _update_prompts.get(_quick_key):
             raw = (event.text or "").strip()
@@ -7529,6 +7650,64 @@ class GatewayRunner:
             getattr(getattr(event, "source", None), "platform", None),
         )
 
+    @staticmethod
+    def _normalize_runtime_identity_field(value: Any) -> str:
+        if not isinstance(value, str):
+            return ""
+        return value.strip().rstrip("/").lower()
+
+    def _runtime_identity_changed(
+        self,
+        *,
+        current_provider: Any,
+        current_base_url: Any,
+        current_api_mode: Any,
+        new_provider: Any,
+        new_base_url: Any,
+        new_api_mode: Any,
+    ) -> bool:
+        return (
+            self._normalize_runtime_identity_field(current_provider),
+            self._normalize_runtime_identity_field(current_base_url),
+            self._normalize_runtime_identity_field(current_api_mode),
+        ) != (
+            self._normalize_runtime_identity_field(new_provider),
+            self._normalize_runtime_identity_field(new_base_url),
+            self._normalize_runtime_identity_field(new_api_mode),
+        )
+
+    def _clear_codex_reasoning_replay_for_session(self, session_id: str) -> None:
+        if not session_id or not getattr(self, "session_store", None):
+            return
+        try:
+            history = self.session_store.load_transcript(session_id)
+        except Exception as exc:
+            logger.debug("Failed to load transcript while clearing Codex reasoning replay: %s", exc)
+            return
+        if not isinstance(history, list) or not history:
+            return
+
+        rewritten = []
+        changed = False
+        for msg in history:
+            if not isinstance(msg, dict):
+                rewritten.append(msg)
+                continue
+            if msg.get("role") != "assistant" or "codex_reasoning_items" not in msg:
+                rewritten.append(msg)
+                continue
+            updated = dict(msg)
+            if updated.pop("codex_reasoning_items", None) is not None:
+                changed = True
+            rewritten.append(updated)
+
+        if not changed:
+            return
+        try:
+            self.session_store.rewrite_transcript(session_id, rewritten)
+        except Exception as exc:
+            logger.debug("Failed to rewrite transcript while clearing Codex reasoning replay: %s", exc)
+
     async def _handle_model_command(self, event: MessageEvent) -> Optional[str]:
         """Handle /model command — switch model for this session.
 
@@ -7544,7 +7723,7 @@ class GatewayRunner:
             switch_model as _switch_model, parse_model_flags,
             list_authenticated_providers,
         )
-        from hermes_cli.providers import get_label
+        from hermes_cli.providers import get_label, determine_api_mode
 
         raw_args = event.get_command_args().strip()
 
@@ -7586,6 +7765,15 @@ class GatewayRunner:
             current_base_url = override.get("base_url", current_base_url)
             current_api_key = override.get("api_key", current_api_key)
 
+        current_api_mode = determine_api_mode(current_provider, current_base_url)
+        session_entry = None
+        try:
+            if getattr(self, "session_store", None) is not None:
+                session_entry = self.session_store.get_or_create_session(source)
+        except Exception:
+            session_entry = None
+        session_id = getattr(session_entry, "session_id", "")
+
         # No args: show interactive picker (Telegram/Discord) or text list
         if not model_input and not explicit_provider:
             # Try interactive picker if the platform supports it
@@ -7617,6 +7805,8 @@ class GatewayRunner:
                     _cur_provider = current_provider
                     _cur_base_url = current_base_url
                     _cur_api_key = current_api_key
+                    _cur_api_mode = current_api_mode
+                    _session_id = session_id
 
                     async def _on_model_selected(
                         _chat_id: str, model_id: str, provider_slug: str
@@ -7635,6 +7825,16 @@ class GatewayRunner:
                         )
                         if not result.success:
                             return f"Error: {result.error_message}"
+
+                        if _self._runtime_identity_changed(
+                            current_provider=_cur_provider,
+                            current_base_url=_cur_base_url,
+                            current_api_mode=_cur_api_mode,
+                            new_provider=result.target_provider,
+                            new_base_url=result.base_url,
+                            new_api_mode=result.api_mode,
+                        ):
+                            _self._clear_codex_reasoning_replay_for_session(_session_id)
 
                         # Update cached agent in-place
                         cached_entry = None
@@ -7771,6 +7971,16 @@ class GatewayRunner:
 
         if not result.success:
             return f"Error: {result.error_message}"
+
+        if self._runtime_identity_changed(
+            current_provider=current_provider,
+            current_base_url=current_base_url,
+            current_api_mode=current_api_mode,
+            new_provider=result.target_provider,
+            new_base_url=result.base_url,
+            new_api_mode=result.api_mode,
+        ):
+            self._clear_codex_reasoning_replay_for_session(session_id)
 
         # If there's a cached agent, update it in-place
         cached_entry = None

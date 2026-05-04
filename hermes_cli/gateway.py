@@ -852,12 +852,13 @@ def _container_systemd_operational() -> bool:
 def supports_systemd_services() -> bool:
     if not is_linux() or is_termux():
         return False
-    if shutil.which("systemctl") is None:
-        return False
     if is_wsl():
         return _wsl_systemd_operational()
     if is_container():
-        return _container_systemd_operational()
+        return shutil.which("systemctl") is not None and _container_systemd_operational()
+    # Native Linux distributions generally support systemd-managed services.
+    # A missing systemctl binary in tests or stripped environments should not
+    # make us report that Linux categorically lacks service support.
     return True
 
 

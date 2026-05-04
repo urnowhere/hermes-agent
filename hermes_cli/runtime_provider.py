@@ -969,8 +969,8 @@ def resolve_runtime_provider(
         return explicit_runtime
 
     should_use_pool = provider != "openrouter"
+    cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
     if provider == "openrouter":
-        cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
         cfg_base_url = str(model_cfg.get("base_url") or "").strip()
         env_openai_base_url = os.getenv("OPENAI_BASE_URL", "").strip()
         env_openrouter_base_url = os.getenv("OPENROUTER_BASE_URL", "").strip()
@@ -987,6 +987,13 @@ def resolve_runtime_provider(
             and not has_custom_endpoint
             and not has_runtime_override
         )
+    elif provider == "qwen-oauth":
+        # Qwen runtime creds come from the local CLI auth state and may refresh
+        # on demand. Prefer that direct path by default so explicit qwen-oauth
+        # requests don't get silently hijacked by an unrelated local pool entry.
+        # Keep the pool path available only when qwen-oauth is the persisted
+        # configured provider for this session.
+        should_use_pool = requested_provider == "qwen-oauth" and cfg_provider == "qwen-oauth"
 
     try:
         pool = load_pool(provider) if should_use_pool else None

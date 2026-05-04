@@ -8,6 +8,7 @@ import pytest
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent
 from gateway.session import SessionEntry, SessionSource, build_session_key
+from hermes_cli.model_switch import ModelSwitchResult
 
 
 def _make_source() -> SessionSource:
@@ -139,3 +140,91 @@ async def test_new_command_only_clears_own_session():
     assert other_key in runner._session_reasoning_overrides
     assert session_key not in runner._pending_model_notes
     assert other_key in runner._pending_model_notes
+
+
+def test_clear_codex_reasoning_replay_for_session_rewrites_stripped_history():
+    """Provider switches should strip replay-only Codex reasoning blobs from the
+    persisted transcript so the next turn cannot resend them to a new backend."""
+    runner = _make_runner()
+
+    runner.session_store.load_transcript.return_value = [
+        {"role": "user", "content": "Reply with exactly: OK"},
+        {
+            "role": "assistant",
+            "content": "OK",
+            "codex_reasoning_items": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_tmp_hwkdj18eemj",
+                    "encrypted_content": "enc_legacy",
+                    "summary": [],
+                }
+            ],
+        },
+    ]
+
+    runner._clear_codex_reasoning_replay_for_session("sess-1")
+
+    runner.session_store.rewrite_transcript.assert_called_once()
+    rewritten_messages = runner.session_store.rewrite_transcript.call_args.args[1]
+    assert rewritten_messages[1].get("codex_reasoning_items") is None
+
+
+@pytest.mark.asyncio
+async def test_model_command_clears_replay_history_when_backend_changes(monkeypatch):
+    """The real /model command path should sanitize persisted reasoning replay
+    state before storing the new session override."""
+    runner = _make_runner()
+    session_key = build_session_key(_make_source())
+    runner._agent_cache = {}
+    runner._evict_cached_agent = lambda _session_key: None
+
+    runner._session_model_overrides[session_key] = {
+        "model": "openai/gpt-5.4",
+        "provider": "openrouter",
+        "api_key": "***",
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_mode": "codex_responses",
+    }
+    runner.session_store.load_transcript.return_value = [
+        {"role": "user", "content": "Reply with exactly: OK"},
+        {
+            "role": "assistant",
+            "content": "OK",
+            "codex_reasoning_items": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_tmp_hwkdj18eemj",
+                    "encrypted_content": "enc_legacy",
+                    "summary": [],
+                }
+            ],
+        },
+    ]
+
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.parse_model_flags",
+        lambda raw_args: ("gpt-5.4", "openai-codex", False),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.switch_model",
+        lambda **kwargs: ModelSwitchResult(
+            success=True,
+            target_provider="openai-codex",
+            new_model="gpt-5.4",
+            api_key="codex-token",
+            base_url="https://chatgpt.com/backend-api/codex",
+            api_mode="codex_responses",
+            provider_label="OpenAI Codex",
+            model_info=None,
+            warning_message=None,
+            error_message=None,
+        ),
+    )
+
+    response = await runner._handle_model_command(_make_event("/model gpt-5.4 --provider openai-codex"))
+
+    assert "Model switched to `gpt-5.4`" in response
+    runner.session_store.rewrite_transcript.assert_called_once()
+    rewritten_messages = runner.session_store.rewrite_transcript.call_args.args[1]
+    assert rewritten_messages[1].get("codex_reasoning_items") is None

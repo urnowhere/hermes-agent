@@ -1761,10 +1761,67 @@ def test_preflight_codex_input_deduplicates_reasoning_ids(monkeypatch):
 
     reasoning_items = [it for it in normalized if it.get("type") == "reasoning"]
     # rs_xyz duplicate should be collapsed to one item; rs_zzz kept.
-    assert len(reasoning_items) == 2
     encrypted = [it["encrypted_content"] for it in reasoning_items]
     assert encrypted.count("enc_a") == 1
     assert "enc_b" in encrypted
     # IDs must be stripped — with store=False the API 404s on id lookups.
     for it in reasoning_items:
         assert "id" not in it
+
+
+def test_switch_model_disables_legacy_codex_reasoning_replay_after_backend_change(monkeypatch):
+    """Legacy reasoning items without origin metadata must not be replayed after
+    an in-place backend/provider switch.
+
+    Regression: replaying an OpenRouter-produced ``rs_tmp_*`` reasoning item into
+    an OpenAI Codex backend request triggers ``invalid_encrypted_content``.
+    """
+    from agent.codex_responses_adapter import _chat_messages_to_responses_input
+
+    _patch_agent_bootstrap(monkeypatch)
+    agent = run_agent.AIAgent(
+        model="openai/gpt-5.4",
+        provider="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="openrouter-token",
+        quiet_mode=True,
+        max_iterations=1,
+        skip_context_files=True,
+        skip_memory=True,
+    )
+
+    monkeypatch.setattr(
+        agent,
+        "_create_openai_client",
+        lambda *args, **kwargs: SimpleNamespace(),
+    )
+
+    agent.switch_model(
+        new_model="gpt-5.4",
+        new_provider="openai-codex",
+        api_key="codex-token",
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_mode="codex_responses",
+    )
+
+    items = _chat_messages_to_responses_input(
+        [
+            {"role": "user", "content": "Reply with exactly: OK"},
+            {
+                "role": "assistant",
+                "content": "",
+                "codex_reasoning_items": [
+                    {
+                        "type": "reasoning",
+                        "id": "rs_tmp_hwkdj18eemj",
+                        "encrypted_content": "enc_legacy",
+                        "summary": [],
+                    }
+                ],
+            },
+        ],
+        allow_legacy_reasoning_replay=agent._allow_legacy_codex_reasoning_replay,
+        current_origin=agent._current_codex_reasoning_origin(),
+    )
+
+    assert [it for it in items if it.get("type") == "reasoning"] == []

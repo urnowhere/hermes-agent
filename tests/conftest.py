@@ -198,6 +198,15 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
     "TERMINAL_DOCKER_RUN_AS_HOST_USER",
     "BROWSER_CDP_URL",
     "CAMOFOX_URL",
+    # Terminal backend selectors leak across tests and can silently route later
+    # tool/file calls into modal/docker/ssh code paths. Keep the default local
+    # backend unless a test sets these explicitly.
+    "TERMINAL_ENV",
+    "TERMINAL_MODAL_MODE",
+    "TERMINAL_CWD",
+    "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE",
+    "TERMINAL_SSH_HOST",
+    "TERMINAL_SSH_USER",
     # Platform allowlists — not credentials, but if set from any source
     # (user shell, earlier leaky test, CI env), they change gateway auth
     # behavior and flake button-authorization tests.
