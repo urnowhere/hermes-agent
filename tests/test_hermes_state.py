@@ -1006,6 +1006,14 @@ class TestCounts:
         assert db.session_count(source="cli") == 2
         assert db.session_count(source="telegram") == 1
 
+    def test_session_sources(self, db):
+        assert db.session_sources() == []
+        db.create_session(session_id="s1", source="telegram")
+        db.create_session(session_id="s2", source="cli")
+        db.create_session(session_id="s3", source="telegram")
+        db.create_session(session_id="s4", source="matrix")
+        assert db.session_sources() == ["cli", "matrix", "telegram"]
+
     def test_message_count_total(self, db):
         assert db.message_count() == 0
         db.create_session(session_id="s1", source="cli")
