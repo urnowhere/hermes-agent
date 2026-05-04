@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass, field
 from difflib import unified_diff
 from pathlib import Path
+from typing import Any
 
 from utils import safe_json_loads
 
@@ -801,12 +802,16 @@ class KawaiiSpinner:
 # Cute tool message (completion line that replaces the spinner)
 # =========================================================================
 
-def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]:
-    """Inspect a tool result string for signs of failure.
+def _detect_tool_failure(tool_name: str, result: Any) -> tuple[bool, str]:
+    """Inspect a tool result for signs of failure.
 
     Returns ``(is_failure, suffix)`` where *suffix* is an informational tag
     like ``" [exit 1]"`` for terminal failures, or ``" [error]"`` for generic
     failures.  On success, returns ``(False, "")``.
+
+    *result* is normally a string from the tool transport, but plugin-supplied
+    custom tools may hand back arbitrary objects (e.g. ``dict``); the function
+    is tolerant of that.
     """
     if result is None:
         return False, ""
@@ -826,9 +831,22 @@ def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]
             if data.get("success") is False and "exceed the limit" in data.get("error", ""):
                 return True, " [full]"
 
-    # Generic heuristic for non-terminal tools
-    lower = result[:500].lower()
-    if '"error"' in lower or '"failed"' in lower or result.startswith("Error"):
+    # Generic heuristic for non-terminal tools.
+    # Custom-tools plugin tools may return dicts/lists; coerce to a JSON string
+    # so slicing doesn't raise KeyError(slice(None, 500, None)) and the
+    # ``"error"``/``"failed"`` heuristic still matches structured payloads.
+    if isinstance(result, str):
+        result_str = result
+    elif isinstance(result, (dict, list)):
+        try:
+            import json as _json
+            result_str = _json.dumps(result, default=str)
+        except (TypeError, ValueError):
+            result_str = str(result)
+    else:
+        result_str = str(result)
+    lower = result_str[:500].lower()
+    if '"error"' in lower or '"failed"' in lower or result_str.startswith("Error"):
         return True, " [error]"
 
     return False, ""
