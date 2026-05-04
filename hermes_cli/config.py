@@ -4603,6 +4603,7 @@ def edit_config():
     
     print(f"Opening {config_path} in {editor}...")
     subprocess.run([editor, str(config_path)])
+    print(color("Note: If the Hermes Gateway is currently running, you must restart it for config changes to take effect.", Colors.YELLOW))
 
 
 def set_config_value(key: str, value: str):
@@ -4690,6 +4691,7 @@ def set_config_value(key: str, value: str):
         save_env_value(_config_to_env_sync[key], str(value))
 
     print(f"✓ Set {key} = {value} in {config_path}")
+    print(color("Note: If the Hermes Gateway is currently running, you must restart it for config changes to take effect.", Colors.YELLOW))
 
 
 # =============================================================================
