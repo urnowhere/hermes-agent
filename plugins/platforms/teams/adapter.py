@@ -509,7 +509,22 @@ class TeamsAdapter(BasePlatformAdapter):
 
         for chunk in chunks:
             try:
-                result = await self._app.send(chat_id, chunk)
+                # Route via cached ConversationReference when available so that
+                # replies use the inbound activity's serviceUrl (correct for
+                # non-Teams channels: Web Chat, Bot Framework Emulator,
+                # Direct Line). Without this, app.send() falls back to the
+                # SDK's hardcoded default Teams URL
+                # (https://smba.trafficmanager.net/teams) and the Bot
+                # Connector returns 400 because the conversation only exists
+                # at the channel-specific serviceUrl. Same pattern already
+                # used by send_image() and _send_card() below.
+                from microsoft_teams.api import MessageActivityInput
+                conv_ref = self._conv_refs.get(chat_id)
+                if conv_ref:
+                    activity = MessageActivityInput().add_text(chunk)
+                    result = await self._app.activity_sender.send(activity, conv_ref)
+                else:
+                    result = await self._app.send(chat_id, chunk)
                 last_message_id = getattr(result, "id", None)
             except Exception as e:
                 return SendResult(success=False, error=str(e), retryable=True)
@@ -520,7 +535,13 @@ class TeamsAdapter(BasePlatformAdapter):
         if not self._app:
             return
         try:
-            await self._app.send(chat_id, TypingActivityInput())
+            # Same per-conversation routing as send() above so typing
+            # indicators reach Web Chat / Emulator / Direct Line correctly.
+            conv_ref = self._conv_refs.get(chat_id)
+            if conv_ref:
+                await self._app.activity_sender.send(TypingActivityInput(), conv_ref)
+            else:
+                await self._app.send(chat_id, TypingActivityInput())
         except Exception:
             pass
 
