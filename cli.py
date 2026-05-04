@@ -5663,7 +5663,14 @@ class HermesCLI:
             )
             return
 
-        # Perform the switch
+        # Perform the switch — pass user_providers so user-defined providers
+        # (from config.yaml providers:) are resolvable.
+        _user_provs = None
+        try:
+            from hermes_cli.config import load_config
+            _user_provs = load_config().get("providers")
+        except Exception:
+            pass
         result = switch_model(
             raw_input=model_input,
             current_provider=self.provider or "",

@@ -640,6 +640,7 @@ def switch_model(
     resolved_alias = ""
     new_model = raw_input.strip()
     target_provider = current_provider
+    pdef = None  # set in PATH A when --provider is given
 
     # =================================================================
     # PATH A: Explicit --provider given
@@ -805,7 +806,9 @@ def switch_model(
 
     provider_changed = target_provider != current_provider
     provider_label = get_label(target_provider)
-    if target_provider.startswith("custom:"):
+    if pdef is not None:
+        provider_label = pdef.name or provider_label
+    elif target_provider.startswith("custom:"):
         custom_pdef = resolve_provider_full(
             target_provider,
             user_providers,
@@ -820,25 +823,37 @@ def switch_model(
     api_mode = ""
 
     if provider_changed or explicit_provider:
-        try:
-            runtime = resolve_runtime_provider(
-                requested=target_provider,
-                target_model=new_model,
-            )
-            api_key = runtime.get("api_key", "")
-            base_url = runtime.get("base_url", "")
-            api_mode = runtime.get("api_mode", "")
-        except Exception as e:
-            return ModelSwitchResult(
-                success=False,
-                target_provider=target_provider,
-                provider_label=provider_label,
-                is_global=is_global,
-                error_message=(
-                    f"Could not resolve credentials for provider "
-                    f"'{provider_label}': {e}"
-                ),
-            )
+        # User-defined providers carry their own credentials in the ProviderDef;
+        # resolve_runtime_provider only knows about built-in providers.
+        if pdef is not None and getattr(pdef, "source", "") == "user-config":
+            import os as _os
+            for _ev in pdef.api_key_env_vars:
+                _val = _os.environ.get(_ev, "")
+                if _val:
+                    api_key = _val
+                    break
+            if pdef.base_url:
+                base_url = pdef.base_url
+        else:
+            try:
+                runtime = resolve_runtime_provider(
+                    requested=target_provider,
+                    target_model=new_model,
+                )
+                api_key = runtime.get("api_key", "")
+                base_url = runtime.get("base_url", "")
+                api_mode = runtime.get("api_mode", "")
+            except Exception as e:
+                return ModelSwitchResult(
+                    success=False,
+                    target_provider=target_provider,
+                    provider_label=provider_label,
+                    is_global=is_global,
+                    error_message=(
+                        f"Could not resolve credentials for provider "
+                        f"'{provider_label}': {e}"
+                    ),
+                )
     else:
         try:
             runtime = resolve_runtime_provider(

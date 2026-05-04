@@ -7475,6 +7475,8 @@ class GatewayRunner:
                     _cur_base_url = current_base_url
                     _cur_api_key = current_api_key
 
+                    _user_provs_for_cb = user_provs
+
                     async def _on_model_selected(
                         _chat_id: str, model_id: str, provider_slug: str
                     ) -> str:
