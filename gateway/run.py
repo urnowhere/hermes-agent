@@ -10210,7 +10210,8 @@ class GatewayRunner:
             await loop.run_in_executor(None, shutdown_mcp_servers)
 
             # Reconnect by discovering tools (reads config.yaml fresh)
-            new_tools = await loop.run_in_executor(None, discover_mcp_tools)
+            ctx = copy_context()
+            new_tools = await loop.run_in_executor(None, lambda: ctx.run(discover_mcp_tools))
 
             # Compute what changed
             with _lock:

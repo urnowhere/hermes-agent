@@ -314,6 +314,44 @@ def test_completion_event_rebuilds_source_with_routed_profile(tmp_path):
     assert source.thread_id == "101"
 
 
+@pytest.mark.asyncio
+async def test_reload_mcp_reads_profile_cli_config_for_routed_topic(monkeypatch, tmp_path):
+    from gateway.run import GatewayRunner
+    from tools import mcp_tool
+
+    gateway_home = tmp_path / "gateway"
+    profile_home = tmp_path / "profiles" / "cybrel-test"
+    gateway_home.mkdir()
+    profile_home.mkdir(parents=True)
+    captured_homes = []
+
+    def fake_discover_mcp_tools():
+        captured_homes.append(str(get_hermes_home()))
+        mcp_tool._servers["profile-server"] = object()
+        return [{"name": "profile_tool"}]
+
+    monkeypatch.setattr(mcp_tool, "_servers", {})
+    monkeypatch.setattr(mcp_tool, "_lock", threading.Lock())
+    monkeypatch.setattr(mcp_tool, "shutdown_mcp_servers", lambda: None)
+    monkeypatch.setattr(mcp_tool, "discover_mcp_tools", fake_discover_mcp_tools)
+
+    with hermes_home_context(gateway_home):
+        runner = object.__new__(GatewayRunner)
+        runner.config = GatewayConfig()
+        runner.session_store = SessionStore(gateway_home / "sessions", runner.config)
+        source = _source(agent_profile="cybrel-test", agent_hermes_home=str(profile_home))
+        event = MessageEvent(
+            text="/reload-mcp",
+            message_type=MessageType.COMMAND,
+            source=source,
+        )
+        with hermes_home_context(profile_home):
+            result = await runner._execute_mcp_reload(event)
+
+    assert captured_homes == [str(profile_home)]
+    assert "profile-server" in result
+
+
 def test_profile_session_store_uses_routed_home_without_changing_global_home(tmp_path):
     from gateway.run import GatewayRunner
 
