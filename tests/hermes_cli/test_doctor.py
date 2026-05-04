@@ -623,3 +623,51 @@ def test_run_doctor_opencode_go_skips_invalid_models_probe(monkeypatch, tmp_path
     )
     assert not any(url == "https://opencode.ai/zen/go/v1/models" for url, _, _ in calls)
     assert not any("opencode" in url.lower() and "models" in url.lower() for url, _, _ in calls)
+
+
+class TestModuleAvailable:
+    """Regression tests for hermes doctor editable-install detection (#16365)."""
+
+    def test_returns_true_for_stdlib_module(self):
+        # `json` is always present in the stdlib of any supported Python.
+        assert doctor._module_available("json") is True
+
+    def test_returns_false_for_missing_module(self):
+        assert doctor._module_available("absolutely_no_such_module_xyz_16365") is False
+
+    def test_returns_false_on_value_error(self, monkeypatch):
+        # Malformed / relative spec strings can raise ValueError under some
+        # importlib internals; the helper must swallow that and report False.
+        import importlib.util
+
+        def boom(name):
+            raise ValueError("bad name")
+
+        monkeypatch.setattr(importlib.util, "find_spec", boom)
+        assert doctor._module_available("anything") is False
+
+    def test_returns_false_when_parent_package_fails(self, monkeypatch):
+        # Parent package failing to load surfaces as ImportError out of
+        # find_spec; helper must treat that as "not available".
+        import importlib.util
+
+        def boom(name):
+            raise ImportError("parent broken")
+
+        monkeypatch.setattr(importlib.util, "find_spec", boom)
+        assert doctor._module_available("foo.bar") is False
+
+    def test_does_not_execute_module_body(self, monkeypatch):
+        # `find_spec` returning a non-None spec must be enough — we never
+        # need to actually import the module. This protects against the
+        # original bug where an editable install wasn't picked up by
+        # __import__ in some launcher contexts even though the spec was
+        # locatable via importlib.
+        import importlib.util
+        from types import SimpleNamespace
+
+        def fake_find_spec(name):
+            return SimpleNamespace(name=name)
+
+        monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
+        assert doctor._module_available("tinker_atropos") is True

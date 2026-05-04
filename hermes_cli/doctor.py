@@ -70,6 +70,31 @@ def _python_install_cmd() -> str:
     return "python -m pip install" if _is_termux() else "uv pip install"
 
 
+def _module_available(module: str) -> bool:
+    """Check whether a Python module can be located in the current interpreter.
+
+    Uses ``importlib.util.find_spec`` rather than ``__import__`` so that:
+
+    - Editable installs (``pip install -e .`` / ``uv pip install -e .``) are
+      detected reliably regardless of how the package's import machinery is
+      hooked up.
+    - Modules whose top-level import has side effects (or an ImportError
+      caused by an *unrelated* missing dependency) don't get reported as
+      "not installed". ``find_spec`` only checks importability, not whether
+      the body successfully executes.
+    - We avoid loading the module just to probe for it, keeping ``doctor``
+      cheap and side-effect free.
+    """
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError):
+        # ValueError can be raised for malformed/relative module specs;
+        # ImportError can come from a parent package failing to load.
+        return False
+
+
 def _system_package_install_cmd(pkg: str) -> str:
     if _is_termux():
         return f"pkg install {pkg}"
@@ -1193,10 +1218,9 @@ def run_doctor(args):
     tinker_dir = PROJECT_ROOT / "tinker-atropos"
     if tinker_dir.exists() and (tinker_dir / "pyproject.toml").exists():
         if py_version >= (3, 11):
-            try:
-                __import__("tinker_atropos")
+            if _module_available("tinker_atropos"):
                 check_ok("tinker-atropos", "(RL training backend)")
-            except ImportError:
+            else:
                 install_cmd = f"{_python_install_cmd()} -e ./tinker-atropos"
                 check_warn("tinker-atropos found but not installed", f"(run: {install_cmd})")
                 issues.append(f"Install tinker-atropos: {install_cmd}")
