@@ -5,6 +5,7 @@ import errno
 import json
 import logging
 import os
+import sys
 import threading
 from pathlib import Path
 
@@ -154,6 +155,34 @@ _SENSITIVE_PATH_PREFIXES = (
 )
 _SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/run/docker.sock"}
 
+# On macOS ``/private/var/`` is in the sensitive prefix list to catch the
+# ``/etc`` → ``/private/etc`` and ``/var`` → ``/private/var`` symlink bypass
+# that was fixed in commit 311dac19.  However ``/private/var/folders/`` is the
+# macOS per-user temporary directory (``tempfile.mkdtemp()`` / ``/tmp`` both
+# resolve there), so the blanket prefix is too broad.  The allowlist below
+# carves out exactly those user-writable subtrees; everything else under
+# ``/private/var/`` (``/private/var/db/``, ``/private/var/log/``, etc.)
+# remains blocked.  We require BOTH the ``resolved`` (realpath) form AND the
+# ``normalized`` (normpath) form to fall under an allowlisted prefix — the AND
+# guard defeats a symlink-substitution bypass where an attacker creates a
+# symlink from an allowlisted path into a blocked system directory.
+_MACOS_TEMP_PREFIXES = (
+    "/private/var/folders/",  # realpath form of macOS per-user temp
+    "/var/folders/",           # un-resolved symlink form
+    "/private/tmp/",           # realpath form of /tmp on macOS
+    "/tmp/",                   # un-resolved symlink form
+)
+
+
+def _is_macos_user_temp(resolved: str, normalized: str) -> bool:
+    """Return True when both resolved and normalized are in macOS user-writable temp."""
+    if sys.platform != "darwin":
+        return False
+    return (
+        any(resolved.startswith(p) for p in _MACOS_TEMP_PREFIXES)
+        and any(normalized.startswith(p) for p in _MACOS_TEMP_PREFIXES)
+    )
+
 
 def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None:
     """Return an error message if the path targets a sensitive system location."""
@@ -168,6 +197,8 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
     )
     for prefix in _SENSITIVE_PATH_PREFIXES:
         if resolved.startswith(prefix) or normalized.startswith(prefix):
+            if _is_macos_user_temp(resolved, normalized):
+                return None
             return _err
     if resolved in _SENSITIVE_EXACT_PATHS or normalized in _SENSITIVE_EXACT_PATHS:
         return _err
