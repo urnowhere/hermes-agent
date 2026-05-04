@@ -2348,7 +2348,7 @@ def resolve_provider_client(
         # Honour an explicit api_key override (e.g. from a fallback_model entry
         # or a custom_providers entry) so callers that pass an explicit
         # credential can authenticate against endpoints where no built-in
-        # credential is registered for this provider alias.
+        # credential is registered for this provider alias. See #16290.
         if explicit_api_key:
             api_key = explicit_api_key.strip() or api_key
         if not api_key:
@@ -2364,7 +2364,9 @@ def resolve_provider_client(
         base_url = _to_openai_base_url(raw_base_url)
         # Honour an explicit base_url override from the caller — used when a
         # fallback_model entry (or custom_providers lookup) routes through a
-        # built-in provider name but targets a user-specified endpoint.
+        # built-in provider name but targets a user-specified endpoint
+        # (e.g. user pinning zai to open.bigmodel.cn while still using the
+        # named provider's credential pool). See #16290.
         if explicit_base_url:
             base_url = _to_openai_base_url(explicit_base_url.strip().rstrip("/"))
 
@@ -2593,6 +2595,32 @@ def _strict_vision_backend_available(provider: str) -> bool:
     return _resolve_strict_vision_backend(provider)[0] is not None
 
 
+def _named_provider_has_credentials(provider: str) -> bool:
+    """Return True if the given API-key provider has at least one usable key.
+
+    Used by ``resolve_vision_provider_client`` to decide whether an
+    explicit base_url override should keep routing through the named
+    provider's credential pool, or fall back to the generic ``custom``
+    endpoint. See #16290.
+    """
+    try:
+        from hermes_cli.auth import (
+            PROVIDER_REGISTRY,
+            resolve_api_key_provider_credentials,
+        )
+    except ImportError:
+        return False
+
+    pconfig = PROVIDER_REGISTRY.get(provider)
+    if pconfig is None or pconfig.auth_type != "api_key":
+        return False
+    try:
+        creds = resolve_api_key_provider_credentials(provider)
+    except Exception:  # noqa: BLE001 — credential lookup must never raise here
+        return False
+    return bool(str(creds.get("api_key", "")).strip())
+
+
 def get_available_vision_backends() -> List[str]:
     """Return the currently available vision backends in auto-selection order.
 
@@ -2648,6 +2676,31 @@ def resolve_vision_provider_client(
         return resolved_provider, sync_client, final_model
 
     if resolved_base_url:
+        # When the user explicitly named a provider (e.g. provider=zai) AND
+        # supplied a custom base_url (e.g. open.bigmodel.cn), keep routing
+        # through the named provider so its credential pool is consulted
+        # (ZAI_API_KEY etc). Falling back to "custom" here would silently
+        # drop the named provider's credentials and only honour OPENAI_API_KEY,
+        # producing 401s when the user expects ZAI_API_KEY auto-resolution
+        # (#16290).
+        if (
+            requested
+            and requested not in ("auto", "custom")
+            and not resolved_api_key
+            and _named_provider_has_credentials(requested)
+        ):
+            client, final_model = resolve_provider_client(
+                requested,
+                model=resolved_model,
+                async_mode=async_mode,
+                explicit_base_url=resolved_base_url,
+                explicit_api_key=resolved_api_key,
+                api_mode=resolved_api_mode,
+            )
+            if client is not None:
+                return requested, client, final_model
+            # Fall through to generic custom path if the named provider
+            # turned up no credentials — preserves prior behaviour.
         client, final_model = resolve_provider_client(
             "custom",
             model=resolved_model,
