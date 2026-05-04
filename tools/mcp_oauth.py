@@ -168,6 +168,18 @@ def _write_json(path: Path, data: dict) -> None:
         raise
 
 
+def _validated_oauth_provider_url(server_name: str, server_url: str) -> str:
+    """Return a validated MCP server URL for OAuth provider construction."""
+    url = server_url.strip() if isinstance(server_url, str) else ""
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(
+            f"MCP OAuth server URL for '{server_name}' must be an absolute "
+            f"http(s) URL with a host, got {server_url!r}"
+        )
+    return url
+
+
 # ---------------------------------------------------------------------------
 # HermesTokenStorage -- persistent token/client-info on disk
 # ---------------------------------------------------------------------------
@@ -539,6 +551,8 @@ def build_oauth_auth(
         An ``OAuthClientProvider`` instance, or None if the MCP SDK lacks
         OAuth support.
     """
+    provider_url = _validated_oauth_provider_url(server_name, server_url)
+
     if not _OAUTH_AVAILABLE:
         logger.warning(
             "MCP OAuth requested for '%s' but SDK auth types are not available. "
@@ -564,7 +578,7 @@ def build_oauth_auth(
     _maybe_preregister_client(storage, cfg, client_metadata)
 
     return OAuthClientProvider(
-        server_url=server_url,
+        server_url=provider_url,
         client_metadata=client_metadata,
         storage=storage,
         redirect_handler=_redirect_handler,
