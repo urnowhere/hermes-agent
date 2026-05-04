@@ -157,7 +157,8 @@ def _codex_ack_message_response(text: str):
 
 
 class _FakeResponsesStream:
-    def __init__(self, *, final_response=None, final_error=None):
+    def __init__(self, *, events=None, final_response=None, final_error=None):
+        self._events = list(events or [])
         self._final_response = final_response
         self._final_error = final_error
 
@@ -168,7 +169,7 @@ class _FakeResponsesStream:
         return False
 
     def __iter__(self):
-        return iter(())
+        return iter(self._events)
 
     def get_final_response(self):
         if self._final_error is not None:
@@ -485,6 +486,53 @@ def test_run_codex_stream_fallback_parses_create_stream_events(monkeypatch):
     assert response.output[0].content[0].text == "streamed create ok"
 
 
+def test_run_codex_stream_backfills_tool_items_from_output_item_done(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    tool_item_done = SimpleNamespace(
+        type="function_call",
+        status="completed",
+        call_id="call_1",
+        id="fc_1",
+        name="terminal",
+        arguments='{"command":"pwd"}',
+    )
+
+    stream = _FakeResponsesStream(
+        events=[
+            SimpleNamespace(type="response.created"),
+            SimpleNamespace(type="response.in_progress"),
+            SimpleNamespace(
+                type="response.output_item.done",
+                output_index=0,
+                item=tool_item_done,
+            ),
+            SimpleNamespace(type="response.completed"),
+        ],
+        final_response=SimpleNamespace(
+            output=[],
+            output_text="",
+            status="completed",
+            model="gpt-5.4",
+        ),
+    )
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            stream=lambda **kwargs: stream,
+            create=lambda **kwargs: _codex_message_response("fallback"),
+        )
+    )
+
+    response = agent._run_codex_stream(_codex_request_kwargs())
+
+    assistant_message, finish_reason = agent._normalize_codex_response(response)
+    assert finish_reason == "tool_calls"
+    assert len(assistant_message.tool_calls) == 1
+    assert assistant_message.tool_calls[0].id == "call_1"
+    assert assistant_message.tool_calls[0].function.name == "terminal"
+    assert assistant_message.tool_calls[0].function.arguments == '{"command":"pwd"}'
+
+
 def test_run_conversation_codex_plain_text(monkeypatch):
     agent = _build_agent(monkeypatch)
     monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: _codex_message_response("OK"))
@@ -495,6 +543,67 @@ def test_run_conversation_codex_plain_text(monkeypatch):
     assert result["final_response"] == "OK"
     assert result["messages"][-1]["role"] == "assistant"
     assert result["messages"][-1]["content"] == "OK"
+
+
+def test_run_conversation_codex_tool_stream_empty_final_output(monkeypatch):
+    agent = _build_agent(monkeypatch)
+
+    first_stream = _FakeResponsesStream(
+        events=[
+            SimpleNamespace(type="response.created"),
+            SimpleNamespace(type="response.in_progress"),
+            SimpleNamespace(
+                type="response.output_item.done",
+                output_index=0,
+                item=SimpleNamespace(
+                    type="function_call",
+                    status="completed",
+                    call_id="call_1",
+                    id="fc_1",
+                    name="terminal",
+                    arguments="{}",
+                ),
+            ),
+            SimpleNamespace(type="response.completed"),
+        ],
+        final_response=SimpleNamespace(
+            output=[],
+            output_text="",
+            status="completed",
+            model="gpt-5.4",
+        ),
+    )
+    second_stream = _FakeResponsesStream(final_response=_codex_message_response("done"))
+
+    streams = [first_stream, second_stream]
+    fake_client = SimpleNamespace(
+        responses=SimpleNamespace(
+            stream=lambda **kwargs: streams.pop(0),
+            create=lambda **kwargs: _codex_message_response("fallback"),
+        )
+    )
+    monkeypatch.setattr(
+        agent,
+        "_interruptible_api_call",
+        lambda api_kwargs: agent._run_codex_stream(api_kwargs, client=fake_client),
+    )
+
+    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count=0):
+        for call in assistant_message.tool_calls:
+            messages.append(
+                {"role": "tool", "tool_call_id": call.id, "content": '{"ok":true}'}
+            )
+
+    monkeypatch.setattr(agent, "_execute_tool_calls", _fake_execute_tool_calls)
+
+    result = agent.run_conversation("run the terminal tool then finish")
+
+    assert result["completed"] is True
+    assert result["final_response"] == "done"
+    assert any(
+        msg.get("role") == "tool" and msg.get("tool_call_id") == "call_1"
+        for msg in result["messages"]
+    )
 
 
 def test_run_conversation_codex_empty_output_with_output_text(monkeypatch):
