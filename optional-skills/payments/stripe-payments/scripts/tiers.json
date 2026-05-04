@@ -1,0 +1,101 @@
+{
+  "ICEMAG 3": {
+    "product_id": "prod_UJdtBFhQlPJxXn",
+    "moq": 30,
+    "tiers": {
+      "MOQ": { "price_id": "price_1TL0c4PVfg2ryZHfNBX1dQCH", "min": 30, "max": 99, "unit_amount": 5290 },
+      "A":   { "price_id": "price_1TL0c5PVfg2ryZHfyA7KrDOL", "min": 100, "max": 199, "unit_amount": 4690 },
+      "B":   { "price_id": "price_1TL0c5PVfg2ryZHfhkD0PZtb", "min": 200, "max": 499, "unit_amount": 4190 },
+      "C":   { "price_id": "price_1TL0c6PVfg2ryZHfxcwhhO0G", "min": 500, "max": 999, "unit_amount": 3790 },
+      "D":   { "price_id": "price_1TL0c7PVfg2ryZHfvwMjoqU1", "min": 1000, "max": 9999, "unit_amount": 3390 }
+    }
+  },
+  "Retractable 3-in-1": {
+    "product_id": "prod_UJdt5ZGlQuhVfL",
+    "moq": 30,
+    "tiers": {
+      "MOQ": { "price_id": "price_1TL0c8PVfg2ryZHfcKSQIwJE", "min": 30, "max": 99, "unit_amount": 3190 },
+      "A":   { "price_id": "price_1TL0c9PVfg2ryZHfIHU80Gsb", "min": 100, "max": 199, "unit_amount": 2500 },
+      "B":   { "price_id": "price_1TL0c9PVfg2ryZHfTvQgfM2e", "min": 200, "max": 499, "unit_amount": 2250 },
+      "C":   { "price_id": "price_1TL0cAPVfg2ryZHfyWADAIQS", "min": 500, "max": 999, "unit_amount": 2250 },
+      "D":   { "price_id": "price_1TL0cAPVfg2ryZHf7A95goxU", "min": 1000, "max": 9999, "unit_amount": 2000 }
+    }
+  },
+  "Shargeek 170": {
+    "product_id": "prod_UJdtF3IjcPdTg9",
+    "moq": 10,
+    "tiers": {
+      "MOQ": { "price_id": "price_1TL0cCPVfg2ryZHflBaKVxDT", "min": 10, "max": 99, "unit_amount": 8900 },
+      "A":   { "price_id": "price_1TL0cCPVfg2ryZHftQkcvDOS", "min": 100, "max": 199, "unit_amount": 7800 },
+      "B":   { "price_id": "price_1TL0cDPVfg2ryZHfejSgOEZx", "min": 200, "max": 499, "unit_amount": 7000 },
+      "C":   { "price_id": "price_1TL0cEPVfg2ryZHfjUFlLvFj", "min": 500, "max": 999, "unit_amount": 6300 },
+      "D":   { "price_id": "price_1TL0cEPVfg2ryZHfYWbPkYHQ", "min": 1000, "max": 9999, "unit_amount": 5700 }
+    }
+  },
+  "Flow mini 2": {
+    "product_id": "prod_UJdu9srHtkkerO",
+    "moq": 30,
+    "tiers": {
+      "MOQ": { "price_id": "price_1TL0cGPVfg2ryZHfvhwRjrqM", "min": 30, "max": 99, "unit_amount": 1690 },
+      "A":   { "price_id": "price_1TL0cGPVfg2ryZHfMXRyqjQv", "min": 100, "max": 199, "unit_amount": 1450 },
+      "B":   { "price_id": "price_1TL0cHPVfg2ryZHfK0MbaqbF", "min": 200, "max": 499, "unit_amount": 1300 },
+      "C":   { "price_id": "price_1TL0cHPVfg2ryZHfMPtLbvkZ", "min": 500, "max": 999, "unit_amount": 1170 },
+      "D":   { "price_id": "price_1TL0cIPVfg2ryZHf0gMRIoPa", "min": 1000, "max": 9999, "unit_amount": 1050 }
+    }
+  },
+  "Pixel Charger 140W": {
+    "product_id": "prod_UJduvfmKnamvd8",
+    "moq": 30,
+    "tiers": {
+      "MOQ": { "price_id": "price_1TL0cJPVfg2ryZHfk0aHs1Mv", "min": 30, "max": 99, "unit_amount": 6790 },
+      "A":   { "price_id": "price_1TL0cKPVfg2ryZHfGPa1MZbM", "min": 100, "max": 199, "unit_amount": 5890 },
+      "B":   { "price_id": "price_1TL0cLPVfg2ryZHfdThWI9Cu", "min": 200, "max": 499, "unit_amount": 5190 },
+      "C":   { "price_id": "price_1TL0cLPVfg2ryZHf3WzGAOCd", "min": 500, "max": 999, "unit_amount": 4590 },
+      "D":   { "price_id": "price_1TL0cMPVfg2ryZHfJMwChaC1", "min": 1000, "max": 9999, "unit_amount": 4190 }
+    }
+  },
+  "Pixel Charger 100W": {
+    "product_id": "prod_UJduK9QQS1jnX6",
+    "moq": 30,
+    "tiers": {
+      "MOQ": { "price_id": "price_1TL0cNPVfg2ryZHfKLis6IML", "min": 30, "max": 99, "unit_amount": 5190 },
+      "A":   { "price_id": "price_1TL0cOPVfg2ryZHfq0zMBege", "min": 100, "max": 199, "unit_amount": 4490 },
+      "B":   { "price_id": "price_1TL0cOPVfg2ryZHfPyvdST9G", "min": 200, "max": 499, "unit_amount": 3990 },
+      "C":   { "price_id": "price_1TL0cPPVfg2ryZHfV6I6jfOU", "min": 500, "max": 999, "unit_amount": 3590 },
+      "D":   { "price_id": "price_1TL0cQPVfg2ryZHf4s14Lnv5", "min": 1000, "max": 9999, "unit_amount": 3190 }
+    }
+  },
+  "Charging Station 6-in-1": {
+    "product_id": "prod_UJduGA64k07G2W",
+    "moq": 30,
+    "tiers": {
+      "MOQ": { "price_id": "price_1TL0cRPVfg2ryZHfieoJXhA3", "min": 30, "max": 99, "unit_amount": 2200 },
+      "A":   { "price_id": "price_1TL0cSPVfg2ryZHfIqHEj7OD", "min": 100, "max": 199, "unit_amount": 2160 },
+      "B":   { "price_id": "price_1TL0cSPVfg2ryZHflbVIgshw", "min": 200, "max": 499, "unit_amount": 2130 },
+      "C":   { "price_id": "price_1TL0cTPVfg2ryZHfCdSv5NT1", "min": 500, "max": 999, "unit_amount": 2100 },
+      "D":   { "price_id": "price_1TL0cUPVfg2ryZHftEuVDj9N", "min": 1000, "max": 9999, "unit_amount": 2080 }
+    }
+  },
+  "Braided CC 240W cable": {
+    "product_id": "prod_UJduC5Du7CuxYY",
+    "moq": 50,
+    "tiers": {
+      "MOQ": { "price_id": "price_1TL0cVPVfg2ryZHfZAHS9oI5", "min": 50, "max": 99, "unit_amount": 950 },
+      "A":   { "price_id": "price_1TL0cVPVfg2ryZHfF2JlYnS7", "min": 100, "max": 199, "unit_amount": 770 },
+      "B":   { "price_id": "price_1TL0cWPVfg2ryZHfklo8b0ll", "min": 200, "max": 499, "unit_amount": 660 },
+      "C":   { "price_id": "price_1TL0cXPVfg2ryZHfH4nSIfcL", "min": 500, "max": 999, "unit_amount": 560 },
+      "D":   { "price_id": "price_1TL0cXPVfg2ryZHfxtBLJpdC", "min": 1000, "max": 9999, "unit_amount": 490 }
+    }
+  },
+  "Highly-Elastic CC cable": {
+    "product_id": "prod_UJduTK3dRoS12S",
+    "moq": 50,
+    "tiers": {
+      "MOQ": { "price_id": "price_1TL0cZPVfg2ryZHfMPBipgSc", "min": 50, "max": 99, "unit_amount": 830 },
+      "A":   { "price_id": "price_1TL0cZPVfg2ryZHfEiB2m3XD", "min": 100, "max": 199, "unit_amount": 670 },
+      "B":   { "price_id": "price_1TL0caPVfg2ryZHfmlfst2uZ", "min": 200, "max": 499, "unit_amount": 570 },
+      "C":   { "price_id": "price_1TL0cbPVfg2ryZHfFgftbMM2", "min": 500, "max": 999, "unit_amount": 490 },
+      "D":   { "price_id": "price_1TL0cbPVfg2ryZHfYmSWYsRP", "min": 1000, "max": 9999, "unit_amount": 430 }
+    }
+  }
+}
