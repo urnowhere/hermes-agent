@@ -1163,7 +1163,7 @@ display:
   show_reasoning: false   # Show model reasoning/thinking above each response (toggle with /reasoning show|hide)
   streaming: false        # Stream tokens to terminal as they arrive (real-time output)
   show_cost: false        # Show estimated $ cost in the CLI status bar
-  tool_preview_length: 0  # Max chars for tool call previews (0 = no limit, show full paths/commands)
+  tool_preview_length: 0  # Max chars for normal tool previews (0 = compact per-tool defaults)
   runtime_metadata_footer: false  # Gateway: append a runtime-context footer to final replies
 ```
 
