@@ -269,7 +269,7 @@ class MemoryProvider(ABC):
     ) -> None:
         """Called when the built-in memory tool writes an entry.
 
-        action: 'add', 'replace', or 'remove'
+        action: 'add', 'replace', 'remove', or 'update'
         target: 'memory' or 'user'
         content: the entry content
         metadata: structured provenance for the write, when available. Common
@@ -278,3 +278,17 @@ class MemoryProvider(ABC):
 
         Use to mirror built-in memory writes to your backend.
         """
+
+    def weighted_retrieve(
+        self,
+        target: str,
+        query: str = "",
+        top_k: int = 5,
+        min_score: float = 0.0,
+    ):
+        """Retrieve entries sorted by priority * weight * recency score.
+
+        Override to implement weighted retrieval in external providers.
+        Default: fall back to empty list.
+        """
+        return []
