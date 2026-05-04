@@ -1478,3 +1478,104 @@ async def test_concurrent_routed_profiles_do_not_cross_contaminate_prompt_env_or
     assert captured_b["api_key"] == "sk-test-profile-b"
     assert "web" in set(captured_a["enabled_toolsets"])
     assert "todo" in set(captured_b["enabled_toolsets"])
+
+
+@pytest.mark.asyncio
+async def test_two_routed_topics_concurrent_background_processes_route_correctly(tmp_path):
+    from gateway.run import GatewayRunner
+    from tools.process_registry import ProcessSession, process_registry
+
+    gateway_home = tmp_path / "gateway"
+    profile_a = tmp_path / "profiles" / "cybrel-test"
+    profile_b = tmp_path / "profiles" / "vault-test"
+    for home in (gateway_home, profile_a, profile_b):
+        home.mkdir(parents=True)
+
+    delivered = []
+
+    class _Adapter:
+        async def handle_message(self, event):
+            delivered.append(event)
+
+    with hermes_home_context(gateway_home):
+        runner = object.__new__(GatewayRunner)
+        runner.config = GatewayConfig()
+        runner.session_store = SessionStore(gateway_home / "sessions", runner.config)
+        runner.adapters = {Platform.TELEGRAM: _Adapter()}
+        runner._load_background_notifications_mode = lambda: "result"
+
+    process_registry._running.clear()
+    process_registry._finished.clear()
+    process_registry._completion_consumed.clear()
+
+    session_a = ProcessSession(
+        id="proc_cybrel",
+        command="printf cybrel",
+        task_id="default",
+        session_key="agent:cybrel-test:telegram:group:-1001:101",
+        agent_profile="cybrel-test",
+        agent_hermes_home=str(profile_a),
+        pid=111,
+        started_at=1.0,
+        exited=True,
+        exit_code=0,
+        output_buffer="cybrel done",
+        notify_on_complete=True,
+    )
+    session_b = ProcessSession(
+        id="proc_vault",
+        command="printf vault",
+        task_id="default",
+        session_key="agent:vault-test:telegram:group:-1001:202",
+        agent_profile="vault-test",
+        agent_hermes_home=str(profile_b),
+        pid=222,
+        started_at=1.0,
+        exited=True,
+        exit_code=0,
+        output_buffer="vault done",
+        notify_on_complete=True,
+    )
+    process_registry._running[session_a.id] = session_a
+    process_registry._running[session_b.id] = session_b
+
+    watcher_a = {
+        "session_id": session_a.id,
+        "check_interval": 0,
+        "session_key": session_a.session_key,
+        "platform": "telegram",
+        "chat_id": "-1001",
+        "thread_id": "101",
+        "user_id": "42",
+        "user_name": "alice",
+        "agent_profile": "cybrel-test",
+        "agent_hermes_home": str(profile_a),
+        "notify_on_complete": True,
+    }
+    watcher_b = {
+        "session_id": session_b.id,
+        "check_interval": 0,
+        "session_key": session_b.session_key,
+        "platform": "telegram",
+        "chat_id": "-1001",
+        "thread_id": "202",
+        "user_id": "43",
+        "user_name": "bob",
+        "agent_profile": "vault-test",
+        "agent_hermes_home": str(profile_b),
+        "notify_on_complete": True,
+    }
+
+    await asyncio.gather(
+        runner._run_process_watcher(watcher_a),
+        runner._run_process_watcher(watcher_b),
+    )
+
+    by_profile = {event.source.agent_profile: event for event in delivered}
+    assert set(by_profile) == {"cybrel-test", "vault-test"}
+    assert by_profile["cybrel-test"].source.thread_id == "101"
+    assert by_profile["cybrel-test"].source.agent_hermes_home == str(profile_a)
+    assert "cybrel done" in by_profile["cybrel-test"].text
+    assert by_profile["vault-test"].source.thread_id == "202"
+    assert by_profile["vault-test"].source.agent_hermes_home == str(profile_b)
+    assert "vault done" in by_profile["vault-test"].text
