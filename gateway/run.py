@@ -49,6 +49,14 @@ from hermes_cli.config import cfg_get
 _AGENT_CACHE_MAX_SIZE = 128
 _AGENT_CACHE_IDLE_TTL_SECS = 3600.0  # evict agents idle for >1h
 _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT = 30.0
+# Discord registers slash commands during connect.  With many skills
+# enabled, local registration + login + WS handshake + on_ready can
+# legitimately exceed 30s on a cold start (#19776), tripping the outer
+# connect timeout even though Discord is making progress.  Give Discord
+# a higher default; HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT still wins.
+_PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULTS: Dict[str, float] = {
+    "discord": 90.0,
+}
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
 
 
@@ -1395,8 +1403,14 @@ class GatewayRunner:
                 e,
             )
 
-    def _platform_connect_timeout_secs(self) -> float:
-        """Return the per-platform connect timeout used during startup/retry."""
+    def _platform_connect_timeout_secs(self, platform=None) -> float:
+        """Return the per-platform connect timeout used during startup/retry.
+
+        Platforms whose connect path includes substantial pre-ready work
+        (notably Discord, which registers many slash commands) get a
+        longer default than the global one; the env var still overrides
+        both.
+        """
         raw = os.getenv("HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT", "").strip()
         if raw:
             try:
@@ -1408,11 +1422,16 @@ class GatewayRunner:
                 )
             else:
                 return max(0.0, timeout)
+        platform_value = getattr(platform, "value", platform)
+        if isinstance(platform_value, str):
+            override = _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULTS.get(platform_value)
+            if override is not None:
+                return override
         return _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT
 
     async def _connect_adapter_with_timeout(self, adapter, platform) -> bool:
         """Connect an adapter without allowing one platform to block others."""
-        timeout = self._platform_connect_timeout_secs()
+        timeout = self._platform_connect_timeout_secs(platform)
         if timeout <= 0:
             return await adapter.connect()
         try:
