@@ -25,6 +25,7 @@ import logging
 import os
 import time
 from pathlib import Path
+from types import MappingProxyType
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 from multiprocessing import Pool, Lock
@@ -44,7 +45,9 @@ from toolset_distributions import (
 from model_tools import TOOL_TO_TOOLSET_MAP
 
 
-# Global configuration for worker processes
+# NOTE: _WORKER_CONFIG is set once per worker process in the initializer
+# function (via multiprocessing.Pool(initializer=...)), so each process
+# gets its own copy. Not shared across threads within the same process.
 _WORKER_CONFIG = {}
 
 # All possible tools - auto-derived from the master mapping in model_tools.py.
@@ -53,8 +56,9 @@ _WORKER_CONFIG = {}
 # filtering corrupted entries during trajectory combination.
 ALL_POSSIBLE_TOOLS = set(TOOL_TO_TOOLSET_MAP.keys())
 
-# Default stats for tools that weren't used
-DEFAULT_TOOL_STATS = {'count': 0, 'success': 0, 'failure': 0}
+# FIX: immutable mapping prevents accidental mutation of shared default
+# across parallel worker processes.
+DEFAULT_TOOL_STATS = MappingProxyType({'count': 0, 'success': 0, 'failure': 0})
 
 
 def _normalize_tool_stats(tool_stats: Dict[str, Dict[str, int]]) -> Dict[str, Dict[str, int]]:
