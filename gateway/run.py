@@ -8867,11 +8867,20 @@ class GatewayRunner:
         args, persist_global = self._parse_reasoning_command_args(raw_args)
         config_path = _hermes_home / "config.yaml"
         session_key = self._session_key_for_source(event.source)
-        self._show_reasoning = self._load_show_reasoning()
         self._reasoning_config = self._resolve_session_reasoning_config(
             source=event.source,
             session_key=session_key,
         )
+        try:
+            from gateway.display_config import resolve_display_setting as _rds_show_reasoning
+
+            _gc = _load_gateway_config()
+            _pk = _platform_config_key(event.source.platform)
+            self._show_reasoning = bool(
+                _rds_show_reasoning(_gc, _pk, "show_reasoning", self._load_show_reasoning())
+            )
+        except Exception:
+            self._show_reasoning = self._load_show_reasoning()
 
         def _save_config_key(key_path: str, value):
             """Save a dot-separated key to config.yaml."""
