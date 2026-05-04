@@ -614,6 +614,16 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
 
     script_timeout = _get_script_timeout()
 
+    # Propagate HERMES_HOME into the child environment. The cron daemon may
+    # have resolved HERMES_HOME via config file, command-line flag, or active
+    # profile sticky-file even when the shell environment doesn't have it set
+    # — but subprocess.run() without env= inherits only the shell env, not
+    # the resolved value. Without this, cron-spawned scripts silently read
+    # ~/.hermes (default profile) instead of the active profile, causing
+    # cross-profile data corruption (see #18594).
+    child_env = dict(os.environ)
+    child_env.setdefault("HERMES_HOME", str(_hermes_home))
+
     try:
         result = subprocess.run(
             [sys.executable, str(path)],
@@ -621,6 +631,7 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
             text=True,
             timeout=script_timeout,
             cwd=str(path.parent),
+            env=child_env,
         )
         stdout = (result.stdout or "").strip()
         stderr = (result.stderr or "").strip()
