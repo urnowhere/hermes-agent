@@ -163,6 +163,14 @@ class TestRequireServiceInstalled:
 
 
 class TestGeneratedSystemdUnits:
+    @staticmethod
+    def _expected_timeout_stop_sec() -> int:
+        """Mirror the formula in ``hermes_cli.gateway`` so this test stays
+        green when ``agent.restart_drain_timeout`` (and therefore the
+        derived TimeoutStopSec headroom) shifts in the shared defaults."""
+        drain = int(gateway_cli._get_restart_drain_timeout() or 0)
+        return max(60, drain) + 30
+
     def test_user_unit_avoids_recursive_execstop_and_uses_extended_stop_timeout(self):
         unit = gateway_cli.generate_systemd_unit(system=False)
 
@@ -170,10 +178,13 @@ class TestGeneratedSystemdUnits:
         assert "ExecStop=" not in unit
         assert "ExecReload=/bin/kill -USR1 $MAINPID" in unit
         assert f"RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}" in unit
-        # TimeoutStopSec must exceed the default drain_timeout (60s) so
-        # systemd doesn't SIGKILL the cgroup before post-interrupt cleanup
-        # (tool subprocess kill, adapter disconnect) runs — issue #8202.
-        assert "TimeoutStopSec=90" in unit
+        # TimeoutStopSec must exceed the configured drain_timeout so systemd
+        # doesn't SIGKILL the cgroup before post-interrupt cleanup (tool
+        # subprocess kill, adapter disconnect) runs — issue #8202. Compute
+        # the expected value from the same helper the unit generator uses,
+        # so the assertion follows the configured default rather than
+        # hardcoding a stale value.
+        assert f"TimeoutStopSec={self._expected_timeout_stop_sec()}" in unit
 
     def test_user_unit_includes_resolved_node_directory_in_path(self, monkeypatch):
         monkeypatch.setattr(gateway_cli.shutil, "which", lambda cmd: "/home/test/.nvm/versions/node/v24.14.0/bin/node" if cmd == "node" else None)
@@ -189,10 +200,11 @@ class TestGeneratedSystemdUnits:
         assert "ExecStop=" not in unit
         assert "ExecReload=/bin/kill -USR1 $MAINPID" in unit
         assert f"RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}" in unit
-        # TimeoutStopSec must exceed the default drain_timeout (60s) so
-        # systemd doesn't SIGKILL the cgroup before post-interrupt cleanup
-        # (tool subprocess kill, adapter disconnect) runs — issue #8202.
-        assert "TimeoutStopSec=90" in unit
+        # TimeoutStopSec must exceed the configured drain_timeout so systemd
+        # doesn't SIGKILL the cgroup before post-interrupt cleanup (tool
+        # subprocess kill, adapter disconnect) runs — issue #8202. See
+        # ``_expected_timeout_stop_sec`` above for why this is computed.
+        assert f"TimeoutStopSec={self._expected_timeout_stop_sec()}" in unit
         assert "WantedBy=multi-user.target" in unit
 
 
