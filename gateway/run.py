@@ -31,6 +31,7 @@ from contextvars import copy_context
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional, Any, List, Union
+from tools.i18n import format_zh
 
 # account_usage imports the OpenAI SDK chain (~230 ms). Only needed by
 # /usage; we still import it at module top in the gateway because test
@@ -6355,14 +6356,18 @@ class GatewayRunner:
                     if source.platform == Platform.SLACK
                     else "/sethome"
                 )
-                notice = (
-                    f"📬 No home channel is set for {platform_name.title()}. "
-                    f"A home channel is where Hermes delivers cron job results "
-                    f"and cross-platform messages.\n\n"
-                    f"Type {sethome_cmd} to make this chat your home channel, "
-                    f"or ignore to skip."
+                _home_msg = format_zh(
+                    "📬 No home channel is set for {name}. "
+                    "A home channel is where Hermes delivers cron job results "
+                    "and cross-platform messages.
+
+"
+                    "Type {cmd} to make this chat your home channel, "
+                    "or ignore to skip.",
+                    name=platform_name.title(),
+                    cmd=sethome_cmd
                 )
-                await self._deliver_platform_notice(source, notice)
+                await self._deliver_platform_notice(source, _home_msg)
         
         # -----------------------------------------------------------------
         # Voice channel awareness — inject current voice channel state
@@ -14029,9 +14034,14 @@ class GatewayRunner:
                     except Exception:
                         pass
                 try:
+                    _msg = format_zh(
+                        "⏳ Still working... ({elapsed} min elapsed{detail})",
+                        elapsed=_elapsed_mins,
+                        detail=_status_detail
+                    )
                     await _notify_adapter.send(
                         source.chat_id,
-                        f"⏳ Still working... ({_elapsed_mins} min elapsed{_status_detail})",
+                        _msg,
                         metadata=_status_thread_metadata,
                     )
                 except Exception as _ne:

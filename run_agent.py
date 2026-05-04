@@ -28,6 +28,7 @@ import copy
 import hashlib
 import json
 import logging
+from tools.i18n import format_zh
 logger = logging.getLogger(__name__)
 import os
 import random
@@ -6531,7 +6532,7 @@ class AIAgent:
         )
 
         _call_start = time.time()
-        self._touch_activity("waiting for non-streaming API response")
+        self._touch_activity(format_zh("waiting for non-streaming API response"))
 
         t = threading.Thread(target=_call, daemon=True)
         t.start()
@@ -6933,7 +6934,7 @@ class AIAgent:
             # Reset stale-stream timer so the detector measures from this
             # attempt's start, not a previous attempt's last chunk.
             last_chunk_time["t"] = time.time()
-            self._touch_activity("waiting for provider response (streaming)")
+            self._touch_activity(format_zh("waiting for provider response (streaming)"))
             stream = request_client_holder["client"].chat.completions.create(**stream_kwargs)
 
             # Capture rate limit headers from the initial HTTP response.
@@ -7505,7 +7506,7 @@ class AIAgent:
                 _last_heartbeat = _hb_now
                 _waiting_secs = int(_hb_now - last_chunk_time["t"])
                 self._touch_activity(
-                    f"waiting for stream response ({_waiting_secs}s, no chunks yet)"
+                    format_zh(f"waiting for stream response ({_waiting_secs}s, no chunks yet)")
                 )
 
             # Detect stale streams: connections kept alive by SSE pings

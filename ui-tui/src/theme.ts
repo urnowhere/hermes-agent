@@ -244,12 +244,29 @@ const BRAND: ThemeBrand = {
   helpHeader: '(^_^)? Commands'
 }
 
+const BRAND_ZH: ThemeBrand = {
+  name: 'Hermes Agent',
+  icon: '⚕',
+  prompt: '❯',
+  welcome: '输入消息或 /help 查看命令。',
+  goodbye: '再见！⚕',
+  tool: '┊',
+  helpHeader: '(^_^)? 命令列表'
+}
+
 const cleanPromptSymbol = (s: string | undefined, fallback: string) => {
   const cleaned = String(s ?? '')
     .replace(/\s+/g, ' ')
     .trim()
 
   return cleaned || fallback
+}
+
+export function getBrand(lang?: string): ThemeBrand {
+  if (lang === 'zh') {
+    return BRAND_ZH
+  }
+  return BRAND
 }
 
 export const DARK_THEME: Theme = {
@@ -570,4 +587,25 @@ export function fromSkin(
     bannerLogo,
     bannerHero
   }, process.env, DEFAULT_LIGHT_MODE)
+}
+
+// ── Language-aware brand override ──────────────────────────────────────
+
+export function withLocalizedBrand(
+  theme: Theme,
+  lang?: string
+): Theme {
+  const localized = lang === 'zh' ? BRAND_ZH : BRAND
+  return {
+    ...theme,
+    brand: {
+      name: theme.brand.name === 'Hermes Agent' ? localized.name : theme.brand.name,
+      icon: theme.brand.icon,
+      prompt: theme.brand.prompt,
+      welcome: theme.brand.welcome === localized.welcome ? localized.welcome : theme.brand.welcome,
+      goodbye: theme.brand.goodbye === localized.goodbye ? localized.goodbye : theme.brand.goodbye,
+      tool: theme.brand.tool,
+      helpHeader: theme.brand.helpHeader === localized.helpHeader ? localized.helpHeader : theme.brand.helpHeader
+    }
+  }
 }

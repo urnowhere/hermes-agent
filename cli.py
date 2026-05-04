@@ -72,6 +72,7 @@ from agent.usage_pricing import (
 # top — it transitively pulls the OpenAI SDK chain (~230 ms cold) and is only
 # needed when the user runs `/limits`. Lazy-imported inside the handler below.
 from hermes_cli.banner import _format_context_length, format_banner_version_label
+from tools.i18n import format_zh
 
 _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
@@ -4191,7 +4192,7 @@ class HermesCLI:
         if subcmd in ("list", "ls"):
             snaps = list_quick_snapshots()
             if not snaps:
-                print("  No state snapshots yet.")
+                print("  " + format_zh("No state snapshots yet."))
                 print("  Create one: /snapshot create [label]")
                 return
             print(f"  State snapshots ({display_hermes_home()}/state-snapshots/):\n")
@@ -7627,7 +7628,7 @@ class HermesCLI:
                 focus_topic = parts[1].strip()
 
         original_count = len(self.conversation_history)
-        with self._busy_command("Compressing context..."):
+        with self._busy_command(format_zh("Compressing context...", zh="正在压缩上下文...")):
             try:
                 from agent.model_metadata import estimate_request_tokens_rough
                 from agent.manual_compression_feedback import summarize_manual_compression
@@ -7644,7 +7645,7 @@ class HermesCLI:
                     tools=_tools,
                 )
                 if focus_topic:
-                    print(f"🗜️  Compressing {original_count} messages (~{approx_tokens:,} tokens), "
+                    print(f"🗜️  {format_zh('Compressing {original_count} messages', original_count=original_count)} (~{approx_tokens:,} tokens), "
                           f"focus: \"{focus_topic}\"...")
                 else:
                     print(f"🗜️  Compressing {original_count} messages (~{approx_tokens:,} tokens)...")
@@ -7756,7 +7757,7 @@ class HermesCLI:
         )
         elapsed = format_duration_compact((datetime.now() - self.session_start).total_seconds())
 
-        print("  📊 Session Token Usage")
+        print("  📊 " + format_zh("Session Token Usage"))
         print(f"  {'─' * 40}")
         print(f"  Model:                     {agent.model}")
         print(f"  Input tokens:              {input_tokens:>10,}")
@@ -7990,7 +7991,7 @@ class HermesCLI:
                 old_servers = set(_servers.keys())
 
             if not self._command_running:
-                print("🔄 Reloading MCP servers...")
+                print("🔄 " + format_zh("Reloading MCP servers..."))
 
             # Shutdown existing connections
             shutdown_mcp_servers()
@@ -8603,7 +8604,7 @@ class HermesCLI:
     def _enable_voice_mode(self):
         """Enable voice mode after checking requirements."""
         if self._voice_mode:
-            _cprint(f"{_DIM}Voice mode is already enabled.{_RST}")
+            _cprint(f"{_DIM}" + format_zh("Voice mode is already enabled.") + "{_RST}")
             return
 
         from tools.voice_mode import check_voice_requirements, detect_audio_environment
@@ -8611,14 +8612,14 @@ class HermesCLI:
         # Environment detection -- warn and block in incompatible environments
         env_check = detect_audio_environment()
         if not env_check["available"]:
-            _cprint(f"\n{_ACCENT}Voice mode unavailable in this environment:{_RST}")
+            _cprint(f"\n{_ACCENT}" + format_zh("Voice mode unavailable in this environment:") + "{_RST}")
             for warning in env_check["warnings"]:
                 _cprint(f"  {_DIM}{warning}{_RST}")
             return
 
         reqs = check_voice_requirements()
         if not reqs["available"]:
-            _cprint(f"\n{_ACCENT}Voice mode requirements not met:{_RST}")
+            _cprint(f"\n{_ACCENT}" + format_zh("Voice mode requirements not met:") + "{_RST}")
             for line in reqs["details"].split("\n"):
                 _cprint(f"  {_DIM}{line}{_RST}")
             if reqs["missing_packages"]:
@@ -8655,7 +8656,7 @@ class HermesCLI:
         # here would drift after a mid-session config edit (Copilot
         # round-14 on #19835, same class as round-13).
         _ptt_display = self._voice_record_key_label()
-        _cprint(f"\n{_ACCENT}Voice mode enabled{tts_status}{_RST}")
+        _cprint(f"\n{_ACCENT}" + format_zh("Voice mode enabled") + tts_status + "{_RST}")
         _cprint(f"  {_DIM}{_ptt_display} to start/stop recording{_RST}")
         _cprint(f"  {_DIM}/voice tts  to toggle speech output{_RST}")
         _cprint(f"  {_DIM}/voice off  to disable voice mode{_RST}")
@@ -8690,7 +8691,7 @@ class HermesCLI:
             pass
         self._voice_tts_done.set()
 
-        _cprint(f"\n{_DIM}Voice mode disabled.{_RST}")
+        _cprint(f"\n{_DIM}" + format_zh("Voice mode disabled.") + "{_RST}")
 
     def _toggle_voice_tts(self):
         """Toggle TTS output for voice mode."""
@@ -8707,7 +8708,7 @@ class HermesCLI:
             if not check_tts_requirements():
                 _cprint(f"{_DIM}Warning: No TTS provider available. Install edge-tts or set API keys.{_RST}")
 
-        _cprint(f"{_ACCENT}Voice TTS {status}.{_RST}")
+        _cprint(f"{_ACCENT}" + format_zh("Voice TTS {status}.", status=status) + "{_RST}")
 
     def _show_voice_status(self):
         """Show current voice mode status."""
@@ -8715,16 +8716,16 @@ class HermesCLI:
 
         reqs = check_voice_requirements()
 
-        _cprint(f"\n{_BOLD}Voice Mode Status{_RST}")
-        _cprint(f"  Mode:      {'ON' if self._voice_mode else 'OFF'}")
-        _cprint(f"  TTS:       {'ON' if self._voice_tts else 'OFF'}")
-        _cprint(f"  Recording: {'YES' if self._voice_recording else 'no'}")
+        _cprint(f"\n{_BOLD}" + format_zh("Voice Mode Status") + "{_RST}")
+        _cprint(f"  " + format_zh("Mode:") + f"      {'ON' if self._voice_mode else 'OFF'}")
+        _cprint(f"  " + format_zh("TTS:") + f"       {'ON' if self._voice_tts else 'OFF'}")
+        _cprint(f"  " + format_zh("Recording:") + f" {'YES' if self._voice_recording else 'no'}")
         # Display the startup-pinned label so /voice status always
         # matches the live prompt_toolkit binding (Copilot round-14 on
         # #19835, same class as round-13). Reading live config here
         # would drift after a mid-session config edit.
-        _cprint(f"  Record key: {self._voice_record_key_label()}")
-        _cprint(f"\n  {_BOLD}Requirements:{_RST}")
+        _cprint(f"  " + format_zh("Record key:") + f" {self._voice_record_key_label()}")
+        _cprint(f"\n  {_BOLD}" + format_zh("Requirements:") + "{_RST}")
         for line in reqs["details"].split("\n"):
             _cprint(f"    {line}")
 
@@ -8789,7 +8790,7 @@ class HermesCLI:
         self._clarify_freetext = False
         self._clarify_deadline = 0
         self._invalidate()
-        _cprint(f"\n{_DIM}(clarify timed out after {timeout}s — agent will decide){_RST}")
+        _cprint(f"\n{_DIM}" + format_zh("(clarify timed out after {timeout}s — agent will decide)", timeout=timeout) + "{_RST}")
         return (
             "The user did not provide a response within the time limit. "
             "Use your best judgement to make the choice and proceed."
@@ -8893,12 +8894,12 @@ class HermesCLI:
             self._approval_state = None
             self._approval_deadline = 0
             self._invalidate()
-            _cprint(f"\n{_DIM}  ⏱ Timeout — denying command{_RST}")
+            _cprint(f"\n{_DIM}  ⏱ " + format_zh("Timeout — denying command") + "{_RST}")
             return "deny"
 
     def _approval_choices(self, command: str, *, allow_permanent: bool = True) -> list[str]:
         """Return approval choices for a dangerous command prompt."""
-        choices = ["once", "session", "always", "deny"] if allow_permanent else ["once", "session", "deny"]
+        choices = [format_zh("once"), format_zh("session"), format_zh("always"), format_zh("deny")] if allow_permanent else [format_zh("once"), format_zh("session"), format_zh("deny")]
         if len(command) > 70:
             choices.append("view")
         return choices
@@ -8977,7 +8978,7 @@ class HermesCLI:
         title = "⚠️  Dangerous Command"
         cmd_display = command if show_full or len(command) <= 70 else command[:70] + '...'
         choice_labels = {
-            "once": "Allow once",
+            "once": format_zh("Allow once"),
             "session": "Allow for this session",
             "always": "Add to permanent allowlist",
             "deny": "Deny",
@@ -9436,7 +9437,7 @@ class HermesCLI:
                             # But if it does (race condition), don't interrupt.
                             if self._clarify_state or self._clarify_freetext:
                                 continue
-                            print("\n⚡ New message detected, interrupting...")
+                            print("\n⚡ " + format_zh("New message detected, interrupting..."))
                             # Signal TTS to stop on interrupt
                             if stop_event is not None:
                                 stop_event.set()
@@ -9698,7 +9699,7 @@ class HermesCLI:
                 if n > 1:
                     print(f"\n⚡ Sending {n} messages after interrupt: '{preview}'")
                 else:
-                    print(f"\n⚡ Sending after interrupt: '{preview}'")
+                    print("\n⚡ " + format_zh("Sending after interrupt: '{preview}'", preview=preview))
                 self._pending_input.put(combined)
 
             # If a /steer was left over (agent finished before another tool
