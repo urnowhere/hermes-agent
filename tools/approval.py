@@ -289,6 +289,15 @@ DANGEROUS_PATTERNS = [
     # a script is first made executable then immediately run. The script
     # content may contain dangerous commands that individual patterns miss.
     (r'\bchmod\s+\+x\b.*[;&|]+\s*\./', "chmod +x followed by immediate execution"),
+    # Data exfiltration vectors
+    (r'\b(nc|ncat|socat)\b.*\d+\.\d+\.\d+\.\d+', "netcat to external IP"),
+    (r'/dev/tcp/', "bash /dev/tcp exfiltration"),
+    (r'/dev/udp/', "bash /dev/udp exfiltration"),
+    (r'\bopenssl\s+s_client\s+-connect\b', "openssl outbound connection"),
+    (r'\bcurl\b.*(-d|--data|--data-binary|--data-urlencode|--upload-file)\b', "curl with data upload"),
+    (r'\bwget\b.*(--post-data|--post-file)\b', "wget with data upload"),
+    # Credential file reads via common tools
+    (r'\b(cat|head|tail|less|more|bat)\b.*(\.ssh/|aws/credentials|\.env|\.netrc|\.gnupg/|\.kube/config)', "read credential file"),
 ]
 
 
