@@ -105,15 +105,15 @@ def format_zh(text: str, **kwargs) -> str:
         "Requirements:": "要求:",
         
         # Clarify timeout
-        "clarify timed out after": "澄清超时（",
-        " — agent will decide)": "）— 代理将自行决定)",
+        "clarify timed out after": "澄清超时，超时时间：",
+        " — agent will decide)": "— 将由代理自行决定",
         
         # Approval timeout
         "Timeout — denying command": "超时 — 拒绝命令",
         
         # Approval choices
         "once": "仅一次",
-        "session": "本次会话",
+        "session": "会话",
         "always": "始终",
         "deny": "拒绝",
         "view": "查看",
@@ -141,8 +141,8 @@ def format_zh(text: str, **kwargs) -> str:
         "Voice TTS disabled.": "语音 TTS 已禁用。",
         
         # General
-        "messages": "条消息",
-        "messages...": "条消息...",
+        "messages": "消息",
+        "messages...": "消息...",
 
         # Gateway notifications
         "Still working...": "仍在工作中...",
@@ -158,7 +158,7 @@ def format_zh(text: str, **kwargs) -> str:
 
         # Home channel
         "No home channel is set for": "{0} 未设置主频道",
-        "A home channel is where Hermes delivers cron job results": "主频道是 Hermes 投递定时任务结果和跨平台消息的地方",
+        "A home channel is where Hermes delivers cron job results": "主频道是 Hermes 投递定时任务结果的位置",
         "Type /sethome to make this chat your home channel,": "输入 /sethome 将此聊天设为主频道，",
         "or ignore to skip.": "或忽略以跳过。",
 
@@ -169,23 +169,23 @@ def format_zh(text: str, **kwargs) -> str:
         "New message detected, interrupting...": "检测到新消息，正在中断...",
         "Sending after interrupt:": "中断后发送：",
         "Interrupting agent... (press Ctrl+C again to force exit)": "正在中断 agent...（再按 Ctrl+C 强制退出）",
-        "Interrupted during API call.": "API 调用中断。",
+        "Interrupted during API call.": "API 调用过程中被中断",
         "Interrupt requested": "请求中断",
         "Force exiting...": "强制退出...",
         "Interrupt: skipping": "中断：跳过",
         "Breaking out of tool loop due to interrupt...": "因中断跳出工具循环...",
-        "Interrupt detected during retry wait, aborting.": "重试等待期间检测到中断，放弃。",
-        "Interrupt detected during error handling, aborting retries.": "错误处理期间检测到中断，放弃重试。",
-        "Suspend (Ctrl+Z) is not supported on Windows.": "Windows 不支持挂起 (Ctrl+Z)。",
+        "Interrupt detected during retry wait, aborting.": "重试等待阶段检测到中断，已中止",
+        "Interrupt detected during error handling, aborting retries.": "错误处理阶段检测到中断，已中止重试",
+        "Suspend (Ctrl+Z) is not supported on Windows.": "Windows 系统不支持挂起操作（Ctrl+Z）",
         "Starting Hermes Gateway (messaging platforms)...": "正在启动 Hermes 网关（消息平台）...",
         "Starting conversation:": "开始对话：",
         "Error generating insights:": "生成洞察时出错：",
         "Error loading gateway config:": "加载网关配置时出错：",
         "Warning: Unknown toolsets:": "警告：未知的工具集：",
-        "Warning: No TTS provider available. Install edge-tts or set API keys.": "警告：无 TTS 提供商。安装 edge-tts 或设置 API 密钥。",
+        "Warning: No TTS provider available. Install edge-tts or set API keys.": "警告：无可用的 TTS 服务提供商。安装 edge-tts 或设置 API 密钥。",
         "Loading skill:": "正在加载技能：",
         "Stopping": "正在停止",
-        "background process(es)...": "个后台进程...",
+        "background process(es)...": "后台进程...",
     }
     
     if not is_chinese():
