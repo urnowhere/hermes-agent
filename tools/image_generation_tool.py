@@ -294,6 +294,8 @@ DEFAULT_MODEL = "fal-ai/flux-2/klein/9b"
 
 DEFAULT_ASPECT_RATIO = "landscape"
 VALID_ASPECT_RATIOS = ("landscape", "square", "portrait")
+DEFAULT_IMAGE_QUALITY = "medium"
+VALID_IMAGE_QUALITIES = ("low", "medium", "high")
 
 
 # ---------------------------------------------------------------------------
@@ -556,7 +558,14 @@ def _build_fal_payload(
 
     if overrides:
         for k, v in overrides.items():
-            if v is not None:
+            if v is None:
+                continue
+            if k == "quality" and isinstance(v, str):
+                quality = v.strip().lower()
+                if quality not in VALID_IMAGE_QUALITIES:
+                    continue
+                payload[k] = quality
+            else:
                 payload[k] = v
 
     supports = meta["supports"]
@@ -618,6 +627,7 @@ def _upscale_image(image_url: str, original_prompt: str) -> Optional[Dict[str, A
 def image_generate_tool(
     prompt: str,
     aspect_ratio: str = DEFAULT_ASPECT_RATIO,
+    quality: Optional[str] = None,
     num_inference_steps: Optional[int] = None,
     guidance_scale: Optional[float] = None,
     num_images: Optional[int] = None,
@@ -626,8 +636,8 @@ def image_generate_tool(
 ) -> str:
     """Generate an image from a text prompt using the configured FAL model.
 
-    The agent-facing schema exposes only ``prompt`` and ``aspect_ratio``; the
-    remaining kwargs are overrides for direct Python callers and are filtered
+    The agent-facing schema exposes ``prompt``, ``aspect_ratio``, and optional
+    ``quality``. Remaining kwargs are overrides for direct Python callers and are filtered
     per-model via the ``supports`` whitelist (unsupported overrides are
     silently dropped so legacy callers don't break when switching models).
 
@@ -641,6 +651,7 @@ def image_generate_tool(
         "parameters": {
             "prompt": prompt,
             "aspect_ratio": aspect_ratio,
+            "quality": quality,
             "num_inference_steps": num_inference_steps,
             "guidance_scale": guidance_scale,
             "num_images": num_images,
@@ -674,6 +685,8 @@ def image_generate_tool(
             aspect_lc = DEFAULT_ASPECT_RATIO
 
         overrides: Dict[str, Any] = {}
+        if quality is not None:
+            overrides["quality"] = quality
         if num_inference_steps is not None:
             overrides["num_inference_steps"] = num_inference_steps
         if guidance_scale is not None:
@@ -873,6 +886,12 @@ IMAGE_GENERATE_SCHEMA = {
                 "description": "The aspect ratio of the generated image. 'landscape' is 16:9 wide, 'portrait' is 16:9 tall, 'square' is 1:1.",
                 "default": DEFAULT_ASPECT_RATIO,
             },
+            "quality": {
+                "type": "string",
+                "enum": list(VALID_IMAGE_QUALITIES),
+                "description": "Optional generation quality. Use low for drafts, medium for normal/default work, and high only for final/high-stakes images. Unsupported providers ignore it.",
+                "default": DEFAULT_IMAGE_QUALITY,
+            },
         },
         "required": ["prompt"],
     },
@@ -900,7 +919,7 @@ def _read_configured_image_provider():
     return None
 
 
-def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
+def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str, quality: Optional[str] = None):
     """Route the call to a plugin-registered provider when one is selected.
 
     Returns a JSON string on dispatch, or ``None`` to fall through to the
@@ -950,7 +969,7 @@ def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
         })
 
     try:
-        result = provider.generate(prompt=prompt, aspect_ratio=aspect_ratio)
+        result = provider.generate(prompt=prompt, aspect_ratio=aspect_ratio, quality=quality)
     except Exception as exc:
         logger.warning(
             "Image gen provider '%s' raised: %s",
@@ -977,16 +996,18 @@ def _handle_image_generate(args, **kw):
     if not prompt:
         return tool_error("prompt is required for image generation")
     aspect_ratio = args.get("aspect_ratio", DEFAULT_ASPECT_RATIO)
+    quality = args.get("quality")
 
     # Route to a plugin-registered provider if one is active (and it's
     # not the in-tree FAL path).
-    dispatched = _dispatch_to_plugin_provider(prompt, aspect_ratio)
+    dispatched = _dispatch_to_plugin_provider(prompt, aspect_ratio, quality=quality)
     if dispatched is not None:
         return dispatched
 
     return image_generate_tool(
         prompt=prompt,
         aspect_ratio=aspect_ratio,
+        quality=quality,
     )
 
 

@@ -27,6 +27,7 @@ class _FakeCodexProvider(ImageGenProvider):
             "prompt": prompt,
             "aspect_ratio": aspect_ratio,
             "provider": "codex",
+            "quality": kwargs.get("quality"),
         }
 
 
@@ -44,13 +45,14 @@ class TestPluginDispatch:
         monkeypatch.setattr(plugins_module, "_ensure_plugins_discovered", lambda: None)
         monkeypatch.setattr(registry_module, "get_provider", lambda name: _FakeCodexProvider() if name == "codex" else None)
 
-        dispatched = image_generation_tool._dispatch_to_plugin_provider("draw cat", "square")
+        dispatched = image_generation_tool._dispatch_to_plugin_provider("draw cat", "square", quality="high")
         payload = json.loads(dispatched)
 
         assert payload["success"] is True
         assert payload["provider"] == "codex"
         assert payload["image"] == "/tmp/codex-test.png"
         assert payload["aspect_ratio"] == "square"
+        assert payload["quality"] == "high"
 
     def test_dispatch_reports_missing_registered_provider(self, monkeypatch, tmp_path):
         from tools import image_generation_tool
@@ -62,7 +64,7 @@ class TestPluginDispatch:
         monkeypatch.setattr(image_generation_tool, "_read_configured_image_provider", lambda: "missing-codex")
         monkeypatch.setattr(plugins_module, "_ensure_plugins_discovered", lambda: None)
 
-        dispatched = image_generation_tool._dispatch_to_plugin_provider("draw cat", "landscape")
+        dispatched = image_generation_tool._dispatch_to_plugin_provider("draw cat", "landscape", quality="medium")
         payload = json.loads(dispatched)
 
         assert payload["success"] is False
@@ -90,10 +92,11 @@ class TestPluginDispatch:
         monkeypatch.setattr(plugins_module, "_ensure_plugins_discovered", fake_ensure_plugins_discovered)
         monkeypatch.setattr(registry_module, "get_provider", lambda name: provider_state["provider"])
 
-        dispatched = image_generation_tool._dispatch_to_plugin_provider("draw hammy", "portrait")
+        dispatched = image_generation_tool._dispatch_to_plugin_provider("draw hammy", "portrait", quality="low")
         payload = json.loads(dispatched)
 
         assert calls == [False, True]
         assert payload["success"] is True
         assert payload["provider"] == "codex"
         assert payload["aspect_ratio"] == "portrait"
+        assert payload["quality"] == "low"

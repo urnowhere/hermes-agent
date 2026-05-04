@@ -71,6 +71,17 @@ _MODELS: Dict[str, Dict[str, Any]] = {
 }
 
 DEFAULT_MODEL = "gpt-image-2-medium"
+_VALID_QUALITIES = {"low", "medium", "high"}
+
+
+def _model_for_quality(quality: Any) -> Optional[Tuple[str, Dict[str, Any]]]:
+    if not isinstance(quality, str):
+        return None
+    normalized = quality.strip().lower()
+    if normalized not in _VALID_QUALITIES:
+        return None
+    model_id = f"gpt-image-2-{normalized}"
+    return model_id, _MODELS[model_id]
 
 _SIZES = {
     "landscape": "1536x1024",
@@ -209,7 +220,8 @@ class OpenAIImageGenProvider(ImageGenProvider):
                 aspect_ratio=aspect,
             )
 
-        tier_id, meta = _resolve_model()
+        quality_override = _model_for_quality(kwargs.get("quality"))
+        tier_id, meta = quality_override if quality_override is not None else _resolve_model()
         size = _SIZES.get(aspect, _SIZES["square"])
 
         # gpt-image-2 returns b64_json unconditionally and REJECTS
