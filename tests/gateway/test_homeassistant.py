@@ -385,6 +385,21 @@ class TestCooldown:
         assert adapter.handle_message.call_count == 2
 
     @pytest.mark.asyncio
+    async def test_noop_state_change_does_not_consume_cooldown(self):
+        adapter = _make_adapter(watch_all=True, cooldown_seconds=60)
+
+        await adapter._handle_ha_event(
+            _make_event("sensor.temp", "20", "20", new_attrs={"friendly_name": "Temp"})
+        )
+        assert adapter.handle_message.call_count == 0
+        assert "sensor.temp" not in adapter._last_event_time
+
+        await adapter._handle_ha_event(
+            _make_event("sensor.temp", "20", "21", new_attrs={"friendly_name": "Temp"})
+        )
+        assert adapter.handle_message.call_count == 1
+
+    @pytest.mark.asyncio
     async def test_different_entities_independent_cooldowns(self):
         adapter = _make_adapter(watch_all=True, cooldown_seconds=60)
 

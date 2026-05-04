@@ -288,7 +288,6 @@ class HomeAssistantAdapter(BasePlatformAdapter):
         last = self._last_event_time.get(entity_id, 0)
         if (now - last) < self._cooldown_seconds:
             return
-        self._last_event_time[entity_id] = now
 
         # Build human-readable message
         old_state = event_data.get("old_state", {})
@@ -297,6 +296,8 @@ class HomeAssistantAdapter(BasePlatformAdapter):
 
         if not message:
             return
+
+        self._last_event_time[entity_id] = now
 
         # Build MessageEvent and forward to handler
         source = self.build_source(
