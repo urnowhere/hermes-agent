@@ -911,6 +911,177 @@ async def test_reset_command_uses_profile_session_store_for_routed_topic(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_undo_command_rewrites_profile_transcript_only_for_routed_topic(tmp_path):
+    gateway_home = tmp_path / "gateway"
+    profiles_root = gateway_home / "profiles"
+    profile_home = profiles_root / "cybrel-test"
+    profile_home.mkdir(parents=True)
+    config = GatewayConfig(
+        platforms={
+            Platform.TELEGRAM: PlatformConfig(
+                extra={"topic_profiles_safe_root": str(profiles_root)}
+            )
+        }
+    )
+
+    with hermes_home_context(gateway_home):
+        runner = _make_runner(config)
+        source = _source(agent_profile="cybrel-test", agent_hermes_home=str(profile_home))
+        profile_store = runner._session_store_for_source(source)
+        profile_entry = profile_store.get_or_create_session(source)
+        gateway_entry = runner.session_store.get_or_create_session(source)
+        profile_store.rewrite_transcript(
+            profile_entry.session_id,
+            [
+                {"role": "user", "content": "profile keep"},
+                {"role": "assistant", "content": "profile kept"},
+                {"role": "user", "content": "profile remove"},
+                {"role": "assistant", "content": "profile removed"},
+            ],
+        )
+        runner.session_store.rewrite_transcript(
+            gateway_entry.session_id,
+            [
+                {"role": "user", "content": "gateway keep"},
+                {"role": "assistant", "content": "gateway kept"},
+                {"role": "user", "content": "gateway remove"},
+                {"role": "assistant", "content": "gateway removed"},
+            ],
+        )
+
+        event = MessageEvent(text="/undo", message_type=MessageType.TEXT, source=source)
+        response = await runner._handle_undo_command(event)
+
+    assert "profile remove" in response
+    assert [m["content"] for m in profile_store.load_transcript(profile_entry.session_id)] == [
+        "profile keep",
+        "profile kept",
+    ]
+    assert [m["content"] for m in runner.session_store.load_transcript(gateway_entry.session_id)] == [
+        "gateway keep",
+        "gateway kept",
+        "gateway remove",
+        "gateway removed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_retry_command_rewrites_profile_transcript_only_for_routed_topic(tmp_path):
+    gateway_home = tmp_path / "gateway"
+    profiles_root = gateway_home / "profiles"
+    profile_home = profiles_root / "cybrel-test"
+    profile_home.mkdir(parents=True)
+    config = GatewayConfig(
+        platforms={
+            Platform.TELEGRAM: PlatformConfig(
+                extra={"topic_profiles_safe_root": str(profiles_root)}
+            )
+        }
+    )
+
+    with hermes_home_context(gateway_home):
+        runner = _make_runner(config)
+        runner._handle_message = AsyncMock(return_value="retried")
+        source = _source(agent_profile="cybrel-test", agent_hermes_home=str(profile_home))
+        profile_store = runner._session_store_for_source(source)
+        profile_entry = profile_store.get_or_create_session(source)
+        gateway_entry = runner.session_store.get_or_create_session(source)
+        profile_store.rewrite_transcript(
+            profile_entry.session_id,
+            [
+                {"role": "user", "content": "profile keep"},
+                {"role": "assistant", "content": "profile kept"},
+                {"role": "user", "content": "profile retry"},
+                {"role": "assistant", "content": "profile answer"},
+            ],
+        )
+        runner.session_store.rewrite_transcript(
+            gateway_entry.session_id,
+            [
+                {"role": "user", "content": "gateway keep"},
+                {"role": "assistant", "content": "gateway kept"},
+                {"role": "user", "content": "gateway retry"},
+                {"role": "assistant", "content": "gateway answer"},
+            ],
+        )
+
+        event = MessageEvent(text="/retry", message_type=MessageType.TEXT, source=source)
+        response = await runner._handle_retry_command(event)
+
+    assert response == "retried"
+    retry_event = runner._handle_message.await_args.args[0]
+    assert retry_event.text == "profile retry"
+    assert [m["content"] for m in profile_store.load_transcript(profile_entry.session_id)] == [
+        "profile keep",
+        "profile kept",
+    ]
+    assert [m["content"] for m in runner.session_store.load_transcript(gateway_entry.session_id)] == [
+        "gateway keep",
+        "gateway kept",
+        "gateway retry",
+        "gateway answer",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_title_command_uses_profile_session_db_for_routed_topic(tmp_path):
+    gateway_home = tmp_path / "gateway"
+    profiles_root = gateway_home / "profiles"
+    profile_home = profiles_root / "cybrel-test"
+    profile_home.mkdir(parents=True)
+    config = GatewayConfig(
+        platforms={
+            Platform.TELEGRAM: PlatformConfig(
+                extra={"topic_profiles_safe_root": str(profiles_root)}
+            )
+        }
+    )
+
+    with hermes_home_context(gateway_home):
+        runner = _make_runner(config)
+        source = _source(agent_profile="cybrel-test", agent_hermes_home=str(profile_home))
+        profile_store = runner._session_store_for_source(source)
+        profile_entry = profile_store.get_or_create_session(source)
+        gateway_entry = runner.session_store.get_or_create_session(source)
+        runner._session_db = runner.session_store._db
+
+        event = MessageEvent(text="/title Profile Title", message_type=MessageType.TEXT, source=source)
+        response = await runner._handle_title_command(event)
+
+    assert "Profile Title" in response
+    assert profile_store._db.get_session_title(profile_entry.session_id) == "Profile Title"
+    assert runner.session_store._db.get_session_title(gateway_entry.session_id) is None
+
+
+@pytest.mark.asyncio
+async def test_status_command_reads_profile_session_db_for_routed_topic(tmp_path):
+    gateway_home = tmp_path / "gateway"
+    profiles_root = gateway_home / "profiles"
+    profile_home = profiles_root / "cybrel-test"
+    profile_home.mkdir(parents=True)
+    config = GatewayConfig(
+        platforms={
+            Platform.TELEGRAM: PlatformConfig(
+                extra={"topic_profiles_safe_root": str(profiles_root)}
+            )
+        }
+    )
+
+    with hermes_home_context(gateway_home):
+        runner = _make_runner(config)
+        source = _source(agent_profile="cybrel-test", agent_hermes_home=str(profile_home))
+        profile_store = runner._session_store_for_source(source)
+        profile_entry = profile_store.get_or_create_session(source)
+        profile_store._db.set_session_title(profile_entry.session_id, "Profile DB Title")
+        runner._session_db = runner.session_store._db
+
+        event = MessageEvent(text="/status", message_type=MessageType.TEXT, source=source)
+        response = await runner._handle_status_command(event)
+
+    assert "Profile DB Title" in response
+
+
+@pytest.mark.asyncio
 async def test_personality_command_is_disabled_for_routed_profile_topics(tmp_path):
     from gateway import run as gateway_run
 

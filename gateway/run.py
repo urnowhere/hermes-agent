@@ -1444,6 +1444,17 @@ class GatewayRunner:
                 cache[key] = SessionStore(profile_home / "sessions", self.config)
         return cache[key]
 
+    def _session_db_for_source(self, source: SessionSource):
+        """Return the SQLite SessionDB associated with the source's active store."""
+        try:
+            store = self._session_store_for_source(source)
+            db = getattr(store, "_db", None)
+            if db is not None:
+                return db
+        except Exception:
+            pass
+        return getattr(self, "_session_db", None)
+
     def _resolve_session_agent_runtime(
         self,
         *,
@@ -5414,7 +5425,8 @@ class GatewayRunner:
                 # on error. Let the user drive the next turn.
                 if _final_text.strip():
                     try:
-                        session_entry = self.session_store.get_or_create_session(source)
+                        session_store = self._session_store_for_source(source)
+                        session_entry = session_store.get_or_create_session(source)
                     except Exception:
                         session_entry = None
                     if session_entry is not None:
@@ -6956,7 +6968,9 @@ class GatewayRunner:
     async def _handle_status_command(self, event: MessageEvent) -> str:
         """Handle /status command."""
         source = event.source
-        session_entry = self.session_store.get_or_create_session(source)
+        session_store = self._session_store_for_source(source)
+        session_db = self._session_db_for_source(source)
+        session_entry = session_store.get_or_create_session(source)
 
         connected_platforms = [p.value for p in self.adapters.keys()]
 
@@ -6976,13 +6990,13 @@ class GatewayRunner:
         # single source of truth; reading it here keeps /status accurate
         # without duplicating token writes into two stores.
         db_total_tokens = 0
-        if self._session_db:
+        if session_db:
             try:
-                title = self._session_db.get_session_title(session_entry.session_id)
+                title = session_db.get_session_title(session_entry.session_id)
             except Exception:
                 title = None
             try:
-                row = self._session_db.get_session(session_entry.session_id)
+                row = session_db.get_session(session_entry.session_id)
                 if row:
                     db_total_tokens = (
                         (row.get("input_tokens") or 0)
@@ -7118,7 +7132,8 @@ class GatewayRunner:
         The session is preserved so the user can continue the conversation.
         """
         source = event.source
-        session_entry = self.session_store.get_or_create_session(source)
+        session_store = self._session_store_for_source(source)
+        session_entry = session_store.get_or_create_session(source)
         session_key = session_entry.session_key
 
         agent = self._running_agents.get(session_key)
@@ -7786,8 +7801,9 @@ class GatewayRunner:
     async def _handle_retry_command(self, event: MessageEvent) -> str:
         """Handle /retry command - re-send the last user message."""
         source = event.source
-        session_entry = self.session_store.get_or_create_session(source)
-        history = self.session_store.load_transcript(session_entry.session_id)
+        session_store = self._session_store_for_source(source)
+        session_entry = session_store.get_or_create_session(source)
+        history = session_store.load_transcript(session_entry.session_id)
         
         # Find the last user message
         last_user_msg = None
@@ -7803,7 +7819,7 @@ class GatewayRunner:
         
         # Truncate history to before the last user message and persist
         truncated = history[:last_user_idx]
-        self.session_store.rewrite_transcript(session_entry.session_id, truncated)
+        session_store.rewrite_transcript(session_entry.session_id, truncated)
         # Reset stored token count — transcript was truncated
         session_entry.last_prompt_tokens = 0
         
@@ -7834,7 +7850,8 @@ class GatewayRunner:
             logger.debug("goal manager unavailable: %s", exc)
             return None, None
         try:
-            session_entry = self.session_store.get_or_create_session(event.source)
+            session_store = self._session_store_for_source(event.source)
+            session_entry = session_store.get_or_create_session(event.source)
         except Exception as exc:
             logger.debug("goal manager: session lookup failed: %s", exc)
             return None, None
@@ -8017,8 +8034,9 @@ class GatewayRunner:
     async def _handle_undo_command(self, event: MessageEvent) -> str:
         """Handle /undo command - remove the last user/assistant exchange."""
         source = event.source
-        session_entry = self.session_store.get_or_create_session(source)
-        history = self.session_store.load_transcript(session_entry.session_id)
+        session_store = self._session_store_for_source(source)
+        session_entry = session_store.get_or_create_session(source)
+        history = session_store.load_transcript(session_entry.session_id)
         
         # Find the last user message and remove everything from it onward
         last_user_idx = None
@@ -8032,7 +8050,7 @@ class GatewayRunner:
         
         removed_msg = history[last_user_idx].get("content", "")
         removed_count = len(history) - last_user_idx
-        self.session_store.rewrite_transcript(session_entry.session_id, history[:last_user_idx])
+        session_store.rewrite_transcript(session_entry.session_id, history[:last_user_idx])
         # Reset stored token count — transcript was truncated
         session_entry.last_prompt_tokens = 0
         
@@ -9097,8 +9115,9 @@ class GatewayRunner:
         more aggressive about discarding everything else.
         """
         source = event.source
-        session_entry = self.session_store.get_or_create_session(source)
-        history = self.session_store.load_transcript(session_entry.session_id)
+        session_store = self._session_store_for_source(source)
+        session_entry = session_store.get_or_create_session(source)
+        history = session_store.load_transcript(session_entry.session_id)
 
         if not history or len(history) < 4:
             return "Not enough conversation to compress (need at least 4 messages)."
@@ -9164,11 +9183,11 @@ class GatewayRunner:
                 new_session_id = tmp_agent.session_id
                 if new_session_id != session_entry.session_id:
                     session_entry.session_id = new_session_id
-                    self.session_store._save()
+                    session_store._save()
 
-                self.session_store.rewrite_transcript(new_session_id, compressed)
+                session_store.rewrite_transcript(new_session_id, compressed)
                 # Reset stored token count — transcript changed, old value is stale
-                self.session_store.update_session(
+                session_store.update_session(
                     session_entry.session_key, last_prompt_tokens=0
                 )
                 new_tokens = estimate_request_tokens_rough(
@@ -9221,19 +9240,21 @@ class GatewayRunner:
     async def _handle_title_command(self, event: MessageEvent) -> str:
         """Handle /title command — set or show the current session's title."""
         source = event.source
-        session_entry = self.session_store.get_or_create_session(source)
+        session_store = self._session_store_for_source(source)
+        session_db = self._session_db_for_source(source)
+        session_entry = session_store.get_or_create_session(source)
         session_id = session_entry.session_id
 
-        if not self._session_db:
+        if not session_db:
             return "Session database not available."
 
         # Ensure session exists in SQLite DB (it may only exist in session_store
         # if this is the first command in a new session)
-        existing_title = self._session_db.get_session_title(session_id)
+        existing_title = session_db.get_session_title(session_id)
         if existing_title is None:
             # Session doesn't exist in DB yet — create it
             try:
-                self._session_db.create_session(
+                session_db.create_session(
                     session_id=session_id,
                     source=source.platform.value if source.platform else "unknown",
                     user_id=source.user_id,
@@ -9245,14 +9266,14 @@ class GatewayRunner:
         if title_arg:
             # Sanitize the title before setting
             try:
-                sanitized = self._session_db.sanitize_title(title_arg)
+                sanitized = session_db.sanitize_title(title_arg)
             except ValueError as e:
                 return f"⚠️ {e}"
             if not sanitized:
                 return "⚠️ Title is empty after cleanup. Please use printable characters."
             # Set the title
             try:
-                if self._session_db.set_session_title(session_id, sanitized):
+                if session_db.set_session_title(session_id, sanitized):
                     return f"✏️ Session title set: **{sanitized}**"
                 else:
                     return "Session not found in database."
@@ -9260,7 +9281,7 @@ class GatewayRunner:
                 return f"⚠️ {e}"
         else:
             # Show the current title and session ID
-            title = self._session_db.get_session_title(session_id)
+            title = session_db.get_session_title(session_id)
             if title:
                 return f"📌 Session: `{session_id}`\nTitle: **{title}**"
             else:
@@ -9268,10 +9289,12 @@ class GatewayRunner:
 
     async def _handle_resume_command(self, event: MessageEvent) -> str:
         """Handle /resume command — switch to a previously-named session."""
-        if not self._session_db:
+        source = event.source
+        session_store = self._session_store_for_source(source)
+        session_db = self._session_db_for_source(source)
+        if not session_db:
             return "Session database not available."
 
-        source = event.source
         session_key = self._session_key_for_source(source)
         name = event.get_command_args().strip()
 
@@ -9279,7 +9302,7 @@ class GatewayRunner:
             # List recent titled sessions for this user/platform
             try:
                 user_source = source.platform.value if source.platform else None
-                sessions = self._session_db.list_sessions_rich(
+                sessions = session_db.list_sessions_rich(
                     source=user_source, limit=10
                 )
                 titled = [s for s in sessions if s.get("title")]
@@ -9302,7 +9325,7 @@ class GatewayRunner:
                 return f"Could not list sessions: {e}"
 
         # Resolve the name to a session ID.
-        target_id = self._session_db.resolve_session_by_title(name)
+        target_id = session_db.resolve_session_by_title(name)
         if not target_id:
             return (
                 f"No session found matching '**{name}**'.\n"
@@ -9311,12 +9334,12 @@ class GatewayRunner:
         # Compression creates child continuations that hold the live transcript.
         # Follow that chain so gateway /resume matches CLI behavior (#15000).
         try:
-            target_id = self._session_db.resolve_resume_session_id(target_id)
+            target_id = session_db.resolve_resume_session_id(target_id)
         except Exception as e:
             logger.debug("Failed to resolve resume continuation for %s: %s", target_id, e)
 
         # Check if already on that session
-        current_entry = self.session_store.get_or_create_session(source)
+        current_entry = session_store.get_or_create_session(source)
         if current_entry.session_id == target_id:
             return f"📌 Already on session **{name}**."
 
@@ -9324,7 +9347,7 @@ class GatewayRunner:
         self._release_running_agent_state(session_key)
 
         # Switch the session entry to point at the old session
-        new_entry = self.session_store.switch_session(session_key, target_id)
+        new_entry = session_store.switch_session(session_key, target_id)
         if not new_entry:
             return "Failed to switch session."
         self._clear_session_boundary_security_state(session_key)
@@ -9337,10 +9360,10 @@ class GatewayRunner:
         self._evict_cached_agent(session_key)
 
         # Get the title for confirmation
-        title = self._session_db.get_session_title(target_id) or name
+        title = session_db.get_session_title(target_id) or name
 
         # Count messages for context
-        history = self.session_store.load_transcript(target_id)
+        history = session_store.load_transcript(target_id)
         msg_count = len([m for m in history if m.get("role") == "user"]) if history else 0
         msg_part = f" ({msg_count} message{'s' if msg_count != 1 else ''})" if msg_count else ""
 
@@ -9355,15 +9378,16 @@ class GatewayRunner:
         """
         import uuid as _uuid
 
-        if not self._session_db:
-            return "Session database not available."
-
         source = event.source
+        session_store = self._session_store_for_source(source)
+        session_db = self._session_db_for_source(source)
+        if not session_db:
+            return "Session database not available."
         session_key = self._session_key_for_source(source)
 
         # Load the current session and its transcript
-        current_entry = self.session_store.get_or_create_session(source)
-        history = self.session_store.load_transcript(current_entry.session_id)
+        current_entry = session_store.get_or_create_session(source)
+        history = session_store.load_transcript(current_entry.session_id)
         if not history:
             return "No conversation to branch — send a message first."
 
@@ -9380,15 +9404,15 @@ class GatewayRunner:
         if branch_name:
             branch_title = branch_name
         else:
-            current_title = self._session_db.get_session_title(current_entry.session_id)
+            current_title = session_db.get_session_title(current_entry.session_id)
             base = current_title or "branch"
-            branch_title = self._session_db.get_next_title_in_lineage(base)
+            branch_title = session_db.get_next_title_in_lineage(base)
 
         parent_session_id = current_entry.session_id
 
         # Create the new session with parent link
         try:
-            self._session_db.create_session(
+            session_db.create_session(
                 session_id=new_session_id,
                 source=source.platform.value if source.platform else "gateway",
                 model=(self.config.get("model", {}) or {}).get("default") if isinstance(self.config, dict) else None,
@@ -9401,7 +9425,7 @@ class GatewayRunner:
         # Copy conversation history to the new session
         for msg in history:
             try:
-                self._session_db.append_message(
+                session_db.append_message(
                     session_id=new_session_id,
                     role=msg.get("role", "user"),
                     content=msg.get("content"),
@@ -9420,12 +9444,12 @@ class GatewayRunner:
 
         # Set title
         try:
-            self._session_db.set_session_title(new_session_id, branch_title)
+            session_db.set_session_title(new_session_id, branch_title)
         except Exception:
             pass
 
         # Switch the session store entry to the new session
-        new_entry = self.session_store.switch_session(session_key, new_session_id)
+        new_entry = session_store.switch_session(session_key, new_session_id)
         if not new_entry:
             return "Branch created but failed to switch to it."
         self._clear_session_boundary_security_state(session_key)
@@ -9450,6 +9474,8 @@ class GatewayRunner:
         available whenever the user asks, not only while the agent is running.
         """
         source = event.source
+        session_store = self._session_store_for_source(source)
+        session_db = self._session_db_for_source(source)
         session_key = self._session_key_for_source(source)
 
         # Try running agent first (mid-turn), then cached agent (between turns)
@@ -9470,10 +9496,10 @@ class GatewayRunner:
         provider = getattr(agent, "provider", None) if agent and agent is not _AGENT_PENDING_SENTINEL else None
         base_url = getattr(agent, "base_url", None) if agent and agent is not _AGENT_PENDING_SENTINEL else None
         api_key = getattr(agent, "api_key", None) if agent and agent is not _AGENT_PENDING_SENTINEL else None
-        if not provider and getattr(self, "_session_db", None) is not None:
+        if not provider and session_db is not None:
             try:
-                _entry_for_billing = self.session_store.get_or_create_session(source)
-                persisted = self._session_db.get_session(_entry_for_billing.session_id) or {}
+                _entry_for_billing = session_store.get_or_create_session(source)
+                persisted = session_db.get_session(_entry_for_billing.session_id) or {}
             except Exception:
                 persisted = {}
             provider = provider or persisted.get("billing_provider")
@@ -9559,8 +9585,8 @@ class GatewayRunner:
             return "\n".join(lines)
 
         # No agent at all -- check session history for a rough count
-        session_entry = self.session_store.get_or_create_session(source)
-        history = self.session_store.load_transcript(session_entry.session_id)
+        session_entry = session_store.get_or_create_session(source)
+        history = session_store.load_transcript(session_entry.session_id)
         if history:
             from agent.model_metadata import estimate_messages_tokens_rough
             msgs = [m for m in history if m.get("role") in ("user", "assistant") and m.get("content")]
@@ -9765,8 +9791,9 @@ class GatewayRunner:
                 "content": f"[IMPORTANT: MCP servers have been reloaded. {change_detail}{tool_summary}. The tool list for this conversation has been updated accordingly.]",
             }
             try:
-                session_entry = self.session_store.get_or_create_session(event.source)
-                self.session_store.append_to_transcript(
+                session_store = self._session_store_for_source(event.source)
+                session_entry = session_store.get_or_create_session(event.source)
+                session_store.append_to_transcript(
                     session_entry.session_id, reload_msg
                 )
             except Exception:
