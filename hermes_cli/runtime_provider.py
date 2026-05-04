@@ -115,18 +115,31 @@ def _get_model_config() -> Dict[str, Any]:
         # Accept "model" as alias for "default" (users intuitively write model.model)
         if not cfg.get("default") and cfg.get("model"):
             cfg["default"] = cfg["model"]
-        default = (cfg.get("default") or "").strip()
-        base_url = (cfg.get("base_url") or "").strip()
-        is_local = "localhost" in base_url or "127.0.0.1" in base_url
-        is_fallback = not default
-        if is_local and is_fallback and base_url:
-            detected = _auto_detect_local_model(base_url)
-            if detected:
-                cfg["default"] = detected
-        return cfg
-    if isinstance(model_cfg, str) and model_cfg.strip():
-        return {"default": model_cfg.strip()}
-    return {}
+    elif isinstance(model_cfg, str) and model_cfg.strip():
+        cfg = {"default": model_cfg.strip()}
+    else:
+        cfg = {}
+
+    # Honour top-level provider/base_url/api_key/api_mode when the user wrote
+    # them flat in config.yaml instead of nested under `model:` (#6295).  Only
+    # fill keys that aren't already present in the nested model section so the
+    # nested form keeps priority when both are set.
+    for top_key in ("provider", "base_url", "api_key", "api_mode"):
+        if cfg.get(top_key):
+            continue
+        top_val = config.get(top_key)
+        if isinstance(top_val, str) and top_val.strip():
+            cfg[top_key] = top_val.strip()
+
+    default = (cfg.get("default") or "").strip()
+    base_url = (cfg.get("base_url") or "").strip()
+    is_local = "localhost" in base_url or "127.0.0.1" in base_url
+    is_fallback = not default
+    if is_local and is_fallback and base_url:
+        detected = _auto_detect_local_model(base_url)
+        if detected:
+            cfg["default"] = detected
+    return cfg
 
 
 def _provider_supports_explicit_api_mode(provider: Optional[str], configured_provider: Optional[str] = None) -> bool:

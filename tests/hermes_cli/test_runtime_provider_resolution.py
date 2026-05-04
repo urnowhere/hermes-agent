@@ -1547,6 +1547,53 @@ def test_explicit_nous_auth_failure_still_raises(monkeypatch):
         rp.resolve_runtime_provider(requested="nous")
 
 
+def test_get_model_config_honors_top_level_provider(monkeypatch):
+    """Top-level `provider:` in config.yaml must surface into model config (#6295).
+
+    When users write a flat layout:
+
+        model: MiniMax-M2.7
+        provider: minimax
+        base_url: https://api.minimax.io/anthropic
+
+    the provider must win over auto-detection from env vars. Previously the
+    string form of `model:` dropped the sibling provider and the gateway
+    fell back to OpenRouter.
+    """
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "model": "MiniMax-M2.7",
+            "provider": "minimax",
+            "base_url": "https://api.minimax.io/anthropic",
+        },
+    )
+    cfg = rp._get_model_config()
+    assert cfg["default"] == "MiniMax-M2.7"
+    assert cfg["provider"] == "minimax"
+    assert cfg["base_url"] == "https://api.minimax.io/anthropic"
+
+    # And `resolve_requested_provider` must now return the configured provider
+    # instead of falling through to env/auto.
+    monkeypatch.delenv("HERMES_INFERENCE_PROVIDER", raising=False)
+    assert rp.resolve_requested_provider() == "minimax"
+
+
+def test_get_model_config_nested_model_keeps_priority_over_top_level(monkeypatch):
+    """Nested `model.provider` still wins when both forms are present."""
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "model": {"default": "MiniMax-M2.7", "provider": "minimax"},
+            "provider": "openrouter",
+        },
+    )
+    cfg = rp._get_model_config()
+    assert cfg["provider"] == "minimax"
+
+
 def test_openrouter_provider_not_affected_by_custom_fix(monkeypatch):
     """Fixing custom must not change openrouter behavior."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
