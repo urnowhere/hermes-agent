@@ -1215,13 +1215,45 @@ class QQAdapter(BasePlatformAdapter):
                 except Exception as exc:
                     logger.debug("[%s] Failed to cache image: %s", self._log_tag, exc)
             else:
-                # Other attachments (video, file, etc.): record as text.
+                # Other attachments (video, file, etc.): record as text. The
+                # agent must always learn that *something* was sent, even when
+                # the QQ file CDN download fails — otherwise the file is
+                # silently dropped and the user sees no acknowledgement.
+                #
+                # Strip whitespace from filename so a name like "   " doesn't
+                # produce "[Attachment:  (download failed)]".  The QQ file CDN
+                # URLs carry signed query parameters (``sign=`` / ``sig=``);
+                # log only the hostname + path so signed tokens don't leak
+                # into production logs.
+                stripped_name = (filename or "").strip()
+                label = stripped_name or (ct or "").strip() or "file"
+                _parsed = urlparse(url or "")
+                _safe_url = f"{_parsed.hostname or '?'}{_parsed.path or ''}"
                 try:
                     cached_path = await self._download_and_cache(url, ct)
                     if cached_path:
-                        other_attachments.append(f"[Attachment: {filename or ct}]")
+                        other_attachments.append(f"[Attachment: {label}]")
+                    else:
+                        logger.warning(
+                            "[%s] Attachment download failed (no cached path): %s (%s)",
+                            self._log_tag,
+                            label,
+                            _safe_url,
+                        )
+                        other_attachments.append(
+                            f"[Attachment: {label} (download failed)]"
+                        )
                 except Exception as exc:
-                    logger.debug("[%s] Failed to cache attachment: %s", self._log_tag, exc)
+                    logger.warning(
+                        "[%s] Failed to cache attachment %s (%s): %s",
+                        self._log_tag,
+                        label,
+                        _safe_url,
+                        exc,
+                    )
+                    other_attachments.append(
+                        f"[Attachment: {label} (download failed)]"
+                    )
 
         attachment_info = "\n".join(other_attachments) if other_attachments else ""
         return {

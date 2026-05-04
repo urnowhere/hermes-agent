@@ -191,6 +191,152 @@ class TestVoiceAttachmentSSRFProtection:
         assert kwargs.get("follow_redirects") is True
         assert kwargs.get("event_hooks", {}).get("response") == [_ssrf_redirect_guard]
 
+
+# ---------------------------------------------------------------------------
+# Non-image, non-voice attachment fallback (#16979)
+# ---------------------------------------------------------------------------
+
+class TestProcessAttachmentsFallback:
+    """File / video attachments must surface to the agent even when the QQ
+    file CDN download fails — otherwise the user sends a PDF and the agent
+    silently sees nothing."""
+
+    def _make_adapter(self, **extra):
+        from gateway.platforms.qqbot import QQAdapter
+        return QQAdapter(_make_config(app_id="a", client_secret="b", **extra))
+
+    def test_file_download_returns_none_emits_failure_marker(self):
+        adapter = self._make_adapter()
+        adapter._download_and_cache = mock.AsyncMock(return_value=None)
+
+        result = asyncio.run(
+            adapter._process_attachments(
+                [
+                    {
+                        "content_type": "application/pdf",
+                        "url": "https://grouptalk.c2c.qq.com/qqdownloadftnv5?sign=abc",
+                        "filename": "report.pdf",
+                    }
+                ]
+            )
+        )
+
+        assert "report.pdf" in result["attachment_info"]
+        assert "download failed" in result["attachment_info"]
+
+    def test_file_download_raises_emits_failure_marker(self):
+        adapter = self._make_adapter()
+        adapter._download_and_cache = mock.AsyncMock(
+            side_effect=ValueError("Blocked unsafe URL")
+        )
+
+        result = asyncio.run(
+            adapter._process_attachments(
+                [
+                    {
+                        "content_type": "application/pdf",
+                        "url": "http://127.0.0.1/private.pdf",
+                        "filename": "private.pdf",
+                    }
+                ]
+            )
+        )
+
+        assert "private.pdf" in result["attachment_info"]
+        assert "download failed" in result["attachment_info"]
+
+    def test_file_download_succeeds_omits_failure_marker(self):
+        adapter = self._make_adapter()
+        adapter._download_and_cache = mock.AsyncMock(return_value="/tmp/cached.pdf")
+
+        result = asyncio.run(
+            adapter._process_attachments(
+                [
+                    {
+                        "content_type": "application/pdf",
+                        "url": "https://grouptalk.c2c.qq.com/qqdownloadftnv5?sign=abc",
+                        "filename": "report.pdf",
+                    }
+                ]
+            )
+        )
+
+        assert "report.pdf" in result["attachment_info"]
+        assert "download failed" not in result["attachment_info"]
+
+    def test_file_failure_falls_back_to_content_type_when_filename_missing(self):
+        adapter = self._make_adapter()
+        adapter._download_and_cache = mock.AsyncMock(return_value=None)
+
+        result = asyncio.run(
+            adapter._process_attachments(
+                [
+                    {
+                        "content_type": "video/mp4",
+                        "url": "https://grouptalk.c2c.qq.com/qqdownloadftnv5?sign=abc",
+                        "filename": "",
+                    }
+                ]
+            )
+        )
+
+        assert "video/mp4" in result["attachment_info"]
+        assert "download failed" in result["attachment_info"]
+
+    def test_whitespace_filename_falls_back_to_content_type(self):
+        # Regression for Copilot review on PR #16990: a whitespace-only
+        # filename slipped through ``filename or ct or "file"`` and produced
+        # ``[Attachment:  (download failed)]``.  The label must strip
+        # whitespace before the falsy-fallback chain.
+        adapter = self._make_adapter()
+        adapter._download_and_cache = mock.AsyncMock(return_value=None)
+
+        result = asyncio.run(
+            adapter._process_attachments(
+                [
+                    {
+                        "content_type": "application/pdf",
+                        "url": "https://grouptalk.c2c.qq.com/qqdownloadftnv5?sign=abc",
+                        "filename": "   ",
+                    }
+                ]
+            )
+        )
+
+        info = result["attachment_info"]
+        assert "application/pdf" in info
+        assert "download failed" in info
+        assert "Attachment:  " not in info  # no double-space label
+
+    def test_failure_log_does_not_leak_signed_query_params(self, caplog):
+        # Regression for Copilot review on PR #16990: warning logs included
+        # ``url[:80]`` which for QQ file CDN often contains ``sign=`` /
+        # ``sig=`` tokens.  The warning must log only host + path.
+        import logging
+        adapter = self._make_adapter()
+        adapter._download_and_cache = mock.AsyncMock(return_value=None)
+
+        with caplog.at_level(logging.WARNING):
+            asyncio.run(
+                adapter._process_attachments(
+                    [
+                        {
+                            "content_type": "application/pdf",
+                            "url": "https://grouptalk.c2c.qq.com/qqdownloadftnv5?sign=SECRETSIGNATURE&sig=OTHER",
+                            "filename": "report.pdf",
+                        }
+                    ]
+                )
+            )
+
+        log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "SECRETSIGNATURE" not in log_text
+        assert "sign=" not in log_text
+        # but the host + path should still be present for debuggability
+        assert "grouptalk.c2c.qq.com" in log_text
+        assert "/qqdownloadftnv5" in log_text
+
+
 # ---------------------------------------------------------------------------
 # _strip_at_mention
 # ---------------------------------------------------------------------------
