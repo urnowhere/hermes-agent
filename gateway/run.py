@@ -13036,8 +13036,14 @@ class GatewayRunner:
                     f"Reply `/approve` to execute, `/approve session` to approve this pattern "
                     f"for the session, `/approve always` to approve permanently, or `/deny` to cancel."
                 )
+                # Propagate delivery failure to the approval system so it fails
+                # fast with BLOCKED instead of waiting out the gateway_timeout
+                # (default 5 min). Adapters that don't support push delivery
+                # (e.g. APIServerAdapter.send returns SendResult(success=False))
+                # would otherwise leave the agent thread blocked on
+                # entry.event.wait() with no path to ever resolve. See #19731.
                 try:
-                    asyncio.run_coroutine_threadsafe(
+                    _send_result = asyncio.run_coroutine_threadsafe(
                         _status_adapter.send(
                             _status_chat_id,
                             msg,
@@ -13047,6 +13053,16 @@ class GatewayRunner:
                     ).result(timeout=15)
                 except Exception as _e:
                     logger.error("Failed to send approval request: %s", _e)
+                    raise
+                if not getattr(_send_result, "success", False):
+                    _err = getattr(_send_result, "error", None) or "send returned success=False"
+                    logger.error(
+                        "Approval delivery rejected by %s adapter (%s); denying instead of hanging.",
+                        type(_status_adapter).__name__, _err,
+                    )
+                    raise RuntimeError(
+                        f"approval delivery failed via {type(_status_adapter).__name__}: {_err}"
+                    )
 
             # Prepend pending model switch note so the model knows about the switch
             _pending_notes = getattr(self, '_pending_model_notes', {})
