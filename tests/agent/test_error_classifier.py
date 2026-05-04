@@ -425,6 +425,68 @@ class TestClassifyApiError:
         result = classify_api_error(e, approx_tokens=5000, context_length=200000)
         assert result.reason == FailoverReason.timeout
 
+    # ── Large-context (1M) sessions: don't misclassify on absolute heuristics ──
+
+    def test_400_generic_1m_context_high_message_count_not_overflow(self):
+        """Generic 400 in a 1M-context session with many messages but low token
+        pressure should be format_error, not context_overflow. Regression for #16351."""
+        e = MockAPIError(
+            "Error",
+            status_code=400,
+            body={"error": {"message": "Error"}},
+        )
+        result = classify_api_error(
+            e,
+            provider="openai-codex",
+            model="gpt-5.5",
+            approx_tokens=74320,
+            context_length=1_000_000,
+            num_messages=432,
+        )
+        assert result.reason == FailoverReason.format_error
+        assert result.should_compress is False
+
+    def test_400_generic_1m_context_relative_pressure_still_overflow(self):
+        """Generic 400 in a 1M-context session with > 40% token pressure is
+        still context_overflow — relative threshold is preserved."""
+        e = MockAPIError(
+            "Error",
+            status_code=400,
+            body={"error": {"message": "Error"}},
+        )
+        result = classify_api_error(
+            e,
+            approx_tokens=500_000,
+            context_length=1_000_000,
+            num_messages=10,
+        )
+        assert result.reason == FailoverReason.context_overflow
+
+    def test_disconnect_1m_context_high_message_count_is_timeout(self):
+        """Server disconnect in a 1M-context session with many messages but
+        low token pressure should be timeout, not context_overflow. Regression
+        for #16351."""
+        e = Exception("server disconnected without sending complete message")
+        result = classify_api_error(
+            e,
+            approx_tokens=150_000,
+            context_length=1_000_000,
+            num_messages=300,
+        )
+        assert result.reason == FailoverReason.timeout
+
+    def test_disconnect_1m_context_relative_pressure_still_overflow(self):
+        """Server disconnect in a 1M-context session with > 60% token pressure
+        is still context_overflow."""
+        e = Exception("server disconnected without sending complete message")
+        result = classify_api_error(
+            e,
+            approx_tokens=700_000,
+            context_length=1_000_000,
+            num_messages=10,
+        )
+        assert result.reason == FailoverReason.context_overflow
+
     # ── Provider-specific: Anthropic thinking signature ──
 
     def test_anthropic_thinking_signature(self):
