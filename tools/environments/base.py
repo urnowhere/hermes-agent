@@ -755,10 +755,23 @@ class BaseEnvironment(ABC):
         # Use login shell if snapshot failed (so user's profile still loads)
         login = not self._snapshot_ready
 
-        proc = self._run_bash(
-            wrapped, login=login, timeout=effective_timeout, stdin_data=effective_stdin
-        )
-        result = self._wait_for_process(proc, timeout=effective_timeout)
+        proc = None
+        try:
+            proc = self._run_bash(
+                wrapped, login=login, timeout=effective_timeout, stdin_data=effective_stdin
+            )
+            result = self._wait_for_process(proc, timeout=effective_timeout)
+        except (KeyboardInterrupt, SystemExit):
+            # Cover the narrow window after the backend has spawned the child
+            # but before _wait_for_process has entered its own cleanup guard.
+            # Thread-targeted interrupts in tests and real process signals can
+            # otherwise strand a local process group with PPID=1.
+            if proc is not None:
+                try:
+                    self._kill_process(proc)
+                except Exception:
+                    pass
+            raise
         self._update_cwd(result)
 
         return result
