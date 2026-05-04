@@ -1547,6 +1547,41 @@ class TestBuildAssistantMessage:
         assert result["content"] == ""
 
 
+class TestRecoverHermesToolCalls:
+    def test_recovers_raw_tool_call_tags_from_content(self, agent):
+        msg = _mock_assistant_msg(
+            content=(
+                "Let me check that.\n"
+                '<tool_call>{"name": "web_search", "arguments": {"q": "MiniMax tool call bug"}}</tool_call>'
+            ),
+            tool_calls=None,
+        )
+
+        agent._recover_hermes_tool_calls_from_content(msg)
+
+        assert msg.content == "Let me check that."
+        assert msg.tool_calls is not None
+        assert len(msg.tool_calls) == 1
+        assert msg.tool_calls[0].function.name == "web_search"
+        assert json.loads(msg.tool_calls[0].function.arguments) == {
+            "q": "MiniMax tool call bug"
+        }
+
+    def test_does_not_recover_raw_tool_calls_when_tools_disabled(self, agent):
+        agent.tools = []
+        msg = _mock_assistant_msg(
+            content='<tool_call>{"name": "web_search", "arguments": {"q": "test"}}</tool_call>',
+            tool_calls=None,
+        )
+
+        agent._recover_hermes_tool_calls_from_content(msg)
+
+        assert msg.content == (
+            '<tool_call>{"name": "web_search", "arguments": {"q": "test"}}</tool_call>'
+        )
+        assert msg.tool_calls is None
+
+
 class TestFormatToolsForSystemMessage:
     def test_no_tools_returns_empty_array(self, agent):
         agent.tools = []

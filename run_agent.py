@@ -5441,6 +5441,38 @@ class AIAgent:
         """Split a stored tool id into (call_id, response_item_id)."""
         return _codex_split_responses_tool_id(raw_id)
 
+    def _recover_hermes_tool_calls_from_content(self, assistant_message) -> None:
+        """Parse raw Hermes-style tool-call tags from assistant content.
+
+        Some providers return tool calls inline as ``<tool_call>...</tool_call>``
+        text instead of populating structured ``tool_calls``.  When tools are
+        enabled, recover those calls so the main agent loop executes them rather
+        than treating the markup as a plain assistant reply.
+        """
+        if getattr(assistant_message, "tool_calls", None) or not self.tools:
+            return
+
+        content = getattr(assistant_message, "content", None)
+        if not isinstance(content, str) or "<tool_call>" not in content:
+            return
+
+        try:
+            from environments.tool_call_parsers import get_parser
+
+            parsed_content, parsed_calls = get_parser("hermes").parse(content)
+        except Exception:
+            return
+
+        if not parsed_calls:
+            return
+
+        assistant_message.tool_calls = parsed_calls
+        assistant_message.content = parsed_content
+        logger.info(
+            "Recovered %d Hermes-format tool call(s) from raw assistant content",
+            len(parsed_calls),
+        )
+
     def _derive_responses_function_call_id(
         self,
         call_id: str,
@@ -12935,6 +12967,8 @@ class AIAgent:
                         assistant_message.content = "\n".join(parts)
                     else:
                         assistant_message.content = str(raw)
+
+                self._recover_hermes_tool_calls_from_content(assistant_message)
 
                 try:
                     from hermes_cli.plugins import invoke_hook as _invoke_hook
