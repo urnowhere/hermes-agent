@@ -79,3 +79,48 @@ def test_get_auth_status_reports_anthropic_wif(tmp_path, monkeypatch):
     assert status["identity_token_file_exists"] is True
     assert status["federation_rule_id"] == "fdrl_test123"
     assert status["service_account_id"] == "svac_test789"
+
+
+def test_read_anthropic_wif_config_does_not_mix_partial_env_with_auth_store(tmp_path, monkeypatch):
+    home = tmp_path / "hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("ANTHROPIC_IDENTITY_TOKEN_FILE", "/tmp/env-token.jwt")
+    auth_payload = {
+        "version": 1,
+        "providers": {
+            "anthropic": {
+                "auth_type": "wif",
+                "source": "manual:wif",
+                "federation_rule_id": "fdrl_auth",
+                "organization_id": "org_auth",
+                "service_account_id": "svac_auth",
+                "identity_token_file": "/tmp/auth-token.jwt",
+            }
+        },
+    }
+    (home / "auth.json").write_text(__import__("json").dumps(auth_payload), encoding="utf-8")
+
+    from agent.anthropic_adapter import read_anthropic_wif_config
+
+    config = read_anthropic_wif_config()
+    assert config["source"] == "manual:wif"
+    assert config["identity_token_file"] == "/tmp/auth-token.jwt"
+    assert config["federation_rule_id"] == "fdrl_auth"
+
+
+def test_read_anthropic_wif_config_prefers_complete_env_atomically(tmp_path, monkeypatch):
+    home = tmp_path / "hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("ANTHROPIC_FEDERATION_RULE_ID", "fdrl_env")
+    monkeypatch.setenv("ANTHROPIC_ORGANIZATION_ID", "org_env")
+    monkeypatch.setenv("ANTHROPIC_SERVICE_ACCOUNT_ID", "svac_env")
+    monkeypatch.setenv("ANTHROPIC_IDENTITY_TOKEN_FILE", "/tmp/env-token.jwt")
+
+    from agent.anthropic_adapter import read_anthropic_wif_config
+
+    config = read_anthropic_wif_config()
+    assert config["source"] == "env:wif"
+    assert config["federation_rule_id"] == "fdrl_env"
+    assert config["identity_token_file"] == "/tmp/env-token.jwt"

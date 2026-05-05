@@ -955,6 +955,7 @@ class AIAgent:
         iteration_budget: "IterationBudget" = None,
         fallback_model: Dict[str, Any] = None,
         credential_pool=None,
+        anthropic_force_bearer_auth: bool = False,
         checkpoints_enabled: bool = False,
         checkpoint_max_snapshots: int = 50,
         pass_session_id: bool = False,
@@ -1034,6 +1035,7 @@ class AIAgent:
         self.load_soul_identity = load_soul_identity
         self.pass_session_id = pass_session_id
         self._credential_pool = credential_pool
+        self._anthropic_force_bearer_auth = bool(anthropic_force_bearer_auth)
         self.log_prefix_chars = log_prefix_chars
         self.log_prefix = f"{log_prefix} " if log_prefix else ""
         # Store effective base URL for feature detection (prompt caching, reasoning, etc.)
@@ -1372,8 +1374,15 @@ class AIAgent:
                 # that cause 401/403 on their endpoints.  Guards #1739 and
                 # the third-party identity-injection bug.
                 from agent.anthropic_adapter import _is_oauth_token as _is_oat
-                self._is_anthropic_oauth = _is_oat(effective_key) if _is_native_anthropic else False
-                self._anthropic_client = build_anthropic_client(effective_key, base_url, timeout=_provider_timeout)
+                self._is_anthropic_oauth = (
+                    self._anthropic_force_bearer_auth or (_is_oat(effective_key) if _is_native_anthropic else False)
+                )
+                self._anthropic_client = build_anthropic_client(
+                    effective_key,
+                    base_url,
+                    timeout=_provider_timeout,
+                    force_bearer_auth=self._anthropic_force_bearer_auth,
+                )
                 # No OpenAI client needed for Anthropic mode
                 self.client = None
                 self._client_kwargs = {}
@@ -2192,6 +2201,7 @@ class AIAgent:
                 "anthropic_api_key": self._anthropic_api_key,
                 "anthropic_base_url": self._anthropic_base_url,
                 "is_anthropic_oauth": self._is_anthropic_oauth,
+                "anthropic_force_bearer_auth": getattr(self, "_anthropic_force_bearer_auth", False),
             })
 
     def _ensure_db_session(self) -> None:
@@ -2442,6 +2452,7 @@ class AIAgent:
                 "anthropic_api_key": self._anthropic_api_key,
                 "anthropic_base_url": self._anthropic_base_url,
                 "is_anthropic_oauth": self._is_anthropic_oauth,
+                "anthropic_force_bearer_auth": getattr(self, "_anthropic_force_bearer_auth", False),
             })
 
         # ── Reset fallback state ──
@@ -3631,6 +3642,7 @@ class AIAgent:
                         base_url=_parent_runtime.get("base_url") or None,
                         api_key=_parent_runtime.get("api_key") or None,
                         credential_pool=getattr(self, "_credential_pool", None),
+                        anthropic_force_bearer_auth=bool(_parent_runtime.get("anthropic_force_bearer_auth")),
                         parent_session_id=self.session_id,
                         enabled_toolsets=["memory", "skills"],
                     )
@@ -6202,8 +6214,10 @@ class AIAgent:
             if wif_config:
                 exchanged = exchange_anthropic_wif_for_access_token(wif_config)
                 new_token = str(exchanged.get("access_token") or "").strip()
+                force_bearer_auth = True
             else:
                 new_token = resolve_anthropic_token()
+                force_bearer_auth = self._anthropic_force_bearer_auth
         except Exception as exc:
             logger.debug("Anthropic credential refresh failed: %s", exc)
             return False
@@ -6224,6 +6238,7 @@ class AIAgent:
                 new_token,
                 getattr(self, "_anthropic_base_url", None),
                 timeout=get_provider_request_timeout(self.provider, self.model),
+                **({"force_bearer_auth": True} if force_bearer_auth else {}),
             )
         except Exception as exc:
             logger.warning("Failed to rebuild Anthropic client after credential refresh: %s", exc)
@@ -6235,7 +6250,10 @@ class AIAgent:
         # the Anthropic protocol must not trip OAuth paths (#1739 & third-party
         # identity-injection guard).
         from agent.anthropic_adapter import _is_oauth_token
-        self._is_anthropic_oauth = _is_oauth_token(new_token) if self.provider == "anthropic" else False
+        self._anthropic_force_bearer_auth = force_bearer_auth
+        self._is_anthropic_oauth = (
+            force_bearer_auth or (_is_oauth_token(new_token) if self.provider == "anthropic" else False)
+        )
         return True
 
     def _apply_client_headers_for_base_url(self, base_url: str) -> None:
@@ -6378,7 +6396,7 @@ class AIAgent:
         return False, has_retried_429
 
     def _anthropic_messages_create(self, api_kwargs: dict):
-        if self.api_mode == "anthropic_messages":
+        if self.api_mode == "anthropic_messages" and not getattr(self, "_anthropic_force_bearer_auth", False):
             self._try_refresh_anthropic_client_credentials()
         return self._anthropic_client.messages.create(**api_kwargs)
 
@@ -6406,6 +6424,7 @@ class AIAgent:
                 getattr(self, "_anthropic_base_url", None),
                 timeout=get_provider_request_timeout(self.provider, self.model),
                 drop_context_1m_beta=_drop_1m,
+                force_bearer_auth=getattr(self, "_anthropic_force_bearer_auth", False),
             )
 
     def _interruptible_api_call(self, api_kwargs: dict):
@@ -7173,7 +7192,8 @@ class AIAgent:
                         raise InterruptedError("Agent interrupted before stream retry")
                     try:
                         if self.api_mode == "anthropic_messages":
-                            self._try_refresh_anthropic_client_credentials()
+                            if not getattr(self, "_anthropic_force_bearer_auth", False):
+                                self._try_refresh_anthropic_client_credentials()
                             result["response"] = _call_anthropic()
                         else:
                             result["response"] = _call_chat_completions()

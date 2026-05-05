@@ -514,6 +514,7 @@ def build_anthropic_client(
     timeout: float = None,
     *,
     drop_context_1m_beta: bool = False,
+    force_bearer_auth: bool = False,
 ):
     """Create an Anthropic client, auto-detecting setup-tokens vs API keys.
 
@@ -528,6 +529,11 @@ def build_anthropic_client(
     path in ``run_agent.py`` when a subscription rejects the beta; leave at
     its default on fresh clients so 1M-capable subscriptions keep the
     capability.
+
+    ``force_bearer_auth=True`` routes the token through ``auth_token`` even
+    when its opaque string format is not recognised by ``_is_oauth_token``.
+    Anthropic WIF exchanges return short-lived bearer tokens and must not be
+    sent with the regular ``x-api-key`` header.
 
     Returns an anthropic.Anthropic instance.
     """
@@ -563,7 +569,19 @@ def build_anthropic_client(
         drop_context_1m_beta=drop_context_1m_beta,
     )
 
-    if _is_kimi_coding_endpoint(base_url):
+    if force_bearer_auth:
+        # WIF exchanges produce short-lived bearer tokens. Keep the header set
+        # intentionally close to the direct Anthropic WIF/Claude Code contract:
+        # common API-key betas such as the 1M context beta can make some
+        # workspace-scoped WIF tokens fail before the first message call.
+        all_betas = _OAUTH_ONLY_BETAS
+        kwargs["auth_token"] = api_key
+        kwargs["default_headers"] = {
+            "anthropic-beta": ",".join(all_betas),
+            "user-agent": f"claude-cli/{_get_claude_code_version()} (external, cli)",
+            "x-app": "cli",
+        }
+    elif _is_kimi_coding_endpoint(base_url):
         # Kimi's /coding endpoint requires User-Agent: claude-code/0.1.0
         # to be recognized as a valid Coding Agent. Without it, returns 403.
         # Check this BEFORE _requires_bearer_auth since both match api.kimi.com/coding.
@@ -955,36 +973,57 @@ def _read_anthropic_provider_state() -> Optional[Dict[str, Any]]:
     return dict(state) if isinstance(state, dict) else None
 
 
+def _complete_wif_config(config: Dict[str, Any]) -> bool:
+    return all(
+        str(config.get(field) or "").strip()
+        for field in (
+            "federation_rule_id",
+            "organization_id",
+            "service_account_id",
+            "identity_token_file",
+        )
+    )
+
+
 def read_anthropic_wif_config() -> Optional[Dict[str, Any]]:
-    """Resolve explicit Anthropic WIF configuration from env and/or auth.json."""
+    """Resolve explicit Anthropic WIF configuration from env or auth.json.
+
+    Environment variables are treated as an atomic source: all four WIF
+    variables must be present before they override auth.json.  This avoids
+    accidentally combining a JWT file from one workload with organization or
+    service-account identifiers from a persisted auth store.
+    """
     env_config = {
+        "auth_type": "wif",
+        "source": "env:wif",
+        "label": "anthropic-wif",
+        "api_base_url": "https://api.anthropic.com",
         "federation_rule_id": os.getenv("ANTHROPIC_FEDERATION_RULE_ID", "").strip(),
         "organization_id": os.getenv("ANTHROPIC_ORGANIZATION_ID", "").strip(),
         "service_account_id": os.getenv("ANTHROPIC_SERVICE_ACCOUNT_ID", "").strip(),
         "identity_token_file": os.getenv("ANTHROPIC_IDENTITY_TOKEN_FILE", "").strip(),
     }
+    env_api_base_url = os.getenv("ANTHROPIC_API_BASE_URL", "").strip()
+    if env_api_base_url:
+        env_config["api_base_url"] = env_api_base_url
+    if _complete_wif_config(env_config):
+        return env_config
+
     auth_state = _read_anthropic_provider_state() or {}
-    merged = {
-        "auth_type": str(auth_state.get("auth_type") or "").strip().lower(),
+    if str(auth_state.get("auth_type") or "").strip().lower() != "wif":
+        return None
+
+    auth_config = {
+        "auth_type": "wif",
         "source": str(auth_state.get("source") or "auth_store:wif").strip() or "auth_store:wif",
         "label": str(auth_state.get("label") or "anthropic-wif").strip() or "anthropic-wif",
         "api_base_url": str(auth_state.get("api_base_url") or "https://api.anthropic.com").strip() or "https://api.anthropic.com",
-        "federation_rule_id": env_config["federation_rule_id"] or str(auth_state.get("federation_rule_id") or "").strip(),
-        "organization_id": env_config["organization_id"] or str(auth_state.get("organization_id") or "").strip(),
-        "service_account_id": env_config["service_account_id"] or str(auth_state.get("service_account_id") or "").strip(),
-        "identity_token_file": env_config["identity_token_file"] or str(auth_state.get("identity_token_file") or "").strip(),
+        "federation_rule_id": str(auth_state.get("federation_rule_id") or "").strip(),
+        "organization_id": str(auth_state.get("organization_id") or "").strip(),
+        "service_account_id": str(auth_state.get("service_account_id") or "").strip(),
+        "identity_token_file": str(auth_state.get("identity_token_file") or "").strip(),
     }
-    required = (
-        merged["federation_rule_id"],
-        merged["organization_id"],
-        merged["service_account_id"],
-        merged["identity_token_file"],
-    )
-    if all(required):
-        if any(env_config.values()):
-            merged["source"] = "env:wif"
-        return merged
-    return None
+    return auth_config if _complete_wif_config(auth_config) else None
 
 
 def exchange_anthropic_wif_for_access_token(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1019,45 +1058,37 @@ def exchange_anthropic_wif_for_access_token(config: Optional[Dict[str, Any]] = N
         "federation_rule_id": resolved["federation_rule_id"],
     }).encode("utf-8")
 
-    endpoints = [
-        "https://api.anthropic.com/v1/oauth/token",
-        "https://platform.claude.com/v1/oauth/token",
-        "https://console.anthropic.com/v1/oauth/token",
-    ]
-    last_error = None
-    for endpoint in endpoints:
-        req = urllib.request.Request(
-            endpoint,
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": f"claude-cli/{_get_claude_code_version()} (external, cli)",
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                result = json.loads(resp.read().decode())
-        except Exception as exc:
-            last_error = exc
-            logger.debug("Anthropic WIF token exchange failed at %s: %s", endpoint, exc)
-            continue
+    api_base_url = str(resolved.get("api_base_url") or "https://api.anthropic.com").strip().rstrip("/")
+    if not api_base_url.startswith("https://"):
+        raise ValueError("Anthropic WIF api_base_url must use https://")
+    endpoint = f"{api_base_url}/v1/oauth/token"
+    req = urllib.request.Request(
+        endpoint,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": f"claude-cli/{_get_claude_code_version()} (external, cli)",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read().decode())
+    except Exception as exc:
+        logger.debug("Anthropic WIF token exchange failed at %s: %s", endpoint, exc)
+        raise
 
-        access_token = str(result.get("access_token") or "").strip()
-        if not access_token:
-            raise ValueError("Anthropic WIF exchange response was missing access_token")
-        expires_in = int(result.get("expires_in") or 3600)
-        return {
-            "access_token": access_token,
-            "token_type": result.get("token_type") or "Bearer",
-            "scope": result.get("scope"),
-            "expires_in": expires_in,
-            "expires_at_ms": int(time.time() * 1000) + (expires_in * 1000),
-        }
-
-    if last_error is not None:
-        raise last_error
-    raise ValueError("Anthropic WIF token exchange failed")
+    access_token = str(result.get("access_token") or "").strip()
+    if not access_token:
+        raise ValueError("Anthropic WIF exchange response was missing access_token")
+    expires_in = int(result.get("expires_in") or 3600)
+    return {
+        "access_token": access_token,
+        "token_type": result.get("token_type") or "Bearer",
+        "scope": result.get("scope"),
+        "expires_in": expires_in,
+        "expires_at_ms": int(time.time() * 1000) + (expires_in * 1000),
+    }
 
 
 def resolve_anthropic_token() -> Optional[str]:

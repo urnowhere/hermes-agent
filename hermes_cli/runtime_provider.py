@@ -762,6 +762,7 @@ def _resolve_explicit_runtime(
             cfg_base_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
         base_url = explicit_base_url or cfg_base_url or "https://api.anthropic.com"
         api_key = explicit_api_key
+        auth_source = "explicit"
         if not api_key:
             from agent.anthropic_adapter import (
                 exchange_anthropic_wif_for_access_token,
@@ -775,8 +776,10 @@ def _resolve_explicit_runtime(
                 api_key = str(exchanged.get("access_token") or "").strip()
                 if not api_key:
                     raise AuthError("Anthropic WIF exchange returned no access token.")
+                auth_source = "wif"
             else:
                 api_key = resolve_anthropic_token()
+                auth_source = "explicit"
             if not api_key:
                 raise AuthError(
                     "No Anthropic credentials found. Configure WIF, set ANTHROPIC_TOKEN or ANTHROPIC_API_KEY, "
@@ -787,7 +790,8 @@ def _resolve_explicit_runtime(
             "api_mode": "anthropic_messages",
             "base_url": base_url,
             "api_key": api_key,
-            "source": "explicit",
+            "source": auth_source,
+            "anthropic_force_bearer_auth": auth_source == "wif",
             "requested_provider": requested_provider,
         }
 
@@ -980,6 +984,17 @@ def resolve_runtime_provider(
         return explicit_runtime
 
     should_use_pool = provider != "openrouter"
+    if provider == "anthropic":
+        try:
+            from agent.anthropic_adapter import read_anthropic_wif_config
+
+            if read_anthropic_wif_config():
+                # Explicit WIF configuration is a runtime exchange, not a pooled
+                # static credential.  Do not let an older Anthropic pool entry
+                # shadow it.
+                should_use_pool = False
+        except Exception:
+            pass
     if provider == "openrouter":
         cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
         cfg_base_url = str(model_cfg.get("base_url") or "").strip()
@@ -1154,6 +1169,8 @@ def resolve_runtime_provider(
         if cfg_provider == "anthropic":
             cfg_base_url = (model_cfg.get("base_url") or "").strip().rstrip("/")
         base_url = cfg_base_url or "https://api.anthropic.com"
+        token = ""
+        auth_source = "env"
 
         # For Azure AI Foundry endpoints, use ANTHROPIC_API_KEY directly —
         # Claude Code OAuth tokens (sk-ant-oat01) are not accepted by Azure.
@@ -1206,8 +1223,10 @@ def resolve_runtime_provider(
                 token = str(exchanged.get("access_token") or "").strip()
                 if not token:
                     raise AuthError("Anthropic WIF exchange returned no access token.")
+                auth_source = "wif"
             else:
                 token = resolve_anthropic_token()
+                auth_source = "env"
             if not token:
                 raise AuthError(
                     "No Anthropic credentials found. Configure WIF, set ANTHROPIC_TOKEN or ANTHROPIC_API_KEY, "
@@ -1218,7 +1237,8 @@ def resolve_runtime_provider(
             "api_mode": "anthropic_messages",
             "base_url": base_url,
             "api_key": token,
-            "source": "env",
+            "source": auth_source,
+            "anthropic_force_bearer_auth": auth_source == "wif",
             "requested_provider": requested_provider,
         }
 
