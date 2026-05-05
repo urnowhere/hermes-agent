@@ -151,6 +151,40 @@ def test_aiagent_reuses_existing_errors_log_handler():
             root_logger.addHandler(handler)
 
 
+def test_aiagent_quiet_mode_suppresses_minisweagent_logger():
+    """Quiet mode should suppress third-party sandbox logs in the interactive CLI."""
+    minisweagent_logger = logging.getLogger("minisweagent")
+    tools_logger = logging.getLogger("tools")
+    prev_minisweagent_level = minisweagent_logger.level
+    prev_tools_level = tools_logger.level
+
+    try:
+        minisweagent_logger.setLevel(logging.NOTSET)
+        tools_logger.setLevel(logging.NOTSET)
+
+        with (
+            patch(
+                "run_agent.get_tool_definitions",
+                return_value=_make_tool_defs("web_search"),
+            ),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            AIAgent(
+                api_key="test-k...7890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+        assert logging.getLogger("tools").level == logging.ERROR
+        assert logging.getLogger("minisweagent").level == logging.ERROR
+    finally:
+        minisweagent_logger.setLevel(prev_minisweagent_level)
+        tools_logger.setLevel(prev_tools_level)
+
+
 class TestProviderModelNormalization:
     def test_aiagent_strips_matching_native_provider_prefix(self):
         with (

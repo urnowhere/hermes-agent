@@ -1285,6 +1285,7 @@ class AIAgent:
                     'trajectory_compressor',
                     'cron',                 # scheduler (only relevant in daemon mode)
                     'hermes_cli',           # CLI helpers
+                    'minisweagent',        # external sandbox startup logs can leak into TUI transcript
                 ]:
                     logging.getLogger(quiet_logger).setLevel(logging.ERROR)
         
