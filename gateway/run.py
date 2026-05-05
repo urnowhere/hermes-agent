@@ -983,6 +983,50 @@ def _thread_metadata_for_source(source: SessionSource, thread_id: Optional[str] 
     return metadata or None
 
 
+def _enabled_mcp_server_names(config: dict | None) -> set[str]:
+    servers = (config or {}).get("mcp_servers")
+    if not isinstance(servers, dict):
+        return set()
+    enabled: set[str] = set()
+    for name, server_cfg in servers.items():
+        if isinstance(server_cfg, dict) and server_cfg.get("enabled") is False:
+            continue
+        enabled.add(str(name))
+    return enabled
+
+
+def _has_explicit_platform_toolsets(config: dict | None, platform_key: str) -> bool:
+    toolsets = (config or {}).get("platform_toolsets")
+    return isinstance(toolsets, dict) and platform_key in toolsets
+
+
+def _topic_profile_tool_isolation_notice(
+    gateway_config: dict | None,
+    profile_config: dict | None,
+    platform_key: str,
+) -> Optional[str]:
+    """Return a diagnostic when gateway-only tool config will not be inherited."""
+    reasons: list[str] = []
+    if (
+        _has_explicit_platform_toolsets(gateway_config, platform_key)
+        and not _has_explicit_platform_toolsets(profile_config, platform_key)
+    ):
+        reasons.append(f"platform_toolsets.{platform_key}")
+
+    gateway_mcp = _enabled_mcp_server_names(gateway_config)
+    profile_mcp = _enabled_mcp_server_names(profile_config)
+    if gateway_mcp and not profile_mcp:
+        reasons.append("mcp_servers")
+
+    if not reasons:
+        return None
+    return (
+        "Routed profile tool isolation: gateway "
+        f"{', '.join(reasons)} config is not inherited by the routed profile. "
+        "Declare required toolsets or MCP servers in the profile config."
+    )
+
+
 def _load_gateway_config(hermes_home: Path | None = None) -> dict:
     """Load and parse ~/.hermes/config.yaml, returning {} on any error.
 
@@ -13296,6 +13340,33 @@ class GatewayRunner:
 
         user_config = _load_gateway_config()
         platform_key = _platform_config_key(source.platform)
+
+        if _profile_home is not None:
+            try:
+                gateway_sessions = getattr(
+                    getattr(self, "session_store", None),
+                    "sessions_dir",
+                    None,
+                )
+                gateway_home = (
+                    gateway_sessions.parent
+                    if gateway_sessions is not None
+                    else _hermes_home
+                )
+                notice = _topic_profile_tool_isolation_notice(
+                    _load_gateway_config(gateway_home),
+                    user_config,
+                    platform_key,
+                )
+                if notice:
+                    logger.info(
+                        "%s profile=%s home=%s",
+                        notice,
+                        getattr(source, "agent_profile", ""),
+                        _profile_home,
+                    )
+            except Exception:
+                logger.debug("Could not evaluate routed profile tool isolation notice", exc_info=True)
 
         from hermes_cli.tools_config import _get_platform_tools
         enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))

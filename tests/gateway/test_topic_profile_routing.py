@@ -69,14 +69,21 @@ def _make_runner(config=None, *, gateway_prompt="Gateway prompt"):
     runner._provider_routing = {"order": ["gateway-provider"], "sort": "latency"}
     runner._fallback_model = None
     runner._running_agents = {}
+    runner._running_agents_ts = {}
+    runner._busy_ack_ts = {}
+    runner._session_run_generation = {}
     runner._pending_model_notes = {}
+    runner._update_prompt_pending = {}
+    runner._pending_native_image_paths_by_session = {}
+    runner._pending_approvals = {}
+    runner._voice_mode = {}
     runner._session_db = None
     runner._agent_cache = {}
     runner._agent_cache_lock = threading.Lock()
     runner._session_model_overrides = {}
     runner._session_reasoning_overrides = {}
     runner._draining = False
-    runner.hooks = SimpleNamespace(loaded_hooks=False)
+    runner.hooks = SimpleNamespace(loaded_hooks=False, emit=AsyncMock())
     runner.config = config or GatewayConfig()
     runner.session_store = SessionStore(get_hermes_home() / "sessions", runner.config)
     runner._get_or_create_gateway_honcho = lambda session_key: (None, None)
@@ -908,6 +915,60 @@ async def test_routed_profile_soul_identity_is_loaded_from_profile_home(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_handle_message_routes_full_turn_through_topic_profile(monkeypatch, tmp_path):
+    from gateway import run as gateway_run
+
+    gateway_home = tmp_path / "gateway"
+    profiles_root = gateway_home / "profiles"
+    profile_home = profiles_root / "cybrel-test"
+    profile_home.mkdir(parents=True)
+    (gateway_home / "SOUL.md").write_text("Gateway SOUL", encoding="utf-8")
+    (profile_home / "SOUL.md").write_text("Profile SOUL", encoding="utf-8")
+    _write_profile_config(
+        profile_home,
+        prompt="Profile prompt",
+        model="openrouter/profile-model",
+        toolsets=["web"],
+    )
+    config = GatewayConfig(
+        platforms={
+            Platform.TELEGRAM: PlatformConfig(
+                extra={"topic_profiles_safe_root": str(profiles_root)}
+            )
+        }
+    )
+
+    _install_fake_agent(monkeypatch)
+    monkeypatch.delenv("HERMES_EPHEMERAL_SYSTEM_PROMPT", raising=False)
+    monkeypatch.delenv("HERMES_PREFILL_MESSAGES_FILE", raising=False)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", _provider_runtime)
+    monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
+
+    with hermes_home_context(gateway_home):
+        runner = _make_runner(config)
+        runner._detect_stale_code = lambda: False
+        runner._trigger_stale_code_restart = lambda: None
+        runner._is_user_authorized = lambda _source: True
+        source = _source(
+            agent_profile="cybrel-test",
+            agent_hermes_home=str(profile_home),
+        )
+        event = MessageEvent(text="hi", message_type=MessageType.TEXT, source=source)
+
+        response = await runner._handle_message(event)
+
+        assert get_hermes_home() == gateway_home
+
+    assert response == "ok"
+    captured = _CapturingAgent.last_init
+    assert captured is not None
+    assert captured["hermes_home_at_init"] == str(profile_home)
+    assert captured["soul"] == "Profile SOUL"
+    assert captured["model"] == "openrouter/profile-model"
+    assert "web" in set(captured["enabled_toolsets"])
+
+
+@pytest.mark.asyncio
 async def test_routed_profile_model_toolsets_and_disabled_toolsets_come_from_profile_config(monkeypatch, tmp_path):
     gateway_home = tmp_path / "gateway"
     profiles_root = gateway_home / "profiles"
@@ -937,6 +998,37 @@ async def test_routed_profile_model_toolsets_and_disabled_toolsets_come_from_pro
     assert captured["model"] == "openrouter/profile-model"
     assert "web" in set(captured["enabled_toolsets"])
     assert captured["disabled_toolsets"] == ["memory"]
+
+
+def test_routed_profile_tool_isolation_diagnostic_for_gateway_only_tools():
+    from gateway.run import _topic_profile_tool_isolation_notice
+
+    notice = _topic_profile_tool_isolation_notice(
+        {
+            "platform_toolsets": {"telegram": ["web", "browser"]},
+            "mcp_servers": {"search": {"command": "npx", "args": ["server"]}},
+        },
+        {},
+        "telegram",
+    )
+
+    assert notice is not None
+    assert "platform_toolsets.telegram" in notice
+    assert "mcp_servers" in notice
+    assert "not inherited" in notice
+
+    no_notice = _topic_profile_tool_isolation_notice(
+        {
+            "platform_toolsets": {"telegram": ["web", "browser"]},
+            "mcp_servers": {"search": {"command": "npx", "args": ["server"]}},
+        },
+        {
+            "platform_toolsets": {"telegram": ["memory"]},
+            "mcp_servers": {"profile-search": {"command": "npx"}},
+        },
+        "telegram",
+    )
+    assert no_notice is None
 
 
 @pytest.mark.asyncio

@@ -325,6 +325,27 @@ Messages in Telegram topics `31` and `42` are always ignored before the mention 
 - Invalid regex patterns are ignored with a warning in the gateway logs rather than crashing the bot
 - If you want a pattern to match only at the start of a message, anchor it with `^`
 
+## Routing Topics to Profiles
+
+Operators can route specific Telegram forum topics to isolated Hermes profiles. This is useful when one bot serves several specialized agents in the same Telegram group.
+
+```yaml
+platforms:
+  telegram:
+    extra:
+      topic_profiles_safe_root: ~/.hermes-topic-profiles
+      topic_profiles:
+        - match:
+            chat_id: "-1001234567890"
+            thread_id: 101
+          profile: shopping
+          profile_home: ~/.hermes-topic-profiles/shopping
+```
+
+For a routed topic, Hermes reads `SOUL.md`, `config.yaml`, `.env`, sessions, memory files, and skills from the routed profile home.
+Gateway-level custom `platform_toolsets` and `mcp_servers` are not inherited by the routed profile.
+If a topic profile needs custom tools or MCP servers, declare them in that profile's own `config.yaml`; otherwise it uses the normal Hermes defaults for that profile.
+
 ## Private Chat Topics (Bot API 9.4)
 
 Telegram Bot API 9.4 (February 2026) introduced **Private Chat Topics** — bots can create forum-style topic threads directly in 1-on-1 DM chats, no supergroup needed. This lets you run multiple isolated workspaces within your existing DM with Hermes.
