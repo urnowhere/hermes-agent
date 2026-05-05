@@ -29,6 +29,7 @@ import os
 import re
 import tempfile
 from contextlib import contextmanager
+from difflib import SequenceMatcher
 from pathlib import Path
 from hermes_constants import get_hermes_home
 from typing import Dict, Any, List, Optional
@@ -87,6 +88,70 @@ _INVISIBLE_CHARS = {
     '\u200b', '\u200c', '\u200d', '\u2060', '\ufeff',
     '\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
 }
+
+
+# Unicode normalization for substring matching — same map used by fuzzy_match.py
+_UNICODE_MAP = {
+    "\u201c": '"', "\u201d": '"',  # smart double quotes
+    "\u2018": "'", "\u2019": "'",  # smart single quotes
+    "\u2014": "--", "\u2013": "-", # em/en dashes
+    "\u2026": "...", "\u00a0": " ", # ellipsis and non-breaking space
+}
+
+
+def _unicode_normalize(text: str) -> str:
+    """Normalize Unicode characters to ASCII equivalents for matching."""
+    for char, repl in _UNICODE_MAP.items():
+        text = text.replace(char, repl)
+    return text
+
+
+def _fuzzy_match_entries(entries: List[str], old_text: str) -> List[int]:
+    """Find entries matching old_text using progressive fuzzy strategies.
+
+    Returns list of matching entry indices. Tries exact match first,
+    then unicode-normalized match, then whitespace-collapsed match,
+    finally similarity-based match. Stops at the first strategy that
+    produces at least one match.
+    """
+    # Strategy 1: Exact substring match
+    matches = [(i, e) for i, e in enumerate(entries) if old_text in e]
+    if matches:
+        return [i for i, _ in matches]
+
+    # Strategy 2: Unicode-normalized match
+    norm_old = _unicode_normalize(old_text)
+    norm_entries = [(i, _unicode_normalize(e)) for i, e in enumerate(entries)]
+    matches = [(i, ne) for i, ne in norm_entries if norm_old in ne]
+    if matches:
+        return [i for i, _ in matches]
+
+    # Strategy 3: Whitespace-collapsed match
+    collapsed_old = re.sub(r'[ \t]+', ' ', old_text).strip()
+    matches = []
+    for i, e in enumerate(entries):
+        collapsed_entry = re.sub(r'[ \t]+', ' ', e).strip()
+        if collapsed_old in collapsed_entry:
+            matches.append(i)
+    if matches:
+        return matches
+
+    # Strategy 4: Line-level similarity (50% of lines must match at 80%+)
+    old_lines = [l.strip() for l in old_text.strip().split('\n') if l.strip()]
+    if old_lines:
+        matches = []
+        for i, e in enumerate(entries):
+            entry_lines = [l.strip() for l in e.strip().split('\n') if l.strip()]
+            high_sim = sum(
+                1 for ol in old_lines
+                if any(SequenceMatcher(None, ol, el).ratio() >= 0.80 for el in entry_lines)
+            )
+            if high_sim >= len(old_lines) * 0.5:
+                matches.append(i)
+        if matches:
+            return matches
+
+    return []
 
 
 def _scan_memory_content(content: str) -> Optional[str]:
@@ -284,16 +349,16 @@ class MemoryStore:
             self._reload_target(target)
 
             entries = self._entries_for(target)
-            matches = [(i, e) for i, e in enumerate(entries) if old_text in e]
+            match_indices = _fuzzy_match_entries(entries, old_text)
 
-            if not matches:
+            if not match_indices:
                 return {"success": False, "error": f"No entry matched '{old_text}'."}
 
-            if len(matches) > 1:
+            if len(match_indices) > 1:
                 # If all matches are identical (exact duplicates), operate on the first one
-                unique_texts = set(e for _, e in matches)
+                unique_texts = set(entries[i] for i in match_indices)
                 if len(unique_texts) > 1:
-                    previews = [e[:80] + ("..." if len(e) > 80 else "") for _, e in matches]
+                    previews = [entries[i][:80] + ("..." if len(entries[i]) > 80 else "") for i in match_indices]
                     return {
                         "success": False,
                         "error": f"Multiple entries matched '{old_text}'. Be more specific.",
@@ -301,7 +366,7 @@ class MemoryStore:
                     }
                 # All identical -- safe to replace just the first
 
-            idx = matches[0][0]
+            idx = match_indices[0]
             limit = self._char_limit(target)
 
             # Check that replacement doesn't blow the budget
@@ -334,16 +399,16 @@ class MemoryStore:
             self._reload_target(target)
 
             entries = self._entries_for(target)
-            matches = [(i, e) for i, e in enumerate(entries) if old_text in e]
+            match_indices = _fuzzy_match_entries(entries, old_text)
 
-            if not matches:
+            if not match_indices:
                 return {"success": False, "error": f"No entry matched '{old_text}'."}
 
-            if len(matches) > 1:
+            if len(match_indices) > 1:
                 # If all matches are identical (exact duplicates), remove the first one
-                unique_texts = set(e for _, e in matches)
+                unique_texts = set(entries[i] for i in match_indices)
                 if len(unique_texts) > 1:
-                    previews = [e[:80] + ("..." if len(e) > 80 else "") for _, e in matches]
+                    previews = [entries[i][:80] + ("..." if len(entries[i]) > 80 else "") for i in match_indices]
                     return {
                         "success": False,
                         "error": f"Multiple entries matched '{old_text}'. Be more specific.",
@@ -351,7 +416,7 @@ class MemoryStore:
                     }
                 # All identical -- safe to remove just the first
 
-            idx = matches[0][0]
+            idx = match_indices[0]
             entries.pop(idx)
             self._set_entries(target, entries)
             self.save_to_disk(target)
