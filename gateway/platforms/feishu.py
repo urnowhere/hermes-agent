@@ -157,6 +157,11 @@ _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 _MARKDOWN_FENCE_OPEN_RE = re.compile(r"^```([^\n`]*)\s*$")
 _MARKDOWN_FENCE_CLOSE_RE = re.compile(r"^```\s*$")
 _MENTION_RE = re.compile(r"@_user_\d+")
+# GFM table: a row of |cells| followed by a separator row (---|:---|...)
+_TABLE_MARKDOWN_RE = re.compile(r"^\|.+\|.*\n\|[-: |]+\|", re.MULTILINE)
+# Multi-line fenced code block (opening fence + 2+ content lines + closing fence)
+# Empty or 1-line blocks render fine in post/md; route 3+ content lines to CardKit 2.0.
+_CODE_BLOCK_RE = re.compile(r"^```[^\n]*\n(.*\n){2,}```", re.MULTILINE | re.DOTALL)
 _MULTISPACE_RE = re.compile(r"[ \t]{2,}")
 _POST_CONTENT_INVALID_RE = re.compile(r"content format of the post type is incorrect", re.IGNORECASE)
 # ---------------------------------------------------------------------------
@@ -3992,6 +3997,11 @@ class FeishuAdapter(BasePlatformAdapter):
     # =========================================================================
 
     def _build_outbound_payload(self, content: str) -> tuple[str, str]:
+        # Route tables and multi-line code blocks to CardKit 2.0 interactive format.
+        # Feishu's post/md tag does not support table syntax and truncates code
+        # blocks after ~6 lines; CardKit 2.0's markdown element handles both.
+        if _TABLE_MARKDOWN_RE.search(content) or _CODE_BLOCK_RE.search(content):
+            return "interactive", self._build_card_payload(content)
         if _MARKDOWN_HINT_RE.search(content):
             return "post", _build_markdown_post_payload(content)
         text_payload = {"text": content}
@@ -4444,6 +4454,22 @@ class FeishuAdapter(BasePlatformAdapter):
         content = payload.setdefault("zh_cn", {}).setdefault("content", [])
         content.append([media_tag])
         return json.dumps(payload, ensure_ascii=False)
+
+    def _build_card_payload(self, content: str) -> str:
+        """Build a CardKit 2.0 interactive card with a markdown element.
+
+        CardKit 2.0's ``tag: markdown`` element natively supports GFM tables and
+        fenced code blocks with scrollable rendering — unlike the ``post/md`` tag
+        which silently drops tables and truncates code after ~6 lines.
+        """
+        card = {
+            "schema": "2.0",
+            "config": {"wide_screen_mode": True},
+            "body": {
+                "elements": [{"tag": "markdown", "content": content}]
+            },
+        }
+        return json.dumps(card, ensure_ascii=False)
 
     @staticmethod
     def _resolve_outbound_file_routing(
