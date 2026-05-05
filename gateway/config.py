@@ -426,6 +426,9 @@ class GatewayConfig:
     # Streaming configuration
     streaming: StreamingConfig = field(default_factory=StreamingConfig)
 
+    # Profile-based routing: route specific channels/threads to different profiles
+    profile_routes: List[Any] = field(default_factory=list)
+
     # Session store pruning: drop SessionEntry records older than this many
     # days from the in-memory dict and sessions.json.  Keeps the store from
     # growing unbounded in gateways serving many chats/threads/users over
@@ -594,6 +597,7 @@ class GatewayConfig:
             thread_sessions_per_user=_coerce_bool(thread_sessions_per_user, False),
             unauthorized_dm_behavior=unauthorized_dm_behavior,
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
+            profile_routes=data.get("profile_routes", []),
             session_store_max_age_days=session_store_max_age_days,
         )
 
@@ -697,6 +701,18 @@ def load_gateway_config() -> GatewayConfig:
                     yaml_cfg.get("unauthorized_dm_behavior"),
                     "pair",
                 )
+
+            # Profile-based routing rules
+            pr = yaml_cfg.get("profile_routes")
+            if isinstance(pr, list) and pr:
+                gw_data["profile_routes"] = pr
+                logger.info("Loaded %d profile route(s) from config.yaml", len(pr))
+            elif isinstance(yaml_cfg.get("gateway"), dict):
+                # Also support gateway.profile_routes nesting
+                pr_nested = yaml_cfg["gateway"].get("profile_routes")
+                if isinstance(pr_nested, list) and pr_nested:
+                    gw_data["profile_routes"] = pr_nested
+                    logger.info("Loaded %d profile route(s) from config.yaml gateway section", len(pr_nested))
 
             # Merge platforms section from config.yaml into gw_data so that
             # nested keys like platforms.webhook.extra.routes are loaded.

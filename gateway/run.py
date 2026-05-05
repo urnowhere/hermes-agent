@@ -1407,7 +1407,7 @@ class GatewayRunner:
     def exit_code(self) -> Optional[int]:
         return self._exit_code
 
-    def _session_key_for_source(self, source: SessionSource) -> str:
+    def _session_key_for_source(self, source: SessionSource, *, profile_name: Optional[str] = None) -> str:
         """Resolve the current session key for a source, honoring gateway config when available."""
         if hasattr(self, "session_store") and self.session_store is not None:
             try:
@@ -1421,6 +1421,7 @@ class GatewayRunner:
             source,
             group_sessions_per_user=getattr(config, "group_sessions_per_user", True),
             thread_sessions_per_user=getattr(config, "thread_sessions_per_user", False),
+            profile_name=profile_name,
         )
 
     def _resolve_session_agent_runtime(
@@ -4623,7 +4624,43 @@ class GatewayRunner:
                     self.pairing_store._record_rate_limit(platform_name, source.user_id)
             return None
         
-        # Intercept messages that are responses to a pending /update prompt.
+        # ── Profile-based routing ──────────────────────────────────────
+        # Match this message's source against configured profile routes.
+        # If a route matches, the session key is scoped to the routed
+        # profile (e.g. "agent:trader:discord:group:123:...") so that
+        # routed sessions are isolated from the default "main" profile.
+        _matched_route = None
+        _profile_name: Optional[str] = None
+        _profile_routes = getattr(self, "_profile_routes_cache", None)
+        if _profile_routes is None:
+            # Lazy-init: parse routes from gateway config on first message
+            try:
+                from gateway.profile_routing import parse_profile_routes
+                _raw_routes = getattr(self.config, "profile_routes", []) or []
+                _profile_routes = parse_profile_routes(_raw_routes)
+                self._profile_routes_cache = _profile_routes
+                if _profile_routes:
+                    logger.info("Profile routing enabled: %d route(s) loaded", len(_profile_routes))
+            except Exception as _pr_err:
+                logger.warning("Failed to parse profile routes: %s", _pr_err)
+                _profile_routes = []
+                self._profile_routes_cache = _profile_routes
+
+        if _profile_routes:
+            try:
+                from gateway.profile_routing import match_profile_route
+                _matched_route = match_profile_route(source, _profile_routes)
+                if _matched_route is not None:
+                    _profile_name = _matched_route.profile
+                    logger.debug(
+                        "Profile route matched: %s → profile '%s' (platform=%s, chat=%s, thread=%s)",
+                        _matched_route.name, _profile_name,
+                        source.platform.value, source.chat_id, source.thread_id,
+                    )
+            except Exception as _route_err:
+                logger.warning("Profile route matching error: %s", _route_err)
+
+        # ── Intercept messages that are responses to a pending /update prompt.
         # The update process (detached) wrote .update_prompt.json; the watcher
         # forwarded it to the user; now the user's reply goes back via
         # .update_response so the update process can continue.
@@ -4631,7 +4668,7 @@ class GatewayRunner:
         # IMPORTANT: recognized slash commands must bypass this interception.
         # Otherwise control/session commands like /new or /help get silently
         # consumed as update answers instead of being dispatched normally.
-        _quick_key = self._session_key_for_source(source)
+        _quick_key = self._session_key_for_source(source, profile_name=_profile_name)
         _update_prompts = getattr(self, "_update_prompt_pending", {})
         if _update_prompts.get(_quick_key):
             raw = (event.text or "").strip()
@@ -5424,7 +5461,10 @@ class GatewayRunner:
         _run_generation = self._begin_session_run_generation(_quick_key)
 
         try:
-            _agent_result = await self._handle_message_with_agent(event, source, _quick_key, _run_generation)
+            _agent_result = await self._handle_message_with_agent(
+                event, source, _quick_key, _run_generation,
+                profile_name=_profile_name, matched_route=_matched_route,
+            )
             # Goal continuation: after the agent returns a final response
             # for this turn, check any standing /goal — the judge will
             # either mark it done, pause it (budget), or enqueue a
@@ -5673,7 +5713,9 @@ class GatewayRunner:
             return []
         return list(pending_native.pop(session_key, []) or [])
 
-    async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
+    async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int,
+                                         *, profile_name: Optional[str] = None,
+                                         matched_route=None):
         """Inner handler that runs under the _running_agents sentinel guard."""
         _msg_start_time = time.time()
         _platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
@@ -5683,6 +5725,31 @@ class GatewayRunner:
             _platform_name, source.user_name or source.user_id or "unknown",
             source.chat_id or "unknown", _msg_preview,
         )
+
+        # If profile routing matched, load the profile's config overrides
+        _profile_overrides: dict = {}
+        if profile_name:
+            try:
+                _profile_path = _hermes_home / "profiles" / profile_name / "config.yaml"
+                if _profile_path.exists():
+                    import yaml
+                    with open(_profile_path) as _pf:
+                        _profile_overrides = yaml.safe_load(_pf) or {}
+                    logger.info("Loaded profile config from %s", _profile_path)
+                else:
+                    logger.warning("Profile route matched '%s' but config not found at %s", profile_name, _profile_path)
+            except Exception as _prof_err:
+                logger.warning("Failed to load profile '%s' config: %s", profile_name, _prof_err)
+
+        # Helper: merge profile overrides into a user_config dict for _resolve_session_agent_runtime
+        def _apply_profile_overrides(user_config: Optional[dict]) -> Optional[dict]:
+            if not _profile_overrides:
+                return user_config
+            merged = dict(user_config) if user_config else {}
+            for key in ("model", "provider", "api_key", "base_url", "api_mode"):
+                if key in _profile_overrides and _profile_overrides[key]:
+                    merged[key] = _profile_overrides[key]
+            return merged if merged else None
 
         # Get or create session
         session_entry = self.session_store.get_or_create_session(source)
@@ -5915,7 +5982,7 @@ class GatewayRunner:
                     _hyg_model, _hyg_runtime = self._resolve_session_agent_runtime(
                         source=source,
                         session_key=session_key,
-                        user_config=_hyg_data if isinstance(_hyg_data, dict) else None,
+                        user_config=_apply_profile_overrides(_hyg_data if isinstance(_hyg_data, dict) else None),
                     )
                     _hyg_provider = _hyg_runtime.get("provider") or _hyg_provider
                     _hyg_base_url = _hyg_runtime.get("base_url") or _hyg_base_url
@@ -6018,7 +6085,7 @@ class GatewayRunner:
                         _hyg_model, _hyg_runtime = self._resolve_session_agent_runtime(
                             source=source,
                             session_key=session_key,
-                            user_config=_hyg_data if isinstance(_hyg_data, dict) else None,
+                            user_config=_apply_profile_overrides(_hyg_data if isinstance(_hyg_data, dict) else None),
                         )
                         if _hyg_runtime.get("api_key"):
                             _hyg_msgs = [

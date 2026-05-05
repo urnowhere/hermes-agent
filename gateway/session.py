@@ -595,10 +595,16 @@ def build_session_key(
     source: SessionSource,
     group_sessions_per_user: bool = True,
     thread_sessions_per_user: bool = False,
+    profile_name: Optional[str] = None,
 ) -> str:
     """Build a deterministic session key from a message source.
 
     This is the single source of truth for session key construction.
+
+    When *profile_name* is set (e.g. "trader"), the key prefix becomes
+    ``agent:{profile_name}:`` instead of the default ``agent:main:``.
+    This ensures profile-routed sessions are isolated from the default
+    profile's session store.
 
     DM rules:
       - DMs include chat_id when present, so each private conversation is isolated.
@@ -625,13 +631,14 @@ def build_session_key(
         if source.platform == Platform.WHATSAPP:
             dm_chat_id = canonical_whatsapp_identifier(source.chat_id)
 
+        profile = profile_name or "main"
         if dm_chat_id:
             if source.thread_id:
-                return f"agent:main:{platform}:dm:{dm_chat_id}:{source.thread_id}"
-            return f"agent:main:{platform}:dm:{dm_chat_id}"
+                return f"agent:{profile}:{platform}:dm:{dm_chat_id}:{source.thread_id}"
+            return f"agent:{profile}:{platform}:dm:{dm_chat_id}"
         if source.thread_id:
-            return f"agent:main:{platform}:dm:{source.thread_id}"
-        return f"agent:main:{platform}:dm"
+            return f"agent:{profile}:{platform}:dm:{source.thread_id}"
+        return f"agent:{profile}:{platform}:dm"
 
     participant_id = source.user_id_alt or source.user_id
     if participant_id and source.platform == Platform.WHATSAPP:
@@ -639,7 +646,8 @@ def build_session_key(
         # single group member gets two isolated per-user sessions when the
         # bridge reshuffles alias forms.
         participant_id = canonical_whatsapp_identifier(str(participant_id)) or participant_id
-    key_parts = ["agent:main", platform, source.chat_type]
+    profile = profile_name or "main"
+    key_parts = ["agent", profile, platform, source.chat_type]
 
     if source.chat_id:
         key_parts.append(source.chat_id)
