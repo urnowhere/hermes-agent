@@ -914,6 +914,13 @@ class MessageEvent:
     # completion notifications) that must bypass user authorization checks.
     internal: bool = False
 
+    # Silence-allowed flag — set by adapters for group messages that are not
+    # directly addressed to the bot (no @mention, not a DM, not a reply to the
+    # bot). When true, the agent may legitimately choose to produce no visible
+    # response, and the gateway's empty/thinking-only retry loop is suppressed
+    # to honor that silence instead of fighting it. See issue #13248.
+    silence_allowed: bool = False
+
     # Timestamps
     timestamp: datetime = field(default_factory=datetime.now)
     
@@ -2759,6 +2766,17 @@ class BasePlatformAdapter(ABC):
                     "[%s] Suppressing stale response for interrupted session %s",
                     self.name,
                     session_key,
+                )
+                response = None
+            # [SILENT] sentinel: model chose to stay quiet. Strip the token
+            # exactly and suppress the outbound send entirely. Parallels the
+            # cron scheduler's SILENT_MARKER handling so messaging surfaces
+            # (Slack, WhatsApp, etc.) honor the same contract. (#13249)
+            if response and response.strip() == "[SILENT]":
+                logger.info(
+                    "[%s] Response is [SILENT] sentinel — suppressing delivery for %s",
+                    self.name,
+                    event.source.chat_id,
                 )
                 response = None
             if not response:
