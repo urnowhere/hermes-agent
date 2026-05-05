@@ -13886,7 +13886,40 @@ class AIAgent:
         # Clean up VM and browser for this task after conversation completes
         self._cleanup_task_resources(effective_task_id)
 
-        # Persist session to both JSON log and SQLite
+        # Plugin hook: post_llm_call
+        # Fired once per turn after the tool-calling loop completes.
+        # Plugins can use this to persist conversation data (e.g. sync
+        # to an external memory system) or override the final response.
+        # IMPORTANT: runs BEFORE _persist_session so that any response
+        # overrides are captured in the persisted history (#14894).
+        if final_response and not interrupted:
+            try:
+                from hermes_cli.plugins import invoke_hook as _invoke_hook
+                _hook_results = _invoke_hook(
+                    "post_llm_call",
+                    session_id=self.session_id,
+                    user_message=original_user_message,
+                    assistant_response=final_response,
+                    conversation_history=list(messages),
+                    model=self.model,
+                    platform=getattr(self, "platform", None) or "",
+                )
+                # Apply response override if a plugin returned one
+                if isinstance(_hook_results, list):
+                    for _hr in _hook_results:
+                        if isinstance(_hr, dict) and _hr.get("override_response"):
+                            final_response = _hr["override_response"]
+                            # Update the last assistant message so the
+                            # persisted history matches the returned response.
+                            for _m in reversed(messages):
+                                if _m.get("role") == "assistant":
+                                    _m["content"] = final_response
+                                    break
+            except Exception as exc:
+                logger.warning("post_llm_call hook failed: %s", exc)
+
+        # Persist session to both JSON log and SQLite.
+        # Runs AFTER post_llm_call so plugin response overrides are captured.
         self._persist_session(messages, conversation_history)
 
         # ── Turn-exit diagnostic log ─────────────────────────────────────
@@ -13933,26 +13966,6 @@ class AIAgent:
         else:
             logger.info(_diag_msg, *_diag_args)
 
-        # Plugin hook: post_llm_call
-        # Fired once per turn after the tool-calling loop completes.
-        # Plugins can use this to persist conversation data (e.g. sync
-        # to an external memory system).
-        if final_response and not interrupted:
-            try:
-                from hermes_cli.plugins import invoke_hook as _invoke_hook
-                _invoke_hook(
-                    "post_llm_call",
-                    session_id=self.session_id,
-                    user_message=original_user_message,
-                    assistant_response=final_response,
-                    conversation_history=list(messages),
-                    model=self.model,
-                    platform=getattr(self, "platform", None) or "",
-                )
-            except Exception as exc:
-                logger.warning("post_llm_call hook failed: %s", exc)
-
-        # Extract reasoning from the last assistant message (if any)
         last_reasoning = None
         for msg in reversed(messages):
             if msg.get("role") == "assistant" and msg.get("reasoning"):
