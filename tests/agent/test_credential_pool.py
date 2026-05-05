@@ -1162,6 +1162,72 @@ def test_load_pool_does_not_seed_qwen_oauth_when_no_token(tmp_path, monkeypatch)
     assert pool.entries() == []
 
 
+def test_resolved_exhausted_cooldown_prefers_ttl_env(monkeypatch):
+    monkeypatch.setenv("HERMES_CREDENTIAL_TTL_SECONDS", "200")
+    monkeypatch.setenv("HERMES_CREDENTIAL_COOLDOWN_SECONDS", "400")
+    from agent.credential_pool import _resolved_exhausted_cooldown_seconds
+
+    assert _resolved_exhausted_cooldown_seconds() == 200
+
+
+def test_resolved_exhausted_cooldown_falls_back_to_cooldown_env(monkeypatch):
+    monkeypatch.delenv("HERMES_CREDENTIAL_TTL_SECONDS", raising=False)
+    monkeypatch.setenv("HERMES_CREDENTIAL_COOLDOWN_SECONDS", "180")
+    from agent.credential_pool import _resolved_exhausted_cooldown_seconds
+
+    assert _resolved_exhausted_cooldown_seconds() == 180
+
+
+def test_resolved_exhausted_cooldown_clamps_minimum(monkeypatch):
+    monkeypatch.setenv("HERMES_CREDENTIAL_TTL_SECONDS", "30")
+    from agent.credential_pool import _resolved_exhausted_cooldown_seconds
+
+    assert _resolved_exhausted_cooldown_seconds() == 60
+
+
+def test_legacy_exhausted_ttl_module_attrs_match_resolved(monkeypatch):
+    monkeypatch.setenv("HERMES_CREDENTIAL_TTL_SECONDS", "240")
+    import agent.credential_pool as cp
+
+    assert cp.EXHAUSTED_TTL_429_SECONDS == 240
+    assert cp.EXHAUSTED_TTL_DEFAULT_SECONDS == 240
+
+
+def test_env_short_ttl_re_enables_exhausted_primary(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.setenv("HERMES_CREDENTIAL_TTL_SECONDS", "120")
+    _write_auth_store(
+        tmp_path,
+        {
+            "version": 1,
+            "credential_pool": {
+                "anthropic": [
+                    {
+                        "id": "cred-1",
+                        "label": "old",
+                        "auth_type": "api_key",
+                        "priority": 0,
+                        "source": "manual",
+                        "access_token": "***",
+                        "last_status": "exhausted",
+                        "last_status_at": time.time() - 200.0,
+                        "last_error_code": 402,
+                    }
+                ]
+            },
+        },
+    )
+
+    from agent.credential_pool import load_pool
+
+    pool = load_pool("anthropic")
+    entry = pool.select()
+
+    assert entry is not None
+    assert entry.id == "cred-1"
+    assert entry.last_status == "ok"
+
+
 def test_nous_seed_from_singletons_preserves_obtained_at_timestamps(tmp_path, monkeypatch):
     """Regression test for #15099 secondary issue.
 

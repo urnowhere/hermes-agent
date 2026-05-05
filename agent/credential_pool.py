@@ -67,11 +67,38 @@ SUPPORTED_POOL_STRATEGIES = {
     STRATEGY_LEAST_USED,
 }
 
-# Cooldown before retrying an exhausted credential.
-# 429 (rate-limited) and 402 (billing/quota) both cool down after 1 hour.
-# Provider-supplied reset_at timestamps override these defaults.
-EXHAUSTED_TTL_429_SECONDS = 60 * 60          # 1 hour
-EXHAUSTED_TTL_DEFAULT_SECONDS = 60 * 60      # 1 hour
+# Cooldown before retrying an exhausted credential (when no provider reset_at).
+# 429 (rate-limited) and other exhaustion codes share the same base cooldown.
+# Override with HERMES_CREDENTIAL_TTL_SECONDS or HERMES_CREDENTIAL_COOLDOWN_SECONDS
+# (minimum 60 seconds; TTL wins if both are set to valid integers).
+_DEFAULT_EXHAUSTED_COOLDOWN_SECONDS = 60 * 60
+_MIN_EXHAUSTED_COOLDOWN_SECONDS = 60
+
+
+def _parse_positive_int_env(name: str) -> Optional[int]:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw, 10)
+    except ValueError:
+        return None
+
+
+def _resolved_exhausted_cooldown_seconds() -> int:
+    """Return base exhausted-cooldown seconds from env (re-read each call for tests)."""
+    for key in ("HERMES_CREDENTIAL_TTL_SECONDS", "HERMES_CREDENTIAL_COOLDOWN_SECONDS"):
+        parsed = _parse_positive_int_env(key)
+        if parsed is not None:
+            return max(_MIN_EXHAUSTED_COOLDOWN_SECONDS, parsed)
+    return _DEFAULT_EXHAUSTED_COOLDOWN_SECONDS
+
+
+
+def __getattr__(name: str) -> int:
+    if name in {"EXHAUSTED_TTL_429_SECONDS", "EXHAUSTED_TTL_DEFAULT_SECONDS"}:
+        return _resolved_exhausted_cooldown_seconds()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # Pool key prefix for custom OpenAI-compatible endpoints.
 # Custom endpoints all share provider='custom' but are keyed by their
@@ -189,10 +216,9 @@ def _is_manual_source(source: str) -> bool:
 
 
 def _exhausted_ttl(error_code: Optional[int]) -> int:
-    """Return cooldown seconds based on the HTTP status that caused exhaustion."""
-    if error_code == 429:
-        return EXHAUSTED_TTL_429_SECONDS
-    return EXHAUSTED_TTL_DEFAULT_SECONDS
+    """Return cooldown seconds for exhausted credentials (shared base; callers honor reset_at)."""
+    del error_code
+    return _resolved_exhausted_cooldown_seconds()
 
 
 def _parse_absolute_timestamp(value: Any) -> Optional[float]:
