@@ -64,6 +64,7 @@ If a skill is missing from this list but present in the repo, the catalog is reg
 |-------|-------------|------|
 | [`kanban-orchestrator`](/docs/user-guide/skills/bundled/devops/devops-kanban-orchestrator) | Decomposition playbook + specialist-roster conventions + anti-temptation rules for an orchestrator profile routing work through Kanban. The "don't do the work yourself" rule and the basic lifecycle are auto-injected into every kanban wor... | `devops/kanban-orchestrator` |
 | [`kanban-worker`](/docs/user-guide/skills/bundled/devops/devops-kanban-worker) | Pitfalls, examples, and edge cases for Hermes Kanban workers. The lifecycle itself is auto-injected into every worker's system prompt as KANBAN_GUIDANCE (from agent/prompt_builder.py); this skill is what you load when you want deeper det... | `devops/kanban-worker` |
+| [`kubernetes-readonly`](/docs/user-guide/skills/bundled/devops/devops-kubernetes-readonly) | Read-only kubectl inspections (get, describe, explain, api-resources, version, cluster-info, top) via a JSON-in / JSON-out helper script with strict Pydantic validation. Requires kubectl on PATH. | `devops/kubernetes-readonly` |
 | [`webhook-subscriptions`](/docs/user-guide/skills/bundled/devops/devops-webhook-subscriptions) | Webhook subscriptions: event-driven agent runs. | `devops/webhook-subscriptions` |
 
 ## dogfood
