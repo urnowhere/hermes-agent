@@ -56,7 +56,20 @@ logger = logging.getLogger(__name__)
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8642
 MAX_STORED_RESPONSES = 100
-MAX_REQUEST_BYTES = 1_000_000  # 1 MB default limit for POST bodies
+def _parse_max_request_bytes(default: int = 20_000_000) -> int:
+    raw = os.environ.get("API_SERVER_MAX_REQUEST_BYTES")
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(
+            "API_SERVER_MAX_REQUEST_BYTES=%r is not a valid integer; using default %d",
+            raw, default,
+        )
+        return default
+
+MAX_REQUEST_BYTES = _parse_max_request_bytes()  # 20 MB default — large enough for images
 CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 30.0
 MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array
@@ -2805,7 +2818,10 @@ class APIServerAdapter(BasePlatformAdapter):
 
         try:
             mws = [mw for mw in (cors_middleware, body_limit_middleware, security_headers_middleware) if mw is not None]
-            self._app = web.Application(middlewares=mws)
+            self._app = web.Application(
+                middlewares=mws,
+                client_max_size=MAX_REQUEST_BYTES,
+            )
             self._app["api_server_adapter"] = self
             self._app.router.add_get("/health", self._handle_health)
             self._app.router.add_get("/health/detailed", self._handle_health_detailed)
