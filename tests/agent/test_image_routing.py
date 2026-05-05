@@ -11,6 +11,7 @@ import pytest
 from agent.image_routing import (
     _coerce_mode,
     _explicit_aux_vision_override,
+    _looks_like_vision_model,
     build_native_content_parts,
     decide_image_input_mode,
 )
@@ -90,9 +91,27 @@ class TestDecideImageInputMode:
         with patch("agent.image_routing._lookup_supports_vision", return_value=False):
             assert decide_image_input_mode("openrouter", "qwen/qwen3-235b", {}) == "text"
 
-    def test_auto_with_unknown_model(self):
+    def test_auto_with_unknown_non_vision_slug_falls_back_to_text(self):
         with patch("agent.image_routing._lookup_supports_vision", return_value=None):
             assert decide_image_input_mode("openrouter", "brand-new-slug", {}) == "text"
+
+    def test_auto_with_unknown_vision_shaped_slug_falls_back_to_native(self):
+        """Models missing from the local models.dev snapshot but with a clearly
+        vision-shaped slug (mimo-v2-omni, qwen-vl, *-vision) attempt native
+        attachment instead of text-mode (which would leak the cache path).
+        Closes #19287."""
+        with patch("agent.image_routing._lookup_supports_vision", return_value=None):
+            assert decide_image_input_mode("xiaomi", "mimo-v2-omni", {}) == "native"
+            assert decide_image_input_mode("openrouter", "xiaomi/mimo-v2-omni", {}) == "native"
+            assert decide_image_input_mode("custom-provider", "qwen2.5-vl-72b-instruct", {}) == "native"
+            assert decide_image_input_mode("custom-provider", "claude-3-vision-preview", {}) == "native"
+
+    def test_auto_known_non_vision_still_text_even_if_slug_looks_visiony(self):
+        """When caps are KNOWN to be non-vision, slug heuristic must not override."""
+        with patch("agent.image_routing._lookup_supports_vision", return_value=False):
+            # Hypothetical: a slug that matches the heuristic but is registered
+            # as non-vision in models.dev (False, not None) must stay text.
+            assert decide_image_input_mode("openrouter", "fake-omni-model", {}) == "text"
 
     def test_auto_respects_aux_vision_override_even_for_vision_model(self):
         """If the user configured a dedicated vision backend, don't bypass it."""
@@ -108,6 +127,34 @@ class TestDecideImageInputMode:
         cfg = {"agent": {"image_input_mode": "weird-value"}}
         with patch("agent.image_routing._lookup_supports_vision", return_value=True):
             assert decide_image_input_mode("anthropic", "claude-sonnet-4", cfg) == "native"
+
+
+class TestLooksLikeVisionModel:
+    @pytest.mark.parametrize("slug", [
+        "mimo-v2-omni",
+        "xiaomi/mimo-v2-omni",
+        "gpt-4o-omni",
+        "qwen2.5-vl-72b-instruct",
+        "qwen-vl-max",
+        "claude-3-vision-preview",
+        "gpt-4-vision-preview",
+        "some-multimodal-model",
+        "model-mm",
+    ])
+    def test_recognises_vision_slugs(self, slug):
+        assert _looks_like_vision_model(slug) is True
+
+    @pytest.mark.parametrize("slug", [
+        "claude-sonnet-4",
+        "gpt-4-turbo",
+        "qwen3-235b",
+        "deepseek-coder-v2",
+        "llama-3.3-70b",
+        "mimo-v2-flash",
+        "",
+    ])
+    def test_rejects_non_vision_slugs(self, slug):
+        assert _looks_like_vision_model(slug) is False
 
 
 # ─── build_native_content_parts ──────────────────────────────────────────────
