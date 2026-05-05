@@ -2654,12 +2654,29 @@ class AIAgent:
             aux_base_url = str(getattr(client, "base_url", ""))
             aux_api_key = str(getattr(client, "api_key", ""))
 
+            # Load custom_providers so per-model context_length overrides
+            # are honored for the compression model — mirrors the
+            # switch_model() path. Without this, the auxiliary probe skips
+            # step 0b in get_model_context_length and falls back to the
+            # 256K default, even when the user set
+            # custom_providers[].models[].context_length in config.yaml.
+            _aux_custom_providers = None
+            try:
+                from hermes_cli.config import (
+                    load_config,
+                    get_compatible_custom_providers,
+                )
+                _aux_custom_providers = get_compatible_custom_providers(load_config())
+            except Exception:
+                _aux_custom_providers = None
+
             aux_context = get_model_context_length(
                 aux_model,
                 base_url=aux_base_url,
                 api_key=aux_api_key,
                 config_context_length=getattr(self, "_aux_compression_context_length_config", None),
                 provider=getattr(self, "provider", ""),
+                custom_providers=_aux_custom_providers,
             )
 
             # Hard floor: the auxiliary compression model must have at least
@@ -7696,10 +7713,24 @@ class AIAgent:
             # the fallback activation drops to 128K even when config says 204800.
             if hasattr(self, 'context_compressor') and self.context_compressor:
                 from agent.model_metadata import get_model_context_length
+                # Pass custom_providers so per-model context_length overrides
+                # apply to the fallback model too — same fix as the aux
+                # compression path; otherwise a custom-provider fallback
+                # falls back to the 256K default.
+                _fb_custom_providers = None
+                try:
+                    from hermes_cli.config import (
+                        load_config,
+                        get_compatible_custom_providers,
+                    )
+                    _fb_custom_providers = get_compatible_custom_providers(load_config())
+                except Exception:
+                    _fb_custom_providers = None
                 fb_context_length = get_model_context_length(
                     self.model, base_url=self.base_url,
                     api_key=self.api_key, provider=self.provider,
                     config_context_length=getattr(self, "_config_context_length", None),
+                    custom_providers=_fb_custom_providers,
                 )
                 self.context_compressor.update_model(
                     model=self.model,
