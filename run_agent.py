@@ -1947,6 +1947,7 @@ class AIAgent:
         # Persist for reuse on switch_model / fallback activation. Must come
         # AFTER the custom_providers branch so per-model overrides aren't lost.
         self._config_context_length = _config_context_length
+        self._custom_providers = _custom_providers
 
         self._ensure_lmstudio_runtime_loaded(_config_context_length)
 
@@ -2659,6 +2660,7 @@ class AIAgent:
                 base_url=aux_base_url,
                 api_key=aux_api_key,
                 config_context_length=getattr(self, "_aux_compression_context_length_config", None),
+                custom_providers=getattr(self, "_custom_providers", None),
                 provider=getattr(self, "provider", ""),
             )
 
