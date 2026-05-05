@@ -814,14 +814,16 @@ def _execute_remote(
         )
         rpc_thread.start()
 
-        # Build environment variable prefix for the script
+        # Build environment variable prefix for the script.
+        # TZ is intentionally not set here — the underlying terminal backend's
+        # ``_wrap_command`` already exports TZ from ``hermes_time.get_timezone``
+        # before this command runs, so the inline prefix would be redundant
+        # (and would silently miss config.yaml-only setups, since it used to
+        # read ``HERMES_TIMEZONE`` directly).
         env_prefix = (
             f"HERMES_RPC_DIR={shlex.quote(f'{sandbox_dir}/rpc')} "
             f"PYTHONDONTWRITEBYTECODE=1"
         )
-        tz = os.getenv("HERMES_TIMEZONE", "").strip()
-        if tz:
-            env_prefix += f" TZ={tz}"
 
         # Execute the script on the remote backend
         logger.info("Executing code on %s backend (task %s)...",
@@ -1066,12 +1068,16 @@ def execute_code(
             _pp_parts.append(_existing_pp)
         child_env["PYTHONPATH"] = os.pathsep.join(_pp_parts)
         # Inject user's configured timezone so datetime.now() in sandboxed
-        # code reflects the correct wall-clock time.  Only TZ is set —
-        # HERMES_TIMEZONE is an internal Hermes setting and must not leak
-        # into child processes.
-        _tz_name = os.getenv("HERMES_TIMEZONE", "").strip()
-        if _tz_name:
-            child_env["TZ"] = _tz_name
+        # code reflects the correct wall-clock time. Resolved via hermes_time
+        # rather than reading HERMES_TIMEZONE directly — ``hermes chat`` and
+        # other CLI entry points don't bridge config.yaml -> env var (only
+        # gateway/run.py does), so the env-var-only check would silently miss
+        # config.yaml-only setups. HERMES_TIMEZONE itself is an internal
+        # Hermes setting and must not leak into child processes.
+        from hermes_time import get_timezone
+        _tz = get_timezone()
+        if _tz is not None:
+            child_env["TZ"] = _tz.key
         child_env.pop("HERMES_TIMEZONE", None)
 
         # Per-profile HOME isolation: redirect system tool configs into

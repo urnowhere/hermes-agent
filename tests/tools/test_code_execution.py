@@ -745,8 +745,16 @@ class TestEnvVarFiltering(unittest.TestCase):
         child_env = self._get_child_env()
         self.assertEqual(child_env.get("PYTHONDONTWRITEBYTECODE"), "1")
 
+    def _reset_hermes_time_cache(self):
+        """Reset hermes_time's module-level cache so each test re-resolves."""
+        import hermes_time
+        hermes_time._cached_tz = None
+        hermes_time._cached_tz_name = None
+        hermes_time._cache_resolved = False
+
     def test_timezone_injected_when_set(self):
         env_backup = os.environ.copy()
+        self._reset_hermes_time_cache()
         try:
             os.environ["HERMES_TIMEZONE"] = "America/New_York"
             child_env = self._get_child_env()
@@ -754,17 +762,56 @@ class TestEnvVarFiltering(unittest.TestCase):
         finally:
             os.environ.clear()
             os.environ.update(env_backup)
+            self._reset_hermes_time_cache()
 
-    def test_timezone_not_set_when_empty(self):
+    def test_timezone_from_config_yaml_when_no_env_var(self):
+        """config.yaml-only setups (no HERMES_TIMEZONE env var) must still
+        propagate TZ — the previous os.getenv-only path silently missed this.
+        """
         env_backup = os.environ.copy()
+        self._reset_hermes_time_cache()
         try:
             os.environ.pop("HERMES_TIMEZONE", None)
-            child_env = self._get_child_env()
-            if "TZ" in child_env:
-                self.assertNotEqual(child_env["TZ"], "")
+            with patch("hermes_time._resolve_timezone_name",
+                       return_value="Asia/Shanghai"):
+                self._reset_hermes_time_cache()
+                child_env = self._get_child_env()
+            self.assertEqual(child_env.get("TZ"), "Asia/Shanghai")
         finally:
             os.environ.clear()
             os.environ.update(env_backup)
+            self._reset_hermes_time_cache()
+
+    def test_hermes_timezone_does_not_leak_to_child(self):
+        """HERMES_TIMEZONE is an internal Hermes setting and must be stripped
+        from child_env even when present in the parent environment."""
+        env_backup = os.environ.copy()
+        self._reset_hermes_time_cache()
+        try:
+            os.environ["HERMES_TIMEZONE"] = "America/New_York"
+            child_env = self._get_child_env()
+            self.assertNotIn("HERMES_TIMEZONE", child_env)
+        finally:
+            os.environ.clear()
+            os.environ.update(env_backup)
+            self._reset_hermes_time_cache()
+
+    def test_timezone_not_set_when_empty(self):
+        """With no env var AND no config.yaml setting, child_env carries no TZ."""
+        env_backup = os.environ.copy()
+        self._reset_hermes_time_cache()
+        try:
+            os.environ.pop("HERMES_TIMEZONE", None)
+            # Mock the resolver to simulate "neither env var nor config.yaml" —
+            # without this, a real config.yaml on the dev machine would leak in.
+            with patch("hermes_time._resolve_timezone_name", return_value=""):
+                self._reset_hermes_time_cache()
+                child_env = self._get_child_env()
+            self.assertNotIn("TZ", child_env)
+        finally:
+            os.environ.clear()
+            os.environ.update(env_backup)
+            self._reset_hermes_time_cache()
 
 
 # ---------------------------------------------------------------------------

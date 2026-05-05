@@ -91,6 +91,78 @@ class TestWrapCommand:
         assert "exit 126" in wrapped
 
 
+class TestWrapCommandTimezone:
+    """_wrap_command must inject `export TZ=<name>` so every backend that
+    flows through BaseEnvironment.execute (local, docker, ssh, singularity,
+    modal, daytona) gets the user's configured timezone inside the
+    subprocess shell."""
+
+    def test_injects_tz_export_when_configured(self, monkeypatch):
+        from zoneinfo import ZoneInfo
+        import hermes_time
+        monkeypatch.setattr(hermes_time, "get_timezone", lambda: ZoneInfo("Asia/Shanghai"))
+        env = _TestableEnv()
+        env._snapshot_ready = True
+        wrapped = env._wrap_command("date", "/tmp")
+        assert "export TZ=Asia/Shanghai" in wrapped
+
+    def test_skips_tz_export_when_unset(self, monkeypatch):
+        import hermes_time
+        monkeypatch.setattr(hermes_time, "get_timezone", lambda: None)
+        env = _TestableEnv()
+        env._snapshot_ready = True
+        wrapped = env._wrap_command("date", "/tmp")
+        assert "export TZ" not in wrapped
+
+    def test_tz_export_after_snapshot_source(self, monkeypatch):
+        """Configured TZ must override anything sourced from the snapshot."""
+        from zoneinfo import ZoneInfo
+        import hermes_time
+        monkeypatch.setattr(hermes_time, "get_timezone", lambda: ZoneInfo("Asia/Shanghai"))
+        env = _TestableEnv()
+        env._snapshot_ready = True
+        wrapped = env._wrap_command("date", "/tmp")
+        source_idx = wrapped.find("source ")
+        export_idx = wrapped.find("export TZ=")
+        assert source_idx != -1 and export_idx != -1
+        assert source_idx < export_idx, "TZ export must come after snapshot source"
+
+    def test_tz_export_present_without_snapshot(self, monkeypatch):
+        """Even when snapshot is not ready, TZ should still be exported."""
+        from zoneinfo import ZoneInfo
+        import hermes_time
+        monkeypatch.setattr(hermes_time, "get_timezone", lambda: ZoneInfo("Asia/Shanghai"))
+        env = _TestableEnv()
+        env._snapshot_ready = False
+        wrapped = env._wrap_command("date", "/tmp")
+        assert "source" not in wrapped
+        assert "export TZ=Asia/Shanghai" in wrapped
+
+
+class TestResolveConfiguredTzName:
+    def test_returns_iana_key_when_configured(self, monkeypatch):
+        from zoneinfo import ZoneInfo
+        import hermes_time
+        from tools.environments.base import _resolve_configured_tz_name
+        monkeypatch.setattr(hermes_time, "get_timezone", lambda: ZoneInfo("Asia/Kolkata"))
+        assert _resolve_configured_tz_name() == "Asia/Kolkata"
+
+    def test_returns_none_when_unset(self, monkeypatch):
+        import hermes_time
+        from tools.environments.base import _resolve_configured_tz_name
+        monkeypatch.setattr(hermes_time, "get_timezone", lambda: None)
+        assert _resolve_configured_tz_name() is None
+
+    def test_returns_none_on_resolver_error(self, monkeypatch):
+        """If hermes_time.get_timezone raises, the helper must swallow it."""
+        import hermes_time
+        from tools.environments.base import _resolve_configured_tz_name
+        def _boom():
+            raise RuntimeError("resolver failed")
+        monkeypatch.setattr(hermes_time, "get_timezone", _boom)
+        assert _resolve_configured_tz_name() is None
+
+
 class TestExtractCwdFromOutput:
     def test_happy_path(self):
         env = _TestableEnv()

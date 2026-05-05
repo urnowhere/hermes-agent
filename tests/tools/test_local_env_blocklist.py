@@ -328,3 +328,59 @@ class TestSanePathIncludesHomebrew:
             result = _make_run_env({})
         # Should keep existing PATH unchanged
         assert result["PATH"] == "/usr/bin:/bin"
+
+
+class TestTimezonePropagation:
+    """Foreground and background terminal subprocesses must translate the
+    user's configured timezone (resolved by hermes_time — env var or
+    config.yaml) into the standard TZ env var so `date` and language
+    runtimes that honour TZ report wall-clock time in the user's zone."""
+
+    def test_make_run_env_propagates_tz(self, monkeypatch):
+        """Foreground terminal (_make_run_env) gets TZ from hermes_time."""
+        from zoneinfo import ZoneInfo
+        import hermes_time
+        from tools.environments.local import _make_run_env
+        monkeypatch.setattr(hermes_time, "get_timezone", lambda: ZoneInfo("Asia/Shanghai"))
+        with patch.dict(os.environ, {}, clear=True):
+            result = _make_run_env({})
+        assert result.get("TZ") == "Asia/Shanghai"
+
+    def test_make_run_env_skips_tz_when_unset(self, monkeypatch):
+        import hermes_time
+        from tools.environments.local import _make_run_env
+        monkeypatch.setattr(hermes_time, "get_timezone", lambda: None)
+        with patch.dict(os.environ, {}, clear=True):
+            result = _make_run_env({})
+        assert "TZ" not in result
+
+    def test_sanitize_subprocess_env_propagates_tz(self, monkeypatch):
+        """Background terminal (_sanitize_subprocess_env, used by
+        process_registry.spawn_local) also gets TZ so foreground and
+        background `date` agree."""
+        from zoneinfo import ZoneInfo
+        import hermes_time
+        from tools.environments.local import _sanitize_subprocess_env
+        monkeypatch.setattr(hermes_time, "get_timezone", lambda: ZoneInfo("Asia/Shanghai"))
+        result = _sanitize_subprocess_env({"PATH": "/usr/bin"})
+        assert result.get("TZ") == "Asia/Shanghai"
+
+    def test_sanitize_subprocess_env_skips_tz_when_unset(self, monkeypatch):
+        import hermes_time
+        from tools.environments.local import _sanitize_subprocess_env
+        monkeypatch.setattr(hermes_time, "get_timezone", lambda: None)
+        result = _sanitize_subprocess_env({"PATH": "/usr/bin"})
+        assert "TZ" not in result
+
+    def test_sanitize_subprocess_env_reads_config_yaml_via_hermes_time(self, monkeypatch):
+        """CLI entry points don't bridge config.yaml → HERMES_TIMEZONE, but
+        hermes_time.get_timezone() reads config.yaml directly, so background
+        terminals launched from `hermes chat` still get the configured TZ."""
+        from zoneinfo import ZoneInfo
+        import hermes_time
+        from tools.environments.local import _sanitize_subprocess_env
+        # No HERMES_TIMEZONE in env, but hermes_time resolves (e.g. from config.yaml)
+        monkeypatch.setattr(hermes_time, "get_timezone", lambda: ZoneInfo("Asia/Kolkata"))
+        with patch.dict(os.environ, {}, clear=True):
+            result = _sanitize_subprocess_env({"PATH": "/usr/bin"})
+        assert result.get("TZ") == "Asia/Kolkata"

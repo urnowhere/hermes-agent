@@ -9,7 +9,11 @@ import subprocess
 import tempfile
 import time
 
-from tools.environments.base import BaseEnvironment, _pipe_stdin
+from tools.environments.base import (
+    BaseEnvironment,
+    _pipe_stdin,
+    _resolve_configured_tz_name,
+)
 
 _IS_WINDOWS = platform.system() == "Windows"
 
@@ -170,6 +174,13 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
     if _profile_home:
         sanitized["HOME"] = _profile_home
 
+    # Match _make_run_env: expose the user's configured timezone so `date` and
+    # other tools in background/PTY terminals (spawned via process_registry)
+    # agree with foreground terminals (which set TZ via `_wrap_command`).
+    _tz_name = _resolve_configured_tz_name()
+    if _tz_name:
+        sanitized["TZ"] = _tz_name
+
     return sanitized
 
 
@@ -244,6 +255,16 @@ def _make_run_env(env: dict) -> dict:
     _profile_home = get_subprocess_home()
     if _profile_home:
         run_env["HOME"] = _profile_home
+
+    # Propagate the configured timezone so subprocess tools (`date`, language
+    # runtimes that honour TZ, etc.) report wall-clock time in the user's
+    # zone rather than the server's system zone. Use hermes_time's resolver
+    # rather than reading HERMES_TIMEZONE directly — gateway/run.py bridges
+    # config.yaml to the env var but CLI entry points do not, so the env var
+    # alone would miss `hermes chat`-launched terminals.
+    _tz_name = _resolve_configured_tz_name()
+    if _tz_name:
+        run_env["TZ"] = _tz_name
 
     return run_env
 

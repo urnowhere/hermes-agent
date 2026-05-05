@@ -167,6 +167,15 @@ class BaseModalExecutionEnvironment(BaseEnvironment):
         if sudo_stdin is not None:
             exec_command = wrap_modal_sudo_pipe(exec_command, sudo_stdin)
 
+        # Inject the user's configured TZ so `date` inside the gateway-owned
+        # sandbox agrees with foreground BaseEnvironment-backed terminals.
+        # The managed Modal transport doesn't go through BaseEnvironment's
+        # `_wrap_command`, so we have to inject here instead.
+        from tools.environments.base import _resolve_configured_tz_name
+        _tz_name = _resolve_configured_tz_name()
+        if _tz_name:
+            exec_command = f"export TZ={shlex.quote(_tz_name)}; {exec_command}"
+
         return PreparedModalExec(
             command=exec_command,
             cwd=effective_cwd,
