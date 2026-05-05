@@ -1,0 +1,208 @@
+/* ===== Easter Egg Hunt Styles ===== */
+
+/* Hidden eggs scattered on page */
+.easter-egg-hidden {
+  position: absolute;
+  font-size: 28px;
+  cursor: pointer;
+  z-index: 99999;
+  transition: transform 0.3s ease, opacity 0.3s ease;
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.2));
+  animation: egg-wobble 2s ease-in-out infinite;
+  user-select: none;
+}
+
+.easter-egg-hidden:hover {
+  transform: scale(1.4) rotate(10deg) !important;
+}
+
+@keyframes egg-wobble {
+  0%, 100% { transform: rotate(-3deg); }
+  50% { transform: rotate(3deg); }
+}
+
+/* Egg found celebration */
+.easter-egg-found {
+  animation: egg-found 0.8s ease forwards;
+}
+
+@keyframes egg-found {
+  0% { transform: scale(1); opacity: 1; }
+  30% { transform: scale(1.8) rotate(20deg); opacity: 1; }
+  100% { transform: scale(0) rotate(360deg); opacity: 0; }
+}
+
+/* Easter banner */
+.easter-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 30%, #a8edea 60%, #fed6e3 100%);
+  color: #5a3e7a;
+  text-align: center;
+  padding: 10px 20px;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: 15px;
+  font-weight: 600;
+  z-index: 999999;
+  box-shadow: 0 3px 15px rgba(0,0,0,0.15);
+  transform: translateY(-100%);
+  animation: banner-slide 0.5s ease forwards;
+  letter-spacing: 0.5px;
+}
+
+.easter-banner .close-banner {
+  position: absolute;
+  right: 15px;
+  top: 50%;
+  transform: translateY(-50%);
+  cursor: pointer;
+  font-size: 18px;
+  opacity: 0.6;
+  transition: opacity 0.2s;
+  background: none;
+  border: none;
+  color: #5a3e7a;
+}
+
+.easter-banner .close-banner:hover {
+  opacity: 1;
+}
+
+@keyframes banner-slide {
+  to { transform: translateY(0); }
+}
+
+/* Egg reveal popup */
+.easter-reveal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) scale(0);
+  background: white;
+  border-radius: 20px;
+  padding: 30px 40px;
+  z-index: 9999999;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+  text-align: center;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  animation: reveal-pop 0.5s ease forwards;
+  max-width: 420px;
+  border: 3px solid #fecfef;
+}
+
+.easter-reveal h2 {
+  margin: 0 0 12px 0;
+  font-size: 22px;
+  color: #5a3e7a;
+}
+
+.easter-reveal p {
+  margin: 0 0 16px 0;
+  font-size: 15px;
+  color: #666;
+  line-height: 1.5;
+}
+
+.easter-reveal .egg-emoji {
+  font-size: 50px;
+  display: block;
+  margin-bottom: 12px;
+}
+
+.easter-reveal button {
+  background: linear-gradient(135deg, #a8edea, #fed6e3);
+  border: none;
+  padding: 10px 28px;
+  border-radius: 25px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #5a3e7a;
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.easter-reveal button:hover {
+  transform: scale(1.05);
+  box-shadow: 0 4px 15px rgba(168, 237, 234, 0.5);
+}
+
+@keyframes reveal-pop {
+  to { transform: translate(-50%, -50%) scale(1); }
+}
+
+.easter-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.4);
+  z-index: 9999998;
+  animation: fade-in 0.3s ease forwards;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Confetti burst */
+.easter-confetti {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  z-index: 99999999;
+  overflow: hidden;
+}
+
+.confetti-piece {
+  position: absolute;
+  width: 10px;
+  height: 14px;
+  border-radius: 2px;
+  animation: confetti-fall linear forwards;
+}
+
+@keyframes confetti-fall {
+  0% { transform: translateY(-20px) rotate(0deg); opacity: 1; }
+  100% { transform: translateY(100vh) rotate(720deg); opacity: 0; }
+}
+
+/* Bunny cursor trail */
+.bunny-trail {
+  position: fixed;
+  pointer-events: none;
+  z-index: 999999;
+  font-size: 20px;
+  animation: trail-fade 1s ease forwards;
+}
+
+@keyframes trail-fade {
+  0% { opacity: 0.8; transform: scale(1) translateY(0); }
+  100% { opacity: 0; transform: scale(0.3) translateY(-30px); }
+}
+
+/* Score counter */
+.easter-score {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  background: linear-gradient(135deg, #667eea, #764ba2);
+  color: white;
+  padding: 12px 20px;
+  border-radius: 30px;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+  z-index: 999999;
+  box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+  animation: score-pop 0.5s ease;
+  cursor: default;
+}
+
+@keyframes score-pop {
+  0% { transform: scale(0); }
+  70% { transform: scale(1.1); }
+  100% { transform: scale(1); }
+}

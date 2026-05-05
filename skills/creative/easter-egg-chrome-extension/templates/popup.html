@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      width: 280px;
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: linear-gradient(165deg, #fef9ff 0%, #f0e6ff 50%, #e8faf8 100%);
+      color: #3d2c5e;
+      overflow: hidden;
+    }
+
+    .header {
+      text-align: center;
+      padding: 20px 16px 12px;
+    }
+
+    .header .big-egg {
+      font-size: 48px;
+      display: block;
+      margin-bottom: 6px;
+      animation: bounce 1.5s ease-in-out infinite;
+    }
+
+    @keyframes bounce {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-8px); }
+    }
+
+    .header h1 {
+      font-size: 18px;
+      font-weight: 700;
+      background: linear-gradient(135deg, #667eea, #a855f7, #ec4899);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .header .subtitle {
+      font-size: 12px;
+      color: #9880b8;
+      margin-top: 2px;
+    }
+
+    .counter-section {
+      text-align: center;
+      padding: 16px;
+      margin: 0 16px;
+      background: rgba(255,255,255,0.7);
+      border-radius: 16px;
+      border: 1.5px solid rgba(168, 130, 234, 0.2);
+    }
+
+    .counter-section .label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      color: #9880b8;
+      margin-bottom: 4px;
+    }
+
+    .counter-section .count {
+      font-size: 40px;
+      font-weight: 800;
+      background: linear-gradient(135deg, #667eea, #a855f7);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .counter-section .eggs-label {
+      font-size: 13px;
+      color: #7c6a9e;
+    }
+
+    .actions {
+      padding: 14px 16px 16px;
+      display: flex;
+      gap: 8px;
+    }
+
+    .actions button {
+      flex: 1;
+      padding: 10px 8px;
+      border-radius: 12px;
+      border: none;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-spawn {
+      background: linear-gradient(135deg, #a8edea, #fed6e3);
+      color: #5a3e7a;
+    }
+
+    .btn-spawn:hover {
+      transform: scale(1.03);
+      box-shadow: 0 3px 12px rgba(168, 237, 234, 0.5);
+    }
+
+    .btn-reset {
+      background: rgba(0,0,0,0.05);
+      color: #9880b8;
+    }
+
+    .btn-reset:hover {
+      background: rgba(0,0,0,0.1);
+    }
+
+    .footer {
+      text-align: center;
+      padding: 0 16px 14px;
+      font-size: 11px;
+      color: #b8a5d4;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <span class="big-egg">🥚</span>
+    <h1>Easter Egg Hunt</h1>
+    <div class="subtitle">eggs hide on every page you visit ✨</div>
+  </div>
+
+  <div class="counter-section">
+    <div class="label">collected</div>
+    <div class="count" id="count">0</div>
+    <div class="eggs-label">eggs found</div>
+  </div>
+
+  <div class="actions">
+    <button class="btn-spawn" id="spawnBtn">🥚 Spawn Egg Now</button>
+    <button class="btn-reset" id="resetBtn">Reset</button>
+  </div>
+
+  <div class="footer">
+    🐰 Happy Easter! Eggs appear randomly~
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
