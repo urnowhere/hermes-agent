@@ -77,7 +77,7 @@ _KNOWN_DELIVERY_PLATFORMS = frozenset({
     "telegram", "discord", "slack", "whatsapp", "signal",
     "matrix", "mattermost", "homeassistant", "dingtalk", "feishu",
     "wecom", "wecom_callback", "weixin", "sms", "email", "webhook", "bluebubbles",
-    "qqbot", "yuanbao",
+    "qqbot", "yuanbao", "zulip",
 })
 
 # Platforms that support a configured cron/notification home target, mapped to
@@ -97,6 +97,7 @@ _HOME_TARGET_ENV_VARS = {
     "weixin": "WEIXIN_HOME_CHANNEL",
     "bluebubbles": "BLUEBUBBLES_HOME_CHANNEL",
     "qqbot": "QQBOT_HOME_CHANNEL",
+    "zulip": "ZULIP_HOME_CHANNEL",
 }
 
 # Legacy env var names kept for back-compat.  Each entry is the current
@@ -208,11 +209,17 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
 
         from tools.send_message_tool import _parse_target_ref
 
-        parsed_chat_id, parsed_thread_id, is_explicit = _parse_target_ref(platform_key, rest)
-        if is_explicit:
-            chat_id, thread_id = parsed_chat_id, parsed_thread_id
-        else:
+        # Zulip uses stream:topic and dm:email formats — keep the full rest
+        # as chat_id so stream:topic isn't split into chat_id+thread_id.
+        if platform_key == "zulip":
             chat_id, thread_id = rest, None
+            is_explicit = True
+        else:
+            parsed_chat_id, parsed_thread_id, is_explicit = _parse_target_ref(platform_key, rest)
+            if is_explicit:
+                chat_id, thread_id = parsed_chat_id, parsed_thread_id
+            else:
+                chat_id, thread_id = rest, None
 
         # Resolve human-friendly labels like "Alice (dm)" to real IDs.
         try:
@@ -276,12 +283,39 @@ def _normalize_deliver_value(deliver) -> str:
     return str(deliver)
 
 
+def _split_delivery_targets(deliver: str) -> list:
+    """Split a deliver string into individual targets, respecting zulip:group_dm: commas."""
+    parts = []
+    current = ""
+    for segment in deliver.split(":"):
+        if current:
+            if current.rstrip().endswith(","):
+                parts.append(current.rstrip().rstrip(","))
+                current = segment
+            else:
+                current += ":" + segment
+        else:
+            current = segment
+    if current:
+        parts.append(current)
+    result = []
+    for part in parts:
+        if part.strip().lower().startswith("zulip"):
+            result.append(part)
+        else:
+            for sub in part.split(","):
+                sub = sub.strip()
+                if sub:
+                    result.append(sub)
+    return result
+
+
 def _resolve_delivery_targets(job: dict) -> List[dict]:
     """Resolve all concrete auto-delivery targets for a cron job (supports comma-separated deliver)."""
     deliver = _normalize_deliver_value(job.get("deliver", "local"))
     if deliver == "local":
         return []
-    parts = [p.strip() for p in deliver.split(",") if p.strip()]
+    parts = _split_delivery_targets(str(deliver))
     seen = set()
     targets = []
     for part in parts:

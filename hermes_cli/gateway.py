@@ -2990,6 +2990,33 @@ _PLATFORMS = [
              "help": "The App Secret (used for HMAC signing) from your Yuanbao IM Bot."},
         ],
     },
+    {
+        "key": "zulip",
+        "label": "Zulip",
+        "emoji": "💬",
+        "token_var": "ZULIP_API_KEY",
+        "setup_instructions": [
+            "1. Go to your Zulip server (e.g., https://zulip.example.com)",
+            "2. Settings → Personal settings → Bots → Add a new bot",
+            "3. Choose 'Generic bot' and copy the bot's email and API key",
+            "4. Note your Zulip server URL",
+        ],
+        "vars": [
+            {"name": "ZULIP_SITE_URL", "prompt": "Zulip server URL (e.g., https://zulip.example.com)", "password": False,
+             "help": "The URL of your Zulip server."},
+            {"name": "ZULIP_BOT_EMAIL", "prompt": "Bot email", "password": False,
+             "help": "The email address of your Zulip bot (e.g., hermes-bot@zulip.example.com)."},
+            {"name": "ZULIP_API_KEY", "prompt": "Bot API key", "password": True,
+             "help": "The API key from your Zulip bot's settings."},
+            {"name": "ZULIP_ALLOWED_USERS", "prompt": "Allowed user emails (comma-separated, leave empty for open access)", "password": False,
+             "is_allowlist": True,
+             "help": "Restrict which Zulip users can interact with the bot."},
+            {"name": "ZULIP_DEFAULT_STREAM", "prompt": "Default stream name (optional)", "password": False,
+             "help": "The default stream for cron results and notifications."},
+            {"name": "ZULIP_HOME_CHANNEL", "prompt": "Home channel (stream or stream:topic, optional)", "password": False,
+             "help": "Channel for delivering cron results and notifications."},
+        ],
+    },
 ]
 def _all_platforms() -> list[dict]:
     """Return the full list of platforms for setup menus.
@@ -3101,6 +3128,14 @@ def _platform_status(platform: dict) -> str:
         if val and token:
             return "configured"
         if val or token:
+            return "partially configured"
+        return "not configured"
+    if platform.get("key") == "zulip":
+        site_url = get_env_value("ZULIP_SITE_URL")
+        bot_email = get_env_value("ZULIP_BOT_EMAIL")
+        if val and site_url and bot_email:
+            return "configured"
+        if val or site_url or bot_email:
             return "partially configured"
         return "not configured"
     if val:
@@ -4041,6 +4076,7 @@ def _builtin_setup_fn(key: str):
         "feishu": _setup_feishu,
         "wecom": _setup_wecom,
         "qqbot": _setup_qqbot,
+        "zulip": _s._setup_zulip,
     }.get(key)
 def _configure_platform(platform: dict) -> None:
     """Run the interactive setup flow for a single platform.

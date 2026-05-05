@@ -2303,6 +2303,68 @@ def _setup_qqbot():
     _gateway_setup_qqbot()
 
 
+def _setup_zulip():
+    """Configure Zulip bot credentials and settings."""
+    print_header("Zulip")
+    existing = get_env_value("ZULIP_BOT_EMAIL")
+    if existing:
+        print_info("Zulip: already configured")
+        if not prompt_yes_no("Reconfigure Zulip?", False):
+            return
+
+    print_info("Create a bot at your Zulip organization's Settings → Bots")
+    print_info("   1. Go to your Zulip server (e.g., https://zulip.example.com)")
+    print_info("   2. Settings → Personal settings → Bots → Add a new bot")
+    print_info("   3. Choose 'Generic bot' and copy the bot's email and API key")
+    print_info("   4. Note your Zulip server URL (e.g., https://zulip.example.com)")
+    print()
+
+    site_url = prompt("Zulip server URL (e.g., https://zulip.example.com)")
+    if site_url:
+        save_env_value("ZULIP_SITE_URL", site_url.rstrip("/"))
+
+    bot_email = prompt("Zulip bot email")
+    if bot_email:
+        save_env_value("ZULIP_BOT_EMAIL", bot_email)
+
+    api_key = prompt("Zulip bot API key", password=True)
+    if api_key:
+        save_env_value("ZULIP_API_KEY", api_key)
+        print_success("Zulip API key saved")
+    else:
+        print_warning("No API key provided — Zulip won't work without it")
+        return
+
+    print()
+    print_info("🔒 Security: Restrict who can use your bot")
+    print_info("   Zulip user emails look like user@example.com")
+    print_info("   Leave empty to allow any user on this Zulip server.")
+    print()
+    allowed_users = prompt(
+        "Allowed user emails (comma-separated, leave empty for open access)"
+    )
+    if allowed_users:
+        save_env_value("ZULIP_ALLOWED_USERS", allowed_users.replace(" ", ""))
+        print_success("Zulip allowlist configured")
+    else:
+        print_info("⚠️  No allowlist set — anyone on this Zulip server can use the bot")
+
+    print()
+    print_info("📬 Default stream: where Hermes delivers cron job results,")
+    print_info("   cross-platform messages, and notifications.")
+    print_info("   You can also set this later by typing /set-home in Zulip.")
+    default_stream = prompt("Default stream name (leave empty to set later with /set-home)")
+    if default_stream:
+        save_env_value("ZULIP_DEFAULT_STREAM", default_stream)
+
+    print()
+    print_info("📬 Home channel: a specific topic or stream for cron delivery.")
+    print_info("   Format: stream_name or stream_name:topic_name")
+    home_channel = prompt("Home channel (leave empty to set later with /set-home)")
+    if home_channel:
+        save_env_value("ZULIP_HOME_CHANNEL", home_channel)
+
+
 def _setup_webhooks():
     """Configure webhook integration."""
     print_header("Webhooks")

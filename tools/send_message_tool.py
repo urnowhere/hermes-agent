@@ -19,6 +19,11 @@ from agent.redact import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
+# Zulip target formats: "stream_name", "stream_name:topic_name", or "private:user@example.com"
+_ZULIP_STREAM_RE = re.compile(r"^\s*([^:#]+)(?::([^:]+))?\s*$")
+_ZULIP_DM_RE = re.compile(r"^\s*private:([^\s:]+)\s*$")
+_ZULIP_TARGET_RE = re.compile(r"^\s*([^:#]+)(?::([^:]+))?\s*$")
+
 _TELEGRAM_TOPIC_TARGET_RE = re.compile(r"^\s*(-?\d+)(?::(\d+))?\s*$")
 _FEISHU_TARGET_RE = re.compile(r"^\s*((?:oc|ou|on|chat|open)_[-A-Za-z0-9]+)(?::([-A-Za-z0-9_]+))?\s*$")
 # Slack conversation IDs: C (public channel), G (private/group channel), D (DM).
@@ -133,7 +138,7 @@ SEND_MESSAGE_SCHEMA = {
             },
             "target": {
                 "type": "string",
-                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org', 'yuanbao:direct:<account_id>' (DM), 'yuanbao:group:<group_code>' (group chat)"
+                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org', 'zulip:general', 'zulip:general:help'"
             },
             "message": {
                 "type": "string",
@@ -326,6 +331,8 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         match = _SLACK_TARGET_RE.fullmatch(target_ref)
         if match:
             return match.group(1), None, True
+    if platform_name == "zulip":
+        return _parse_zulip_target_ref(target_ref)
     if platform_name == "weixin":
         match = _WEIXIN_TARGET_RE.fullmatch(target_ref)
         if match:
@@ -348,6 +355,29 @@ def _parse_target_ref(platform_name: str, target_ref: str):
     # Matrix room IDs (start with !) and user IDs (start with @) are explicit
     if platform_name == "matrix" and (target_ref.startswith("!") or target_ref.startswith("@")):
         return target_ref, None, True
+    return None, None, False
+
+
+def _parse_zulip_target_ref(target_ref: str):
+    """Parse a Zulip target into (stream/topic, None, is_explicit).
+
+    Formats:
+      - "stream_name" → (stream_name, None, True)
+      - "stream_name:topic_name" → ("stream_name:topic_name", None, True)
+      - "private:user@example.com" → ("private:user@example.com", None, True)
+    """
+    if not target_ref:
+        return None, None, False
+    dm_match = _ZULIP_DM_RE.fullmatch(target_ref)
+    if dm_match:
+        return target_ref.strip(), None, True
+    match = _ZULIP_TARGET_RE.fullmatch(target_ref)
+    if match:
+        stream = match.group(1).strip()
+        topic = match.group(2)
+        if topic:
+            return f"{stream}:{topic.strip()}", None, True
+        return stream, None, True
     return None, None, False
 
 
@@ -463,6 +493,13 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     except ImportError:
         _feishu_available = False
 
+    # Zulip adapter import is optional (requires zulip package)
+    try:
+        from gateway.platforms.zulip import ZulipAdapter, MAX_MESSAGE_LENGTH as _ZULIP_MAX_MESSAGE_LENGTH
+        _zulip_available = True
+    except ImportError:
+        _zulip_available = False
+
     media_files = media_files or []
 
     if platform == Platform.SLACK and message:
@@ -480,6 +517,8 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     }
     if _feishu_available:
         _MAX_LENGTHS[Platform.FEISHU] = FeishuAdapter.MAX_MESSAGE_LENGTH
+    if _zulip_available:
+        _MAX_LENGTHS[Platform.ZULIP] = _ZULIP_MAX_MESSAGE_LENGTH
 
     # Check plugin registry for max_message_length
     if platform not in _MAX_LENGTHS:
@@ -606,11 +645,27 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             last_result = result
         return last_result
 
+    # --- Zulip: special handling for media attachments ---
+    if platform == Platform.ZULIP:
+        last_result = None
+        for i, chunk in enumerate(chunks):
+            is_last = (i == len(chunks) - 1)
+            result = await _send_zulip(
+                pconfig,
+                chat_id,
+                chunk,
+                media_files=media_files if is_last else [],
+            )
+            if isinstance(result, dict) and result.get("error"):
+                return result
+            last_result = result
+        return last_result
+
     # --- Non-media platforms ---
     if media_files and not message.strip():
         return {
             "error": (
-                f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao and feishu; "
+                f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal, feishu, zulip and yuanbao; "
                 f"target {platform.value} had only media attachments"
             )
         }
@@ -618,7 +673,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     if media_files:
         warning = (
             f"MEDIA attachments were omitted for {platform.value}; "
-            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao and feishu"
+            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, feishu, zulip and yuanbao"
         )
 
     last_result = None
@@ -651,6 +706,8 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             result = await _send_qqbot(pconfig, chat_id, chunk)
         elif platform == Platform.YUANBAO:
             result = await _send_yuanbao(chat_id, chunk)
+        elif platform == Platform.ZULIP:
+            result = await _send_zulip(pconfig, chat_id, chunk)
         else:
             # Plugin platform — route through the gateway's live adapter
             # if available, otherwise report the error.
@@ -1765,6 +1822,31 @@ async def _send_yuanbao(chat_id, message, media_files=None):
         return await send_yuanbao_direct(adapter, chat_id, message, media_files=media_files)
     except Exception as e:
         return _error(f"Yuanbao send failed: {e}")
+
+
+async def _send_zulip(pconfig, chat_id, message, media_files=None):
+    """Send via Zulip using the native adapter helper."""
+    try:
+        from gateway.platforms.zulip import ZulipAdapter, check_zulip_requirements
+        if not check_zulip_requirements():
+            return {"error": "Zulip requirements not met. Need zulip package."}
+    except ImportError:
+        return {"error": "Zulip adapter not available."}
+
+    try:
+        adapter = ZulipAdapter(pconfig)
+        connected = await adapter.connect()
+        if not connected:
+            return _error("Zulip: failed to connect to server")
+        try:
+            result = await adapter.send(chat_id, message)
+            if not result.success:
+                return _error(f"Zulip send failed: {result.error}")
+            return {"success": True, "platform": "zulip", "chat_id": chat_id, "message_id": result.message_id}
+        finally:
+            await adapter.disconnect()
+    except Exception as e:
+        return _error(f"Zulip send failed: {e}")
 
 
 # --- Registry ---
