@@ -187,6 +187,7 @@ def _normalize_aux_provider(provider: Optional[str]) -> str:
 # server-side default applies.  Kimi/Moonshot models manage temperature
 # internally — sending *any* value (even the "correct" one) can conflict
 # with gateway-side mode selection (thinking → 1.0, non-thinking → 0.6).
+# The ChatGPT Codex Responses backend also rejects temperature outright.
 OMIT_TEMPERATURE: object = object()
 
 
@@ -194,6 +195,19 @@ def _is_kimi_model(model: Optional[str]) -> bool:
     """True for any Kimi / Moonshot model that manages temperature server-side."""
     bare = (model or "").strip().lower().rsplit("/", 1)[-1]
     return bare.startswith("kimi-") or bare == "kimi"
+
+
+def _is_codex_responses_base_url(base_url: Optional[str]) -> bool:
+    """True for the ChatGPT/Codex Responses backend that rejects temperature."""
+    candidate = str(base_url or "").strip()
+    if not candidate:
+        return False
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(candidate)
+    except Exception:
+        return False
+    return parsed.hostname == "chatgpt.com" and parsed.path.rstrip("/").startswith("/backend-api/codex")
 
 
 def _fixed_temperature_for_model(
@@ -212,6 +226,9 @@ def _fixed_temperature_for_model(
     """
     if _is_kimi_model(model):
         logger.debug("Omitting temperature for Kimi model %r (server-managed)", model)
+        return OMIT_TEMPERATURE
+    if _is_codex_responses_base_url(base_url):
+        logger.debug("Omitting temperature for Codex Responses endpoint %r", base_url)
         return OMIT_TEMPERATURE
     return None
 
@@ -536,6 +553,13 @@ class _CodexCompletionsAdapter:
             if role == "system":
                 instructions = content if isinstance(content, str) else str(content)
             else:
+                # The Codex Responses input endpoint accepts only assistant,
+                # developer, system, and user roles. Chat Completions histories
+                # can include `tool` messages; for auxiliary summarization/flush
+                # calls they are context only, so preserve them as user-visible
+                # transcript text instead of forwarding an invalid role.
+                if role not in {"assistant", "developer", "user"}:
+                    role = "user"
                 input_msgs.append({
                     "role": role,
                     "content": _convert_content_for_responses(content),

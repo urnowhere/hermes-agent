@@ -1117,6 +1117,65 @@ class TestKimiTemperatureOmitted:
         assert "temperature" not in kwargs
 
 
+class TestCodexResponsesCompatibility:
+    def test_codex_responses_endpoint_omits_temperature_for_flush_memory(self):
+        """ChatGPT Codex Responses backend rejects temperature, including flush-memory calls."""
+        from agent.auxiliary_client import _build_call_kwargs
+
+        kwargs = _build_call_kwargs(
+            provider="openai-codex",
+            model="gpt-5.5",
+            messages=[{"role": "user", "content": "hello"}],
+            temperature=0.3,
+            max_tokens=5120,
+            base_url="https://chatgpt.com/backend-api/codex",
+        )
+
+        assert "temperature" not in kwargs
+        assert kwargs["max_tokens"] == 5120
+
+    def test_codex_adapter_maps_tool_history_to_user_role(self):
+        """Responses input rejects role=tool; auxiliary transcript context should be preserved as user text."""
+        from agent.auxiliary_client import _CodexCompletionsAdapter
+
+        class DummyStream:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def __iter__(self):
+                return iter(())
+
+            def get_final_response(self):
+                from types import SimpleNamespace
+                return SimpleNamespace(output=[])
+
+        class DummyResponses:
+            def __init__(self):
+                self.kwargs = None
+
+            def stream(self, **kwargs):
+                self.kwargs = kwargs
+                return DummyStream()
+
+        class DummyClient:
+            def __init__(self):
+                self.responses = DummyResponses()
+
+        client = DummyClient()
+        adapter = _CodexCompletionsAdapter(client, "gpt-5.2-codex")
+
+        adapter.create(messages=[
+            {"role": "user", "content": "question"},
+            {"role": "tool", "content": "tool output"},
+        ])
+
+        assert client.responses.kwargs["input"][1]["role"] == "user"
+        assert client.responses.kwargs["input"][1]["content"] == "tool output"
+
+
 # ---------------------------------------------------------------------------
 # async_call_llm payment / connection fallback (#7512 bug 2)
 # ---------------------------------------------------------------------------
