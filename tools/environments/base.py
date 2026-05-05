@@ -488,6 +488,17 @@ class BaseEnvironment(ABC):
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
         def _drain():
+            if os.name == "nt":
+                # select() does not support anonymous pipe handles on Windows.
+                # A daemon reader thread can block safely while the main thread
+                # owns timeout/interrupt handling and closes the pipe on exit.
+                try:
+                    for line in proc.stdout:
+                        output_chunks.append(line)
+                except (ValueError, OSError):
+                    pass
+                return
+
             fd = proc.stdout.fileno()
             idle_after_exit = 0
             try:

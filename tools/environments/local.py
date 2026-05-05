@@ -3,6 +3,7 @@
 import logging
 import os
 import platform
+import re
 import shutil
 import signal
 import subprocess
@@ -188,10 +189,6 @@ def _find_bash() -> str:
     if custom and os.path.isfile(custom):
         return custom
 
-    found = shutil.which("bash")
-    if found:
-        return found
-
     for candidate in (
         os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "bin", "bash.exe"),
         os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Git", "bin", "bash.exe"),
@@ -199,6 +196,16 @@ def _find_bash() -> str:
     ):
         if candidate and os.path.isfile(candidate):
             return candidate
+
+    found = shutil.which("bash")
+    if found:
+        normalized = os.path.normcase(os.path.abspath(found))
+        is_wsl_shim = (
+            normalized.endswith(os.path.normcase(r"\Windows\System32\bash.exe"))
+            or normalized.endswith(os.path.normcase(r"\Microsoft\WindowsApps\bash.exe"))
+        )
+        if not is_wsl_shim:
+            return found
 
     raise RuntimeError(
         "Git Bash not found. Hermes Agent requires Git for Windows on Windows.\n"
@@ -216,6 +223,28 @@ _SANE_PATH = (
     "/opt/homebrew/bin:/opt/homebrew/sbin:"
     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 )
+
+
+def _windows_popen_cwd(cwd: str) -> str:
+    """Convert Git Bash/MSYS cwd forms back to Windows paths for Popen."""
+    if not _IS_WINDOWS or not cwd:
+        return cwd
+
+    normalized = cwd.replace("\\", "/")
+    if normalized == "/tmp" or normalized.startswith("/tmp/"):
+        temp_root = tempfile.gettempdir().rstrip("\\/")
+        suffix = normalized[5:] if normalized.startswith("/tmp/") else ""
+        return temp_root + (("\\" + suffix.replace("/", "\\")) if suffix else "")
+
+    drive_path_match = re.match(r"^/([a-zA-Z])(?:/(.*))?$", normalized)
+    if not drive_path_match:
+        drive_path_match = re.match(r"^/mnt/([a-zA-Z])(?:/(.*))?$", normalized)
+    if not drive_path_match:
+        return cwd
+
+    drive = drive_path_match.group(1).upper()
+    rest = drive_path_match.group(2) or ""
+    return drive + ":\\" + rest.replace("/", "\\")
 
 
 def _make_run_env(env: dict) -> dict:
@@ -413,7 +442,7 @@ class LocalEnvironment(BaseEnvironment):
             stderr=subprocess.STDOUT,
             stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
             preexec_fn=None if _IS_WINDOWS else os.setsid,
-            cwd=self.cwd,
+            cwd=_windows_popen_cwd(self.cwd),
         )
         if not _IS_WINDOWS:
             try:
