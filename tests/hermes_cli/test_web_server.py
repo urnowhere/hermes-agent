@@ -1940,6 +1940,57 @@ class TestDashboardPluginManifestExtensions:
         ]
 
 
+
+
+# ---------------------------------------------------------------------------
+# Dashboard reverse-proxy security config
+# ---------------------------------------------------------------------------
+
+
+class TestDashboardReverseProxySecurity:
+    def test_host_header_defaults_remain_loopback_only(self, monkeypatch):
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setattr(ws.app.state, "dashboard_security", {}, raising=False)
+        assert ws._is_accepted_host("localhost:9119", "127.0.0.1")
+        assert ws._is_accepted_host("127.0.0.1:9119", "localhost")
+        assert not ws._is_accepted_host("evil.test", "127.0.0.1")
+        assert not ws._is_accepted_host("proxy.tailnet.example.ts.net", "127.0.0.1")
+
+    def test_host_header_accepts_configured_reverse_proxy_hosts(self, monkeypatch):
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setattr(
+            ws.app.state,
+            "dashboard_security",
+            {"allowed_hosts": ["proxy.tailnet.example.ts.net", "100.64.0.10"]},
+            raising=False,
+        )
+        assert ws._is_accepted_host("proxy.tailnet.example.ts.net", "127.0.0.1")
+        assert ws._is_accepted_host("100.64.0.10:443", "127.0.0.1")
+        assert not ws._is_accepted_host("evil.test", "127.0.0.1")
+
+    def test_ws_client_defaults_remain_loopback_only(self, monkeypatch):
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setattr(ws.app.state, "dashboard_security", {}, raising=False)
+        assert ws._host_matches_configured_client("127.0.0.1", ws._trusted_ws_client_values())
+        assert not ws._host_matches_configured_client("100.64.0.10", ws._trusted_ws_client_values())
+
+    def test_ws_client_accepts_configured_trusted_proxy_hosts_and_cidrs(self, monkeypatch):
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setattr(
+            ws.app.state,
+            "dashboard_security",
+            {"trusted_proxy_hosts": ["100.64.0.10", "fd7a:115c:a1e0::/48"]},
+            raising=False,
+        )
+        allowed = ws._trusted_ws_client_values()
+        assert ws._host_matches_configured_client("100.64.0.10", allowed)
+        assert ws._host_matches_configured_client("fd7a:115c:a1e0::123", allowed)
+        assert not ws._host_matches_configured_client("100.64.0.11", allowed)
+
 # ---------------------------------------------------------------------------
 # /api/pty WebSocket — terminal bridge for the dashboard "Chat" tab.
 #
@@ -2159,7 +2210,10 @@ class TestPtyWebSocket:
             self.ws_module.app.state, "bound_port", 9119, raising=False
         )
 
-        with self.client.websocket_connect(self._url(channel="abc-123")) as conn:
+        with self.client.websocket_connect(
+            self._url(channel="abc-123"),
+            headers={"host": "127.0.0.1:9119"},
+        ) as conn:
             try:
                 conn.receive_bytes()
             except Exception:

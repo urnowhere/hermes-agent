@@ -815,6 +815,19 @@ DEFAULT_CONFIG = {
     # Web dashboard settings
     "dashboard": {
         "theme": "default",  # Dashboard visual theme: "default", "midnight", "ember", "mono", "cyberpunk", "rose"
+        # Additional HTTP Host header values accepted when the dashboard is
+        # bound to loopback. Keep empty for loopback-only DNS rebinding
+        # protection; add trusted reverse-proxy hostnames/IPs (e.g.
+        # Tailscale Serve names) when exposing the localhost dashboard
+        # through a trusted proxy.
+        "allowed_hosts": [],
+        # Additional WebSocket peer hosts/IPs accepted for /api/pty, /api/ws,
+        # /api/pub, and /api/events when bound to loopback. Use this for
+        # trusted local/reverse-proxy peers that connect to the dashboard on
+        # behalf of a browser. Defaults remain loopback-only.
+        "trusted_proxy_hosts": [],
+        # Backward-compatible alias for trusted_proxy_hosts.
+        "allowed_ws_clients": [],
     },
 
     # Privacy settings
