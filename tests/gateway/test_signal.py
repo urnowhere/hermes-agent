@@ -8,6 +8,8 @@ from unittest.mock import MagicMock, patch, AsyncMock
 from urllib.parse import quote
 
 from gateway.config import Platform, PlatformConfig
+from gateway.platforms.base import MessageEvent, SendResult
+from gateway.session import SessionSource, build_session_key
 
 
 @pytest.fixture(autouse=True)
@@ -369,12 +371,54 @@ class TestSignalAuthorization:
 
         source = MagicMock()
         source.platform = Platform.SIGNAL
-        source.user_id = "+15559999999"
+        source.user_id = "+155****9999"
 
         # No allowlists set — should check GATEWAY_ALLOW_ALL_USERS
         with patch.dict("os.environ", {}, clear=True):
             result = gw._is_user_authorized(source)
             assert result is False
+
+
+# ---------------------------------------------------------------------------
+# Signal command priority bypass
+# ---------------------------------------------------------------------------
+
+class TestSignalPriorityCommands:
+    @pytest.mark.asyncio
+    async def test_approve_bypasses_active_session_serialization(self, monkeypatch):
+        adapter = _make_signal_adapter(monkeypatch)
+        adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="sig-resp-1"))
+        adapter.send_typing = AsyncMock()
+
+        source = SessionSource(
+            platform=Platform.SIGNAL,
+            chat_id="+155****4567",
+            user_id="+155****4567",
+            user_name="signal_tester",
+            chat_type="dm",
+        )
+        session_key = build_session_key(source)
+        adapter._active_sessions[session_key] = asyncio.Event()
+
+        adapter._message_handler = AsyncMock(return_value="✅ Command approved. The agent is resuming...")
+        adapter.set_message_handler(adapter._message_handler)
+
+        event = MessageEvent(
+            text="/approve always",
+            source=source,
+            message_id="signal-msg-1",
+        )
+
+        await adapter.handle_message(event)
+        await asyncio.sleep(0.3)
+
+        adapter._message_handler.assert_awaited_once()
+        adapter.send.assert_called_once_with(
+            chat_id=source.chat_id,
+            content="✅ Command approved. The agent is resuming...",
+            reply_to="signal-msg-1",
+            metadata=None,
+        )
 
 
 # ---------------------------------------------------------------------------
