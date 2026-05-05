@@ -6671,8 +6671,18 @@ class HermesCLI:
                     exec_cmd = qcmd.get("command", "")
                     if exec_cmd:
                         try:
+                            import shlex
+                            # Use shlex.split to avoid shell injection from
+                            # project-level configs.  Commands needing shell
+                            # features (pipes, redirects) can use explicit
+                            # "sh -c '...'" in config.yaml.
+                            try:
+                                cmd_args = shlex.split(exec_cmd)
+                            except ValueError:
+                                self.console.print("[bold red]Quick command has invalid quoting[/]")
+                                return True
                             result = subprocess.run(
-                                exec_cmd, shell=True, capture_output=True,
+                                cmd_args, capture_output=True,
                                 text=True, timeout=30
                             )
                             output = result.stdout.strip() or result.stderr.strip()
