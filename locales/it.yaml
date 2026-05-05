@@ -1,0 +1,24 @@
+# Catalogo dei messaggi statici di Hermes -- Italiano
+# See locales/en.yaml for the source of truth; keep keys in sync.
+
+approval:
+  dangerous_header: "⚠️  COMANDO PERICOLOSO: {description}"
+  choose_long:     "      [o]una volta  |  [s]sessione  |  [a]sempre  |  [d]nega"
+  choose_short:    "      [o]una volta  |  [s]sessione  |  [d]nega"
+  prompt_long:     "      Scelta [o/s/a/D]: "
+  prompt_short:    "      Scelta [o/s/D]: "
+  timeout:         "      ⏱ Timeout - comando negato"
+  allowed_once:    "      ✓ Consentito una volta"
+  allowed_session: "      ✓ Consentito per questa sessione"
+  allowed_always:  "      ✓ Aggiunto alla allowlist permanente"
+  denied:          "      ✗ Negato"
+  cancelled:       "      ✗ Annullato"
+  blocklist_message: "Questo comando è nella blocklist incondizionata e non può essere approvato."
+
+gateway:
+  approval_expired: "⚠️ Approvazione scaduta (l'agente non è più in attesa). Chiedi all'agente di riprovare."
+  draining:         "⏳ Attendo il completamento di {count} agente/i attivo/i prima del riavvio..."
+  goal_cleared:     "✓ Obiettivo cancellato."
+  no_active_goal:   "Nessun obiettivo attivo."
+  config_read_failed: "⚠️ Impossibile leggere config.yaml: {error}"
+  config_save_failed: "⚠️ Impossibile salvare la configurazione: {error}"
