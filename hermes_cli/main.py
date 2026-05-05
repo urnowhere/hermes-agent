@@ -6445,23 +6445,37 @@ def _load_installable_optional_extras() -> list[str]:
     return referenced
 
 
+def _is_termux() -> bool:
+    return "/com.termux/" in __file__
+
+# Extras known to pull ctranslate2/faster-whisper which have no wheels for
+# Python 3.13 arm64 Android (Termux).
+_EXTRAS_SKIP_ON_TERMUX = frozenset({"voice"})
+
+
 def _install_python_dependencies_with_optional_fallback(
     install_cmd_prefix: list[str],
     *,
     env: dict[str, str] | None = None,
 ) -> None:
     """Install base deps plus as many optional extras as the environment supports."""
+    is_termux = _is_termux()
     try:
         subprocess.run(
             install_cmd_prefix + ["install", "-e", ".[all]", "--quiet"],
             cwd=PROJECT_ROOT,
             check=True,
             env=env,
+            timeout=300,
         )
         return
     except subprocess.CalledProcessError:
         print(
             "  ⚠ Optional extras failed, reinstalling base dependencies and retrying extras individually..."
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            "  ⚠ Optional extras install timed out, reinstalling base deps and trying individually..."
         )
 
     subprocess.run(
@@ -6469,20 +6483,29 @@ def _install_python_dependencies_with_optional_fallback(
         cwd=PROJECT_ROOT,
         check=True,
         env=env,
+        timeout=300,
     )
 
     failed_extras: list[str] = []
     installed_extras: list[str] = []
     for extra in _load_installable_optional_extras():
+        if is_termux and extra in _EXTRAS_SKIP_ON_TERMUX:
+            print(f"  − Skipping [{extra}] (no wheels for Termux/Android)")
+            failed_extras.append(extra)
+            continue
         try:
             subprocess.run(
                 install_cmd_prefix + ["install", "-e", f".[{extra}]", "--quiet"],
                 cwd=PROJECT_ROOT,
                 check=True,
                 env=env,
+                timeout=120,
             )
             installed_extras.append(extra)
         except subprocess.CalledProcessError:
+            failed_extras.append(extra)
+        except subprocess.TimeoutExpired:
+            print(f"  ⚠ [{extra}] timed out, skipping")
             failed_extras.append(extra)
 
     if installed_extras:

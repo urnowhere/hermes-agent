@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "esbuild src/entry-exports.ts --bundle --platform=node --format=esm --packages=external --outdir=dist"
+    "prepare": "node fix-build.js",
+    "build": "node -e \"const esbuild=require('esbuild');esbuild.build({entryPoints:['src/entry-exports.ts'],bundle:true,platform:'node',format:'esm',packages:'external',outdir:'dist',outbase:'src'}).catch(e=>{console.error(e.message);process.exit(1)})\""
   },
   "sideEffects": true,
   "main": "./index.js",
