@@ -1152,6 +1152,16 @@ class DiscordAdapter(BasePlatformAdapter):
                 except Exception as e:
                     logger.debug("Could not fetch reply-to message: %s", e)
 
+            # Extract mentioned user IDs from content to allow Discord to
+            # actually trigger notifications for <@ID> patterns.  Without
+            # allowed_mentions, Discord renders them as plain text.
+            mentioned_user_ids = re.findall(r"<@!?(\d+)>", content)
+            allowed_mentions = None
+            if mentioned_user_ids:
+                allowed_mentions = discord.AllowedMentions(
+                    users=[discord.Object(id=int(uid)) for uid in mentioned_user_ids]
+                )
+
             for i, chunk in enumerate(chunks):
                 if self._reply_to_mode == "all":
                     chunk_reference = reference
@@ -1161,6 +1171,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     msg = await channel.send(
                         content=chunk,
                         reference=chunk_reference,
+                        allowed_mentions=allowed_mentions,
                     )
                 except Exception as e:
                     err_text = str(e)
@@ -1183,6 +1194,7 @@ class DiscordAdapter(BasePlatformAdapter):
                         msg = await channel.send(
                             content=chunk,
                             reference=None,
+                            allowed_mentions=allowed_mentions,
                         )
                     else:
                         raise
@@ -3217,6 +3229,20 @@ class DiscordAdapter(BasePlatformAdapter):
             return bool(configured)
         return os.getenv("DISCORD_REQUIRE_MENTION", "true").lower() not in ("false", "0", "no", "off")
 
+    def _discord_strict_mention(self) -> bool:
+        """Return whether @mention is always required, even in bot-joined threads.
+
+        When strict_mention is enabled, the bot-thread mention bypass is disabled.
+        This is useful in multi-participant threads where the bot should not
+        respond to messages directed at other participants.
+        """
+        configured = self.config.extra.get("strict_mention")
+        if configured is not None:
+            if isinstance(configured, str):
+                return configured.lower() in ("true", "1", "yes", "on")
+            return bool(configured)
+        return os.getenv("DISCORD_STRICT_MENTION", "false").lower() in ("true", "1", "yes", "on")
+
     def _discord_free_response_channels(self) -> set:
         """Return Discord channel IDs where no bot mention is required.
 
@@ -3732,6 +3758,7 @@ class DiscordAdapter(BasePlatformAdapter):
         #
         # Config (all settable via discord.* in config.yaml or DISCORD_* env vars):
         #   discord.require_mention: Require @mention in server channels (default: true)
+        #   discord.strict_mention: Always require @mention, even in bot threads (default: false)
         #   discord.free_response_channels: Channel IDs where bot responds without mention
         #   discord.ignored_channels: Channel IDs where bot NEVER responds (even when mentioned)
         #   discord.allowed_channels: If set, bot ONLY responds in these channels (whitelist)
@@ -3782,6 +3809,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 channel_ids.add(parent_channel_id)
 
             require_mention = self._discord_require_mention()
+            strict_mention = self._discord_strict_mention()
             # Voice-linked text channels act as free-response while voice is active.
             # Only the exact bound channel gets the exemption, not sibling threads.
             voice_linked_ids = {str(ch_id) for ch_id in self._voice_text_channels.values()}
@@ -3795,7 +3823,10 @@ class DiscordAdapter(BasePlatformAdapter):
 
             # Skip the mention check if the message is in a thread where
             # the bot has previously participated (auto-created or replied in).
-            in_bot_thread = is_thread and thread_id in self._threads
+            # When strict_mention is enabled, this bypass is disabled — @mention
+            # is always required, which is useful in multi-participant threads
+            # where the bot should not respond to messages directed at others.
+            in_bot_thread = (not strict_mention) and is_thread and thread_id in self._threads
 
             if require_mention and not is_free_channel and not in_bot_thread:
                 if self._client.user not in message.mentions and not mention_prefix:

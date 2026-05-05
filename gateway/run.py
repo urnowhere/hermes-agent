@@ -509,6 +509,27 @@ if _config_path.exists():
                         os.environ[_env_var] = json.dumps(_val)
                     else:
                         os.environ[_env_var] = str(_val)
+        # Discord config — bridge to DISCORD_* env vars so the platform adapter
+        # can read them via os.getenv() like it expects.
+        _discord_cfg = _cfg.get("discord", {})
+        if _discord_cfg and isinstance(_discord_cfg, dict):
+            _discord_env_map = {
+                "require_mention": "DISCORD_REQUIRE_MENTION",
+                "strict_mention": "DISCORD_STRICT_MENTION",
+                "free_response_channels": "DISCORD_FREE_RESPONSE_CHANNELS",
+                "auto_thread": "DISCORD_AUTO_THREAD",
+                "reactions": "DISCORD_REACTIONS",
+                "allowed_channels": "DISCORD_ALLOWED_CHANNELS",
+                "ignored_channels": "DISCORD_IGNORED_CHANNELS",
+                "no_thread_channels": "DISCORD_NO_THREAD_CHANNELS",
+            }
+            for _cfg_key, _env_var in _discord_env_map.items():
+                if _cfg_key in _discord_cfg:
+                    _val = _discord_cfg[_cfg_key]
+                    if isinstance(_val, list):
+                        os.environ[_env_var] = ",".join(str(v) for v in _val)
+                    else:
+                        os.environ[_env_var] = str(_val)
         # Compression config is read directly from config.yaml by run_agent.py
         # and auxiliary_client.py — no env var bridging needed.
         # Auxiliary model/direct-endpoint overrides (vision, web_extract).
