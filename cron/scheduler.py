@@ -16,6 +16,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 
 # fcntl is Unix-only; on Windows use msvcrt for file locking
 try:
@@ -120,6 +121,96 @@ _hermes_home = get_hermes_home()
 # File-based lock prevents concurrent ticks from gateway + daemon + systemd timer
 _LOCK_DIR = _hermes_home / "cron"
 _LOCK_FILE = _LOCK_DIR / ".tick.lock"
+_PROFILE_ENV_LOCK = threading.RLock()
+
+
+def _resolve_job_profile_home(job: dict) -> tuple[Path, Optional[str], bool]:
+    """Resolve a cron job's optional profile to a Hermes home directory.
+
+    Missing/blank ``job["profile"]`` means legacy behavior: keep using the
+    scheduler process' server-default Hermes home.  A stored profile name is
+    normalized and validated at execution time so deleted/renamed profiles do
+    not crash the scheduler — they log a warning and fall back to that same
+    server default instead.
+    """
+    raw_profile = job.get("profile")
+    raw_text = str(raw_profile or "").strip()
+    if not raw_text:
+        return _hermes_home, None, False
+
+    try:
+        from hermes_cli.profiles import (
+            get_profile_dir,
+            normalize_profile_name,
+            profile_exists,
+            validate_profile_name,
+        )
+
+        profile_name = normalize_profile_name(raw_text)
+        validate_profile_name(profile_name)
+        if profile_exists(profile_name):
+            return get_profile_dir(profile_name), profile_name, True
+        logger.warning(
+            "Job '%s': configured profile %r no longer exists; falling back to server default Hermes home %s",
+            job.get("id", "?"),
+            raw_text,
+            _hermes_home,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Job '%s': invalid configured profile %r (%s); falling back to server default Hermes home %s",
+            job.get("id", "?"),
+            raw_text,
+            exc,
+            _hermes_home,
+        )
+
+    return _hermes_home, None, False
+
+
+class _CronProfileEnv:
+    """Temporarily point profile-aware Hermes code at a selected profile."""
+
+    def __init__(self, home: Path, profile_name: Optional[str], explicit_profile: bool):
+        self.home = Path(home)
+        self.profile_name = profile_name
+        self.explicit_profile = explicit_profile
+        self._old_home = None
+        self._old_profile = None
+        self._entered = False
+
+    def __enter__(self) -> Path:
+        if not self.explicit_profile:
+            return self.home
+        _PROFILE_ENV_LOCK.acquire()
+        self._entered = True
+        self._old_home = os.environ.get("HERMES_HOME")
+        self._old_profile = os.environ.get("HERMES_PROFILE")
+        os.environ["HERMES_HOME"] = str(self.home)
+        if self.profile_name:
+            os.environ["HERMES_PROFILE"] = self.profile_name
+        else:
+            os.environ.pop("HERMES_PROFILE", None)
+        return self.home
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if not self._entered:
+            return
+        if self._old_home is None:
+            os.environ.pop("HERMES_HOME", None)
+        else:
+            os.environ["HERMES_HOME"] = self._old_home
+        if self._old_profile is None:
+            os.environ.pop("HERMES_PROFILE", None)
+        else:
+            os.environ["HERMES_PROFILE"] = self._old_profile
+        self._entered = False
+        _PROFILE_ENV_LOCK.release()
+
+
+def _cron_profile_env(job: dict) -> _CronProfileEnv:
+    home, profile_name, explicit_profile = _resolve_job_profile_home(job)
+    return _CronProfileEnv(home, profile_name, explicit_profile)
 
 
 def _resolve_origin(job: dict) -> Optional[dict]:
@@ -957,12 +1048,11 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         return True, doc, output, None
 
     # ---------------------------------------------------------------
-    # Default (LLM) path — import and construct the agent machinery now
-    # that we know we actually need it. Doing these imports here instead of
-    # at module top keeps no_agent ticks from paying for AIAgent / SessionDB
-    # construction costs.
+    # Default (LLM) path — construct the agent machinery now that we know
+    # we actually need it. Heavy/profile-aware imports stay below inside the
+    # selected profile context so run_agent module setup sees the right
+    # HERMES_HOME.
     # ---------------------------------------------------------------
-    from run_agent import AIAgent
 
     # Initialize SQLite session store so cron job messages are persisted
     # and discoverable via session_search (same pattern as gateway/run.py).
@@ -1053,14 +1143,23 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         os.environ["TERMINAL_CWD"] = _job_workdir
         logger.info("Job '%s': using workdir %s", job_id, _job_workdir)
 
+    # If the job pins a named Hermes profile, enter it for all profile-aware
+    # runtime work below. Missing/blank profile keeps the scheduler's server
+    # default behavior. The finally block always restores the previous process
+    # env so later jobs keep their own profile/default isolation.
+    _profile_context = _cron_profile_env(job)
+    _effective_hermes_home = _profile_context.__enter__()
+
     try:
+        from run_agent import AIAgent
+
         # Re-read .env and config.yaml fresh every run so provider/key
         # changes take effect without a gateway restart.
         from dotenv import load_dotenv
         try:
-            load_dotenv(str(_hermes_home / ".env"), override=True, encoding="utf-8")
+            load_dotenv(str(_effective_hermes_home / ".env"), override=True, encoding="utf-8")
         except UnicodeDecodeError:
-            load_dotenv(str(_hermes_home / ".env"), override=True, encoding="latin-1")
+            load_dotenv(str(_effective_hermes_home / ".env"), override=True, encoding="latin-1")
 
         delivery_target = _resolve_delivery_target(job)
         if delivery_target:
@@ -1078,7 +1177,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         _cfg = {}
         try:
             import yaml
-            _cfg_path = str(_hermes_home / "config.yaml")
+            _cfg_path = str(_effective_hermes_home / "config.yaml")
             if os.path.exists(_cfg_path):
                 with open(_cfg_path) as _f:
                     _cfg = yaml.safe_load(_f) or {}
@@ -1112,7 +1211,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         if prefill_file:
             pfpath = Path(prefill_file).expanduser()
             if not pfpath.is_absolute():
-                pfpath = _hermes_home / pfpath
+                pfpath = _effective_hermes_home / pfpath
             if pfpath.exists():
                 try:
                     with open(pfpath, "r", encoding="utf-8") as _pf:
@@ -1419,6 +1518,8 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             cleanup_stale_async_clients()
         except Exception as e:
             logger.debug("Job '%s': failed to reap stale auxiliary clients: %s", job_id, e)
+        finally:
+            _profile_context.__exit__(None, None, None)
 
 
 def tick(verbose: bool = True, adapters=None, loop=None) -> int:
@@ -1535,17 +1636,21 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                 mark_job_run(job["id"], False, str(e))
                 return False
 
-        # Partition due jobs: those with a per-job workdir mutate
-        # os.environ["TERMINAL_CWD"] inside run_job, which is process-global —
-        # so they MUST run sequentially to avoid corrupting each other.  Jobs
-        # without a workdir leave env untouched and stay parallel-safe.
-        workdir_jobs = [j for j in due_jobs if (j.get("workdir") or "").strip()]
-        parallel_jobs = [j for j in due_jobs if not (j.get("workdir") or "").strip()]
+        # Partition due jobs: jobs that mutate process-global environment must
+        # run sequentially.  Per-job workdir mutates TERMINAL_CWD, and per-job
+        # profile temporarily mutates HERMES_HOME/HERMES_PROFILE so profile-
+        # aware helpers load that profile's config, .env, SOUL.md, sessions,
+        # and skills. Jobs with neither stay parallel-safe.
+        def _requires_serial_env(job: dict) -> bool:
+            return bool((job.get("workdir") or "").strip() or (job.get("profile") or "").strip())
+
+        serial_env_jobs = [j for j in due_jobs if _requires_serial_env(j)]
+        parallel_jobs = [j for j in due_jobs if not _requires_serial_env(j)]
 
         _results: list = []
 
-        # Sequential pass for workdir jobs.
-        for job in workdir_jobs:
+        # Sequential pass for env-mutating jobs.
+        for job in serial_env_jobs:
             _ctx = contextvars.copy_context()
             _results.append(_ctx.run(_process_job, job))
 
