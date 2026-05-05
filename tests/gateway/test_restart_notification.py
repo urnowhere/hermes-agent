@@ -527,3 +527,68 @@ async def test_send_restart_notification_logs_info_on_sendresult_success(
         f"got records: {[(r.levelname, r.getMessage()) for r in caplog.records]}"
     )
     assert not notify_path.exists()
+
+
+# ── plain-shutdown notification: home-channel idle-skip (#20103) ───────────
+
+
+@pytest.mark.asyncio
+async def test_plain_shutdown_skips_home_channel_when_idle():
+    """A plain (non-/restart) shutdown with no active sessions does not ping
+    configured home channels.
+
+    The interrupted-task warning carries no useful signal when nothing was
+    being interrupted; a scheduled systemd-driven reboot of an idle gateway
+    was producing a daily "your current task will be interrupted" ping.
+    """
+    runner, adapter = make_restart_runner()
+    runner._restart_requested = False
+    runner.config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
+        platform=Platform.TELEGRAM,
+        chat_id="home-42",
+        name="Ops Home",
+    )
+    adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="m-1"))
+    runner._running_agents = {}
+
+    await runner._notify_active_sessions_of_shutdown()
+
+    adapter.send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_still_pings_home_channel_when_active():
+    """Active sessions at shutdown still trigger the home-channel broadcast.
+
+    Regression guard: the idle-skip must only suppress the home-channel loop
+    when no session is active. With at least one running agent whose
+    delivery target differs from the home channel, the home channel must
+    still receive the notification (so an ops alert lands even when the
+    interrupted session was a different chat).
+    """
+    runner, adapter = make_restart_runner()
+    runner._restart_requested = False
+    runner.config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
+        platform=Platform.TELEGRAM,
+        chat_id="home-42",
+        name="Ops Home",
+    )
+    adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="m-1"))
+
+    source = make_restart_source(chat_id="user-7")
+    session_key = build_session_key(source)
+    runner._running_agents = {session_key: object()}
+    entry = MagicMock()
+    entry.origin = source
+    runner.session_store._entries = {session_key: entry}
+
+    await runner._notify_active_sessions_of_shutdown()
+
+    sent_chat_ids = [call.args[0] for call in adapter.send.await_args_list]
+    assert "home-42" in sent_chat_ids, (
+        f"Home channel should still receive shutdown notification when "
+        f"a session is active; sent to: {sent_chat_ids}"
+    )
+    assert "user-7" in sent_chat_ids, (
+        f"Active session chat should be notified; sent to: {sent_chat_ids}"
+    )

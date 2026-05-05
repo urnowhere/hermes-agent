@@ -2613,6 +2613,21 @@ class GatewayRunner:
                     platform_str, chat_id, e,
                 )
 
+        # On a plain shutdown (not a user-initiated /restart) with no active
+        # sessions, skip the home-channel broadcast: the warning only
+        # carries useful information when a task is actually being
+        # interrupted, and a scheduled/idle reboot (e.g. systemd timer)
+        # otherwise produces a daily ping in every configured home channel
+        # with nothing to warn about. The /restart path keeps the
+        # always-broadcast behaviour because users explicitly opted into it
+        # and ops watchers depend on the heartbeat — see
+        # ``test_restart_notifies_home_channel_even_without_active_sessions``.
+        if not active and not self._restart_requested:
+            logger.info(
+                "No active sessions at shutdown — skipping home-channel notification"
+            )
+            return
+
         for platform, adapter in self.adapters.items():
             home = self.config.get_home_channel(platform)
             if not home or not home.chat_id:
