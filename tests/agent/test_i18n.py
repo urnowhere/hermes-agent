@@ -89,6 +89,9 @@ def test_normalize_lang_accepts_aliases():
     assert i18n._normalize_lang("Deutsch") == "de"
     assert i18n._normalize_lang("español") == "es"
     assert i18n._normalize_lang("jp") == "ja"
+    assert i18n._normalize_lang("Korean") == "ko"
+    assert i18n._normalize_lang("ko-KR") == "ko"
+    assert i18n._normalize_lang("한국어") == "ko"
 
 
 def test_normalize_lang_unknown_falls_back():
@@ -126,6 +129,7 @@ def test_default_when_nothing_set(monkeypatch):
 def test_t_explicit_lang():
     assert i18n.t("approval.denied", lang="en").endswith("Denied")
     assert i18n.t("approval.denied", lang="zh").endswith("已拒绝")
+    assert i18n.t("approval.denied", lang="ko").endswith("거부했어요")
 
 
 def test_t_formats_placeholders():
