@@ -4561,11 +4561,14 @@ class GatewayRunner:
         Check if a user is authorized to use the bot.
         
         Checks in order:
-        1. Per-platform allow-all flag (e.g., DISCORD_ALLOW_ALL_USERS=true)
-        2. Environment variable allowlists (TELEGRAM_ALLOWED_USERS, etc.)
-        3. DM pairing approved list
-        4. Global allow-all (GATEWAY_ALLOW_ALL_USERS=true)
-        5. Default: deny
+        1. adapter-level is_source_authorized hook, for platforms that
+           already enforced source allowlists before gateway dispatch
+        2. Per-platform allow-all flag (e.g., DISCORD_ALLOW_ALL_USERS=true),
+           before environment allowlists
+        3. Environment variable allowlists (TELEGRAM_ALLOWED_USERS, etc.)
+        4. DM pairing approved list
+        5. Global allow-all (GATEWAY_ALLOW_ALL_USERS=true)
+        6. Default: deny
         """
         # Home Assistant events are system-generated (state changes), not
         # user-initiated messages.  The HASS_TOKEN already authenticates the

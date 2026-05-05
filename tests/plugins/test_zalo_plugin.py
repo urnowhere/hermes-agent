@@ -58,6 +58,9 @@ def _clear_gateway_auth_env(monkeypatch):
         "ZALO_GROUP_REQUIRE_MENTION",
         "ZALO_GROUP_PREFIXES",
         "ZALO_FREE_RESPONSE_GROUP_IDS",
+        "ZALO_REQUEST_TIMEOUT",
+        "ZALO_SSE_TIMEOUT",
+        "ZALO_SSE_READ_TIMEOUT",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -74,11 +77,35 @@ def _make_bare_gateway_runner(adapter):
 def test_local_only_backend_validation_rejects_remote_hosts():
     assert validate_local_backend_url("http://127.0.0.1:56789") == "http://127.0.0.1:56789"
     assert validate_local_backend_url("http://localhost:56789/") == "http://localhost:56789"
+    assert validate_local_backend_url("HTTP://LOCALHOST:56789/") == "http://localhost:56789"
     with pytest.raises(ValueError, match="non-loopback"):
         validate_local_backend_url("http://192.168.1.10:56789")
     with pytest.raises(ValueError, match="non-loopback"):
         validate_local_backend_url("https://example.com")
     assert validate_local_backend_url("http://192.168.1.10:56789", allow_unsafe_remote=True)
+
+
+def test_backend_validation_rejects_non_origin_components():
+    for value in (
+        "http://127.0.0.1:56789/api",
+        "http://127.0.0.1:56789?token=secret",
+        "http://127.0.0.1:56789#fragment",
+        "http://user:pass@127.0.0.1:56789",
+    ):
+        with pytest.raises(ValueError, match="origin"):
+            validate_local_backend_url(value, allow_unsafe_remote=True)
+
+
+def test_policy_config_keeps_sse_timeout_separate_from_rest_request_timeout(monkeypatch):
+    _clear_gateway_auth_env(monkeypatch)
+    default_backend = config_from_platform(config())
+    assert default_backend.request_timeout == 30.0
+    assert default_backend.sse_timeout is None
+
+    backend = config_from_platform(config({"request_timeout": 2, "sse_timeout": 3600}))
+
+    assert backend.request_timeout == 2.0
+    assert backend.sse_timeout == 3600.0
 
 
 def test_sanitizer_drops_unneeded_raw_fields():
@@ -92,6 +119,10 @@ def test_sanitizer_drops_unneeded_raw_fields():
     assert sanitized["isGroup"] is True
     assert sanitized["quote"] == {"msgId": "q-1", "cliMsgId": "qc-1", "senderId": "u-2"}
     assert "sensitive" not in sanitized
+    assert "senderName" not in sanitized
+    assert "timestamp" not in sanitized
+    assert "mentions" not in sanitized
+    assert "atAll" not in sanitized
 
 
 def test_sanitizer_prefers_hzca_v2_canonical_fields():
@@ -125,14 +156,16 @@ def test_sanitizer_prefers_hzca_v2_canonical_fields():
     assert sanitized["id"] == "canonical-message"
     assert sanitized["content"] == "@Bot canonical hello"
     assert sanitized["type"] == "image"
-    assert sanitized["mentions"] == [{"uid": "self-1", "text": "@Bot", "pos": 0, "len": 4}]
-    assert sanitized["atAll"] is False
     assert sanitized["quote"] == {
         "msgId": None,
         "cliMsgId": None,
         "senderId": "self-1",
         "messageId": "canonical-quote",
     }
+    assert "mentions" not in sanitized
+    assert "atAll" not in sanitized
+    assert "senderName" not in sanitized
+    assert "timestamp" not in sanitized
 
 
 def test_gateway_authorizes_zalo_source_from_adapter_allowed_group(monkeypatch):
@@ -171,6 +204,15 @@ def test_gateway_rejects_zalo_source_from_group_not_allowed_by_adapter(monkeypat
     assert runner._is_user_authorized(source) is False
 
 
+def test_gateway_authorization_docstring_mentions_adapter_hook_order():
+    from gateway.run import GatewayRunner
+
+    doc = GatewayRunner._is_user_authorized.__doc__ or ""
+
+    assert "adapter-level is_source_authorized" in doc
+    assert "before environment allowlists" in doc
+
+
 def test_policy_config_supports_legacy_env_fallbacks(monkeypatch):
     _clear_gateway_auth_env(monkeypatch)
     monkeypatch.setenv("ZALO_ALLOWED_USERS", "u-1,u-2")
@@ -205,6 +247,32 @@ async def test_authorization_runs_before_handle_message_for_denied_event(monkeyp
         "data": {"msgId": "m-1", "threadId": "blocked-group", "senderId": "u-1", "content": "no", "isGroup": True},
     })
     assert called is False
+
+
+@pytest.mark.asyncio
+async def test_handle_sse_event_uses_single_inbound_gate_for_authorized_events():
+    adapter = ZaloAdapter(config({"allowed_group_ids": ["g-1"], "require_mention": False}), client=FakeClient())
+    handled = []
+    auth_calls = 0
+    original_auth = adapter._is_authorized
+
+    def tracked_auth(event):
+        nonlocal auth_calls
+        auth_calls += 1
+        return original_auth(event)
+
+    async def fake_handle(message):
+        handled.append(message)
+
+    adapter._is_authorized = tracked_auth
+    adapter.handle_message = fake_handle
+    await adapter._handle_sse_event({
+        "type": "message",
+        "data": {"msgId": "m-gate-1", "threadId": "g-1", "senderId": "u-1", "content": "ping", "isGroup": True},
+    })
+
+    assert len(handled) == 1
+    assert auth_calls == 1
 
 
 @pytest.mark.asyncio
@@ -532,6 +600,10 @@ async def test_self_loop_and_duplicate_events_are_dropped_before_handle_message(
     assert handled[0].text == "ping"
     assert handled[0].raw_message["threadId"] == "g-1"
     assert "data" not in handled[0].raw_message
+    assert "senderName" not in handled[0].raw_message
+    assert "mentions" not in handled[0].raw_message
+    assert "atAll" not in handled[0].raw_message
+    assert "timestamp" not in handled[0].raw_message
 
 
 @pytest.mark.asyncio
@@ -577,3 +649,39 @@ async def test_hzca_client_parses_sse_fixture(monkeypatch):
         events.append(event)
     assert events[0]["type"] == "message"
     assert events[0]["data"]["msgId"] == "m-1"
+
+
+@pytest.mark.asyncio
+async def test_hzca_client_sse_uses_sse_timeout_not_rest_request_timeout(monkeypatch):
+    lines = Path("plugins/platforms/zalo/fixtures/sse-message.frame").read_bytes().splitlines(keepends=True)
+    seen_timeouts = []
+
+    async def immediate_to_thread(func, /, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    class FakeResponse:
+        def __init__(self):
+            self._lines = list(lines)
+
+        def readline(self):
+            return self._lines.pop(0) if self._lines else b""
+
+        def close(self):
+            pass
+
+    def fake_urlopen(req, timeout):
+        seen_timeouts.append(timeout)
+        return FakeResponse()
+
+    monkeypatch.setattr("plugins.platforms.zalo.adapter.urlopen", fake_urlopen)
+    monkeypatch.setattr("plugins.platforms.zalo.adapter.asyncio.to_thread", immediate_to_thread)
+    client = HzcaClient(ZaloBackendConfig(
+        base_url="http://127.0.0.1:1",
+        request_timeout=0.1,
+        sse_timeout=3600.0,
+    ))
+
+    async for _event in client.iter_events(asyncio.Event()):
+        break
+
+    assert seen_timeouts == [3600.0]

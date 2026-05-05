@@ -31,6 +31,7 @@ class ZaloBackendConfig:
     base_url: str = _DEFAULT_BASE_URL
     bearer_token: Optional[str] = None
     request_timeout: float = 30.0
+    sse_timeout: Optional[float] = None
     allow_unsafe_remote: bool = False
     allowed_user_ids: tuple[str, ...] = ()
     allow_all_users: bool = False
@@ -101,17 +102,46 @@ def _is_loopback_host(host: str) -> bool:
     return bool(infos) and all(ip_address(info[4][0]).is_loopback for info in infos)
 
 
+def _optional_float(value: Any, default: Optional[float] = None) -> Optional[float]:
+    if value is None:
+        return default
+    if isinstance(value, str) and value.strip().lower() in {"", "none", "null"}:
+        return None
+    parsed = float(value)
+    return parsed if parsed > 0 else None
+
+
 def validate_local_backend_url(base_url: str, *, allow_unsafe_remote: bool = False) -> str:
     """Return normalized hzca base URL, rejecting non-loopback backends by default."""
-    raw = (base_url or _DEFAULT_BASE_URL).strip().rstrip("/")
+    raw = str(base_url or "").strip() or _DEFAULT_BASE_URL
     parsed = urlparse(raw)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValueError("HZCA serve URL must be an absolute http(s) URL")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("HZCA serve URL must be an origin (scheme://host[:port])") from exc
+    if (
+        parsed.username
+        or parsed.password
+        or "@" in parsed.netloc
+        or parsed.path not in {"", "/"}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "HZCA serve URL must be an origin (scheme://host[:port]) without path, query, fragment, or userinfo"
+        )
     if not allow_unsafe_remote and not _is_loopback_host(parsed.hostname):
         raise ValueError(
             "Refusing non-loopback HZCA serve URL; set allow_unsafe_remote=true only for an explicitly trusted backend"
         )
-    return raw
+    host = parsed.hostname.lower()
+    netloc = f"[{host}]" if ":" in host else host
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    return f"{parsed.scheme.lower()}://{netloc}"
 
 
 def config_from_platform(config: PlatformConfig) -> ZaloBackendConfig:
@@ -125,6 +155,14 @@ def config_from_platform(config: PlatformConfig) -> ZaloBackendConfig:
         base_url=base_url,
         bearer_token=_policy_value(extra, ("hzca_bearer_token",), ("HZCA_BEARER_TOKEN",), None),
         request_timeout=float(_policy_value(extra, ("request_timeout",), ("ZALO_REQUEST_TIMEOUT",), 30.0)),
+        sse_timeout=_optional_float(
+            _policy_value(
+                extra,
+                ("sse_timeout", "sse_read_timeout", "read_timeout"),
+                ("ZALO_SSE_TIMEOUT", "ZALO_SSE_READ_TIMEOUT"),
+                None,
+            )
+        ),
         allow_unsafe_remote=allow_unsafe,
         allowed_user_ids=_split_csv(
             _policy_value(extra, ("allowed_user_ids", "allowed_users"), ("ZALO_ALLOWED_USER_IDS", "ZALO_ALLOWED_USERS"))
@@ -227,7 +265,7 @@ class HzcaClient:
         req = Request(f"{self.backend.base_url}/api/events", headers=headers, method="GET")
 
         def _open():
-            return urlopen(req, timeout=self.backend.request_timeout)  # nosec - URL validated
+            return urlopen(req, timeout=self.backend.sse_timeout)  # nosec - URL validated
 
         resp = await asyncio.to_thread(_open)
         event_type = "message"
@@ -484,8 +522,8 @@ def _int_value(value: Any) -> Optional[int]:
         return None
 
 
-def sanitize_sse_event(event: dict[str, Any]) -> dict[str, Any]:
-    """Keep only privacy-safe fields needed by Hermes; never retain raw event blobs."""
+def _normalize_sse_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Normalize HZCA message fields for adapter routing and trigger checks."""
     data = event.get("data") if isinstance(event.get("data"), dict) else event
     quote = _extract_quote(data)
     return {
@@ -504,6 +542,26 @@ def sanitize_sse_event(event: dict[str, Any]) -> dict[str, Any]:
         "atAll": _extract_at_all(data),
         "quote": quote,
     }
+
+
+def _sanitize_normalized_event(event: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": event.get("id") or "",
+        "messageId": event.get("messageId") or "",
+        "msgId": event.get("msgId") or "",
+        "cliMsgId": event.get("cliMsgId") or "",
+        "threadId": event.get("threadId") or "",
+        "senderId": event.get("senderId") or "",
+        "content": event.get("content") or "",
+        "isGroup": bool(event.get("isGroup")),
+        "type": event.get("type") or "text",
+        "quote": event.get("quote"),
+    }
+
+
+def sanitize_sse_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Keep only privacy-safe fields needed by Hermes; never retain raw event blobs."""
+    return _sanitize_normalized_event(_normalize_sse_event(event))
 
 
 def _split_message(text: str, limit: int) -> list[str]:
@@ -683,15 +741,12 @@ class ZaloAdapter(BasePlatformAdapter):
     async def _handle_sse_event(self, raw_event: dict[str, Any]) -> None:
         if (raw_event.get("type") or "message") != "message":
             return
-        event = sanitize_sse_event(raw_event)
+        event = _normalize_sse_event(raw_event)
         if not event["threadId"] or not event["senderId"]:
             return
         if self._self_user_id and event["senderId"] == self._self_user_id:
             return
         if self._dedup.is_duplicate(self._dedupe_key(event)):
-            return
-        if not self._is_authorized(event):
-            logger.info("[zalo] dropping unauthorized event thread=%s sender=%s", event["threadId"], event["senderId"])
             return
         if not self._should_process_inbound(event):
             return
@@ -711,7 +766,7 @@ class ZaloAdapter(BasePlatformAdapter):
             text=self._message_text_for_event(event),
             message_type=_message_type(event.get("type")),
             source=source,
-            raw_message=event,
+            raw_message=_sanitize_normalized_event(event),
             message_id=event.get("id") or event.get("msgId"),
             reply_to_message_id=_quote_reply_message_id(event.get("quote")),
         )
