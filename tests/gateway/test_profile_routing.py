@@ -14,7 +14,7 @@ from gateway.config import Platform
 
 # ── Minimal SessionSource stand-in ──────────────────────────────────
 
-def _make_source(platform="discord", chat_id=None, thread_id=None, user_id=None, chat_type="group"):
+def _make_source(platform="discord", chat_id=None, thread_id=None, user_id=None, chat_type="group", parent_chat_id=None):
     """Create a fake SessionSource-like object with a real Platform enum."""
     src = MagicMock()
     src.platform = Platform(platform)
@@ -22,6 +22,7 @@ def _make_source(platform="discord", chat_id=None, thread_id=None, user_id=None,
     src.thread_id = thread_id
     src.user_id = user_id
     src.chat_type = chat_type
+    src.parent_chat_id = parent_chat_id
     return src
 
 
@@ -178,5 +179,24 @@ class TestMatchProfileRoute:
             {"name": "thread", "platform": "discord", "profile": "x", "chat_id": "1", "thread_id": "2"},
         ])
         source = _make_source(chat_id="999", thread_id="2")
+        match = match_profile_route(source, routes)
+        assert match is None
+
+    def test_parent_chat_id_matches_route(self):
+        """When source.parent_chat_id matches a route's chat_id, it should match."""
+        routes = parse_profile_routes([
+            {"name": "parent", "platform": "discord", "profile": "parent-prof", "chat_id": "100"},
+        ])
+        source = _make_source(chat_id="200", parent_chat_id="100")
+        match = match_profile_route(source, routes)
+        assert match is not None
+        assert match.profile == "parent-prof"
+
+    def test_parent_chat_id_no_match(self):
+        """When source.parent_chat_id doesn't match any route, it should not match."""
+        routes = parse_profile_routes([
+            {"name": "other", "platform": "discord", "profile": "other-prof", "chat_id": "100"},
+        ])
+        source = _make_source(chat_id="200", parent_chat_id="999")
         match = match_profile_route(source, routes)
         assert match is None

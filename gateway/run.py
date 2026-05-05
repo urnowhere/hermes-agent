@@ -1411,7 +1411,7 @@ class GatewayRunner:
         """Resolve the current session key for a source, honoring gateway config when available."""
         if hasattr(self, "session_store") and self.session_store is not None:
             try:
-                session_key = self.session_store._generate_session_key(source)
+                session_key = self.session_store._generate_session_key(source, profile_name=profile_name)
                 if isinstance(session_key, str) and session_key:
                     return session_key
             except Exception:
@@ -1424,12 +1424,32 @@ class GatewayRunner:
             profile_name=profile_name,
         )
 
+    def _profile_name_for_source(self, source: SessionSource) -> Optional[str]:
+        """Resolve the profile name for a source using the cached profile routes.
+
+        Slash command handlers call this to obtain the same ``profile_name``
+        that ``_handle_message`` resolves for the main message path, ensuring
+        session keys are consistent between slash commands and normal messages.
+        """
+        _profile_routes = getattr(self, "_profile_routes_cache", None)
+        if not _profile_routes:
+            return None
+        try:
+            from gateway.profile_routing import match_profile_route
+            _matched = match_profile_route(source, _profile_routes)
+            if _matched is not None:
+                return _matched.profile
+        except Exception:
+            pass
+        return None
+
     def _resolve_session_agent_runtime(
         self,
         *,
         source: Optional[SessionSource] = None,
         session_key: Optional[str] = None,
         user_config: Optional[dict] = None,
+        profile_name: Optional[str] = None,
     ) -> tuple[str, dict]:
         """Resolve model/runtime for a session, honoring session-scoped /model overrides.
 
@@ -1440,7 +1460,7 @@ class GatewayRunner:
         resolved_session_key = session_key
         if not resolved_session_key and source is not None:
             try:
-                resolved_session_key = self._session_key_for_source(source)
+                resolved_session_key = self._session_key_for_source(source, profile_name=profile_name)
             except Exception:
                 resolved_session_key = None
 
@@ -1844,12 +1864,13 @@ class GatewayRunner:
         *,
         source: Optional[SessionSource] = None,
         session_key: Optional[str] = None,
+        profile_name: Optional[str] = None,
     ) -> dict | None:
         """Resolve reasoning effort for a session, honoring session overrides."""
         resolved_session_key = session_key
         if not resolved_session_key and source is not None:
             try:
-                resolved_session_key = self._session_key_for_source(source)
+                resolved_session_key = self._session_key_for_source(source, profile_name=profile_name)
             except Exception:
                 resolved_session_key = None
 
@@ -5482,7 +5503,7 @@ class GatewayRunner:
                 # on error. Let the user drive the next turn.
                 if _final_text.strip():
                     try:
-                        session_entry = self.session_store.get_or_create_session(source)
+                        session_entry = self.session_store.get_or_create_session(source, profile_name=_profile_name)
                     except Exception:
                         session_entry = None
                     if session_entry is not None:
@@ -5514,6 +5535,7 @@ class GatewayRunner:
         event: MessageEvent,
         source: SessionSource,
         history: List[Dict[str, Any]],
+        profile_name: Optional[str] = None,
     ) -> Optional[str]:
         """Prepare inbound event text for the agent.
 
@@ -5535,7 +5557,7 @@ class GatewayRunner:
         # Use the same helper every other call site uses so the write key here
         # matches the consume key at the run_conversation site — even if the
         # session store overrides build_session_key's default behavior.
-        session_key = self._session_key_for_source(source)
+        session_key = self._session_key_for_source(source, profile_name=profile_name)
         # Reset only this session's per-call buffer; other sessions may be
         # concurrently preparing multimodal turns on the same runner.
         self._consume_pending_native_image_paths(session_key)
@@ -5752,7 +5774,7 @@ class GatewayRunner:
             return merged if merged else None
 
         # Get or create session
-        session_entry = self.session_store.get_or_create_session(source)
+        session_entry = self.session_store.get_or_create_session(source, profile_name=profile_name)
         session_key = session_entry.session_key
         if getattr(session_entry, "was_auto_reset", False):
             # Treat auto-reset as a full conversation boundary — drop every
@@ -6270,6 +6292,7 @@ class GatewayRunner:
             event=event,
             source=source,
             history=history,
+            profile_name=profile_name,
         )
         if message_text is None:
             return
@@ -6819,9 +6842,10 @@ class GatewayRunner:
     async def _handle_reset_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
         """Handle /new or /reset command."""
         source = event.source
+        _profile_name = self._profile_name_for_source(source)
         
         # Get existing session key
-        session_key = self._session_key_for_source(source)
+        session_key = self._session_key_for_source(source, profile_name=_profile_name)
         self._invalidate_session_run_generation(session_key, reason="session_reset")
 
         # Snapshot the old entry so on_session_finalize can report the
@@ -6907,7 +6931,7 @@ class GatewayRunner:
             header = "✨ Session reset! Starting fresh."
         else:
             # No existing session, just create one
-            new_entry = self.session_store.get_or_create_session(source, force_new=True)
+            new_entry = self.session_store.get_or_create_session(source, force_new=True, profile_name=_profile_name)
             header = "✨ New session started!"
 
         # Fire plugin on_session_reset hook (new session guaranteed to exist)
@@ -7026,7 +7050,8 @@ class GatewayRunner:
     async def _handle_status_command(self, event: MessageEvent) -> str:
         """Handle /status command."""
         source = event.source
-        session_entry = self.session_store.get_or_create_session(source)
+        _profile_name = self._profile_name_for_source(source)
+        session_entry = self.session_store.get_or_create_session(source, profile_name=_profile_name)
 
         connected_platforms = [p.value for p in self.adapters.keys()]
 
@@ -7091,7 +7116,7 @@ class GatewayRunner:
         from tools.process_registry import format_uptime_short, process_registry
 
         now = time.time()
-        current_session_key = self._session_key_for_source(event.source)
+        current_session_key = self._session_key_for_source(event.source, profile_name=self._profile_name_for_source(event.source))
 
         running_agents: dict = getattr(self, "_running_agents", {}) or {}
         running_started: dict = getattr(self, "_running_agents_ts", {}) or {}
@@ -7188,7 +7213,8 @@ class GatewayRunner:
         The session is preserved so the user can continue the conversation.
         """
         source = event.source
-        session_entry = self.session_store.get_or_create_session(source)
+        _profile_name = self._profile_name_for_source(source)
+        session_entry = self.session_store.get_or_create_session(source, profile_name=_profile_name)
         session_key = session_entry.session_key
 
         agent = self._running_agents.get(session_key)
@@ -7469,7 +7495,8 @@ class GatewayRunner:
 
         # Check for session override
         source = event.source
-        session_key = self._session_key_for_source(source)
+        _profile_name = self._profile_name_for_source(source)
+        session_key = self._session_key_for_source(source, profile_name=_profile_name)
         override = self._session_model_overrides.get(session_key, {})
         if override:
             current_model = override.get("model", current_model)
@@ -7851,7 +7878,8 @@ class GatewayRunner:
     async def _handle_retry_command(self, event: MessageEvent) -> str:
         """Handle /retry command - re-send the last user message."""
         source = event.source
-        session_entry = self.session_store.get_or_create_session(source)
+        _profile_name = self._profile_name_for_source(source)
+        session_entry = self.session_store.get_or_create_session(source, profile_name=_profile_name)
         history = self.session_store.load_transcript(session_entry.session_id)
         
         # Find the last user message
@@ -7899,7 +7927,8 @@ class GatewayRunner:
             logger.debug("goal manager unavailable: %s", exc)
             return None, None
         try:
-            session_entry = self.session_store.get_or_create_session(event.source)
+            _profile_name = self._profile_name_for_source(event.source)
+            session_entry = self.session_store.get_or_create_session(event.source, profile_name=_profile_name)
         except Exception as exc:
             logger.debug("goal manager: session lookup failed: %s", exc)
             return None, None
@@ -7967,7 +7996,7 @@ class GatewayRunner:
         # Queue the goal text as an immediate first turn so the agent
         # starts making progress. The post-turn hook takes over after.
         adapter = self.adapters.get(event.source.platform) if event.source else None
-        _quick_key = self._session_key_for_source(event.source) if event.source else None
+        _quick_key = self._session_key_for_source(event.source, profile_name=self._profile_name_for_source(event.source)) if event.source else None
         if adapter and _quick_key:
             try:
                 kickoff_event = MessageEvent(
@@ -8075,7 +8104,7 @@ class GatewayRunner:
         # flight preempts the continuation naturally.
         try:
             adapter = self.adapters.get(source.platform)
-            _quick_key = self._session_key_for_source(source)
+            _quick_key = self._session_key_for_source(source, profile_name=self._profile_name_for_source(source))
             if adapter and _quick_key:
                 cont_event = MessageEvent(
                     text=prompt,
@@ -8091,7 +8120,8 @@ class GatewayRunner:
     async def _handle_undo_command(self, event: MessageEvent) -> str:
         """Handle /undo command - remove the last user/assistant exchange."""
         source = event.source
-        session_entry = self.session_store.get_or_create_session(source)
+        _profile_name = self._profile_name_for_source(source)
+        session_entry = self.session_store.get_or_create_session(source, profile_name=_profile_name)
         history = self.session_store.load_transcript(session_entry.session_id)
         
         # Find the last user message and remove everything from it onward
@@ -8850,11 +8880,13 @@ class GatewayRunner:
         raw_args = event.get_command_args().strip()
         args, persist_global = self._parse_reasoning_command_args(raw_args)
         config_path = _hermes_home / "config.yaml"
-        session_key = self._session_key_for_source(event.source)
+        _profile_name = self._profile_name_for_source(event.source)
+        session_key = self._session_key_for_source(event.source, profile_name=_profile_name)
         self._show_reasoning = self._load_show_reasoning()
         self._reasoning_config = self._resolve_session_reasoning_config(
             source=event.source,
             session_key=session_key,
+            profile_name=_profile_name,
         )
 
         def _save_config_key(key_path: str, value):
@@ -9015,7 +9047,7 @@ class GatewayRunner:
             is_session_yolo_enabled,
         )
 
-        session_key = self._session_key_for_source(event.source)
+        session_key = self._session_key_for_source(event.source, profile_name=self._profile_name_for_source(event.source))
         current = is_session_yolo_enabled(session_key)
         if current:
             disable_session_yolo(session_key)
@@ -9186,7 +9218,8 @@ class GatewayRunner:
         more aggressive about discarding everything else.
         """
         source = event.source
-        session_entry = self.session_store.get_or_create_session(source)
+        _profile_name = self._profile_name_for_source(source)
+        session_entry = self.session_store.get_or_create_session(source, profile_name=_profile_name)
         history = self.session_store.load_transcript(session_entry.session_id)
 
         if not history or len(history) < 4:
@@ -9200,10 +9233,11 @@ class GatewayRunner:
             from agent.manual_compression_feedback import summarize_manual_compression
             from agent.model_metadata import estimate_request_tokens_rough
 
-            session_key = self._session_key_for_source(source)
+            session_key = self._session_key_for_source(source, profile_name=_profile_name)
             model, runtime_kwargs = self._resolve_session_agent_runtime(
                 source=source,
                 session_key=session_key,
+                profile_name=_profile_name,
             )
             if not runtime_kwargs.get("api_key"):
                 return "No provider configured -- cannot compress."
@@ -9310,7 +9344,8 @@ class GatewayRunner:
     async def _handle_title_command(self, event: MessageEvent) -> str:
         """Handle /title command — set or show the current session's title."""
         source = event.source
-        session_entry = self.session_store.get_or_create_session(source)
+        _profile_name = self._profile_name_for_source(source)
+        session_entry = self.session_store.get_or_create_session(source, profile_name=_profile_name)
         session_id = session_entry.session_id
 
         if not self._session_db:
@@ -9361,7 +9396,8 @@ class GatewayRunner:
             return "Session database not available."
 
         source = event.source
-        session_key = self._session_key_for_source(source)
+        _profile_name = self._profile_name_for_source(source)
+        session_key = self._session_key_for_source(source, profile_name=_profile_name)
         name = event.get_command_args().strip()
 
         if not name:
@@ -9405,7 +9441,7 @@ class GatewayRunner:
             logger.debug("Failed to resolve resume continuation for %s: %s", target_id, e)
 
         # Check if already on that session
-        current_entry = self.session_store.get_or_create_session(source)
+        current_entry = self.session_store.get_or_create_session(source, profile_name=_profile_name)
         if current_entry.session_id == target_id:
             return f"📌 Already on session **{name}**."
 
@@ -9448,10 +9484,11 @@ class GatewayRunner:
             return "Session database not available."
 
         source = event.source
-        session_key = self._session_key_for_source(source)
+        _profile_name = self._profile_name_for_source(source)
+        session_key = self._session_key_for_source(source, profile_name=_profile_name)
 
         # Load the current session and its transcript
-        current_entry = self.session_store.get_or_create_session(source)
+        current_entry = self.session_store.get_or_create_session(source, profile_name=_profile_name)
         history = self.session_store.load_transcript(current_entry.session_id)
         if not history:
             return "No conversation to branch — send a message first."
@@ -9539,7 +9576,8 @@ class GatewayRunner:
         available whenever the user asks, not only while the agent is running.
         """
         source = event.source
-        session_key = self._session_key_for_source(source)
+        _profile_name = self._profile_name_for_source(source)
+        session_key = self._session_key_for_source(source, profile_name=_profile_name)
 
         # Try running agent first (mid-turn), then cached agent (between turns)
         agent = self._running_agents.get(session_key)
@@ -9561,7 +9599,7 @@ class GatewayRunner:
         api_key = getattr(agent, "api_key", None) if agent and agent is not _AGENT_PENDING_SENTINEL else None
         if not provider and getattr(self, "_session_db", None) is not None:
             try:
-                _entry_for_billing = self.session_store.get_or_create_session(source)
+                _entry_for_billing = self.session_store.get_or_create_session(source, profile_name=_profile_name)
                 persisted = self._session_db.get_session(_entry_for_billing.session_id) or {}
             except Exception:
                 persisted = {}
@@ -9648,7 +9686,7 @@ class GatewayRunner:
             return "\n".join(lines)
 
         # No agent at all -- check session history for a rough count
-        session_entry = self.session_store.get_or_create_session(source)
+        session_entry = self.session_store.get_or_create_session(source, profile_name=_profile_name)
         history = self.session_store.load_transcript(session_entry.session_id)
         if history:
             from agent.model_metadata import estimate_messages_tokens_rough
@@ -9734,7 +9772,8 @@ class GatewayRunner:
         Users can also skip the confirm by flipping the config key directly.
         """
         source = event.source
-        session_key = self._session_key_for_source(source)
+        _profile_name = self._profile_name_for_source(source)
+        session_key = self._session_key_for_source(source, profile_name=_profile_name)
 
         # Read the gate fresh from disk so a prior "always" click takes
         # effect on the next invocation without restarting the gateway.
@@ -9854,7 +9893,7 @@ class GatewayRunner:
                 "content": f"[IMPORTANT: MCP servers have been reloaded. {change_detail}{tool_summary}. The tool list for this conversation has been updated accordingly.]",
             }
             try:
-                session_entry = self.session_store.get_or_create_session(event.source)
+                session_entry = self.session_store.get_or_create_session(event.source, profile_name=self._profile_name_for_source(event.source))
                 self.session_store.append_to_transcript(
                     session_entry.session_id, reload_msg
                 )
@@ -9953,7 +9992,7 @@ class GatewayRunner:
             sections.append("Use skills_list to see the updated catalog.]")
             note = "\n".join(sections)
 
-            session_key = self._session_key_for_source(event.source)
+            session_key = self._session_key_for_source(event.source, profile_name=self._profile_name_for_source(event.source))
             if not hasattr(self, "_pending_skills_reload_notes"):
                 self._pending_skills_reload_notes = {}
             if session_key:
@@ -10005,7 +10044,8 @@ class GatewayRunner:
         from tools import slash_confirm as _slash_confirm_mod
 
         source = event.source
-        session_key = self._session_key_for_source(source)
+        _profile_name = self._profile_name_for_source(source)
+        session_key = self._session_key_for_source(source, profile_name=_profile_name)
         confirm_id = f"{next(self._slash_confirm_counter)}"
 
         # Register the pending confirm FIRST so a super-fast button click
@@ -10088,7 +10128,8 @@ class GatewayRunner:
             /approve all always   — approve all + remember permanently
         """
         source = event.source
-        session_key = self._session_key_for_source(source)
+        _profile_name = self._profile_name_for_source(source)
+        session_key = self._session_key_for_source(source, profile_name=_profile_name)
 
         from tools.approval import (
             resolve_gateway_approval, has_blocking_approval,
@@ -10137,7 +10178,8 @@ class GatewayRunner:
         ``/deny`` denies the oldest; ``/deny all`` denies everything.
         """
         source = event.source
-        session_key = self._session_key_for_source(source)
+        _profile_name = self._profile_name_for_source(source)
+        session_key = self._session_key_for_source(source, profile_name=_profile_name)
 
         from tools.approval import (
             resolve_gateway_approval, has_blocking_approval,
@@ -10266,7 +10308,7 @@ class GatewayRunner:
         pending_path = _hermes_home / ".update_pending.json"
         output_path = _hermes_home / ".update_output.txt"
         exit_code_path = _hermes_home / ".update_exit_code"
-        session_key = self._session_key_for_source(event.source)
+        session_key = self._session_key_for_source(event.source, profile_name=self._profile_name_for_source(event.source))
         pending = {
             "platform": event.source.platform.value,
             "chat_id": event.source.chat_id,
@@ -13660,6 +13702,7 @@ class GatewayRunner:
                         event=pending_event,
                         source=next_source,
                         history=updated_history,
+                        profile_name=profile_name,
                     )
                     if next_message is None:
                         return result

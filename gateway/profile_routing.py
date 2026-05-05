@@ -11,7 +11,7 @@ Configuration example (config.yaml)::
       profile_routes:
         - name: trader
           platform: discord
-          chat_id: "1467470389465583668"
+          chat_id: "YOUR_CHANNEL_ID"
           profile: trader
           enabled: true
 
@@ -130,9 +130,11 @@ def match_profile_route(
             if route.chat_id and source.chat_id != route.chat_id:
                 continue
             return route
-        # If chat_id specified (no thread_id), chat_id must match
+        # If chat_id specified (no thread_id), chat_id must match.
+        # For threads, also check parent_chat_id so a route on a parent
+        # channel matches all threads under it.
         if route.chat_id:
-            if source.chat_id != route.chat_id:
+            if source.chat_id != route.chat_id and source.parent_chat_id != route.chat_id:
                 continue
             return route
         # If only user_id specified

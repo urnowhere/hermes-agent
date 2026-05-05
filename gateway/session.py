@@ -743,12 +743,13 @@ class SessionStore:
                 logger.debug("Could not remove temp file %s: %s", tmp_path, e)
             raise
     
-    def _generate_session_key(self, source: SessionSource) -> str:
+    def _generate_session_key(self, source: SessionSource, profile_name: Optional[str] = None) -> str:
         """Generate a session key from a source."""
         return build_session_key(
             source,
             group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
             thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
+            profile_name=profile_name,
         )
     
     def _is_session_expired(self, entry: SessionEntry) -> bool:
@@ -789,17 +790,17 @@ class SessionStore:
 
         return False
 
-    def _should_reset(self, entry: SessionEntry, source: SessionSource) -> Optional[str]:
+    def _should_reset(self, entry: SessionEntry, source: SessionSource, profile_name: Optional[str] = None) -> Optional[str]:
         """
         Check if a session should be reset based on policy.
-        
+
         Returns the reset reason ("idle" or "daily") if a reset is needed,
         or None if the session is still valid.
-        
+
         Sessions with active background processes are never reset.
         """
         if self._has_active_processes_fn:
-            session_key = self._generate_session_key(source)
+            session_key = self._generate_session_key(source, profile_name=profile_name)
             if self._has_active_processes_fn(session_key):
                 return None
 
@@ -858,7 +859,8 @@ class SessionStore:
     def get_or_create_session(
         self,
         source: SessionSource,
-        force_new: bool = False
+        force_new: bool = False,
+        profile_name: Optional[str] = None,
     ) -> SessionEntry:
         """
         Get an existing session or create a new one.
@@ -866,7 +868,7 @@ class SessionStore:
         Evaluates reset policy to determine if the existing session is stale.
         Creates a session record in SQLite when a new session starts.
         """
-        session_key = self._generate_session_key(source)
+        session_key = self._generate_session_key(source, profile_name=profile_name)
         now = _now()
 
         # SQLite calls are made outside the lock to avoid holding it during I/O.
@@ -899,7 +901,7 @@ class SessionStore:
                     self._save()
                     return entry
                 else:
-                    reset_reason = self._should_reset(entry, source)
+                    reset_reason = self._should_reset(entry, source, profile_name=profile_name)
                 if not reset_reason:
                     entry.updated_at = now
                     self._save()
