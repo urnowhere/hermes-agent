@@ -1942,27 +1942,20 @@ def build_anthropic_kwargs(
         for _sampling_key in ("temperature", "top_p", "top_k"):
             kwargs.pop(_sampling_key, None)
 
-    # ── Fast mode (Opus 4.6 only) ────────────────────────────────────
-    # Adds extra_body.speed="fast" + the fast-mode beta header for ~2.5x
-    # output speed. Per Anthropic docs, fast mode is only supported on
-    # Opus 4.6 — Opus 4.7 and other models 400 on the speed parameter.
-    # Only for native Anthropic endpoints — third-party providers would
-    # reject the unknown beta header and speed parameter.
-    if (
-        fast_mode
-        and not _is_third_party_anthropic_endpoint(base_url)
-        and _supports_fast_mode(model)
-    ):
-        kwargs.setdefault("extra_body", {})["speed"] = "fast"
-        # Build extra_headers with ALL applicable betas (the per-request
-        # extra_headers override the client-level anthropic-beta header).
+    # ── Fast mode / per-request beta headers ──────────────────────────
+    # Per-request extra_headers override client-level anthropic-beta headers,
+    # so fast-mode callers must carry the common betas even when the target
+    # model does not accept extra_body.speed="fast" (e.g. Opus 4.7).
+    if fast_mode and not _is_third_party_anthropic_endpoint(base_url):
         betas = list(_common_betas_for_base_url(
             base_url,
             drop_context_1m_beta=drop_context_1m_beta,
         ))
         if is_oauth:
             betas.extend(_OAUTH_ONLY_BETAS)
-        betas.append(_FAST_MODE_BETA)
+        if _supports_fast_mode(model):
+            kwargs.setdefault("extra_body", {})["speed"] = "fast"
+            betas.append(_FAST_MODE_BETA)
         kwargs["extra_headers"] = {"anthropic-beta": ",".join(betas)}
 
     return kwargs
