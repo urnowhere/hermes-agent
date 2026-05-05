@@ -705,3 +705,103 @@ class TestChatCompletionsCacheStats:
         r = SimpleNamespace(usage=SimpleNamespace(prompt_tokens_details=details))
         result = transport.extract_cache_stats(r)
         assert result == {"cached_tokens": 500, "creation_tokens": 100}
+
+
+class TestChatCompletionsMistralRoleAlternation:
+    """Mistral rejects ``tool`` -> ``user`` transitions with HTTP 400.
+
+    Insert a synthetic single-space assistant turn between any tool result and
+    the next user message when the model is a Mistral variant. Other providers
+    tolerate the same sequence, so the patch must NOT fire for them. (#20154)
+    """
+
+    @pytest.fixture
+    def tool_then_user(self):
+        return [
+            {"role": "user", "content": "find me README"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "search_files", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "README.md"},
+            {"role": "user", "content": "now open it"},
+        ]
+
+    def test_mistral_inserts_assistant_between_tool_and_user(self, transport, tool_then_user):
+        kw = transport.build_kwargs(
+            model="mistralai/mistral-small-4-119b-2603",
+            messages=tool_then_user,
+        )
+        roles = [m["role"] for m in kw["messages"]]
+        assert roles == ["user", "assistant", "tool", "assistant", "user"]
+        # Synthetic message uses a non-empty space — some Mistral endpoints
+        # reject empty content.
+        assert kw["messages"][3] == {"role": "assistant", "content": " "}
+
+    def test_bare_mistral_slug_also_patched(self, transport, tool_then_user):
+        kw = transport.build_kwargs(
+            model="mistral-large-latest",
+            messages=tool_then_user,
+        )
+        roles = [m["role"] for m in kw["messages"]]
+        assert roles == ["user", "assistant", "tool", "assistant", "user"]
+
+    def test_aggregator_prefix_mistral_also_patched(self, transport, tool_then_user):
+        kw = transport.build_kwargs(
+            model="openrouter/mistralai/mistral-large-2411",
+            messages=tool_then_user,
+        )
+        roles = [m["role"] for m in kw["messages"]]
+        assert roles == ["user", "assistant", "tool", "assistant", "user"]
+
+    def test_provider_profile_path_mistral_is_patched(self, transport, tool_then_user):
+        from providers import get_provider_profile
+
+        kw = transport.build_kwargs(
+            model="mistralai/mistral-small-4-119b-2603",
+            messages=tool_then_user,
+            provider_profile=get_provider_profile("nvidia"),
+        )
+        roles = [m["role"] for m in kw["messages"]]
+        assert roles == ["user", "assistant", "tool", "assistant", "user"]
+
+    def test_openai_not_patched(self, transport, tool_then_user):
+        kw = transport.build_kwargs(model="gpt-4o", messages=tool_then_user)
+        roles = [m["role"] for m in kw["messages"]]
+        assert roles == ["user", "assistant", "tool", "user"]
+
+    def test_anthropic_not_patched(self, transport, tool_then_user):
+        kw = transport.build_kwargs(
+            model="anthropic/claude-sonnet-4.6",
+            messages=tool_then_user,
+        )
+        roles = [m["role"] for m in kw["messages"]]
+        assert roles == ["user", "assistant", "tool", "user"]
+
+    def test_nemotron_not_patched(self, transport, tool_then_user):
+        kw = transport.build_kwargs(
+            model="nvidia/llama-3.3-nemotron-super-49b-v1",
+            messages=tool_then_user,
+        )
+        roles = [m["role"] for m in kw["messages"]]
+        assert roles == ["user", "assistant", "tool", "user"]
+
+    def test_mistral_no_tool_user_pair_is_passthrough(self, transport):
+        msgs = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+            {"role": "user", "content": "bye"},
+        ]
+        kw = transport.build_kwargs(
+            model="mistralai/mistral-small-4-119b-2603",
+            messages=msgs,
+        )
+        # No insertion — no tool->user transition exists.
+        assert [m["role"] for m in kw["messages"]] == ["user", "assistant", "user"]
