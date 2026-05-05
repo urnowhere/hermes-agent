@@ -336,6 +336,7 @@ def apply_ipv4_preference(force: bool = False) -> None:
         return _original_getaddrinfo(host, port, family, type, proto, flags)
 
     _ipv4_getaddrinfo._hermes_ipv4_patched = True  # type: ignore[attr-defined]
+    _ipv4_getaddrinfo._hermes_ipv4_original = _original_getaddrinfo  # type: ignore[attr-defined]
     socket.getaddrinfo = _ipv4_getaddrinfo  # type: ignore[assignment]
 
 
