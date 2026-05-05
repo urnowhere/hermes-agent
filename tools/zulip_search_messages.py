@@ -50,6 +50,57 @@ def _check_zulip_search_requirements() -> bool:
     return False
 
 
+def _get_session_narrow() -> Optional[List[List[str]]]:
+    """Build a narrow filter from the current Zulip session context.
+
+    When the tool is invoked from within a Zulip gateway session (i.e. the
+    agent is handling a message that arrived from Zulip), this restricts
+    the search to the *current conversation only* — the stream+topic or DM
+    that the user is talking to the bot in.  This prevents a user in a
+    private DM from asking the bot to exfiltrate messages from streams or
+    other DMs the bot is subscribed to.
+
+    Returns ``None`` when the tool is called from CLI or other platforms,
+    in which case the caller's own credentials/permissions apply.
+    """
+    try:
+        from gateway.session_context import get_session_env
+    except Exception:
+        return None
+
+    platform = get_session_env("HERMES_SESSION_PLATFORM", "")
+    if platform != "zulip":
+        return None
+
+    chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")
+    chat_name = get_session_env("HERMES_SESSION_CHAT_NAME", "")
+    if not chat_id:
+        return None
+
+    # DM: "dm:alice@example.com"
+    if chat_id.startswith("dm:") and "@" in chat_id:
+        email = chat_id[3:]  # strip "dm:" prefix
+        return [["pm-with", email]]
+
+    # Group DM: "group_dm:alice@example.com,bob@example.com"
+    if chat_id.startswith("group_dm:"):
+        emails = chat_id[9:]  # strip "group_dm:" prefix
+        if emails:
+            return [["pm-with", emails]]
+
+    # Stream: "{stream_id}:{topic}"
+    colon = chat_id.find(":")
+    if colon > 0:
+        stream_part = chat_id[:colon]
+        if stream_part.isdigit():
+            topic = chat_id[colon + 1 :] or "(no topic)"
+            stream_name = chat_name or ""
+            if stream_name:
+                return [["stream", stream_name], ["topic", topic]]
+
+    return None
+
+
 def zulip_search_messages(
     stream: Optional[str] = None,
     topic: Optional[str] = None,
@@ -66,12 +117,23 @@ def zulip_search_messages(
     Supports narrowing by stream, topic, full-text search, and pagination
     via message ID anchors.
 
+    **Security note:** When this tool is called from within a Zulip gateway
+    session (i.e. the user is talking to the bot via Zulip), the search is
+    automatically restricted to the *current conversation only*.  A user in
+    a DM cannot ask the bot to search streams or other DMs.  When called
+    from CLI or other platforms, the full search scope is available.
+
     Args:
         stream: Stream name to narrow to (e.g. ``"general"``). Optional.
+                Ignored when called from a Zulip session (restricted to
+                current conversation).
         topic: Topic name to narrow to (e.g. ``"database"``). Optional.
+               Ignored when called from a Zulip session.
         query: Full-text search using Zulip's search syntax.
                Supports operators like ``sender:alice@example.com``,
                ``has:link``, ``is:starred``, ``near:<id>``, etc. Optional.
+               ``stream:`` and ``pm-with:`` operators are stripped when
+               called from a Zulip session to prevent scope escalation.
         anchor: Message ID to anchor around, or ``"newest"`` / ``"oldest"``.
                 Defaults to ``"newest"`` (most recent messages).
         num_before: Number of messages to fetch before the anchor. Default 20.
@@ -107,12 +169,25 @@ def zulip_search_messages(
 
     # Build the narrow filter.
     narrow: List[List[str]] = []
-    if stream:
-        narrow.append(["stream", stream])
-    if topic:
-        narrow.append(["topic", topic])
-    if query:
-        narrow.append(["search", query])
+
+    # When in a Zulip session, restrict to current conversation only.
+    session_narrow = _get_session_narrow()
+    if session_narrow is not None:
+        narrow = list(session_narrow)
+        # Sanitize query to prevent scope escalation via search operators.
+        if query:
+            import re
+            sanitized = re.sub(r"\b(stream|pm-with):\S+", "", query).strip()
+            if sanitized:
+                narrow.append(["search", sanitized])
+    else:
+        # CLI / non-Zulip session — caller controls scope.
+        if stream:
+            narrow.append(["stream", stream])
+        if topic:
+            narrow.append(["topic", topic])
+        if query:
+            narrow.append(["search", query])
 
     # Resolve anchor.
     anchor_value: Any = anchor if anchor else "newest"

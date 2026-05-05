@@ -263,3 +263,169 @@ class TestZulipSearchMessages:
         assert call_args["anchor"] == "500"
         assert call_args["num_before"] == 5
         assert call_args["num_after"] == 5
+
+
+class TestZulipSearchSessionRestriction:
+    """Verify that searches from Zulip sessions are restricted to the current conversation.
+
+    This prevents a user in a private DM from asking the bot to exfiltrate
+    messages from streams or other DMs the bot is subscribed to.
+    """
+
+    def test_stream_session_restricts_to_current_topic(self, monkeypatch):
+        """When in a stream session, search is restricted to that stream+topic."""
+        _set_zulip_env(monkeypatch)
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "zulip")
+        monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "123:database")
+        monkeypatch.setenv("HERMES_SESSION_CHAT_NAME", "engineering")
+
+        mock_client = MagicMock()
+        mock_client.get_messages.return_value = {
+            "result": "success",
+            "messages": _make_messages(2),
+            "found_newest": True,
+            "found_oldest": True,
+        }
+
+        with patch("zulip.Client", return_value=mock_client):
+            # Agent tries to search a different stream — should be overridden.
+            result = zulip_search_messages(stream="general", topic="other")
+
+        data = json.loads(result)
+        assert data["count"] == 2
+
+        call_args = mock_client.get_messages.call_args[0][0]
+        # Should be restricted to current session's stream+topic, not agent's params.
+        assert call_args["narrow"] == [
+            ["stream", "engineering"],
+            ["topic", "database"],
+        ]
+
+    def test_dm_session_restricts_to_current_dm(self, monkeypatch):
+        """When in a DM session, search is restricted to that DM."""
+        _set_zulip_env(monkeypatch)
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "zulip")
+        monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "dm:alice@example.com")
+        monkeypatch.setenv("HERMES_SESSION_CHAT_NAME", "alice@example.com")
+
+        mock_client = MagicMock()
+        mock_client.get_messages.return_value = {
+            "result": "success",
+            "messages": _make_messages(1),
+            "found_newest": True,
+            "found_oldest": True,
+        }
+
+        with patch("zulip.Client", return_value=mock_client):
+            # Agent tries to search a stream — should be overridden to DM.
+            result = zulip_search_messages(stream="general", query="hello")
+
+        data = json.loads(result)
+        assert data["count"] == 1
+
+        call_args = mock_client.get_messages.call_args[0][0]
+        assert call_args["narrow"] == [
+            ["pm-with", "alice@example.com"],
+            ["search", "hello"],
+        ]
+
+    def test_group_dm_session_restricts_to_current_group(self, monkeypatch):
+        """When in a group DM session, search is restricted to that group DM."""
+        _set_zulip_env(monkeypatch)
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "zulip")
+        monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "group_dm:alice@example.com,bob@example.com")
+        monkeypatch.setenv("HERMES_SESSION_CHAT_NAME", "alice@example.com, bob@example.com")
+
+        mock_client = MagicMock()
+        mock_client.get_messages.return_value = {
+            "result": "success",
+            "messages": _make_messages(1),
+            "found_newest": True,
+            "found_oldest": True,
+        }
+
+        with patch("zulip.Client", return_value=mock_client):
+            result = zulip_search_messages()
+
+        call_args = mock_client.get_messages.call_args[0][0]
+        assert call_args["narrow"] == [
+            ["pm-with", "alice@example.com,bob@example.com"],
+        ]
+
+    def test_non_zulip_session_allows_full_search(self, monkeypatch):
+        """When called from CLI (no Zulip session), agent's params are respected."""
+        _set_zulip_env(monkeypatch)
+        # No HERMES_SESSION_PLATFORM set — simulates CLI usage.
+
+        mock_client = MagicMock()
+        mock_client.get_messages.return_value = {
+            "result": "success",
+            "messages": _make_messages(1),
+            "found_newest": True,
+            "found_oldest": True,
+        }
+
+        with patch("zulip.Client", return_value=mock_client):
+            result = zulip_search_messages(stream="general", topic="database")
+
+        data = json.loads(result)
+        assert data["count"] == 1
+
+        call_args = mock_client.get_messages.call_args[0][0]
+        assert call_args["narrow"] == [
+            ["stream", "general"],
+            ["topic", "database"],
+        ]
+
+    def test_query_sanitization_strips_scope_operators(self, monkeypatch):
+        """stream: and pm-with: operators are stripped in restricted sessions."""
+        _set_zulip_env(monkeypatch)
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "zulip")
+        monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "123:database")
+        monkeypatch.setenv("HERMES_SESSION_CHAT_NAME", "engineering")
+
+        mock_client = MagicMock()
+        mock_client.get_messages.return_value = {
+            "result": "success",
+            "messages": _make_messages(1),
+            "found_newest": True,
+            "found_oldest": True,
+        }
+
+        with patch("zulip.Client", return_value=mock_client):
+            result = zulip_search_messages(
+                query="stream:general pm-with:alice@example.com postgresql"
+            )
+
+        call_args = mock_client.get_messages.call_args[0][0]
+        # Should have session narrow + sanitized query (scope operators removed).
+        assert call_args["narrow"] == [
+            ["stream", "engineering"],
+            ["topic", "database"],
+            ["search", "postgresql"],
+        ]
+
+    def test_query_sanitization_all_operators_removed(self, monkeypatch):
+        """If query contains only scope operators, no search narrow is added."""
+        _set_zulip_env(monkeypatch)
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", "zulip")
+        monkeypatch.setenv("HERMES_SESSION_CHAT_ID", "123:database")
+        monkeypatch.setenv("HERMES_SESSION_CHAT_NAME", "engineering")
+
+        mock_client = MagicMock()
+        mock_client.get_messages.return_value = {
+            "result": "success",
+            "messages": _make_messages(1),
+            "found_newest": True,
+            "found_oldest": True,
+        }
+
+        with patch("zulip.Client", return_value=mock_client):
+            result = zulip_search_messages(query="stream:general pm-with:bob@example.com")
+
+        call_args = mock_client.get_messages.call_args[0][0]
+        # Only session narrow — no search narrow since query was fully sanitized.
+        assert call_args["narrow"] == [
+            ["stream", "engineering"],
+            ["topic", "database"],
+        ]

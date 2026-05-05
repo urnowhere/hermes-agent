@@ -288,6 +288,12 @@ zulip_search_messages(stream="general", query="postgresql")
 zulip_search_messages(stream="general", topic="database", anchor="<oldest_message_id>", num_before=20)
 ```
 
+:::warning[Search scope is restricted to the current conversation]
+When the bot is talking to you **through Zulip** (DM, group DM, or stream), the `zulip_search_messages` tool is automatically restricted to the **current conversation only**. A user in a private DM cannot ask the bot to search messages from streams or other DMs the bot is subscribed to. This prevents the bot from being used as a proxy to exfiltrate content from conversations you don't have access to.
+
+When the bot is invoked from the **CLI** or other platforms, the full search scope is available (subject to the bot's own Zulip permissions).
+:::
+
 The response includes pagination hints (`oldest_message_id`, `newest_message_id`) so the bot can continue browsing without guesswork.
 
 :::tip
