@@ -955,6 +955,7 @@ def run_doctor(args):
         npm_dirs = [
             (PROJECT_ROOT, "Browser tools (agent-browser)"),
             (PROJECT_ROOT / "scripts" / "whatsapp-bridge", "WhatsApp bridge"),
+            (PROJECT_ROOT / "scripts" / "session-bridge", "Session bridge"),
         ]
         for npm_dir, label in npm_dirs:
             if not (npm_dir / "node_modules").exists():
@@ -984,6 +985,13 @@ def run_doctor(args):
                     check_ok(f"{label} deps", f"({moderate} moderate vulnerability(ies))")
             except Exception:
                 pass
+
+   # Session gateway checks
+    try:
+        from gateway.platforms.session import session_doctor_checks
+        fixed_count += session_doctor_checks(check_ok, check_fail, check_warn, issues, should_fix)
+    except ImportError:
+        pass
 
     # =========================================================================
     # Check: API connectivity
