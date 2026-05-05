@@ -42,7 +42,7 @@ import uuid
 from pathlib import Path
 
 _IS_WINDOWS = platform.system() == "Windows"
-from tools.environments.local import _find_shell, _sanitize_subprocess_env
+from tools.environments.local import _find_shell, _resolve_safe_cwd, _sanitize_subprocess_env
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -491,7 +491,7 @@ class ProcessRegistry:
             session_key=session_key,
             agent_profile=agent_profile,
             agent_hermes_home=agent_hermes_home,
-            cwd=cwd or os.getcwd(),
+            cwd=_resolve_safe_cwd(cwd or os.getcwd()),
             started_at=time.time(),
         )
 
