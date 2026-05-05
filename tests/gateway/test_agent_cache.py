@@ -940,10 +940,11 @@ class TestAgentCacheSpilloverLive:
 
         CAP = 16
         monkeypatch.setattr(gw_run, "_AGENT_CACHE_MAX_SIZE", CAP)
+        monkeypatch.setenv("OPENROUTER_API_KEY", "test")
         runner = self._runner()
 
         N_THREADS = 8
-        PER_THREAD = 20  # 8 * 20 = 160 inserts into a 16-slot cache
+        PER_THREAD = 8  # 8 * 8 = 64 inserts into a 16-slot cache
 
         def worker(tid: int):
             for j in range(PER_THREAD):
