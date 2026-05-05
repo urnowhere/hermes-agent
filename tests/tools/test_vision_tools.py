@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tools.vision_tools import (
+    _NATIVE_VISION_MARKER,
     _validate_image_url,
     _handle_vision_analyze,
     _determine_mime_type,
@@ -19,6 +20,8 @@ from tools.vision_tools import (
     _is_image_size_error,
     _MAX_BASE64_BYTES,
     _RESIZE_TARGET_BYTES,
+    native_vision_marker_payload,
+    parse_native_vision_marker,
     vision_analyze_tool,
     check_vision_requirements,
 )
@@ -168,6 +171,25 @@ class TestImageToBase64DataUrl:
 # ---------------------------------------------------------------------------
 # _handle_vision_analyze — type signature & behavior
 # ---------------------------------------------------------------------------
+
+
+class TestNativeVisionMarkers:
+    def test_marker_round_trip(self):
+        marker = native_vision_marker_payload(
+            image_url="/tmp/example.png",
+            text="inspect this image",
+            source="browser_vision",
+        )
+        assert marker.startswith(_NATIVE_VISION_MARKER)
+        parsed = parse_native_vision_marker(marker)
+        assert parsed == {
+            "image_url": "/tmp/example.png",
+            "text": "inspect this image",
+            "source": "browser_vision",
+        }
+
+    def test_parse_invalid_marker_returns_none(self):
+        assert parse_native_vision_marker("not-a-marker") is None
 
 
 class TestHandleVisionAnalyze:

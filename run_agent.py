@@ -176,6 +176,7 @@ from agent.trajectory import (
 )
 from utils import atomic_json_write, base_url_host_matches, base_url_hostname, env_var_enabled, normalize_proxy_url
 from hermes_cli.config import cfg_get
+from tools.vision_tools import parse_native_vision_marker
 
 
 
@@ -1321,6 +1322,7 @@ class AIAgent:
         # single tool loop does not repeatedly re-run auxiliary vision on the
         # same image history.
         self._anthropic_image_fallback_cache: Dict[str, str] = {}
+        self._native_vision_enabled = self._load_native_vision_enabled()
 
         # Initialize LLM client via centralized provider router.
         # The router handles auth resolution, base URL, headers, and
@@ -8037,7 +8039,54 @@ class AIAgent:
         except Exception:
             return False
 
+    @staticmethod
+    def _load_native_vision_enabled() -> bool:
+        try:
+            from hermes_cli.config import load_config
+            cfg = load_config()
+            return bool(cfg.get("auxiliary", {}).get("native_vision", False))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _message_content_to_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: List[str] = []
+            for part in content:
+                if isinstance(part, str) and part.strip():
+                    parts.append(part.strip())
+                elif isinstance(part, dict):
+                    text = str(part.get("text", "") or "").strip()
+                    if text:
+                        parts.append(text)
+            return "\n".join(parts).strip()
+        return str(content or "")
+
+    def _coerce_native_vision_content(self, content: Any, role: str) -> Any:
+        if not self._native_vision_enabled:
+            return content
+        marker = parse_native_vision_marker(content) if isinstance(content, str) else None
+        if not marker:
+            return content
+        text = marker.get("text", "").strip()
+        source = marker.get("source", "vision")
+        if not text:
+            text = f"[{source} attached an image for native vision.]"
+        return [
+            {"type": "text", "text": text},
+            {"type": "image_url", "image_url": {"url": marker["image_url"], "detail": "auto"}},
+        ]
+
+    def _prepare_message_content_for_api(self, content: Any, role: str) -> Any:
+        content = self._coerce_native_vision_content(content, role)
+        if self.api_mode == "anthropic_messages":
+            return self._preprocess_anthropic_content(content, role)
+        return content
+
     def _preprocess_anthropic_content(self, content: Any, role: str) -> Any:
+        content = self._coerce_native_vision_content(content, role)
         if not self._content_has_image_parts(content):
             return content
 
@@ -10991,6 +11040,10 @@ class AIAgent:
             api_messages = []
             for idx, msg in enumerate(messages):
                 api_msg = msg.copy()
+                api_msg["content"] = self._prepare_message_content_for_api(
+                    api_msg.get("content"),
+                    str(api_msg.get("role", "user") or "user"),
+                )
 
                 # Inject ephemeral context into the current turn's user message.
                 # Sources: memory manager prefetch + plugin pre_llm_call hooks

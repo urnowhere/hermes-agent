@@ -653,6 +653,30 @@ def _build_media_placeholder(event) -> str:
     return "\n".join(parts)
 
 
+def _native_vision_enabled() -> bool:
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        return bool(cfg.get("auxiliary", {}).get("native_vision", False))
+    except Exception:
+        return False
+
+
+def _make_native_vision_user_content(user_text: str, image_paths: List[str]) -> list[dict[str, Any]]:
+    content: list[dict[str, Any]] = []
+    text = str(user_text or "")
+    if text.strip():
+        content.append({"type": "text", "text": text})
+    elif image_paths:
+        content.append({"type": "text", "text": "The user sent image(s)."})
+    for path in image_paths:
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": str(path), "detail": "auto"},
+        })
+    return content
+
+
 def _dequeue_pending_event(adapter, session_key: str) -> MessageEvent | None:
     """Consume and return the full pending event for a session.
 
@@ -5584,7 +5608,7 @@ class GatewayRunner:
         event: MessageEvent,
         source: SessionSource,
         history: List[Dict[str, Any]],
-    ) -> Optional[str]:
+    ) -> Optional[Any]:
         """Prepare inbound event text for the agent.
 
         Keep the normal inbound path and the queued follow-up path on the same
@@ -11492,7 +11516,7 @@ class GatewayRunner:
         self,
         user_text: str,
         image_paths: List[str],
-    ) -> str:
+    ) -> Any:
         """
         Auto-analyze user-attached images with the vision tool and prepend
         the descriptions to the message text.
@@ -11509,6 +11533,9 @@ class GatewayRunner:
         Returns:
             The enriched message string with vision descriptions prepended.
         """
+        if _native_vision_enabled():
+            return _make_native_vision_user_content(user_text, image_paths)
+
         from tools.vision_tools import vision_analyze_tool
         from agent.memory_manager import sanitize_context
 

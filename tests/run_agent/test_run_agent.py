@@ -3995,6 +3995,45 @@ class TestAnthropicImageFallback:
         assert mock_vision.await_count == 1
 
 
+class TestNativeVisionMainModel:
+    def test_prepare_message_content_for_api_converts_native_marker_to_multimodal(self, agent):
+        agent.api_mode = "chat_completions"
+        agent._native_vision_enabled = True
+
+        prepared = agent._prepare_message_content_for_api(
+            "[[HERMES_NATIVE_VISION]]{\"image_url\":\"/tmp/test.png\",\"text\":\"inspect this screenshot\",\"source\":\"browser_vision\"}",
+            "tool",
+        )
+
+        assert isinstance(prepared, list)
+        assert prepared[0]["type"] == "text"
+        assert prepared[0]["text"] == "inspect this screenshot"
+        assert prepared[1]["type"] == "image_url"
+        assert prepared[1]["image_url"]["url"] == "/tmp/test.png"
+        assert prepared[1]["image_url"]["detail"] == "auto"
+
+    def test_prepare_message_content_for_api_keeps_anthropic_fallback_text(self, agent):
+        agent.api_mode = "anthropic_messages"
+        agent._native_vision_enabled = True
+
+        with patch.object(agent, "_describe_image_for_anthropic_fallback", return_value="[fallback description]"):
+            prepared = agent._prepare_message_content_for_api(
+                "[[HERMES_NATIVE_VISION]]{\"image_url\":\"/tmp/test.png\",\"text\":\"inspect this screenshot\",\"source\":\"browser_vision\"}",
+                "tool",
+            )
+
+        assert isinstance(prepared, str)
+        assert "fallback description" in prepared
+
+    def test_message_content_to_text_handles_multimodal_lists(self, agent):
+        text = agent._message_content_to_text([
+            {"type": "text", "text": "hello"},
+            {"type": "image_url", "image_url": {"url": "/tmp/test.png"}},
+            "world",
+        ])
+        assert text == "hello\nworld"
+
+
 class TestFallbackAnthropicProvider:
     """Bug fix: _try_activate_fallback had no case for anthropic provider."""
 

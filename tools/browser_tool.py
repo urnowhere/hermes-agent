@@ -69,6 +69,7 @@ from agent.auxiliary_client import call_llm
 from hermes_constants import get_hermes_home
 from utils import is_truthy_value
 from hermes_cli.config import cfg_get
+from tools.vision_tools import native_vision_marker_payload
 
 try:
     from tools.website_policy import check_website_access
@@ -205,6 +206,15 @@ def _get_command_timeout() -> int:
 def _get_vision_model() -> Optional[str]:
     """Model for browser_vision (screenshot analysis — multimodal)."""
     return os.getenv("AUXILIARY_VISION_MODEL", "").strip() or None
+
+
+def _native_vision_enabled() -> bool:
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        return bool(cfg.get("auxiliary", {}).get("native_vision", False))
+    except Exception:
+        return False
 
 
 def _get_extraction_model() -> Optional[str]:
@@ -2494,7 +2504,7 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
                     "role": "user",
                     "content": [
                         {"type": "text", "text": vision_prompt},
-                        {"type": "image_url", "image_url": {"url": data_url}},
+                        {"type": "image_url", "image_url": {"url": data_url, "detail": "auto"}},
                     ],
                 }
             ],
@@ -2535,6 +2545,12 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
             "analysis": analysis or "Vision analysis returned no content.",
             "screenshot_path": str(screenshot_path),
         }
+        if _native_vision_enabled():
+            response_data["native_vision"] = native_vision_marker_payload(
+                image_url=str(screenshot_path),
+                text=question,
+                source="browser_vision",
+            )
         # Include annotation data if annotated screenshot was taken
         if annotate and result.get("data", {}).get("annotations"):
             response_data["annotations"] = result["data"]["annotations"]

@@ -46,6 +46,41 @@ logger = logging.getLogger(__name__)
 
 _debug = DebugSession("vision_tools", env_var="VISION_TOOLS_DEBUG")
 
+_NATIVE_VISION_MARKER = "[[HERMES_NATIVE_VISION]]"
+
+
+def native_vision_marker_payload(*, image_url: str, text: str = "", source: str = "vision") -> str:
+    """Encode an image reference for models that can consume native vision blocks."""
+    payload = {
+        "image_url": str(image_url or ""),
+        "text": str(text or ""),
+        "source": str(source or "vision"),
+    }
+    return f"{_NATIVE_VISION_MARKER}{json.dumps(payload, ensure_ascii=False)}"
+
+
+def parse_native_vision_marker(text: str) -> Optional[Dict[str, str]]:
+    """Decode a native-vision marker payload embedded in text."""
+    if not isinstance(text, str) or not text.startswith(_NATIVE_VISION_MARKER):
+        return None
+    raw = text[len(_NATIVE_VISION_MARKER):].strip()
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    image_url = str(payload.get("image_url", "") or "").strip()
+    if not image_url:
+        return None
+    return {
+        "image_url": image_url,
+        "text": str(payload.get("text", "") or ""),
+        "source": str(payload.get("source", "vision") or "vision"),
+    }
+
 # Configurable HTTP download timeout for _download_image().
 # Separate from auxiliary.vision.timeout which governs the LLM API call.
 # Resolution: config.yaml auxiliary.vision.download_timeout → env var → 30s default.
@@ -250,6 +285,15 @@ def _determine_mime_type(image_path: Path) -> str:
         '.svg': 'image/svg+xml'
     }
     return mime_types.get(extension, 'image/jpeg')
+
+
+def _native_vision_enabled() -> bool:
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        return bool(cfg.get("auxiliary", {}).get("native_vision", False))
+    except Exception:
+        return False
 
 
 def _image_to_base64_data_url(image_path: Path, mime_type: Optional[str] = None) -> str:
@@ -543,7 +587,8 @@ async def vision_analyze_tool(
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": image_data_url
+                            "url": image_data_url,
+                            "detail": "auto",
                         }
                     }
                 ]
@@ -615,6 +660,12 @@ async def vision_analyze_tool(
             "success": True,
             "analysis": analysis or "There was a problem with the request and the image could not be analyzed."
         }
+        if _native_vision_enabled():
+            result["native_vision"] = native_vision_marker_payload(
+                image_url=image_url,
+                text=user_prompt,
+                source="vision_analyze",
+            )
         
         debug_call_data["success"] = True
         debug_call_data["analysis_length"] = analysis_length

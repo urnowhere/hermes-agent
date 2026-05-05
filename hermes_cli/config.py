@@ -683,6 +683,7 @@ DEFAULT_CONFIG = {
     # All tasks fall back to openrouter:google/gemini-3-flash-preview if
     # the configured provider is unavailable.
     "auxiliary": {
+        "native_vision": False,  # when true, pass image blocks to the main model instead of forcing auxiliary OCR text
         "vision": {
             "provider": "auto",    # auto | openrouter | nous | codex | custom
             "model": "",           # e.g. "google/gemini-2.5-flash", "gpt-4o"

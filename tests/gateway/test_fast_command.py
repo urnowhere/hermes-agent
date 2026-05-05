@@ -83,6 +83,31 @@ def _make_event(text: str) -> MessageEvent:
     return MessageEvent(text=text, source=_make_source(), message_id="m1")
 
 
+def test_make_native_vision_user_content_builds_multimodal_blocks():
+    content = gateway_run._make_native_vision_user_content("describe this", ["/tmp/image.png"])
+    assert content == [
+        {"type": "text", "text": "describe this"},
+        {"type": "image_url", "image_url": {"url": "/tmp/image.png", "detail": "auto"}},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_enrich_message_with_vision_returns_native_blocks_when_enabled(monkeypatch):
+    runner = _make_runner()
+    monkeypatch.setattr(gateway_run, "_native_vision_enabled", lambda: True)
+
+    result = await gateway_run.GatewayRunner._enrich_message_with_vision(
+        runner,
+        "caption",
+        ["/tmp/image.png"],
+    )
+
+    assert result == [
+        {"type": "text", "text": "caption"},
+        {"type": "image_url", "image_url": {"url": "/tmp/image.png", "detail": "auto"}},
+    ]
+
+
 def test_turn_route_injects_priority_processing_without_changing_runtime():
     runner = _make_runner()
     runner._service_tier = "priority"
