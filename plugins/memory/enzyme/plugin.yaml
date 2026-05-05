@@ -1,0 +1,7 @@
+name: enzyme
+version: 0.4.4
+description: "Vault intelligence — concept graph and semantic search over markdown notes. Surfaces connections between ideas, finds latent patterns across notes."
+pip_dependencies:
+  - enzyme-python-package
+hooks:
+  - on_session_end
