@@ -25,6 +25,13 @@ COPY --chmod=0755 --from=uv_source /usr/local/bin/uv /usr/local/bin/uvx /usr/loc
 
 WORKDIR /opt/hermes
 
+RUN groupadd --gid 1000 hermes && \
+    useradd --uid 1000 --gid 1000 --shell /bin/bash --create-home hermes && \
+    chown -R hermes:hermes /opt/hermes
+RUN mkdir -p /opt/data && chown hermes:hermes /opt/data
+
+USER hermes:hermes
+
 # ---------- Layer-cached dependency install ----------
 # Copy only package manifests first so npm install + Playwright are cached
 # unless the lockfiles themselves change.
