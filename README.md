@@ -37,7 +37,7 @@ Works on Linux, macOS, WSL2, and Android via Termux. The installer handles the p
 
 > **Android / Termux:** The tested manual path is documented in the [Termux guide](https://hermes-agent.nousresearch.com/docs/getting-started/termux). On Termux, Hermes installs a curated `.[termux]` extra because the full `.[all]` extra currently pulls Android-incompatible voice dependencies.
 >
-> **Windows:** Native Windows is not supported. Please install [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) and run the command above.
+> **Windows:** Native Windows support is experimental. See [Windows Installation](#windows-installation) below. For best compatibility, WSL2 is still recommended.
 
 After installation:
 
@@ -170,6 +170,29 @@ scripts/run_tests.sh
 - 📚 [Skills Hub](https://agentskills.io)
 - 🐛 [Issues](https://github.com/NousResearch/hermes-agent/issues)
 - 🔌 [HermesClaw](https://github.com/AaronWong1999/hermesclaw) — Community WeChat bridge: Run Hermes Agent and OpenClaw on the same WeChat account.
+
+---
+
+## Windows Installation
+
+Native Windows support is experimental. To install on Windows:
+
+```powershell
+# Run in PowerShell as Administrator
+irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1 | iex
+```
+
+### Requirements
+- Windows 10/11 64-bit
+- Python 3.11+ (installed from python.org or Microsoft Store)
+- PowerShell 5.1 or PowerShell 7+
+
+### Known Limitations
+- Some terminal features may have reduced functionality compared to Unix
+- Path handling across different drives (C:, D:) has edge cases
+- Background process management uses Windows-specific APIs
+
+For full compatibility, WSL2 is still recommended.
 
 ---
 
