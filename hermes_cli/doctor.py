@@ -12,6 +12,7 @@ import importlib.util
 from pathlib import Path
 
 from hermes_cli.config import get_project_root, get_hermes_home, get_env_path
+from hermes_cli.path_env import ensure_common_tool_paths
 from hermes_constants import display_hermes_home
 
 PROJECT_ROOT = get_project_root()
@@ -804,6 +805,12 @@ def run_doctor(args):
     # =========================================================================
     # Check: External tools
     # =========================================================================
+    # Non-interactive launchers often miss shell-initialized tool directories
+    # (for example mise/asdf/nvm shims or Homebrew). Add conservative fallbacks
+    # before checking external tools so doctor matches what users can run from
+    # an interactive shell without requiring a wrapper script around Hermes.
+    ensure_common_tool_paths()
+
     print()
     print(color("◆ External Tools", Colors.CYAN, Colors.BOLD))
     
