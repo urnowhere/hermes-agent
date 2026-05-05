@@ -56,7 +56,9 @@ from gateway.platforms.base import (
     cache_audio_from_url,
     cache_audio_from_bytes,
     cache_document_from_bytes,
+    cache_video_from_bytes,
     SUPPORTED_DOCUMENT_TYPES,
+    SUPPORTED_VIDEO_TYPES,
 )
 from tools.url_safety import is_safe_url
 
@@ -3913,6 +3915,34 @@ class DiscordAdapter(BasePlatformAdapter):
                     print(f"[Discord] Cached user audio: {cached_path}", flush=True)
                 except Exception as e:
                     print(f"[Discord] Failed to cache audio attachment: {e}", flush=True)
+                    media_urls.append(att.url)
+                    media_types.append(content_type)
+            elif content_type.startswith("video/"):
+                try:
+                    ext = "." + content_type.split("/")[-1].split(";")[0]
+                    if ext not in SUPPORTED_VIDEO_TYPES:
+                        ext = ".mp4"
+                    raw_bytes = await self._read_attachment_bytes(att)
+                    if raw_bytes is not None:
+                        cached_path = cache_video_from_bytes(raw_bytes, ext)
+                    else:
+                        if not is_safe_url(att.url):
+                            raise ValueError(f"Blocked unsafe video URL (SSRF): {att.url}")
+                        import aiohttp
+                        from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
+                        _proxy = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
+                        _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
+                        async with aiohttp.ClientSession(**_sess_kw) as session:
+                            async with session.get(att.url, timeout=aiohttp.ClientTimeout(total=60), **_req_kw) as resp:
+                                if resp.status != 200:
+                                    raise Exception(f"HTTP {resp.status}")
+                                raw_bytes = await resp.read()
+                        cached_path = cache_video_from_bytes(raw_bytes, ext)
+                    media_urls.append(cached_path)
+                    media_types.append(content_type)
+                    logger.info("[Discord] Cached user video: %s", cached_path)
+                except Exception as e:
+                    logger.warning("[Discord] Failed to cache video attachment: %s", e, exc_info=True)
                     media_urls.append(att.url)
                     media_types.append(content_type)
             else:

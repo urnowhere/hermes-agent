@@ -67,6 +67,9 @@ from gateway.platforms.discord import DiscordAdapter  # noqa: E402
 _PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
 _OGG_BYTES = b"OggS" + b"\x00" * 60
 _PDF_BYTES = b"%PDF-1.4\n" + b"fake pdf body" + b"\n%%EOF"
+# cache_video_from_bytes does no validation; any bytes work. We mock the
+# helper itself in tests anyway, so this is purely a sentinel payload.
+_VIDEO_BYTES = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 64
 
 
 def _make_adapter() -> DiscordAdapter:
@@ -358,3 +361,193 @@ class TestHandleMessageUsesAuthenticatedRead:
         event = adapter.handle_message.call_args[0][0]
         assert event.media_urls == ["/tmp/img_from_read.png"]
         assert event.media_types == ["image/png"]
+
+
+# ---------------------------------------------------------------------------
+# Integration: video attachments via _handle_message
+#
+# The inbound-video handler is inlined in ``_handle_message`` (no
+# ``_cache_discord_video`` helper exists yet), so all coverage lives here.
+# Mirrors the three branches the handler exposes:
+#
+#   1. ``att.read()`` returns bytes  → ``cache_video_from_bytes`` (primary)
+#   2. ``att.read()`` returns ``None`` and ``is_safe_url`` accepts the URL
+#                                    → aiohttp fallback download
+#   3. ``att.read()`` returns ``None`` and ``is_safe_url`` rejects the URL
+#                                    → SSRF block, raw URL passed through
+# ---------------------------------------------------------------------------
+
+
+def _build_video_message(monkeypatch, att) -> SimpleNamespace:
+    """Build a minimal Discord DM message stub carrying a single attachment."""
+    from datetime import datetime, timezone
+
+    class _FakeDMChannel:
+        id = 100
+        name = "dm"
+
+    monkeypatch.setattr(
+        "gateway.platforms.discord.discord.DMChannel",
+        _FakeDMChannel,
+    )
+    chan = _FakeDMChannel()
+    return SimpleNamespace(
+        id=1,
+        content="",
+        attachments=[att],
+        mentions=[],
+        reference=None,
+        created_at=datetime.now(timezone.utc),
+        channel=chan,
+        author=SimpleNamespace(id=42, display_name="U", name="U"),
+    )
+
+
+class TestHandleMessageVideoAttachment:
+    """E2E: inbound video attachments cache locally instead of leaking the
+    bare CDN URL downstream (PR #13150)."""
+
+    @pytest.mark.asyncio
+    async def test_video_mp4_via_att_read(self, monkeypatch):
+        """Happy path: ``video/mp4`` with ``.read()`` bytes is cached;
+        ``cache_video_from_bytes`` is invoked and the cached path lands in
+        ``event.media_urls``. No aiohttp / SSRF gate involvement."""
+        adapter = _make_adapter()
+        adapter._client = SimpleNamespace(user=SimpleNamespace(id=999))
+        adapter.handle_message = AsyncMock()
+
+        att = SimpleNamespace(
+            url="https://cdn.discordapp.com/attachments/fake/clip.mp4",
+            filename="clip.mp4",
+            content_type="video/mp4",
+            size=len(_VIDEO_BYTES),
+            read=AsyncMock(return_value=_VIDEO_BYTES),
+        )
+        msg = _build_video_message(monkeypatch, att)
+
+        with patch(
+            "gateway.platforms.discord.cache_video_from_bytes",
+            return_value="/tmp/clip.mp4",
+        ) as mock_bytes, patch("aiohttp.ClientSession") as mock_session:
+            await adapter._handle_message(msg)
+
+        mock_bytes.assert_called_once_with(_VIDEO_BYTES, ".mp4")
+        att.read.assert_awaited_once()
+        # Primary path must not contact aiohttp.
+        mock_session.assert_not_called()
+
+        event = adapter.handle_message.call_args[0][0]
+        assert event.media_urls == ["/tmp/clip.mp4"]
+        assert event.media_types == ["video/mp4"]
+
+    @pytest.mark.asyncio
+    async def test_unknown_video_subtype_defaults_to_mp4_extension(
+        self, monkeypatch
+    ):
+        """``video/x-matroska`` produces a naive ext of ``.x-matroska``,
+        which isn't in ``SUPPORTED_VIDEO_TYPES``. The handler falls back to
+        ``.mp4`` for the on-disk file extension while leaving the reported
+        media_type untouched (so downstream code still sees the real mime)."""
+        adapter = _make_adapter()
+        adapter._client = SimpleNamespace(user=SimpleNamespace(id=999))
+        adapter.handle_message = AsyncMock()
+
+        att = SimpleNamespace(
+            url="https://cdn.discordapp.com/attachments/fake/clip.mkv",
+            filename="clip.mkv",
+            content_type="video/x-matroska",
+            size=len(_VIDEO_BYTES),
+            read=AsyncMock(return_value=_VIDEO_BYTES),
+        )
+        msg = _build_video_message(monkeypatch, att)
+
+        with patch(
+            "gateway.platforms.discord.cache_video_from_bytes",
+            return_value="/tmp/clip.mp4",
+        ) as mock_bytes:
+            await adapter._handle_message(msg)
+
+        mock_bytes.assert_called_once_with(_VIDEO_BYTES, ".mp4")
+        event = adapter.handle_message.call_args[0][0]
+        assert event.media_types == ["video/x-matroska"]
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_aiohttp_when_read_unavailable(
+        self, monkeypatch
+    ):
+        """No ``.read()`` on the attachment → SSRF check passes → aiohttp
+        downloads the bytes → ``cache_video_from_bytes`` caches them."""
+        adapter = _make_adapter()
+        adapter._client = SimpleNamespace(user=SimpleNamespace(id=999))
+        adapter.handle_message = AsyncMock()
+
+        att = SimpleNamespace(
+            url="https://cdn.discordapp.com/attachments/fake/clip.mp4",
+            filename="clip.mp4",
+            content_type="video/mp4",
+            size=len(_VIDEO_BYTES),
+            # No .read attr → _read_attachment_bytes returns None.
+        )
+        msg = _build_video_message(monkeypatch, att)
+
+        # aiohttp ClientSession mock returning 200 + payload.
+        resp = AsyncMock()
+        resp.status = 200
+        resp.read = AsyncMock(return_value=_VIDEO_BYTES)
+        resp.__aenter__ = AsyncMock(return_value=resp)
+        resp.__aexit__ = AsyncMock(return_value=False)
+        session = AsyncMock()
+        session.get = MagicMock(return_value=resp)
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=False)
+
+        with patch(
+            "gateway.platforms.discord.is_safe_url", return_value=True
+        ) as mock_safe, patch(
+            "aiohttp.ClientSession", return_value=session
+        ), patch(
+            "gateway.platforms.discord.cache_video_from_bytes",
+            return_value="/tmp/from_url.mp4",
+        ) as mock_bytes:
+            await adapter._handle_message(msg)
+
+        mock_safe.assert_called_once_with(att.url)
+        mock_bytes.assert_called_once_with(_VIDEO_BYTES, ".mp4")
+        event = adapter.handle_message.call_args[0][0]
+        assert event.media_urls == ["/tmp/from_url.mp4"]
+        assert event.media_types == ["video/mp4"]
+
+    @pytest.mark.asyncio
+    async def test_ssrf_block_falls_back_to_raw_url(self, monkeypatch):
+        """No ``.read()`` + ``is_safe_url`` rejects the URL → handler raises
+        internally, the outer ``except`` catches it, and the raw ``att.url``
+        is appended so the message still flows downstream. Critically,
+        ``cache_video_from_bytes`` and ``aiohttp.ClientSession`` are never
+        contacted."""
+        adapter = _make_adapter()
+        adapter._client = SimpleNamespace(user=SimpleNamespace(id=999))
+        adapter.handle_message = AsyncMock()
+
+        att = SimpleNamespace(
+            url="https://internal.local/clip.mp4",
+            filename="clip.mp4",
+            content_type="video/mp4",
+            size=64,
+            # No .read attr.
+        )
+        msg = _build_video_message(monkeypatch, att)
+
+        with patch(
+            "gateway.platforms.discord.is_safe_url", return_value=False
+        ) as mock_safe, patch(
+            "gateway.platforms.discord.cache_video_from_bytes"
+        ) as mock_bytes, patch("aiohttp.ClientSession") as mock_session:
+            await adapter._handle_message(msg)
+
+        mock_safe.assert_called_once_with(att.url)
+        mock_bytes.assert_not_called()
+        mock_session.assert_not_called()
+
+        event = adapter.handle_message.call_args[0][0]
+        assert event.media_urls == [att.url]
+        assert event.media_types == ["video/mp4"]
