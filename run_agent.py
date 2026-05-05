@@ -950,6 +950,7 @@ class AIAgent:
         skip_context_files: bool = False,
         load_soul_identity: bool = False,
         skip_memory: bool = False,
+        skip_background_review: bool = False,
         session_db=None,
         parent_session_id: str = None,
         iteration_budget: "IterationBudget" = None,
@@ -1821,6 +1822,14 @@ class AIAgent:
             self._skill_nudge_interval = int(skills_config.get("creation_nudge_interval", 10))
         except Exception:
             pass
+
+        # Background review (memory/skill) opt-out switch. When True, skips the
+        # _spawn_background_review fork at end-of-turn -- avoids ~30K tokens /
+        # event of extra LLM cost on cron-style sessions where review forks
+        # provide no value (no human in the loop, no skill-creation pressure).
+        # skip_memory=True already disables the memory-review trigger; this
+        # flag is the explicit single-switch off for both review paths.
+        self.skip_background_review = bool(skip_background_review)
 
         # Tool-use enforcement config: "auto" (default — matches hardcoded
         # model list), true (always), false (never), or list of substrings.
@@ -14023,7 +14032,15 @@ class AIAgent:
 
         # Background memory/skill review — runs AFTER the response is delivered
         # so it never competes with the user's task for model attention.
-        if final_response and not interrupted and (_should_review_memory or _should_review_skills):
+        # Suppressed entirely when skip_background_review=True (e.g. cron),
+        # since review forks spawn another AIAgent (~30K tokens / event) and
+        # cron sessions have no human-in-the-loop benefit from the review.
+        if (
+            final_response
+            and not interrupted
+            and not getattr(self, "skip_background_review", False)
+            and (_should_review_memory or _should_review_skills)
+        ):
             try:
                 self._spawn_background_review(
                     messages_snapshot=list(messages),
