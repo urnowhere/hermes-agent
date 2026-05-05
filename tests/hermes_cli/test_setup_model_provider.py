@@ -114,6 +114,62 @@ def test_setup_keep_current_config_provider_uses_provider_specific_model_menu(
     assert reloaded["model"]["provider"] == "zai"
 
 
+def test_nous_free_tier_with_only_paid_curated_models_still_allows_custom_model(
+    tmp_path, monkeypatch
+):
+    """Free-tier Nous accounts must still be able to enter a custom model.
+
+    Portal credit balances can make non-curated models usable even when every
+    curated model is marked paid. The menu should still offer the custom-model
+    path instead of returning at the upgrade banner.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _clear_provider_env(monkeypatch)
+
+    selected = []
+
+    monkeypatch.setattr(
+        "hermes_cli.auth.get_provider_auth_state",
+        lambda provider: {
+            "access_token": "token",
+            "portal_base_url": "https://portal.example.com",
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.auth.resolve_nous_runtime_credentials",
+        lambda **kwargs: {"base_url": "https://inference.example.com/v1"},
+    )
+    monkeypatch.setattr(
+        "hermes_cli.models.get_curated_nous_model_ids",
+        lambda: ["paid/curated-model"],
+    )
+    monkeypatch.setattr("hermes_cli.models.get_pricing_for_provider", lambda provider: {})
+    monkeypatch.setattr("hermes_cli.models.check_nous_free_tier", lambda: True)
+    monkeypatch.setattr(
+        "hermes_cli.models.partition_nous_models_by_tier",
+        lambda model_ids, pricing, free_tier: ([], list(model_ids)),
+    )
+
+    def fake_prompt(model_ids, **kwargs):
+        selected.append({"model_ids": model_ids, "unavailable": kwargs.get("unavailable_models")})
+        return "custom/free-credit-model"
+
+    monkeypatch.setattr("hermes_cli.auth._prompt_model_selection", fake_prompt)
+    monkeypatch.setattr("hermes_cli.nous_subscription.prompt_enable_tool_gateway", lambda config: set())
+
+    from hermes_cli.config import load_config
+    from hermes_cli.main import _model_flow_nous
+
+    cfg = load_config()
+    _model_flow_nous(cfg)
+
+    assert selected == [{"model_ids": [], "unavailable": ["paid/curated-model"]}]
+    reloaded = load_config()
+    assert reloaded["model"]["provider"] == "nous"
+    assert reloaded["model"]["default"] == "custom/free-credit-model"
+    assert reloaded["model"]["base_url"] == "https://inference.example.com/v1"
+
+
 def test_setup_same_provider_rotation_strategy_saved_for_multi_credential_pool(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     _clear_provider_env(monkeypatch)

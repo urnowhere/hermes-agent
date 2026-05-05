@@ -2555,13 +2555,10 @@ def _model_flow_nous(config, current_model="", args=None):
         pass
 
     if free_tier and not model_ids:
-        print("No free models currently available.")
-        if unavailable_models:
-            from hermes_cli.auth import DEFAULT_NOUS_PORTAL_URL
-
-            _url = (_nous_portal_url or DEFAULT_NOUS_PORTAL_URL).rstrip("/")
-            print(f"Upgrade at {_url} to access paid models.")
-        return
+        print(
+            "No free curated models currently available — "
+            "use \"Enter custom model name\" for models available to your account."
+        )
 
     print(
         f'Showing {len(model_ids)} curated models — use "Enter custom model name" for others.'
