@@ -97,6 +97,36 @@ def test_auth_add_anthropic_oauth_persists_pool_entry(tmp_path, monkeypatch):
     assert entry["expires_at_ms"] == 1711234567000
 
 
+def test_auth_add_anthropic_wif_persists_provider_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    _write_auth_store(tmp_path, {"version": 1, "providers": {}})
+
+    from hermes_cli.auth_commands import auth_add_command
+
+    class _Args:
+        provider = "anthropic"
+        auth_type = "wif"
+        label = "prod-wif"
+        federation_rule_id = "fdrl_test123"
+        organization_id = "org_test456"
+        service_account_id = "svac_test789"
+        identity_token_file = "/tmp/anthropic-identity.jwt"
+
+    auth_add_command(_Args())
+
+    payload = json.loads((tmp_path / "hermes" / "auth.json").read_text())
+    state = payload["providers"]["anthropic"]
+    assert state["auth_type"] == "wif"
+    assert state["source"] == "manual:wif"
+    assert state["label"] == "prod-wif"
+    assert state["federation_rule_id"] == "fdrl_test123"
+    assert state["organization_id"] == "org_test456"
+    assert state["service_account_id"] == "svac_test789"
+    assert state["identity_token_file"] == "/tmp/anthropic-identity.jwt"
+    assert state["api_base_url"] == "https://api.anthropic.com"
+    assert payload.get("credential_pool", {}).get("anthropic") in (None, [])
+
+
 def test_auth_add_nous_oauth_persists_pool_entry(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     _write_auth_store(tmp_path, {"version": 1, "providers": {}})

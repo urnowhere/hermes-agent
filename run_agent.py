@@ -6191,9 +6191,19 @@ class AIAgent:
             return False
 
         try:
-            from agent.anthropic_adapter import resolve_anthropic_token, build_anthropic_client
+            from agent.anthropic_adapter import (
+                build_anthropic_client,
+                exchange_anthropic_wif_for_access_token,
+                read_anthropic_wif_config,
+                resolve_anthropic_token,
+            )
 
-            new_token = resolve_anthropic_token()
+            wif_config = read_anthropic_wif_config()
+            if wif_config:
+                exchanged = exchange_anthropic_wif_for_access_token(wif_config)
+                new_token = str(exchanged.get("access_token") or "").strip()
+            else:
+                new_token = resolve_anthropic_token()
         except Exception as exc:
             logger.debug("Anthropic credential refresh failed: %s", exc)
             return False

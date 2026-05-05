@@ -3625,6 +3625,78 @@ def get_codex_auth_status() -> Dict[str, Any]:
         }
 
 
+def get_anthropic_auth_status() -> Dict[str, Any]:
+    """Combined status for Anthropic API auth sources, including WIF."""
+    try:
+        from agent.anthropic_adapter import read_anthropic_wif_config
+
+        wif_config = read_anthropic_wif_config()
+    except Exception:
+        wif_config = None
+
+    if isinstance(wif_config, dict):
+        identity_token_file = str(wif_config.get("identity_token_file") or "").strip()
+        file_exists = bool(identity_token_file) and Path(identity_token_file).expanduser().exists()
+        return {
+            "logged_in": file_exists,
+            "auth_type": "wif",
+            "source": str(wif_config.get("source") or "auth_store:wif"),
+            "label": wif_config.get("label") or "anthropic-wif",
+            "federation_rule_id": wif_config.get("federation_rule_id"),
+            "organization_id": wif_config.get("organization_id"),
+            "service_account_id": wif_config.get("service_account_id"),
+            "identity_token_file": identity_token_file,
+            "identity_token_file_exists": file_exists,
+            "api_base_url": str(wif_config.get("api_base_url") or "https://api.anthropic.com"),
+            **({"error": "identity token file not found"} if identity_token_file and not file_exists else {}),
+        }
+
+    try:
+        from agent.anthropic_adapter import read_hermes_oauth_credentials, read_claude_code_credentials
+    except Exception:
+        read_hermes_oauth_credentials = None  # type: ignore[assignment]
+        read_claude_code_credentials = None  # type: ignore[assignment]
+
+    hermes_creds = None
+    if read_hermes_oauth_credentials:
+        try:
+            hermes_creds = read_hermes_oauth_credentials()
+        except Exception:
+            hermes_creds = None
+    if hermes_creds and hermes_creds.get("accessToken"):
+        return {
+            "logged_in": True,
+            "auth_type": "oauth",
+            "source": "hermes_pkce",
+            "expires_at": hermes_creds.get("expiresAt"),
+            "api_base_url": "https://api.anthropic.com",
+        }
+
+    cc_creds = None
+    if read_claude_code_credentials:
+        try:
+            cc_creds = read_claude_code_credentials()
+        except Exception:
+            cc_creds = None
+    if cc_creds and cc_creds.get("accessToken"):
+        return {
+            "logged_in": True,
+            "auth_type": "oauth",
+            "source": str(cc_creds.get("source") or "claude_code"),
+            "expires_at": cc_creds.get("expiresAt"),
+            "api_base_url": "https://api.anthropic.com",
+        }
+
+    api_key = get_anthropic_key()
+    return {
+        "logged_in": bool(api_key),
+        "auth_type": "api_key",
+        "source": "env",
+        "api_base_url": "https://api.anthropic.com",
+        **({"error": "no anthropic credentials configured"} if not api_key else {}),
+    }
+
+
 def get_api_key_provider_status(provider_id: str) -> Dict[str, Any]:
     """Status snapshot for API-key providers (z.ai, Kimi, MiniMax)."""
     pconfig = PROVIDER_REGISTRY.get(provider_id)
@@ -3691,6 +3763,8 @@ def get_auth_status(provider_id: Optional[str] = None) -> Dict[str, Any]:
     target = provider_id or get_active_provider()
     if target == "spotify":
         return get_spotify_auth_status()
+    if target == "anthropic":
+        return get_anthropic_auth_status()
     if target == "nous":
         return get_nous_auth_status()
     if target == "openai-codex":

@@ -33,7 +33,14 @@ from hermes_constants import OPENROUTER_BASE_URL
 
 
 # Providers that support OAuth login in addition to API keys.
-_OAUTH_CAPABLE_PROVIDERS = {"anthropic", "nous", "openai-codex", "qwen-oauth", "google-gemini-cli", "minimax-oauth"}
+_OAUTH_CAPABLE_PROVIDERS = {
+    "anthropic",
+    "nous",
+    "openai-codex",
+    "qwen-oauth",
+    "google-gemini-cli",
+    "minimax-oauth",
+}
 
 
 def _get_custom_provider_names() -> list:
@@ -166,6 +173,8 @@ def auth_add_command(args) -> None:
     requested_type = str(getattr(args, "auth_type", "") or "").strip().lower()
     if requested_type in {AUTH_TYPE_API_KEY, "api-key"}:
         requested_type = AUTH_TYPE_API_KEY
+    if requested_type == "wif":
+        requested_type = "wif"
     if not requested_type:
         if provider.startswith(CUSTOM_POOL_PREFIX):
             requested_type = AUTH_TYPE_API_KEY
@@ -216,6 +225,53 @@ def auth_add_command(args) -> None:
         )
         pool.add_entry(entry)
         print(f'Added {provider} credential #{len(pool.entries())}: "{label}"')
+        return
+
+    if requested_type == "wif":
+        if provider != "anthropic":
+            raise SystemExit("Workload Identity Federation is currently supported only for provider 'anthropic'.")
+
+        prompts = {
+            "federation_rule_id": "Anthropic federation rule ID (fdrl_...)",
+            "organization_id": "Anthropic organization ID",
+            "service_account_id": "Anthropic service account ID (svac_...)",
+            "identity_token_file": "Path to identity token file",
+        }
+        values = {
+            "federation_rule_id": str(getattr(args, "federation_rule_id", None) or "").strip(),
+            "organization_id": str(getattr(args, "organization_id", None) or "").strip(),
+            "service_account_id": str(getattr(args, "service_account_id", None) or "").strip(),
+            "identity_token_file": str(getattr(args, "identity_token_file", None) or "").strip(),
+        }
+        missing = [key for key, value in values.items() if not value]
+        if missing and sys.stdin.isatty():
+            for key in missing:
+                try:
+                    values[key] = input(f"{prompts[key]}: ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    raise SystemExit("Anthropic WIF setup cancelled.")
+        missing = [key for key, value in values.items() if not value]
+        if missing:
+            formatted = ", ".join(missing)
+            raise SystemExit(
+                "Missing required Anthropic WIF fields: "
+                f"{formatted}. Pass --federation-rule-id, --organization-id, "
+                "--service-account-id, and --identity-token-file."
+            )
+
+        label = (getattr(args, "label", None) or "").strip() or "anthropic-wif"
+        state = {
+            "auth_type": "wif",
+            "source": "manual:wif",
+            "label": label,
+            **values,
+            "api_base_url": _provider_base_url(provider),
+        }
+        with auth_mod._auth_store_lock():
+            auth_store = auth_mod._load_auth_store()
+            auth_mod._save_provider_state(auth_store, provider, state)
+            auth_mod._save_auth_store(auth_store)
+        print(f'Configured {provider} Workload Identity Federation: "{label}"')
         return
 
     if provider == "anthropic":
@@ -484,7 +540,21 @@ def auth_status_command(args) -> None:
         return
 
     print(f"{provider}: logged in")
-    for key in ("auth_type", "client_id", "redirect_uri", "scope", "expires_at", "api_base_url"):
+    for key in (
+        "auth_type",
+        "source",
+        "label",
+        "client_id",
+        "redirect_uri",
+        "scope",
+        "expires_at",
+        "api_base_url",
+        "federation_rule_id",
+        "organization_id",
+        "service_account_id",
+        "identity_token_file",
+        "identity_token_file_exists",
+    ):
         value = status.get(key)
         if value:
             print(f"  {key}: {value}")
@@ -592,14 +662,18 @@ def _interactive_add() -> None:
 
     # For OAuth-capable providers, ask which type
     if provider in _OAUTH_CAPABLE_PROVIDERS:
-        print(f"\n{provider} supports both API keys and OAuth login.")
+        print(f"\n{provider} supports multiple authentication methods.")
         print("  1. API key (paste a key from the provider dashboard)")
         print("  2. OAuth login (authenticate via browser)")
+        if provider == "anthropic":
+            print("  3. Workload Identity Federation (OIDC / short-lived workload tokens)")
         try:
-            type_choice = input("Type [1/2]: ").strip()
+            type_choice = input("Type [1/2" + ("/3" if provider == "anthropic" else "") + "]: ").strip()
         except (EOFError, KeyboardInterrupt):
             return
-        if type_choice == "2":
+        if provider == "anthropic" and type_choice == "3":
+            auth_type = "wif"
+        elif type_choice == "2":
             auth_type = "oauth"
         else:
             auth_type = "api_key"
@@ -616,6 +690,8 @@ def _interactive_add() -> None:
 
     auth_add_command(SimpleNamespace(
         provider=provider, auth_type=auth_type, label=label, api_key=None,
+        federation_rule_id=None, organization_id=None, service_account_id=None,
+        identity_token_file=None,
         portal_url=None, inference_url=None, client_id=None, scope=None,
         no_browser=False, timeout=None, insecure=False, ca_bundle=None,
     ))

@@ -763,12 +763,23 @@ def _resolve_explicit_runtime(
         base_url = explicit_base_url or cfg_base_url or "https://api.anthropic.com"
         api_key = explicit_api_key
         if not api_key:
-            from agent.anthropic_adapter import resolve_anthropic_token
+            from agent.anthropic_adapter import (
+                exchange_anthropic_wif_for_access_token,
+                read_anthropic_wif_config,
+                resolve_anthropic_token,
+            )
 
-            api_key = resolve_anthropic_token()
+            wif_config = read_anthropic_wif_config()
+            if wif_config:
+                exchanged = exchange_anthropic_wif_for_access_token(wif_config)
+                api_key = str(exchanged.get("access_token") or "").strip()
+                if not api_key:
+                    raise AuthError("Anthropic WIF exchange returned no access token.")
+            else:
+                api_key = resolve_anthropic_token()
             if not api_key:
                 raise AuthError(
-                    "No Anthropic credentials found. Set ANTHROPIC_TOKEN or ANTHROPIC_API_KEY, "
+                    "No Anthropic credentials found. Configure WIF, set ANTHROPIC_TOKEN or ANTHROPIC_API_KEY, "
                     "run 'claude setup-token', or authenticate with 'claude /login'."
                 )
         return {
@@ -1184,11 +1195,22 @@ def resolve_runtime_provider(
                     "config.yaml model section at a custom env var."
                 )
         else:
-            from agent.anthropic_adapter import resolve_anthropic_token
-            token = resolve_anthropic_token()
+            from agent.anthropic_adapter import (
+                exchange_anthropic_wif_for_access_token,
+                read_anthropic_wif_config,
+                resolve_anthropic_token,
+            )
+            wif_config = read_anthropic_wif_config()
+            if wif_config:
+                exchanged = exchange_anthropic_wif_for_access_token(wif_config)
+                token = str(exchanged.get("access_token") or "").strip()
+                if not token:
+                    raise AuthError("Anthropic WIF exchange returned no access token.")
+            else:
+                token = resolve_anthropic_token()
             if not token:
                 raise AuthError(
-                    "No Anthropic credentials found. Set ANTHROPIC_TOKEN or ANTHROPIC_API_KEY, "
+                    "No Anthropic credentials found. Configure WIF, set ANTHROPIC_TOKEN or ANTHROPIC_API_KEY, "
                     "run 'claude setup-token', or authenticate with 'claude /login'."
                 )
         return {
