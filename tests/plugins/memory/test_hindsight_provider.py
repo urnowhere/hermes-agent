@@ -44,6 +44,14 @@ def _clean_env(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_bank_config_fetch(monkeypatch):
+    """Prevent real HTTP calls to the Hindsight bank config API during tests."""
+    monkeypatch.setattr(
+        HindsightMemoryProvider, "_fetch_bank_config", lambda self: None
+    )
+
+
 def _make_mock_client():
     """Create a mock Hindsight client with async methods."""
     async def _aretain(

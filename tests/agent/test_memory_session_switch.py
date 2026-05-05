@@ -229,6 +229,7 @@ def _make_hindsight_provider():
     provider._agent_workspace = ""
     provider._retain_tags = []
     provider._retain_context = "test-context"
+    provider._retain_context_tagging = "off"
     provider._retain_async = False
     provider._bank_id = "test-bank"
     # Prefetch state the switch path drains/clears.

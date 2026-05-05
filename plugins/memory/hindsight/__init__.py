@@ -36,6 +36,7 @@ import logging
 import os
 import queue
 import threading
+import time
 
 from datetime import datetime, timezone
 from typing import Any, Dict, List
@@ -53,6 +54,12 @@ _MIN_CLIENT_VERSION = "0.4.22"
 _DEFAULT_TIMEOUT = 120  # seconds — cloud API can take 30-40s per request
 _DEFAULT_IDLE_TIMEOUT = 300  # seconds — Hindsight embedded daemon default
 _VALID_BUDGETS = {"low", "mid", "high"}
+
+# Circuit breaker for auxiliary LLM calls in the smart retain pipeline.
+# Matches Mem0 plugin pattern: after N consecutive failures, bypass smart
+# steps for a cooldown period, then allow one probe request to recover.
+_AUX_BREAKER_THRESHOLD = 5
+_AUX_BREAKER_COOLDOWN_SECS = 120
 _PROVIDER_DEFAULT_MODELS = {
     "openai": "gpt-4o-mini",
     "anthropic": "claude-haiku-4-5",
@@ -488,7 +495,27 @@ class HindsightMemoryProvider(MemoryProvider):
         # Bank
         self._bank_mission = ""
         self._bank_retain_mission: str | None = None
+        self._bank_reflect_mission: str | None = None
+        self._bank_observations_mission: str | None = None
         self._bank_id_template = ""
+
+        # Smart retain (pre-filter + context tagging)
+        self._retain_prefilter = False
+        self._retain_context_tagging = "off"  # "off", "on", or "smart"
+        self._retain_dedup = False
+        self._retain_extract = False  # client-side extraction before classify/dedup
+
+        # Circuit breaker for auxiliary LLM calls (smart pipeline).
+        # After _AUX_BREAKER_THRESHOLD consecutive failures, bypass the
+        # smart pipeline (prefilter/dedup/smart-tagging) and retain raw
+        # with scope:general.  Retains still happen — only the aux-dependent
+        # classification is skipped.  Matches Mem0 plugin pattern.
+        self._aux_consecutive_failures = 0
+        self._aux_breaker_open_until = 0.0
+        self._aux_fallback_to_main = False  # use main model when aux breaker trips
+        self._retain_mode = "full"  # "full" or "delta"
+        self._retain_overlap_turns = 2
+        self._last_retain_index = 0  # tracks where the last delta ended
 
     @property
     def name(self) -> str:
@@ -763,6 +790,13 @@ class HindsightMemoryProvider(MemoryProvider):
             {"key": "retain_every_n_turns", "description": "Retain every N turns (1 = every turn)", "default": 1},
             {"key": "retain_async","description": "Process retain asynchronously on the Hindsight server", "default": True},
             {"key": "retain_context", "description": "Context label for retained memories", "default": "conversation between Hermes Agent and the User"},
+            {"key": "retain_prefilter", "description": "Classify content with auxiliary LLM before retaining (requires bank_retain_mission)", "default": False},
+            {"key": "retain_dedup", "description": "Check for duplicate content via recall before retaining", "default": False},
+            {"key": "retain_extract", "description": "Extract individual discussion points client-side before classify/dedup. Reduces retain payload and API cost by sending pre-extracted facts instead of raw transcripts", "default": False},
+            {"key": "retain_mode", "description": "What to send on each retain cycle: 'full' (entire session, replaces previous) or 'delta' (only new turns + overlap, creates independent memories)", "default": "full", "choices": ["full", "delta"]},
+            {"key": "retain_overlap_turns", "description": "When retain_mode is 'delta', how many previous turns to include for context continuity", "default": 2},
+            {"key": "retain_context_tagging", "description": "Scope-tag retained memories: 'off' (no tags), 'on' (always tag by platform:chat_id), 'smart' (classify general vs scoped via auxiliary LLM)", "default": "off", "choices": ["off", "on", "smart"]},
+            {"key": "aux_fallback_to_main", "description": "When auxiliary LLM circuit breaker trips, fall back to the main model for smart pipeline instead of bypassing", "default": False},
             {"key": "recall_max_tokens", "description": "Maximum tokens for recall results", "default": 4096},
             {"key": "recall_max_input_chars", "description": "Maximum input query length for auto-recall", "default": 800},
             {"key": "recall_prompt_preamble", "description": "Custom preamble for recalled memories in context"},
@@ -814,6 +848,63 @@ class HindsightMemoryProvider(MemoryProvider):
                              self._api_url, bool(self._api_key), kwargs["timeout"])
                 self._client = Hindsight(**kwargs)
         return self._client
+
+    def _fetch_bank_config(self) -> None:
+        """Fetch bank config from Hindsight API and cache reflect/observations/retain missions.
+
+        This pulls the server-side bank configuration (reflect_mission, observations_mission,
+        retain_mission) so the client-side smart pipeline can use the same framing the bank
+        uses for extraction.  If the API call fails, local config.json values are kept as-is.
+        """
+        if self._mode not in ("cloud",) or not self._api_key or not self._api_url:
+            return
+        import urllib.request
+        import urllib.error
+        url = f"{self._api_url.rstrip('/')}/v1/default/banks/{self._bank_id}/config"
+        req = urllib.request.Request(url, headers={
+            "Authorization": f"Bearer {self._api_key}",
+            "Accept": "application/json",
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=min(self._timeout, 10)) as resp:
+                data = json.loads(resp.read().decode())
+            config = data.get("config") or data  # API wraps in {"config": {...}} or flat
+            # Server-side retain_mission overrides local if present
+            api_retain = (config.get("retain_mission") or "").strip()
+            if api_retain:
+                if self._bank_retain_mission and self._bank_retain_mission != api_retain:
+                    logger.info("Bank retain_mission from API overrides local config.json value")
+                self._bank_retain_mission = api_retain
+            # Reflect and observations — only from API (no local equivalent)
+            self._bank_reflect_mission = (config.get("reflect_mission") or "").strip() or None
+            self._bank_observations_mission = (config.get("observations_mission") or "").strip() or None
+            logger.info(
+                "Fetched bank config for '%s': reflect=%s, observations=%s, retain=%s",
+                self._bank_id,
+                bool(self._bank_reflect_mission),
+                bool(self._bank_observations_mission),
+                bool(self._bank_retain_mission),
+            )
+        except Exception as exc:
+            logger.warning("Failed to fetch bank config for '%s': %s — using local config", self._bank_id, exc)
+
+    def _build_bank_prompt_context(self) -> str:
+        """Compose bank config fields into a prompt preamble for the smart pipeline.
+
+        Order: reflect (persona) → observations (what to look for) → retain_mission (what matters).
+        This gives the classification/extraction LLM a proper frame before it sees the conversation.
+        Returns empty string if no bank config fields are set.
+        """
+        parts = []
+        if self._bank_reflect_mission:
+            parts.append(f"PERSONA:\n{self._bank_reflect_mission}")
+        if self._bank_observations_mission:
+            parts.append(f"OBSERVATIONS (what patterns to look for):\n{self._bank_observations_mission}")
+        if self._bank_retain_mission:
+            parts.append(f"RETAIN MISSION (what to keep vs ignore):\n{self._bank_retain_mission}")
+        if not parts:
+            return ""
+        return "\n\n".join(parts) + "\n"
 
     def _run_sync(self, coro):
         """Schedule *coro* on the shared loop using the configured timeout."""
@@ -1022,6 +1113,57 @@ class HindsightMemoryProvider(MemoryProvider):
         self._bank_mission = self._config.get("bank_mission", "")
         self._bank_retain_mission = self._config.get("bank_retain_mission") or None
 
+        # Fetch server-side bank config (reflect/observations/retain missions).
+        # This overrides local bank_retain_mission if the API has one set,
+        # and populates reflect + observations missions for richer prompt framing.
+        self._fetch_bank_config()
+
+        # Smart retain
+        self._retain_prefilter = self._config.get("retain_prefilter", False)
+        self._retain_dedup = self._config.get("retain_dedup", False)
+        self._retain_extract = self._config.get("retain_extract", False)
+        self._retain_mode = self._config.get("retain_mode", "full")
+        if self._retain_mode not in ("full", "delta"):
+            self._retain_mode = "full"
+        self._retain_overlap_turns = max(0, int(self._config.get("retain_overlap_turns", 2)))
+        self._aux_fallback_to_main = bool(self._config.get("aux_fallback_to_main", False))
+        raw_tagging = self._config.get("retain_context_tagging", "off")
+        # Backward compat: treat True as "smart", False as "off"
+        if raw_tagging is True:
+            raw_tagging = "smart"
+        elif raw_tagging is False:
+            raw_tagging = "off"
+        self._retain_context_tagging = raw_tagging if raw_tagging in ("off", "on", "smart") else "off"
+
+        # Check bank config completeness when smart pipeline is enabled
+        _smart_pipeline_active = (
+            self._retain_prefilter or self._retain_extract
+            or self._retain_context_tagging == "smart"
+        )
+        if _smart_pipeline_active:
+            if not self._bank_retain_mission:
+                logger.warning(
+                    "Hindsight smart pipeline enabled but no retain_mission found — "
+                    "checked local config.json and bank API. Pre-filtering disabled "
+                    "(will retain all content). Set retain_mission on the bank via "
+                    "the Hindsight API and restart the session."
+                )
+                self._retain_prefilter = False
+            else:
+                missing = []
+                if not self._bank_reflect_mission:
+                    missing.append("reflect_mission (persona framing)")
+                if not self._bank_observations_mission:
+                    missing.append("observations_mission (pattern guidance)")
+                if missing:
+                    logger.warning(
+                        "Hindsight bank '%s' is missing: %s. "
+                        "The smart pipeline will still work but pre-filtering accuracy "
+                        "is reduced without full bank configuration. Set these fields "
+                        "on the bank via the Hindsight API for better noise filtering.",
+                        self._bank_id, ", ".join(missing),
+                    )
+
         # Tags
         self._retain_tags = _normalize_retain_tags(
             self._config.get("retain_tags")
@@ -1066,9 +1208,9 @@ class HindsightMemoryProvider(MemoryProvider):
                          self._bank_id_template, self._agent_identity, self._agent_workspace,
                          self._platform, self._user_id, self._bank_id)
         logger.debug("Hindsight config: auto_retain=%s, auto_recall=%s, retain_every_n=%d, "
-                     "retain_async=%s, retain_context=%s, recall_max_tokens=%d, recall_max_input_chars=%d, tags=%s, recall_tags=%s",
+                     "retain_async=%s, retain_mode=%s, retain_overlap=%d, retain_extract=%s, retain_context=%s, recall_max_tokens=%d, recall_max_input_chars=%d, tags=%s, recall_tags=%s",
                      self._auto_retain, self._auto_recall, self._retain_every_n_turns,
-                     self._retain_async, self._retain_context, self._recall_max_tokens, self._recall_max_input_chars,
+                     self._retain_async, self._retain_mode, self._retain_overlap_turns, self._retain_extract, self._retain_context, self._recall_max_tokens, self._recall_max_input_chars,
                      self._tags, self._recall_tags)
 
         # For local mode, start the embedded daemon in the background so it
@@ -1174,8 +1316,16 @@ class HindsightMemoryProvider(MemoryProvider):
         def _run():
             try:
                 if self._prefetch_method == "reflect":
-                    logger.debug("Prefetch: calling reflect (bank=%s, query_len=%d)", self._bank_id, len(query))
-                    resp = self._run_hindsight_operation(lambda client: client.areflect(bank_id=self._bank_id, query=query, budget=self._budget))
+                    reflect_kwargs: dict = {
+                        "bank_id": self._bank_id, "query": query, "budget": self._budget,
+                    }
+                    scope_tags = self._build_recall_scope_tags()
+                    if scope_tags:
+                        reflect_kwargs["tags"] = scope_tags
+                        reflect_kwargs["tags_match"] = "any"
+                    logger.debug("Prefetch: calling reflect (bank=%s, query_len=%d, tags=%s)",
+                                 self._bank_id, len(query), reflect_kwargs.get("tags"))
+                    resp = self._run_hindsight_operation(lambda client: client.areflect(**reflect_kwargs))
                     text = resp.text or ""
                 else:
                     recall_kwargs: dict = {
@@ -1185,10 +1335,21 @@ class HindsightMemoryProvider(MemoryProvider):
                     if self._recall_tags:
                         recall_kwargs["tags"] = self._recall_tags
                         recall_kwargs["tags_match"] = self._recall_tags_match
+                    # Dynamic scope filtering: when context tagging is active,
+                    # recall only general + current-channel memories
+                    scope_tags = self._build_recall_scope_tags()
+                    if scope_tags and "tags" not in recall_kwargs:
+                        recall_kwargs["tags"] = scope_tags
+                        recall_kwargs["tags_match"] = "any"
+                    elif scope_tags and "tags" in recall_kwargs:
+                        # Merge scope tags with explicit recall_tags
+                        for st in scope_tags:
+                            if st not in recall_kwargs["tags"]:
+                                recall_kwargs["tags"].append(st)
                     if self._recall_types:
                         recall_kwargs["types"] = self._recall_types
-                    logger.debug("Prefetch: calling recall (bank=%s, query_len=%d, budget=%s)",
-                                 self._bank_id, len(query), self._budget)
+                    logger.debug("Prefetch: calling recall (bank=%s, query_len=%d, budget=%s, tags=%s)",
+                                 self._bank_id, len(query), self._budget, recall_kwargs.get("tags"))
                     resp = self._run_hindsight_operation(lambda client: client.arecall(**recall_kwargs))
                     num_results = len(resp.results) if resp.results else 0
                     logger.debug("Prefetch: recall returned %d results", num_results)
@@ -1274,6 +1435,357 @@ class HindsightMemoryProvider(MemoryProvider):
             kwargs["tags"] = merged_tags
         return kwargs
 
+    def _classify_for_retain(self, content: str, *, use_main: bool = False) -> str:
+        """Classify content relevance using auxiliary LLM.
+
+        Returns one of: SKIP, GENERAL, SCOPED.
+        - SKIP: noise (greetings, acks, meta-commentary) — don't retain
+        - GENERAL: knowledge useful across all contexts
+        - SCOPED: knowledge specific to the current platform/channel context
+
+        When use_main=True, falls back to the main model instead of auxiliary.
+        """
+        try:
+            from agent.auxiliary_client import get_text_auxiliary_client
+
+            task = "memory_retain_filter"
+            if use_main:
+                client, model = get_text_auxiliary_client("")  # "" = main model
+                logger.debug("Classify using main model fallback (model=%s)", model)
+            else:
+                client, model = get_text_auxiliary_client(task)
+
+            if not client:
+                logger.debug("No auxiliary client for %s; fail-open to GENERAL", task)
+                return "GENERAL"
+
+            # Truncate from the START to preserve the most recent (most relevant) content
+            truncated = content[-4000:] if len(content) > 4000 else content
+
+            prompt = (
+                f"Classify this conversation for memory retention.\n\n"
+                f"{self._build_bank_prompt_context()}\n"
+                f"CONVERSATION:\n{truncated}\n\n"
+                f"Rules:\n"
+                f"- SKIP = content the mission says to ignore, OR pure noise "
+                f"(greetings, acks, \"got it\", status pings, empty exchanges)\n"
+                f"- GENERAL = durable knowledge reusable in any project/context "
+                f"(patterns, conventions, preferences, tool behavior)\n"
+                f"- SCOPED = knowledge tied to a specific project, channel, or task "
+                f"(project-specific decisions, feature details, bug fixes for one codebase)\n\n"
+                f"If in doubt between GENERAL and SCOPED, choose SCOPED. "
+                f"If in doubt between SKIP and retaining, choose GENERAL.\n\n"
+                f"Reply with one word: SKIP, GENERAL, or SCOPED"
+            )
+
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=10,
+                temperature=0,
+            )
+            result = response.choices[0].message.content.strip().upper()
+            # Normalize to valid values
+            if result not in ("SKIP", "GENERAL", "SCOPED"):
+                # Try to extract from response
+                for valid in ("SKIP", "GENERAL", "SCOPED"):
+                    if valid in result:
+                        result = valid
+                        break
+                else:
+                    result = "GENERAL"  # fail-open
+            logger.info("Smart retain classification: %s (content_len=%d)", result, len(content))
+            self._record_aux_success()
+            return result
+        except Exception as exc:
+            self._record_aux_failure()
+            logger.warning("Smart retain classification failed (%s); fail-open to GENERAL", exc)
+            return "GENERAL"
+
+    def _build_scope_tag(self) -> str:
+        """Build a scope tag from session context."""
+        if self._platform and self._chat_id:
+            return f"scope:{self._platform}:{self._chat_id}"
+        return "scope:general"
+
+    # ── Auxiliary circuit breaker ──────────────────────────────────────
+    # Tracks consecutive failures of the auxiliary LLM used by the smart
+    # retain pipeline (classify, dedup).  When tripped, the smart steps
+    # are bypassed — retains still happen, just without classification.
+
+    def _is_aux_breaker_open(self) -> bool:
+        """Return True if the aux circuit breaker is tripped."""
+        if self._aux_consecutive_failures < _AUX_BREAKER_THRESHOLD:
+            return False
+        if time.monotonic() >= self._aux_breaker_open_until:
+            # Cooldown expired — reset and allow a probe request
+            self._aux_consecutive_failures = 0
+            logger.info("Auxiliary circuit breaker cooldown expired; allowing probe request")
+            return False
+        return True
+
+    def _record_aux_success(self):
+        """Reset the aux breaker on a successful auxiliary call."""
+        if self._aux_consecutive_failures > 0:
+            logger.info("Auxiliary LLM recovered after %d consecutive failures",
+                        self._aux_consecutive_failures)
+        self._aux_consecutive_failures = 0
+
+    def _record_aux_failure(self):
+        """Record an aux failure; trip the breaker if threshold reached."""
+        self._aux_consecutive_failures += 1
+        if self._aux_consecutive_failures >= _AUX_BREAKER_THRESHOLD:
+            self._aux_breaker_open_until = time.monotonic() + _AUX_BREAKER_COOLDOWN_SECS
+            logger.warning(
+                "Auxiliary circuit breaker tripped after %d consecutive failures. "
+                "Bypassing smart retain pipeline for %ds.",
+                self._aux_consecutive_failures, _AUX_BREAKER_COOLDOWN_SECS,
+            )
+
+    def _build_recall_scope_tags(self) -> list[str] | None:
+        """Build scope tags for recall filtering when context tagging is active.
+
+        Returns a list like ["scope:general", "scope:discord:123456"] so recall
+        fetches both general knowledge and channel-specific memories, or None
+        if scope tagging is disabled.
+        """
+        if self._retain_context_tagging not in ("on", "smart"):
+            return None
+        tags = ["scope:general"]
+        if self._platform and self._chat_id:
+            tags.append(f"scope:{self._platform}:{self._chat_id}")
+        return tags
+
+    def _check_dedup(self, content: str, *, use_main: bool = False) -> bool:
+        """Check if content is a duplicate of existing memories via recall + auxiliary LLM.
+
+        Returns True if content is DUPLICATE (should skip retain), False if NOVEL.
+        Fails open (returns False) on any error so retain proceeds.
+
+        When use_main=True, falls back to the main model instead of auxiliary.
+        """
+        try:
+            # Truncate content for recall query — Hindsight caps at 500 tokens (~1500 chars)
+            query = content[:1200]
+
+            # Build recall kwargs — cheap recall just to check for duplicates
+            recall_kwargs: dict = {
+                "bank_id": self._bank_id,
+                "query": query,
+                "budget": "low",
+            }
+
+            # Add scope tags if available
+            scope_tags = self._build_recall_scope_tags()
+            if scope_tags:
+                recall_kwargs["tags"] = scope_tags
+                recall_kwargs["tags_match"] = "any"
+
+            # Run recall against existing memories
+            resp = self._run_hindsight_operation(
+                lambda client: client.arecall(**recall_kwargs)
+            )
+
+            if not resp or not resp.results:
+                logger.info("Dedup check: NOVEL (no existing memories found) — %d chars", len(content))
+                return False
+
+            num_results = len(resp.results)
+            recall_text = "\n".join(f"- {r.text}" for r in resp.results if r.text)
+            if not recall_text:
+                logger.info("Dedup check: NOVEL (no text in recall results) — %d chars", len(content))
+                return False
+
+            # Truncate recall results to avoid huge prompts
+            recall_text = recall_text[:3000]
+            content_text = content[:2000]
+
+            # Ask auxiliary LLM to compare
+            from agent.auxiliary_client import get_text_auxiliary_client
+
+            task = "memory_retain_filter"
+            if use_main:
+                client, model = get_text_auxiliary_client("")  # "" = main model
+                logger.debug("Dedup using main model fallback (model=%s)", model)
+            else:
+                client, model = get_text_auxiliary_client(task)
+
+            if not client:
+                logger.debug("Dedup check: no auxiliary client for %s; skipping (NOVEL)", task)
+                return False
+
+            prompt = (
+                f"Existing memories from the knowledge bank:\n{recall_text}\n\n"
+                f"New content being considered for retention:\n{content_text}\n\n"
+                f"Does the new content contain meaningful facts, decisions, or knowledge "
+                f"NOT already captured in the existing memories? Minor wording differences "
+                f"don't count as novel. Answer with a single word: NOVEL or DUPLICATE"
+            )
+
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=10,
+                temperature=0,
+            )
+            answer = response.choices[0].message.content.strip().upper()
+            is_dup = "DUPLICATE" in answer
+
+            logger.info("Dedup check: %s — %d chars against %d existing memories",
+                        "DUPLICATE" if is_dup else "NOVEL", len(content), num_results)
+            self._record_aux_success()
+            return is_dup
+
+        except Exception as exc:
+            self._record_aux_failure()
+            logger.warning("Dedup check failed (proceeding with retain): %s", exc)
+            return False
+
+    def _extract_points(self, content: str, *, use_main: bool = False) -> list[str]:
+        """Extract distinct discussion points from conversation transcript using auxiliary LLM.
+
+        Returns a list of short factual statements. On failure, returns an empty list
+        (caller should fall back to blob-level retain).
+        """
+        try:
+            from agent.auxiliary_client import get_text_auxiliary_client
+
+            task = "memory_retain_filter"
+            if use_main:
+                client, model = get_text_auxiliary_client("")
+                logger.debug("Extract points using main model fallback (model=%s)", model)
+            else:
+                client, model = get_text_auxiliary_client(task)
+
+            if not client:
+                logger.debug("No auxiliary client for %s; skipping extraction", task)
+                return []
+
+            # Truncate from the end (most recent = most relevant)
+            truncated = content[-6000:] if len(content) > 6000 else content
+
+            bank_ctx = self._build_bank_prompt_context()
+
+            prompt = (
+                f"Extract distinct discussion points from this conversation.\n\n"
+                f"{bank_ctx}\n"
+                f"CONVERSATION:\n{truncated}\n\n"
+                f"Rules:\n"
+                f"- Each point should be a short factual statement (1-2 sentences)\n"
+                f"- Include: decisions, architectural choices, facts learned, action items, "
+                f"preferences, bug fixes, configuration changes\n"
+                f"- Exclude: greetings, acknowledgments, CI pass/fail notifications, "
+                f"PR merge confirmations, status pings, meta-commentary about the conversation\n"
+                f"- When in doubt, include the point (conservative extraction)\n\n"
+                f"Return ONLY a JSON array of strings. No markdown, no explanation.\n"
+                f"Example: [\"Decided to use PostgreSQL for the auth service\", "
+                f"\"API rate limit set to 100 requests per minute\"]"
+            )
+
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=2000,
+                temperature=0,
+            )
+            raw = response.choices[0].message.content.strip()
+
+            # Parse JSON array — handle markdown code fences
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
+            points = json.loads(raw)
+            if not isinstance(points, list):
+                logger.warning("Extract points: expected list, got %s", type(points).__name__)
+                return []
+
+            points = [str(p).strip() for p in points if p and str(p).strip()]
+            logger.info("Extract points: %d points from %d chars of conversation", len(points), len(content))
+            self._record_aux_success()
+            return points
+
+        except Exception as exc:
+            self._record_aux_failure()
+            logger.warning("Extract points failed (%s); falling back to blob retain", exc)
+            return []
+
+    def _classify_points(self, points: list[str], *, use_main: bool = False) -> list[dict]:
+        """Classify an array of extracted points in a single batched LLM call.
+
+        Returns a list of dicts: [{"point": str, "verdict": "RETAIN"|"SKIP", "scope": "GENERAL"|"SCOPED"}, ...]
+        On failure, returns all points as RETAIN+SCOPED (fail-open).
+        """
+        if not points:
+            return []
+
+        try:
+            from agent.auxiliary_client import get_text_auxiliary_client
+
+            task = "memory_retain_filter"
+            if use_main:
+                client, model = get_text_auxiliary_client("")
+                logger.debug("Classify points using main model fallback (model=%s)", model)
+            else:
+                client, model = get_text_auxiliary_client(task)
+
+            if not client:
+                logger.debug("No auxiliary client for %s; fail-open all points", task)
+                return [{"point": p, "verdict": "RETAIN", "scope": "SCOPED"} for p in points]
+
+            numbered = "\n".join(f"{i+1}. {p}" for i, p in enumerate(points))
+
+            prompt = (
+                f"Classify each discussion point for memory retention.\n\n"
+                f"{self._build_bank_prompt_context()}\n"
+                f"POINTS:\n{numbered}\n\n"
+                f"For each point, decide:\n"
+                f"- verdict: RETAIN (worth saving) or SKIP (noise, trivial, CI/PR status)\n"
+                f"- scope: GENERAL (useful across all projects) or SCOPED (specific to one project/channel)\n\n"
+                f"Return ONLY a JSON array with one object per point, in order.\n"
+                f"Example: [{{\"verdict\": \"RETAIN\", \"scope\": \"SCOPED\"}}, {{\"verdict\": \"SKIP\", \"scope\": \"\"}}]"
+            )
+
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=1000,
+                temperature=0,
+            )
+            raw = response.choices[0].message.content.strip()
+
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
+            results = json.loads(raw)
+            if not isinstance(results, list):
+                logger.warning("Classify points: expected list, got %s", type(results).__name__)
+                return [{"point": p, "verdict": "RETAIN", "scope": "SCOPED"} for p in points]
+
+            # Merge with original points and normalize
+            classified = []
+            for i, p in enumerate(points):
+                if i < len(results) and isinstance(results[i], dict):
+                    verdict = str(results[i].get("verdict", "RETAIN")).upper()
+                    scope = str(results[i].get("scope", "SCOPED")).upper()
+                    if verdict not in ("RETAIN", "SKIP"):
+                        verdict = "RETAIN"
+                    if scope not in ("GENERAL", "SCOPED"):
+                        scope = "SCOPED"
+                    classified.append({"point": p, "verdict": verdict, "scope": scope})
+                else:
+                    classified.append({"point": p, "verdict": "RETAIN", "scope": "SCOPED"})
+
+            retained = sum(1 for c in classified if c["verdict"] == "RETAIN")
+            skipped = len(classified) - retained
+            logger.info("Classify points: %d RETAIN, %d SKIP out of %d points", retained, skipped, len(classified))
+            self._record_aux_success()
+            return classified
+
+        except Exception as exc:
+            self._record_aux_failure()
+            logger.warning("Classify points failed (%s); fail-open all %d points", exc, len(points))
+            return [{"point": p, "verdict": "RETAIN", "scope": "SCOPED"} for p in points]
+
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Enqueue a retain for the current turn. Non-blocking.
 
@@ -1304,7 +1816,21 @@ class HindsightMemoryProvider(MemoryProvider):
 
         logger.debug("sync_turn: retaining %d turns, total session content %d chars",
                      len(self._session_turns), sum(len(t) for t in self._session_turns))
-        content = "[" + ",".join(self._session_turns) + "]"
+
+        # Build content based on retain_mode
+        if self._retain_mode == "delta":
+            # Delta mode: only send new turns since last retain, plus overlap for context
+            overlap = min(self._retain_overlap_turns, self._last_retain_index)
+            start = max(0, self._last_retain_index - overlap)
+            delta_turns = self._session_turns[start:]
+            content = "[" + ",".join(delta_turns) + "]"
+            self._last_retain_index = len(self._session_turns)
+            logger.debug("sync_turn delta: sending turns %d-%d (%d new + %d overlap)",
+                         start, len(self._session_turns) - 1,
+                         len(self._session_turns) - (start + overlap), overlap)
+        else:
+            # Full mode (default): send entire session, replace previous via document_id
+            content = "[" + ",".join(self._session_turns) + "]"
 
         lineage_tags: list[str] = []
         if self._session_id:
@@ -1319,17 +1845,130 @@ class HindsightMemoryProvider(MemoryProvider):
             turn_index=self._turn_index,
         )
         num_turns = len(self._session_turns)
-        document_id = self._document_id
+        # In delta mode, don't use document_id — each delta creates independent memories.
+        # In full mode, document_id enables replacement of previous extraction.
+        document_id = self._document_id if self._retain_mode == "full" else None
         bank_id = self._bank_id
         retain_async_flag = self._retain_async
         retain_context = self._retain_context
 
         def _do_retain() -> None:
+            # Determine if classification is needed:
+            # - prefilter needs it to decide SKIP vs retain
+            # - "smart" tagging needs it to decide GENERAL vs SCOPED
+            needs_classification = self._retain_prefilter or self._retain_context_tagging == "smart"
+            classification = None
+
+            # Circuit breaker: if aux LLM has been failing, either fall back
+            # to the main model (if aux_fallback_to_main is on) or bypass the
+            # smart pipeline entirely.  Retains still happen either way.
+            aux_bypassed = self._is_aux_breaker_open()
+            use_main = False
+            if aux_bypassed and (needs_classification or self._retain_dedup or self._retain_extract):
+                if self._aux_fallback_to_main:
+                    use_main = True
+                    aux_bypassed = False  # not bypassed — using main model instead
+                    logger.info("Auxiliary circuit breaker open — falling back to main model for %d chars", len(content))
+                else:
+                    logger.info("Auxiliary circuit breaker open — bypassing smart pipeline for %d chars", len(content))
+
+            # ── Phase 4: Client-side extraction pipeline ──────────────
+            # Extract individual points, classify+dedup at point level,
+            # retain only clean pre-extracted facts.
+            if self._retain_extract and not aux_bypassed:
+                points = self._extract_points(content, use_main=use_main)
+                if points:
+                    # Classify all points in one batched call
+                    classified = self._classify_points(points, use_main=use_main)
+
+                    # Filter to RETAIN points only
+                    retained_points = [c for c in classified if c["verdict"] == "RETAIN"]
+                    if not retained_points:
+                        logger.info("Extract pipeline: all %d points classified as SKIP", len(classified))
+                        return
+
+                    # Dedup each surviving point individually
+                    if self._retain_dedup:
+                        novel_points = []
+                        for rp in retained_points:
+                            if not self._check_dedup(rp["point"], use_main=use_main):
+                                novel_points.append(rp)
+                            else:
+                                logger.debug("Extract pipeline: dedup DUPLICATE — %s", rp["point"][:80])
+                        if not novel_points:
+                            logger.info("Extract pipeline: all %d retained points are duplicates", len(retained_points))
+                            return
+                        retained_points = novel_points
+
+                    # Build retain items for each point with appropriate scope tags
+                    items = []
+                    for rp in retained_points:
+                        point_tags = list(lineage_tags) if lineage_tags else []
+                        if self._retain_context_tagging == "on":
+                            point_tags.append(self._build_scope_tag())
+                        elif self._retain_context_tagging == "smart":
+                            if rp.get("scope") == "SCOPED":
+                                point_tags.append(self._build_scope_tag())
+                            else:
+                                point_tags.append("scope:general")
+
+                        item = self._build_retain_kwargs(
+                            rp["point"],
+                            context=retain_context,
+                            metadata=metadata_snapshot,
+                            tags=point_tags or None,
+                        )
+                        item.pop("bank_id", None)
+                        item.pop("retain_async", None)
+                        items.append(item)
+
+                    logger.info("Extract pipeline: retaining %d points (%d extracted, %d after classify, %d after dedup)",
+                                len(items), len(points), sum(1 for c in classified if c["verdict"] == "RETAIN"),
+                                len(items))
+
+                    # Batch retain — no document_id, each extraction cycle is additive
+                    self._run_hindsight_operation(
+                        lambda client: client.aretain_batch(
+                            bank_id=bank_id,
+                            items=items,
+                            retain_async=retain_async_flag,
+                        )
+                    )
+                    logger.debug("Extract pipeline retain succeeded")
+                    return
+                else:
+                    logger.info("Extract pipeline: extraction failed or empty, falling back to blob retain")
+
+            # ── Blob-level pipeline (original / fallback) ─────────────
+            if needs_classification and not aux_bypassed:
+                classification = self._classify_for_retain(content, use_main=use_main)
+                if self._retain_prefilter and classification == "SKIP":
+                    logger.info("Smart retain: SKIP — not retaining %d chars", len(content))
+                    return
+
+            # Dedup check: query existing memories and skip if content is redundant
+            if self._retain_dedup and not aux_bypassed:
+                if self._check_dedup(content, use_main=use_main):
+                    logger.info("Dedup check: DUPLICATE — skipping retain of %d chars", len(content))
+                    return
+
+            # Build scope tag based on tagging mode
+            extra_tags = list(lineage_tags) if lineage_tags else []
+            if self._retain_context_tagging == "on":
+                # Always tag with the concrete scope — no classification needed
+                extra_tags.append(self._build_scope_tag())
+            elif self._retain_context_tagging == "smart":
+                # Use classification result to decide tag
+                if classification == "SCOPED":
+                    extra_tags.append(self._build_scope_tag())
+                else:
+                    extra_tags.append("scope:general")
+
             item = self._build_retain_kwargs(
                 content,
                 context=retain_context,
                 metadata=metadata_snapshot,
-                tags=lineage_tags or None,
+                tags=extra_tags or None,
             )
             item.pop("bank_id", None)
             item.pop("retain_async", None)
@@ -1361,13 +2000,119 @@ class HindsightMemoryProvider(MemoryProvider):
                 return tool_error("Missing required parameter: content")
             context = args.get("context")
             try:
+                # ── Smart pipeline (same gates as sync_turn) ──────────
+                needs_classification = self._retain_prefilter or self._retain_context_tagging == "smart"
+                classification = None
+
+                aux_bypassed = self._is_aux_breaker_open()
+                use_main = False
+                if aux_bypassed and (needs_classification or self._retain_dedup or self._retain_extract):
+                    if self._aux_fallback_to_main:
+                        use_main = True
+                        aux_bypassed = False
+                        logger.info("Tool retain: aux breaker open — falling back to main model for %d chars", len(content))
+                    else:
+                        logger.info("Tool retain: aux breaker open — bypassing smart pipeline for %d chars", len(content))
+
+                # ── Extract pipeline (same as _do_retain Phase 4) ─────
+                if self._retain_extract and not aux_bypassed:
+                    points = self._extract_points(content, use_main=use_main)
+                    if points:
+                        classified = self._classify_points(points, use_main=use_main)
+                        retained_points = [c for c in classified if c["verdict"] == "RETAIN"]
+                        if not retained_points:
+                            logger.info("Tool retain extract: all %d points classified as SKIP", len(classified))
+                            return json.dumps({"result": "Memory filtered (all points noise/irrelevant). Not stored."})
+
+                        if self._retain_dedup:
+                            novel_points = []
+                            for rp in retained_points:
+                                if not self._check_dedup(rp["point"], use_main=use_main):
+                                    novel_points.append(rp)
+                                else:
+                                    logger.debug("Tool retain extract: dedup DUPLICATE — %s", rp["point"][:80])
+                            if not novel_points:
+                                logger.info("Tool retain extract: all %d retained points are duplicates", len(retained_points))
+                                return json.dumps({"result": "Memory filtered (all points duplicate). Not stored."})
+                            retained_points = novel_points
+
+                        extra_tags_base = list(_normalize_retain_tags(args.get("tags")))
+                        items = []
+                        for rp in retained_points:
+                            point_tags = list(extra_tags_base)
+                            if self._retain_context_tagging == "on":
+                                scope_tag = self._build_scope_tag()
+                                if scope_tag not in point_tags:
+                                    point_tags.append(scope_tag)
+                            elif self._retain_context_tagging == "smart":
+                                if rp.get("scope") == "SCOPED":
+                                    scope_tag = self._build_scope_tag()
+                                    if scope_tag not in point_tags:
+                                        point_tags.append(scope_tag)
+                                else:
+                                    if "scope:general" not in point_tags:
+                                        point_tags.append("scope:general")
+
+                            item = self._build_retain_kwargs(
+                                rp["point"],
+                                context=context,
+                                tags=point_tags or None,
+                            )
+                            item.pop("bank_id", None)
+                            item.pop("retain_async", None)
+                            items.append(item)
+
+                        logger.info("Tool retain extract: retaining %d points (%d extracted, %d after classify, %d after dedup)",
+                                    len(items), len(points), sum(1 for c in classified if c["verdict"] == "RETAIN"), len(items))
+
+                        bank_id = self._bank_id
+                        retain_async_flag = self._retain_async
+                        self._run_hindsight_operation(
+                            lambda client: client.aretain_batch(
+                                bank_id=bank_id,
+                                items=items,
+                                retain_async=retain_async_flag,
+                            )
+                        )
+                        return json.dumps({"result": f"Memory stored: {len(items)} points extracted and retained."})
+                    else:
+                        logger.info("Tool retain extract: no points extracted from %d chars", len(content))
+                        return json.dumps({"result": "No extractable facts found. Not stored."})
+
+                # ── Non-extract path: classify/dedup whole blob ────────
+                if needs_classification and not aux_bypassed:
+                    classification = self._classify_for_retain(content, use_main=use_main)
+                    if self._retain_prefilter and classification == "SKIP":
+                        logger.info("Tool retain: SKIP — not retaining %d chars", len(content))
+                        return json.dumps({"result": "Memory filtered (noise/irrelevant per retain mission). Not stored."})
+
+                if self._retain_dedup and not aux_bypassed:
+                    if self._check_dedup(content, use_main=use_main):
+                        logger.info("Tool retain: DUPLICATE — skipping %d chars", len(content))
+                        return json.dumps({"result": "Memory filtered (duplicate of existing knowledge). Not stored."})
+
+                # ── Scope tagging ─────────────────────────────────────
+                extra_tags = list(_normalize_retain_tags(args.get("tags")))
+                if self._retain_context_tagging == "on":
+                    scope_tag = self._build_scope_tag()
+                    if scope_tag not in extra_tags:
+                        extra_tags.append(scope_tag)
+                elif self._retain_context_tagging == "smart":
+                    if classification == "SCOPED":
+                        scope_tag = self._build_scope_tag()
+                        if scope_tag not in extra_tags:
+                            extra_tags.append(scope_tag)
+                    else:
+                        if "scope:general" not in extra_tags:
+                            extra_tags.append("scope:general")
+
                 retain_kwargs = self._build_retain_kwargs(
                     content,
                     context=context,
-                    tags=args.get("tags"),
+                    tags=extra_tags or None,
                 )
-                logger.debug("Tool hindsight_retain: bank=%s, content_len=%d, context=%s",
-                             self._bank_id, len(content), context)
+                logger.debug("Tool hindsight_retain: bank=%s, content_len=%d, context=%s, tags=%s",
+                             self._bank_id, len(content), context, extra_tags)
                 self._run_hindsight_operation(lambda client: client.aretain(**retain_kwargs))
                 logger.debug("Tool hindsight_retain: success")
                 return json.dumps({"result": "Memory stored successfully."})
@@ -1387,10 +2132,19 @@ class HindsightMemoryProvider(MemoryProvider):
                 if self._recall_tags:
                     recall_kwargs["tags"] = self._recall_tags
                     recall_kwargs["tags_match"] = self._recall_tags_match
+                # Dynamic scope filtering (same as prefetch)
+                scope_tags = self._build_recall_scope_tags()
+                if scope_tags and "tags" not in recall_kwargs:
+                    recall_kwargs["tags"] = scope_tags
+                    recall_kwargs["tags_match"] = "any"
+                elif scope_tags and "tags" in recall_kwargs:
+                    for st in scope_tags:
+                        if st not in recall_kwargs["tags"]:
+                            recall_kwargs["tags"].append(st)
                 if self._recall_types:
                     recall_kwargs["types"] = self._recall_types
-                logger.debug("Tool hindsight_recall: bank=%s, query_len=%d, budget=%s",
-                             self._bank_id, len(query), self._budget)
+                logger.debug("Tool hindsight_recall: bank=%s, query_len=%d, budget=%s, tags=%s",
+                             self._bank_id, len(query), self._budget, recall_kwargs.get("tags"))
                 resp = self._run_hindsight_operation(lambda client: client.arecall(**recall_kwargs))
                 num_results = len(resp.results) if resp.results else 0
                 logger.debug("Tool hindsight_recall: %d results", num_results)
@@ -1407,12 +2161,18 @@ class HindsightMemoryProvider(MemoryProvider):
             if not query:
                 return tool_error("Missing required parameter: query")
             try:
-                logger.debug("Tool hindsight_reflect: bank=%s, query_len=%d, budget=%s",
-                             self._bank_id, len(query), self._budget)
+                reflect_kwargs: dict = {
+                    "bank_id": self._bank_id, "query": query, "budget": self._budget,
+                }
+                # Dynamic scope filtering (same as recall paths)
+                scope_tags = self._build_recall_scope_tags()
+                if scope_tags:
+                    reflect_kwargs["tags"] = scope_tags
+                    reflect_kwargs["tags_match"] = "any"
+                logger.debug("Tool hindsight_reflect: bank=%s, query_len=%d, budget=%s, tags=%s",
+                             self._bank_id, len(query), self._budget, reflect_kwargs.get("tags"))
                 resp = self._run_hindsight_operation(
-                    lambda client: client.areflect(
-                        bank_id=self._bank_id, query=query, budget=self._budget
-                    )
+                    lambda client: client.areflect(**reflect_kwargs)
                 )
                 logger.debug("Tool hindsight_reflect: response_len=%d", len(resp.text or ""))
                 return json.dumps({"result": resp.text or "No relevant memories found."})
@@ -1483,13 +2243,128 @@ class HindsightMemoryProvider(MemoryProvider):
                 old_lineage_tags.append(f"session:{old_session_id}")
             if old_parent_session_id:
                 old_lineage_tags.append(f"parent:{old_parent_session_id}")
-            old_content = "[" + ",".join(old_turns) + "]"
+            # Add scope tag for flush-on-switch (same as sync_turn and retain tool)
+            if self._retain_context_tagging in ("on", "smart"):
+                scope_tag = self._build_scope_tag()
+                if scope_tag not in old_lineage_tags:
+                    old_lineage_tags.append(scope_tag)
+
+            # In delta mode, only flush unsent turns (since last retain + overlap)
+            if self._retain_mode == "delta":
+                overlap = min(self._retain_overlap_turns, self._last_retain_index)
+                start = max(0, self._last_retain_index - overlap)
+                flush_turns = old_turns[start:]
+                old_content = "[" + ",".join(flush_turns) + "]"
+                flush_document_id = None  # delta creates independent memories
+            else:
+                old_content = "[" + ",".join(old_turns) + "]"
+                flush_document_id = old_document_id
+
+            # Snapshot pipeline config before session rotation mutates self._*
+            flush_bank_id = self._bank_id
+            flush_retain_async = self._retain_async
+            flush_retain_extract = self._retain_extract
+            flush_retain_prefilter = self._retain_prefilter
+            flush_retain_dedup = self._retain_dedup
+            flush_retain_context = self._retain_context
+            flush_context_tagging = self._retain_context_tagging
+            flush_aux_fallback = self._aux_fallback_to_main
 
             def _flush():
                 try:
+                    # ── Same pipeline gates as _do_retain / handle_tool_call ──
+                    needs_classification = flush_retain_prefilter or flush_context_tagging == "smart"
+                    classification = None
+
+                    aux_bypassed = self._is_aux_breaker_open()
+                    use_main = False
+                    if aux_bypassed and (needs_classification or flush_retain_dedup or flush_retain_extract):
+                        if flush_aux_fallback:
+                            use_main = True
+                            aux_bypassed = False
+                            logger.info("Flush-on-switch: aux breaker open — falling back to main model for %d chars", len(old_content))
+                        else:
+                            logger.info("Flush-on-switch: aux breaker open — bypassing smart pipeline for %d chars", len(old_content))
+
+                    # ── Extract pipeline ──────────────────────────────────
+                    if flush_retain_extract and not aux_bypassed:
+                        points = self._extract_points(old_content, use_main=use_main)
+                        if points:
+                            classified = self._classify_points(points, use_main=use_main)
+                            retained_points = [c for c in classified if c["verdict"] == "RETAIN"]
+                            if not retained_points:
+                                logger.info("Flush-on-switch extract: all %d points classified as SKIP", len(classified))
+                                return
+
+                            if flush_retain_dedup:
+                                novel_points = []
+                                for rp in retained_points:
+                                    if not self._check_dedup(rp["point"], use_main=use_main):
+                                        novel_points.append(rp)
+                                    else:
+                                        logger.debug("Flush-on-switch extract: dedup DUPLICATE — %s", rp["point"][:80])
+                                if not novel_points:
+                                    logger.info("Flush-on-switch extract: all %d retained points are duplicates", len(retained_points))
+                                    return
+                                retained_points = novel_points
+
+                            items = []
+                            for rp in retained_points:
+                                point_tags = list(old_lineage_tags)
+                                if flush_context_tagging == "on":
+                                    scope_tag = self._build_scope_tag()
+                                    if scope_tag not in point_tags:
+                                        point_tags.append(scope_tag)
+                                elif flush_context_tagging == "smart":
+                                    if rp.get("scope") == "SCOPED":
+                                        scope_tag = self._build_scope_tag()
+                                        if scope_tag not in point_tags:
+                                            point_tags.append(scope_tag)
+                                    else:
+                                        if "scope:general" not in point_tags:
+                                            point_tags.append("scope:general")
+
+                                item = self._build_retain_kwargs(
+                                    rp["point"],
+                                    context=flush_retain_context,
+                                    metadata=old_metadata,
+                                    tags=point_tags or None,
+                                )
+                                item.pop("bank_id", None)
+                                item.pop("retain_async", None)
+                                items.append(item)
+
+                            logger.info(
+                                "Flush-on-switch extract: retaining %d points (%d extracted, %d after classify, %d after dedup)",
+                                len(items), len(points), sum(1 for c in classified if c["verdict"] == "RETAIN"), len(items),
+                            )
+                            self._run_hindsight_operation(
+                                lambda client: client.aretain_batch(
+                                    bank_id=flush_bank_id,
+                                    items=items,
+                                    retain_async=flush_retain_async,
+                                )
+                            )
+                            logger.debug("Flush-on-switch extract retain succeeded")
+                            return
+                        else:
+                            logger.info("Flush-on-switch extract: extraction failed or empty, falling back to blob retain")
+
+                    # ── Blob-level pipeline (original / fallback) ─────────
+                    if needs_classification and not aux_bypassed:
+                        classification = self._classify_for_retain(old_content, use_main=use_main)
+                        if flush_retain_prefilter and classification == "SKIP":
+                            logger.info("Flush-on-switch: SKIP — not retaining %d chars", len(old_content))
+                            return
+
+                    if flush_retain_dedup and not aux_bypassed:
+                        if self._check_dedup(old_content, use_main=use_main):
+                            logger.info("Flush-on-switch: DUPLICATE — skipping retain of %d chars", len(old_content))
+                            return
+
                     item = self._build_retain_kwargs(
                         old_content,
-                        context=self._retain_context,
+                        context=flush_retain_context,
                         metadata=old_metadata,
                         tags=old_lineage_tags or None,
                     )
@@ -1497,14 +2372,14 @@ class HindsightMemoryProvider(MemoryProvider):
                     item.pop("retain_async", None)
                     logger.debug(
                         "Hindsight flush-on-switch: bank=%s, doc=%s, num_turns=%d",
-                        self._bank_id, old_document_id, len(old_turns),
+                        flush_bank_id, old_document_id, len(old_turns),
                     )
                     self._run_hindsight_operation(
                         lambda client: client.aretain_batch(
-                            bank_id=self._bank_id,
+                            bank_id=flush_bank_id,
                             items=[item],
-                            document_id=old_document_id,
-                            retain_async=self._retain_async,
+                            document_id=flush_document_id,
+                            retain_async=flush_retain_async,
                         )
                     )
                 except Exception as e:
@@ -1537,6 +2412,7 @@ class HindsightMemoryProvider(MemoryProvider):
         self._session_turns = []
         self._turn_counter = 0
         self._turn_index = 0
+        self._last_retain_index = 0
         logger.debug(
             "Hindsight on_session_switch: new_session=%s parent=%s reset=%s doc=%s",
             self._session_id, self._parent_session_id, reset, self._document_id,
