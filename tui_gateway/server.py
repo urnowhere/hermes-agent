@@ -305,11 +305,11 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
 
     # Mark session ended in DB so it doesn't linger as a ghost row in /resume.
     # Adapted from #18283 (luyao618) and #18299 (Bartok9).
-    if session_key:
+    if session_id:
         try:
             db = _get_db()
             if db is not None:
-                db.end_session(session_key, end_reason)
+                db.end_session(session_id, end_reason)
         except Exception:
             pass
 
@@ -2936,6 +2936,13 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                 conversation_history=list(history),
                 stream_callback=_stream,
             )
+            previous_session_key = session.get("session_key")
+            _sync_session_key_after_compress(sid, session)
+            if session.get("session_key") != previous_session_key:
+                try:
+                    _emit("session.info", sid, _session_info(agent))
+                except Exception:
+                    pass
 
             last_reasoning = None
             status_note = None

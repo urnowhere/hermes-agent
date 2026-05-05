@@ -632,6 +632,33 @@ def test_session_close_commits_memory_and_fires_finalize_hook(monkeypatch):
         server._sessions.pop("sid", None)
 
 
+def test_session_close_finalizes_rotated_agent_session_id(monkeypatch):
+    calls = {"ended": [], "hooks": []}
+
+    class _FakeDB:
+        def end_session(self, session_id, end_reason):
+            calls["ended"].append((session_id, end_reason))
+
+    agent = types.SimpleNamespace(session_id="rotated-id")
+    server._sessions["sid"] = _session(agent=agent, session_key="stale-key")
+    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+    monkeypatch.setattr(
+        server,
+        "_notify_session_boundary",
+        lambda event, session_id: calls["hooks"].append((event, session_id)),
+    )
+
+    try:
+        resp = server.handle_request(
+            {"id": "1", "method": "session.close", "params": {"session_id": "sid"}}
+        )
+        assert resp["result"]["closed"] is True
+        assert calls["ended"] == [("rotated-id", "tui_close")]
+        assert ("on_session_finalize", "rotated-id") in calls["hooks"]
+    finally:
+        server._sessions.pop("sid", None)
+
+
 def test_init_session_fires_reset_hook(monkeypatch):
     hooks = []
 
@@ -2466,6 +2493,69 @@ def test_prompt_submit_history_version_match_persists_normally(monkeypatch):
         assert len(complete_calls) == 1
         _, _, payload = complete_calls[0]
         assert "warning" not in payload
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_prompt_submit_syncs_session_key_after_agent_session_rotation(monkeypatch):
+    """Automatic compression can rotate AIAgent.session_id during a turn.
+
+    The TUI gateway must re-anchor its session_key immediately so title,
+    approval, follow-up prompt, and finalization paths target the live
+    continuation row instead of the compression-ended parent.
+    """
+
+    class _Agent:
+        def __init__(self):
+            self.session_id = "session-key"
+            self.model = "x"
+
+        def run_conversation(
+            self, prompt, conversation_history=None, stream_callback=None
+        ):
+            self.session_id = "rotated-id"
+            return {
+                "final_response": "reply",
+                "messages": [{"role": "assistant", "content": "reply"}],
+            }
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    import tools.approval as _approval
+
+    server._sessions["sid"] = _session(agent=_Agent())
+    emits: list[tuple] = []
+    try:
+        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server, "_get_usage", lambda _a: {})
+        monkeypatch.setattr(server, "render_message", lambda _t, _c: "")
+        monkeypatch.setattr(server, "_emit", lambda *a: emits.append(a))
+        monkeypatch.setattr(server, "_voice_tts_enabled", lambda: False)
+        monkeypatch.setattr(server, "_restart_slash_worker", lambda _s: None)
+        monkeypatch.setattr(_approval, "unregister_gateway_notify", lambda _key: None)
+        monkeypatch.setattr(_approval, "register_gateway_notify", lambda _key, _cb: None)
+        monkeypatch.setattr(_approval, "is_session_yolo_enabled", lambda _key: False)
+
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {"session_id": "sid", "text": "hi"},
+            }
+        )
+        assert resp.get("result")
+        assert server._sessions["sid"]["session_key"] == "rotated-id"
+        session_info_calls = [a for a in emits if a[0] == "session.info"]
+        assert session_info_calls
+        assert any(
+            a[1] == "sid" and a[2].get("model") == "x"
+            for a in session_info_calls
+        )
     finally:
         server._sessions.pop("sid", None)
 
