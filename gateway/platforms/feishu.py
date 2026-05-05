@@ -159,6 +159,10 @@ _MARKDOWN_FENCE_CLOSE_RE = re.compile(r"^```\s*$")
 _MENTION_RE = re.compile(r"@_user_\d+")
 _MULTISPACE_RE = re.compile(r"[ \t]{2,}")
 _POST_CONTENT_INVALID_RE = re.compile(r"content format of the post type is incorrect", re.IGNORECASE)
+_MARKDOWN_TABLE_BLOCK_RE = re.compile(
+    r"(?:^|\n)(\|[^\n]+\|)\n\|[-:\s|]+\|\n((?:\|[^\n]+\|\n?)+)",
+    re.MULTILINE,
+)
 # ---------------------------------------------------------------------------
 # Media type sets and upload constants
 # ---------------------------------------------------------------------------
@@ -946,7 +950,7 @@ def _normalize_interactive_message(message_type: str, payload: Dict[str, Any]) -
     if actions:
         lines.append(f"Actions: {', '.join(actions)}")
 
-    text_content = "\n".join(lines[:12]).strip() or FALLBACK_INTERACTIVE_TEXT
+    text_content = "\n".join(lines[:100]).strip() or FALLBACK_INTERACTIVE_TEXT
     return FeishuNormalizedMessage(
         raw_type=message_type,
         text_content=text_content,
@@ -2764,6 +2768,15 @@ class FeishuAdapter(BasePlatformAdapter):
             or getattr(message, "root_id", None)
             or None
         )
+        # WebSocket events may lack parent_id — proactively call REST API to fill it in
+        if not reply_to_message_id:
+            api_message = await self._fetch_message_detail(message_id)
+            if api_message:
+                reply_to_message_id = (
+                    getattr(api_message, "parent_id", None)
+                    or getattr(api_message, "upper_message_id", None)
+                    or None
+                )
         reply_to_text = await self._fetch_message_text(reply_to_message_id) if reply_to_message_id else None
 
         sender_primary = (
@@ -3653,6 +3666,20 @@ class FeishuAdapter(BasePlatformAdapter):
             logger.debug("[Feishu] Failed to fetch bot names for %s", bot_ids, exc_info=True)
             return None
 
+    async def _fetch_message_detail(self, message_id: str) -> Optional[Any]:
+        """Fetch full message object from Feishu API (includes parent_id/root_id for replies)."""
+        if not self._client or not message_id:
+            return None
+        try:
+            request = self._build_get_message_request(message_id)
+            response = await asyncio.to_thread(self._client.im.v1.message.get, request)
+            if not response or getattr(response, "success", lambda: False)() is False:
+                return None
+            items = getattr(getattr(response, "data", None), "items", None) or []
+            return items[0] if items else None
+        except Exception:
+            return None
+
     async def _fetch_message_text(self, message_id: str) -> Optional[str]:
         if not self._client or not message_id:
             return None
@@ -3991,7 +4018,21 @@ class FeishuAdapter(BasePlatformAdapter):
     # Outbound payload construction and send pipeline
     # =========================================================================
 
+    @staticmethod
+    def _wrap_markdown_tables(content: str) -> str:
+        """Wrap markdown table blocks in code fences so Feishu renders them.
+
+        Feishu's ``text`` message type strips markdown table syntax entirely,
+        and its ``post`` type ``md`` tag doesn't support tables either.
+        Wrapping in code fences preserves the table content for the reader.
+        """
+        return _MARKDOWN_TABLE_BLOCK_RE.sub(
+            lambda m: f"\n```\n{m.group(0).strip()}\n```\n",
+            content,
+        )
+
     def _build_outbound_payload(self, content: str) -> tuple[str, str]:
+        content = self._wrap_markdown_tables(content)
         if _MARKDOWN_HINT_RE.search(content):
             return "post", _build_markdown_post_payload(content)
         text_payload = {"text": content}
@@ -4293,9 +4334,12 @@ class FeishuAdapter(BasePlatformAdapter):
         return SimpleNamespace(chat_id=chat_id)
 
     @staticmethod
-    def _build_get_message_request(message_id: str) -> Any:
+    def _build_get_message_request(message_id: str, card_msg_content_type: str = "user_card_content") -> Any:
         if "GetMessageRequest" in globals():
-            return GetMessageRequest.builder().message_id(message_id).build()
+            req = GetMessageRequest.builder().message_id(message_id).build()
+            if card_msg_content_type:
+                req.add_query("card_msg_content_type", card_msg_content_type)
+            return req
         return SimpleNamespace(message_id=message_id)
 
     @staticmethod

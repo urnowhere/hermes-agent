@@ -6008,14 +6008,25 @@ class GatewayRunner:
                 message_text = f"{context_note}\n\n{message_text}"
 
         if getattr(event, "reply_to_text", None) and event.reply_to_message_id:
-            # Always inject the reply-to pointer — even when the quoted text
-            # already appears in history. The prefix isn't deduplication, it's
-            # disambiguation: it tells the agent *which* prior message the user
-            # is referencing. History can contain the same or similar text
-            # multiple times, and without an explicit pointer the agent has to
-            # guess (or answer for both subjects). Token overhead is minimal.
-            reply_snippet = event.reply_to_text[:500]
-            message_text = f'[Replying to: "{reply_snippet}"]\n\n{message_text}'
+            full_reply_text = event.reply_to_text
+            _REPLY_TO_LIMIT = 3000
+            if len(full_reply_text) > _REPLY_TO_LIMIT:
+                reply_snippet = full_reply_text[:_REPLY_TO_LIMIT] + "\n…[已截断，原文过长]"
+            else:
+                reply_snippet = full_reply_text
+            # _prepare_inbound_message_text is called before session_entry is bound,
+            # pass session_id via event._session_id (injected by the caller)
+            _session_id = getattr(event, "_session_id", "") or ""
+            history_messages = self.session_store.load_transcript(_session_id)
+            found_in_history = any(
+                reply_snippet in (msg.get("content") or "")
+                for msg in reversed(history_messages)
+            )
+            if not found_in_history:
+                message_text = f'[Replying to: "{reply_snippet}"]\n\n{message_text}'
+            else:
+                marker_preview = reply_snippet[:80].replace("\n", " ")
+                message_text = f"[Replying to earlier message: {marker_preview}...]\n\n{message_text}"
 
         if "@" in message_text:
             try:
@@ -6618,6 +6629,8 @@ class GatewayRunner:
         # attachments (documents, audio, etc.) are not sent to the vision
         # tool even when they appear in the same message.
         # -----------------------------------------------------------------
+        # Inject session_id into event for reply-context lookups in _prepare_inbound_message_text
+        event._session_id = session_entry.session_id
         message_text = await self._prepare_inbound_message_text(
             event=event,
             source=source,
