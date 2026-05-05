@@ -75,7 +75,10 @@ def _ensure_discord_mock():
 
 _ensure_discord_mock()
 
-from gateway.platforms.discord import DiscordAdapter  # noqa: E402
+from gateway.platforms.discord import (  # noqa: E402
+    DiscordAdapter,
+    _build_auto_thread_name,
+)
 
 
 class FakeTree:
@@ -97,7 +100,12 @@ class FakeTree:
 
 
 @pytest.fixture
-def adapter():
+def adapter(monkeypatch):
+    monkeypatch.delenv("DISCORD_ALLOWED_CHANNELS", raising=False)
+    monkeypatch.delenv("DISCORD_IGNORED_CHANNELS", raising=False)
+    monkeypatch.delenv("DISCORD_FREE_RESPONSE_CHANNELS", raising=False)
+    monkeypatch.delenv("DISCORD_NO_THREAD_CHANNELS", raising=False)
+    monkeypatch.delenv("DISCORD_SMART_THREAD_TITLES", raising=False)
     config = PlatformConfig(enabled=True, token="***")
     adapter = DiscordAdapter(config)
     adapter._client = SimpleNamespace(
@@ -493,8 +501,40 @@ def test_build_slash_event_uses_group_context_for_channels(adapter):
 # ------------------------------------------------------------------
 
 
+def test_build_auto_thread_name_summarizes_request():
+    assert (
+        _build_auto_thread_name(
+            "Can you make yourself auto-retitle threads intelligently? "
+            "Based on the first message, give the thread a title that is a smart summary."
+        )
+        == "make yourself auto-retitle threads intelligently"
+    )
+
+
+def test_build_auto_thread_name_strips_polite_openers():
+    assert _build_auto_thread_name("<@123> please help me debug Discord auto-thread titles") == "debug Discord auto-thread titles"
+
+
 @pytest.mark.asyncio
-async def test_auto_create_thread_uses_message_content_as_name(adapter):
+async def test_auto_create_thread_uses_summarized_name_when_enabled(adapter, monkeypatch):
+    monkeypatch.setenv("DISCORD_SMART_THREAD_TITLES", "true")
+    thread = SimpleNamespace(id=999, name="summary")
+    message = SimpleNamespace(
+        content="Can you fix our Discord auto-thread titling? It keeps using the whole message.",
+        create_thread=AsyncMock(return_value=thread),
+        channel=SimpleNamespace(send=AsyncMock()),
+        author=SimpleNamespace(display_name="Jezza"),
+    )
+
+    result = await adapter._auto_create_thread(message)
+
+    assert result is thread
+    assert message.create_thread.await_args[1]["name"] == "fix our Discord auto-thread titling"
+
+
+@pytest.mark.asyncio
+async def test_auto_create_thread_uses_message_content_as_name(adapter, monkeypatch):
+    monkeypatch.delenv("DISCORD_SMART_THREAD_TITLES", raising=False)
     thread = SimpleNamespace(id=999, name="Hello world")
     message = SimpleNamespace(
         content="Hello world, how are you?",
@@ -651,6 +691,45 @@ def _fake_message(channel, *, content="Hello", author_id=42, display_name="Jezza
 
 
 @pytest.mark.asyncio
+async def test_rename_thread_edits_discord_thread(adapter):
+    thread = _FakeThreadChannel(channel_id=777, name="raw first message")
+    thread.edit = AsyncMock()
+    adapter._client.get_channel = lambda _id: thread
+
+    result = await adapter.rename_thread("777", "Helpful Discord thread title")
+
+    assert result is True
+    thread.edit.assert_awaited_once_with(
+        name="Helpful Discord thread title",
+        reason="Hermes auto-generated conversation title",
+    )
+
+
+@pytest.mark.asyncio
+async def test_rename_thread_fetches_when_not_cached(adapter):
+    thread = _FakeThreadChannel(channel_id=777, name="raw first message")
+    thread.edit = AsyncMock()
+    adapter._client.get_channel = lambda _id: None
+    adapter._client.fetch_channel = AsyncMock(return_value=thread)
+
+    result = await adapter.rename_thread("777", "Fetched title")
+
+    assert result is True
+    adapter._client.fetch_channel.assert_awaited_once_with(777)
+    thread.edit.assert_awaited_once_with(
+        name="Fetched title",
+        reason="Hermes auto-generated conversation title",
+    )
+
+
+@pytest.mark.asyncio
+async def test_rename_thread_ignores_non_thread_channel(adapter):
+    adapter._client.get_channel = lambda _id: _FakeTextChannel(channel_id=777)
+
+    assert await adapter.rename_thread("777", "Nope") is False
+
+
+@pytest.mark.asyncio
 async def test_auto_thread_creates_thread_and_redirects(adapter, monkeypatch):
     """When DISCORD_AUTO_THREAD=true, a new thread is created and the event routes there."""
     monkeypatch.setenv("DISCORD_AUTO_THREAD", "true")
@@ -726,6 +805,58 @@ async def test_auto_thread_can_be_disabled(adapter, monkeypatch):
     adapter._auto_create_thread.assert_not_awaited()
     assert len(captured_events) == 1
     assert captured_events[0].source.chat_id == "100"  # stays in channel
+
+
+@pytest.mark.asyncio
+async def test_auto_thread_still_runs_in_free_response_channels(adapter, monkeypatch):
+    """Free-response means no mention required; it must not imply no-thread."""
+    monkeypatch.setenv("DISCORD_AUTO_THREAD", "true")
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
+    monkeypatch.setenv("DISCORD_FREE_RESPONSE_CHANNELS", "100")
+
+    fake_thread = _FakeThreadChannel(channel_id=999, name="auto-thread")
+    adapter._auto_create_thread = AsyncMock(return_value=fake_thread)
+
+    captured_events = []
+
+    async def capture_handle(event):
+        captured_events.append(event)
+
+    adapter.handle_message = capture_handle
+
+    msg = _fake_message(_FakeTextChannel(channel_id=100), content="Did Joi's update work?")
+
+    await adapter._handle_message(msg)
+
+    adapter._auto_create_thread.assert_awaited_once_with(msg)
+    assert len(captured_events) == 1
+    assert captured_events[0].source.chat_id == "999"
+    assert captured_events[0].source.chat_type == "thread"
+
+
+@pytest.mark.asyncio
+async def test_auto_thread_respects_no_thread_channels(adapter, monkeypatch):
+    """no_thread_channels is the explicit opt-out from auto-threading."""
+    monkeypatch.setenv("DISCORD_AUTO_THREAD", "true")
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "false")
+    monkeypatch.setenv("DISCORD_NO_THREAD_CHANNELS", "100")
+
+    adapter._auto_create_thread = AsyncMock()
+
+    captured_events = []
+
+    async def capture_handle(event):
+        captured_events.append(event)
+
+    adapter.handle_message = capture_handle
+
+    msg = _fake_message(_FakeTextChannel(channel_id=100), content="Stay in channel")
+
+    await adapter._handle_message(msg)
+
+    adapter._auto_create_thread.assert_not_awaited()
+    assert len(captured_events) == 1
+    assert captured_events[0].source.chat_id == "100"
 
 
 @pytest.mark.asyncio

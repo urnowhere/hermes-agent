@@ -8,10 +8,12 @@ Covers:
      input() call) and the stash is applied automatically
 """
 
+import io
 import subprocess
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import hermes_cli.main as main_mod
 from hermes_cli.main import cmd_update
 
 
@@ -54,12 +56,14 @@ class TestUpdateYesConfigMigration:
     @patch("hermes_cli.config.check_config_version", return_value=(1, 2))
     @patch("hermes_cli.config.get_missing_config_fields", return_value=[])
     @patch("hermes_cli.config.get_missing_env_vars", return_value=["NEW_KEY"])
+    @patch("hermes_cli.config.is_managed", return_value=False)
     @patch("shutil.which", return_value=None)
     @patch("subprocess.run")
     def test_yes_auto_migrates_without_input(
         self,
         mock_run,
         _mock_which,
+        _mock_is_managed,
         _mock_missing_env,
         _mock_missing_cfg,
         _mock_version,
@@ -93,12 +97,14 @@ class TestUpdateYesConfigMigration:
     @patch("hermes_cli.config.check_config_version", return_value=(1, 2))
     @patch("hermes_cli.config.get_missing_config_fields", return_value=[])
     @patch("hermes_cli.config.get_missing_env_vars", return_value=["NEW_KEY"])
+    @patch("hermes_cli.config.is_managed", return_value=False)
     @patch("shutil.which", return_value=None)
     @patch("subprocess.run")
     def test_no_yes_flag_still_prompts_in_tty(
         self,
         mock_run,
         _mock_which,
+        _mock_is_managed,
         _mock_missing_env,
         _mock_missing_cfg,
         _mock_version,
@@ -113,11 +119,15 @@ class TestUpdateYesConfigMigration:
 
         args = SimpleNamespace(yes=False)
 
-        with patch("builtins.input", return_value="n") as mock_input, patch(
-            "hermes_cli.main.sys"
-        ) as mock_sys:
-            mock_sys.stdin.isatty.return_value = True
-            mock_sys.stdout.isatty.return_value = True
+        class _TTYStringIO(io.StringIO):
+            def isatty(self):
+                return True
+
+        tty_in = _TTYStringIO()
+        tty_out = _TTYStringIO()
+        with patch("builtins.input", return_value="n") as mock_input, patch.object(
+            main_mod.sys, "stdin", tty_in
+        ), patch.object(main_mod.sys, "stdout", tty_out):
             cmd_update(args)
             # The user was actually prompted.
             assert mock_input.called
@@ -128,25 +138,20 @@ class TestUpdateYesConfigMigration:
 class TestUpdateYesStashRestore:
     """--yes auto-restores the pre-update autostash without prompting."""
 
-    @patch("hermes_cli.main._restore_stashed_changes")
-    @patch(
-        "hermes_cli.main._stash_local_changes_if_needed",
-        return_value="stash@{0}",
-    )
     @patch("hermes_cli.config.check_config_version", return_value=(1, 1))
     @patch("hermes_cli.config.get_missing_config_fields", return_value=[])
     @patch("hermes_cli.config.get_missing_env_vars", return_value=[])
+    @patch("hermes_cli.config.is_managed", return_value=False)
     @patch("shutil.which", return_value=None)
     @patch("subprocess.run")
     def test_yes_restores_stash_without_prompting(
         self,
         mock_run,
         _mock_which,
+        _mock_is_managed,
         _mock_missing_env,
         _mock_missing_cfg,
         _mock_version,
-        _mock_stash,
-        mock_restore,
         capsys,
     ):
         # Not on main → cmd_update switches to main → autostash fires.
@@ -154,14 +159,29 @@ class TestUpdateYesStashRestore:
             branch="feature-branch", verify_ok=True, commit_count="1", dirty=True
         )
 
+        restore_calls = []
+
+        def fake_restore(*_args, **kwargs):
+            restore_calls.append(kwargs)
+
         args = SimpleNamespace(yes=True)
 
-        cmd_update(args)
+        # Patch the function globals used by this imported cmd_update object.
+        # This is sturdier under pytest-xdist/import-order weirdness than
+        # relying on a module-name patch alone.
+        with patch.dict(
+            cmd_update.__globals__,
+            {
+                "_stash_local_changes_if_needed": lambda *_a, **_kw: "stash@{0}",
+                "_restore_stashed_changes": fake_restore,
+            },
+        ):
+            cmd_update(args)
 
         # _restore_stashed_changes was called, and called with prompt_user=False
         # every time (so the user never sees "Restore local changes now?").
-        assert mock_restore.called
-        for call in mock_restore.call_args_list:
-            assert call.kwargs.get("prompt_user") is False, (
-                f"Expected prompt_user=False under --yes, got {call.kwargs}"
+        assert restore_calls
+        for kwargs in restore_calls:
+            assert kwargs.get("prompt_user") is False, (
+                f"Expected prompt_user=False under --yes, got {kwargs}"
             )

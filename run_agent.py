@@ -10474,8 +10474,10 @@ class AIAgent:
         # a foreground user-directed turn. Set at the top of each call;
         # the review fork runs on its own thread with a fresh context,
         # so the foreground value here does not leak into it.
-        from tools.skill_provenance import set_current_write_origin
-        set_current_write_origin(getattr(self, "_memory_write_origin", "assistant_tool"))
+        from tools.skill_provenance import reset_current_write_origin, set_current_write_origin
+        _write_origin_token = set_current_write_origin(
+            getattr(self, "_memory_write_origin", "assistant_tool")
+        )
 
         # If the previous turn activated fallback, restore the primary
         # runtime so this turn gets a fresh attempt with the preferred model.
@@ -13965,6 +13967,7 @@ class AIAgent:
         except Exception as exc:
             logger.warning("on_session_end hook failed: %s", exc)
 
+        reset_current_write_origin(_write_origin_token)
         return result
 
     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:

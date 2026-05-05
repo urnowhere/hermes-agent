@@ -2,9 +2,10 @@
 { pkgs, hermesNpmLib, ... }:
 let
   src = ../ui-tui;
+  npmFlags = [ "--legacy-peer-deps" ];
   npmDeps = pkgs.fetchNpmDeps {
-    inherit src;
-    hash = "sha256-a/HGI9OgVcTnZrMXA7xFMGnFoVxyHe95fulVz+WNYB0=";
+    inherit src npmFlags;
+    hash = "sha256-35DhzMjKXb+/gkshNEjPSKswAtDWKi9BCyR+FGY7S3c=";
   };
 
   npm = hermesNpmLib.mkNpmPassthru { folder = "ui-tui"; attr = "tui"; pname = "hermes-tui"; };

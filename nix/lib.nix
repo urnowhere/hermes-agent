@@ -31,14 +31,11 @@
     {
       inherit nodejs;
       patchPhase = ''
-        runHook prePatch
-        # Normalize trailing newlines so source and npm-deps always match,
-        # regardless of what fetchNpmDeps preserves.
-        sed -i -z 's/\n*$/\n/' package-lock.json
-
         # Make npmConfigHook's byte-for-byte diff newline-agnostic by
         # replacing its hardcoded /nix/store/.../diff with a wrapper that
         # normalizes trailing newlines on both sides before comparing.
+        # This must happen before runHook prePatch because npmConfigHook runs
+        # from that hook.
         mkdir -p "$TMPDIR/bin"
         cat > "$TMPDIR/bin/diff" << DIFFWRAP
         #!/bin/sh
@@ -50,6 +47,11 @@
         DIFFWRAP
         chmod +x "$TMPDIR/bin/diff"
         export PATH="$TMPDIR/bin:$PATH"
+
+        runHook prePatch
+        # Normalize trailing newlines so source and npm-deps always match,
+        # regardless of what fetchNpmDeps preserves.
+        sed -i -z 's/\n*$/\n/' package-lock.json
 
         runHook postPatch
       '';

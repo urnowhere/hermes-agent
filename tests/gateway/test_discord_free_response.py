@@ -88,6 +88,16 @@ def adapter(monkeypatch):
     monkeypatch.setattr(discord_platform.discord, "Thread", FakeThread, raising=False)
     monkeypatch.setattr(discord_platform.discord, "ForumChannel", FakeForumChannel, raising=False)
 
+    # Keep these unit tests hermetic. The developer machine and gateway runtime
+    # often export Discord channel gates; if they leak into this suite, messages
+    # get filtered before the behavior under test can run.
+    for env_name in (
+        "DISCORD_ALLOWED_CHANNELS",
+        "DISCORD_IGNORED_CHANNELS",
+        "DISCORD_NO_THREAD_CHANNELS",
+    ):
+        monkeypatch.delenv(env_name, raising=False)
+
     config = PlatformConfig(enabled=True, token="fake-token")
     adapter = DiscordAdapter(config)
     adapter._client = SimpleNamespace(user=SimpleNamespace(id=999))
@@ -447,18 +457,18 @@ async def test_discord_voice_linked_channel_skips_mention_requirement_and_auto_t
 
 
 @pytest.mark.asyncio
-async def test_discord_free_channel_skips_auto_thread(adapter, monkeypatch):
-    """Free-response channels must NOT auto-create threads — bot replies inline.
+async def test_discord_free_channel_auto_threads_without_mention(adapter, monkeypatch):
+    """Free-response channels bypass mention gating but still auto-thread.
 
-    Without this, every message in a free-response channel would spin off a
-    thread (since the channel bypasses the @mention gate), defeating the
-    lightweight-chat purpose of free-response mode.
+    This keeps lightweight ambient chat possible while preserving isolated
+    Hermes sessions for each top-level message.
     """
     monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
     monkeypatch.setenv("DISCORD_FREE_RESPONSE_CHANNELS", "789")
     monkeypatch.delenv("DISCORD_AUTO_THREAD", raising=False)  # default true
 
-    adapter._auto_create_thread = AsyncMock()
+    thread = FakeThread(channel_id=790, parent=FakeTextChannel(channel_id=789))
+    adapter._auto_create_thread = AsyncMock(return_value=thread)
 
     message = make_message(
         channel=FakeTextChannel(channel_id=789),
@@ -467,10 +477,12 @@ async def test_discord_free_channel_skips_auto_thread(adapter, monkeypatch):
 
     await adapter._handle_message(message)
 
-    adapter._auto_create_thread.assert_not_awaited()
+    adapter._auto_create_thread.assert_awaited_once_with(message)
     adapter.handle_message.assert_awaited_once()
     event = adapter.handle_message.await_args.args[0]
-    assert event.source.chat_type == "group"
+    assert event.source.chat_type == "thread"
+    assert event.source.chat_id == "790"
+    assert event.source.parent_chat_id == "789"
 
 
 @pytest.mark.asyncio
