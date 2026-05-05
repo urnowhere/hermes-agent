@@ -767,6 +767,7 @@ def cache_video_from_bytes(data: bytes, ext: str = ".mp4") -> str:
 DOCUMENT_CACHE_DIR = get_hermes_dir("cache/documents", "document_cache")
 
 SUPPORTED_DOCUMENT_TYPES = {
+    # Documents
     ".pdf": "application/pdf",
     ".md": "text/markdown",
     ".txt": "text/plain",
@@ -774,12 +775,21 @@ SUPPORTED_DOCUMENT_TYPES = {
     ".log": "text/plain",
     ".json": "application/json",
     ".xml": "application/xml",
+    ".html": "text/html",
     ".yaml": "application/yaml",
     ".yml": "application/yaml",
     ".toml": "application/toml",
     ".ini": "text/plain",
     ".cfg": "text/plain",
+    # Code
+    ".py": "text/x-python",
+    ".js": "application/javascript",
+    ".ts": "application/typescript",
+    ".sh": "application/x-sh",
+    ".sql": "text/x-sql",
+    # Archives
     ".zip": "application/zip",
+    # Office
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
