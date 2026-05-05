@@ -579,3 +579,175 @@ class TestPatchReplacePostWriteVerification:
         result = ops.patch_replace("/tmp/test/a.py", "hello", "hi")
         assert result.error is not None
         assert "could not re-read" in result.error.lower()
+
+
+# =========================================================================
+# Hashline integration tests (real file I/O)
+# =========================================================================
+
+class _SimpleFileOps(ShellFileOperations):
+    """Minimal ShellFileOperations that uses Python file I/O for testing."""
+
+    def __init__(self):
+        super().__init__(terminal_env=MagicMock())
+
+    def read_file(self, path, offset=1, limit=500):
+        return ReadResult()
+
+    def read_file_raw(self, path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return ReadResult(content=f.read())
+        except FileNotFoundError:
+            return ReadResult(error=f"File not found: {path}")
+        except Exception as e:
+            return ReadResult(error=str(e))
+
+    def write_file(self, path, content):
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            return WriteResult()
+        except Exception as e:
+            return WriteResult(error=str(e))
+
+    def patch_replace(self, path, old_string, new_string, replace_all=False):
+        return PatchResult()
+
+    def patch_v4a(self, patch_content):
+        return PatchResult()
+
+    def delete_file(self, path):
+        return WriteResult()
+
+    def move_file(self, src, dst):
+        return WriteResult()
+
+    def search(self, pattern, path=".", **kwargs):
+        return SearchResult()
+
+    def _check_lint(self, path):
+        return LintResult(skipped=True)
+
+
+class TestPatchHashline:
+    """Integration tests for hashline anchor-based editing."""
+
+    def _write(self, tmp_path, name, content):
+        p = tmp_path / name
+        p.write_text(content, encoding="utf-8")
+        return str(p)
+
+    def test_replace_single_line(self, tmp_path):
+        path = self._write(tmp_path, "a.txt", "line one\nline two\nline three")
+        ops = _SimpleFileOps()
+        from tools.line_hash import build_anchor_map
+        amap = build_anchor_map(["line one", "line two", "line three"])
+        tag_two = [t for t, n in amap.items() if n == 2][0]
+
+        result = ops.patch_hashline(path, f"{tag_two}:{tag_two}", "LINE TWO")
+        assert result.success is True
+        assert Path(path).read_text() == "line one\nLINE TWO\nline three"
+
+    def test_replace_range(self, tmp_path):
+        path = self._write(tmp_path, "b.txt", "a\nb\nc\nd\ne")
+        ops = _SimpleFileOps()
+        from tools.line_hash import build_anchor_map
+        amap = build_anchor_map(["a", "b", "c", "d", "e"])
+        tag_b = [t for t, n in amap.items() if n == 2][0]
+        tag_d = [t for t, n in amap.items() if n == 4][0]
+
+        result = ops.patch_hashline(path, f"{tag_b}:{tag_d}", "X\nY")
+        assert result.success is True
+        assert Path(path).read_text() == "a\nX\nY\ne"
+
+    def test_insert_after(self, tmp_path):
+        path = self._write(tmp_path, "c.txt", "first\nsecond\nthird")
+        ops = _SimpleFileOps()
+        from tools.line_hash import build_anchor_map
+        amap = build_anchor_map(["first", "second", "third"])
+        tag_second = [t for t, n in amap.items() if n == 2][0]
+        tag_third = [t for t, n in amap.items() if n == 3][0]
+
+        # Adjacent anchor range replaces [second, third] with "second\ninserted\nthird"
+        result = ops.patch_hashline(path, f"{tag_second}:{tag_third}", "second\ninserted\nthird")
+        assert result.success is True
+        content = Path(path).read_text()
+        assert content == "first\nsecond\ninserted\nthird"
+
+    def test_delete_range(self, tmp_path):
+        path = self._write(tmp_path, "d.txt", "keep\nremove1\nremove2\nkeep")
+        ops = _SimpleFileOps()
+        from tools.line_hash import build_anchor_map
+        amap = build_anchor_map(["keep", "remove1", "remove2", "keep"])
+        tag_r1 = [t for t, n in amap.items() if n == 2][0]
+        tag_r2 = [t for t, n in amap.items() if n == 3][0]
+
+        result = ops.patch_hashline(path, f"{tag_r1}:{tag_r2}", "")
+        assert result.success is True
+        assert Path(path).read_text() == "keep\nkeep"
+
+    def test_stale_anchor_returns_error_with_suggestions(self, tmp_path):
+        path = self._write(tmp_path, "e.txt", "def hello():\n    pass")
+        ops = _SimpleFileOps()
+
+        result = ops.patch_hashline(path, "zzzz:zzzz", "new content")
+        assert result.error is not None
+        assert "not found" in result.error.lower() or "invalid" in result.error.lower()
+
+    def test_invalid_anchor_format(self, tmp_path):
+        path = self._write(tmp_path, "f.txt", "some content")
+        ops = _SimpleFileOps()
+
+        result = ops.patch_hashline(path, "ab:cd", "new")
+        assert result.error is not None
+        assert "invalid" in result.error.lower() or "must be" in result.error.lower()
+
+    def test_collision_disambiguation(self, tmp_path):
+        path = self._write(tmp_path, "g.txt", "dup\ndup\nunique")
+        ops = _SimpleFileOps()
+        from tools.line_hash import build_anchor_map
+        amap = build_anchor_map(["dup", "dup", "unique"])
+        tag_dup2 = [t for t, n in amap.items() if n == 2][0]
+        assert "#" in tag_dup2
+
+        result = ops.patch_hashline(path, f"{tag_dup2}:{tag_dup2}", "changed")
+        assert result.success is True
+        assert Path(path).read_text() == "dup\nchanged\nunique"
+
+    def test_whitespace_invariance(self, tmp_path):
+        """File content with extra spaces still produces a matching hash."""
+        path = self._write(tmp_path, "h.txt", "  hello  \nworld")
+        ops = _SimpleFileOps()
+        from tools.line_hash import build_anchor_map
+        lines = Path(path).read_text().split("\n")
+        amap = build_anchor_map(lines)
+        tag_hello = [t for t, n in amap.items() if n == 1][0]
+
+        result = ops.patch_hashline(path, f"{tag_hello}:{tag_hello}", "hi")
+        assert result.success is True
+        assert Path(path).read_text() == "hi\nworld"
+
+    def test_diff_output_contains_changes(self, tmp_path):
+        path = self._write(tmp_path, "i.txt", "old line")
+        ops = _SimpleFileOps()
+        from tools.line_hash import build_anchor_map
+        amap = build_anchor_map(["old line"])
+        tag = list(amap.keys())[0]
+
+        result = ops.patch_hashline(path, f"{tag}:{tag}", "new line")
+        assert result.success is True
+        assert result.diff is not None
+        assert "-old line" in result.diff
+        assert "+new line" in result.diff
+
+    def test_result_contains_old_text(self, tmp_path):
+        path = self._write(tmp_path, "j.txt", "alpha\nbeta\ngamma")
+        ops = _SimpleFileOps()
+        from tools.line_hash import build_anchor_map
+        amap = build_anchor_map(["alpha", "beta", "gamma"])
+        tag_beta = [t for t, n in amap.items() if n == 2][0]
+
+        result = ops.patch_hashline(path, f"{tag_beta}:{tag_beta}", "BETA")
+        assert result.success is True
+        assert "beta" in result.old_text
