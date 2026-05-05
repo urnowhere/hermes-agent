@@ -19,23 +19,23 @@ Budget/standard/premium are mutually exclusive. Coding overlaps all.
 **PREMIUM** — synthesis, judgment, reviews
 `x-ai/grok-4.20` | `x-ai/grok-4.20-multi-agent` | `x-ai/grok-4.3`
 `anthropic/claude-opus-4.7` | `anthropic/claude-sonnet-4.6`
-`google/gemini-2.5-pro` | `google/gemini-3.1-pro-preview` | `openai/o3` | `openai/gpt-5.5`
+`google/gemini-2.5-pro` | `google/gemini-3.1-pro-preview` | `openai/gpt-5.5`
 
 **STANDARD** — ops, analysis, general delegation
-`anthropic/claude-haiku-4.5` | `openai/o4-mini` | `deepseek/deepseek-r1-0528`
-`openai/gpt-5.4-mini` | `deepseek/deepseek-v4-pro`
+`anthropic/claude-haiku-4.5` | `openai/gpt-5.4-mini` | `deepseek/deepseek-v4-pro`
+`moonshotai/kimi-k2.6` | `minimax/minimax-m2.7` | `z-ai/glm-5.1`
 
 **BUDGET** — cron jobs, extraction, parsing (account default)
 `google/gemini-2.5-flash` | `google/gemini-2.5-flash-lite` | `x-ai/grok-4.1-fast`
-`openai/gpt-5-nano` | `meta-llama/llama-4-maverick`
-`deepseek/deepseek-chat-v3.1` | `deepseek/deepseek-v4-flash`
+`openai/gpt-5-nano` | `deepseek/deepseek-v4-flash`
 
 **CODING** — anything touching code (overlaps permitted)
 `x-ai/grok-code-fast-1` | `openai/gpt-5.1-codex-mini` | `openai/gpt-5.1-codex`
-`qwen/qwen3-coder-flash` | `mistralai/devstral-small`
-`deepseek/deepseek-r1-0528` *(also standard)* | `anthropic/claude-sonnet-4.6` *(also premium)*
-`anthropic/claude-opus-4.7` *(also premium)* | `google/gemini-2.5-pro` *(also premium)*
-`openai/o3` *(also premium)* | `openai/gpt-5.5` *(also premium)*
+`qwen/qwen3-coder-flash`
+`deepseek/deepseek-v4-pro` *(also standard)*
+`moonshotai/kimi-k2.6` *(also standard)* | `minimax/minimax-m2.7` *(also standard)* | `z-ai/glm-5.1` *(also standard)*
+`anthropic/claude-sonnet-4.6` *(also premium)* | `anthropic/claude-opus-4.7` *(also premium)*
+`openai/gpt-5.5` *(also premium)*
 
 ## Routing Matrix
 
@@ -48,9 +48,9 @@ Budget/standard/premium are mutually exclusive. Coding overlaps all.
 | Refactor / complex integration | gpt-5.1-codex | coding |
 | Code review | gemini-2.5-pro + grok-4.20 second opinion | coding + premium |
 | Business ops / analysis | claude-haiku-4.5 | standard |
-| Reasoning / math | o4-mini or deepseek-r1-0528 | standard |
+| Reasoning / math | deepseek-v4-pro or gpt-5.4-mini | standard |
 | Intelligence synthesis | grok-4.20 | premium ← ONLY valid Grok use |
-| Architecture judgment | o3 | premium |
+| Architecture judgment | gpt-5.5 or grok-4.3 | premium |
 
 ## Per-Call Model Pinning (030526 — verified working)
 
@@ -69,6 +69,8 @@ delegate_task(tasks=[
 
 ## Hard Rules
 
+0. **Never second-guess Jordan's model slug.** If Jordan pins a model you don't recognize, load this skill and `openrouter-expert` BEFORE questioning him. Jordan knows his routing environment. The correct response to an unfamiliar slug is to verify it, not to tell him he's wrong. Confirmed live failure (050526): claimed `grok-4.3` didn't exist, used `grok-4` instead — Jordan called it out explicitly. `x-ai/grok-4.3` is a valid premium-tier model.
+
 1. **Grok (ALL variants):** reasoning + intelligence synthesis ONLY. Never code, never general tasks.
 2. **Coding tasks:** coding-tier models ONLY. General models invent abstractions instead of following integration requirements.
 3. **Adversarial code review:** use a different coding model (different training DNA), not a reasoning model.
@@ -76,6 +78,7 @@ delegate_task(tasks=[
 5. **Never self-select Premium autonomously** without exhausting cheaper options. Cost difference is 10–40×.
 6. **Escalating past Standard when user is present:** offer the tradeoff before acting.
 7. **No `openrouter/auto` for cron jobs** where tool execution is mandatory — it can route to a model that fabricates output instead of calling tools. Pin a specific model.
+8. **When Jordan names a specific model slug, load this skill first before questioning it.** If the slug isn't in your training data or memory, that does NOT mean it's wrong — it may be a newer model. Check the whitelist here. If still not found, ask Jordan to clarify rather than substituting a different model unilaterally. Second-guessing a user-provided slug without loading this skill first is an error. (Lesson: `grok-4.3` was valid; `grok-4` substitution was wrong.)
 
 ## When Not to Delegate
 
@@ -83,6 +86,16 @@ delegate_task(tasks=[
 - Task needs 3+ existing codebase functions/patterns already in your context — write it directly
 - Two prior delegations already failed on the same task
 - Task requires your session state or ongoing conversation context
+
+## Ephemeral Subagents vs. Persistent Profiles — Do NOT Conflate
+
+`delegate_task` spawns **ephemeral anonymous subagents** — they live for one task, have no memory, no SOUL.md, no accumulated context. They are cheap throwaway workers.
+
+**Persistent profiles** are a fundamentally different concept: a named profile with its own `config.yaml`, `SOUL.md`, memory store, cron schedule, and identity that accumulates context across sessions.
+
+**Common mistake (caught 040526):** Connecting `delegate_task`'s per-task model routing to the design of persistent multi-agent profiles (e.g., a Librarian profile or Ops profile). PR #12794 adds model overrides to ephemeral subagents only. A persistent profile running in the gateway as its own named agent is a completely separate architectural decision that has nothing to do with delegate_task's model parameter.
+
+**Rule:** When discussing multi-agent architecture — which profiles to create, what each specialist accumulates over time — do not reference `delegate_task` or PR #12794 as the mechanism. Those are for ephemeral fan-out only.
 
 ## Syntax
 
