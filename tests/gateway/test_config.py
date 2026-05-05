@@ -529,6 +529,110 @@ class TestLoadGatewayConfig:
         import os
         assert os.environ.get("TELEGRAM_PROXY") == "socks5://from-env:1080"
 
+    def test_signal_yaml_disabled_beats_env_vars(self, tmp_path, monkeypatch):
+        """YAML ``platforms.signal.enabled: false`` must not be clobbered by
+        SIGNAL_HTTP_URL/SIGNAL_ACCOUNT env vars.  Regression for #11096 (Bug 3).
+        """
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "platforms:\n"
+            "  signal:\n"
+            "    enabled: false\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("SIGNAL_HTTP_URL", "http://localhost:9090")
+        monkeypatch.setenv("SIGNAL_ACCOUNT", "+15551234567")
+
+        config = load_gateway_config()
+
+        assert Platform.SIGNAL in config.platforms
+        signal_cfg = config.platforms[Platform.SIGNAL]
+        # YAML explicitly opted out — env vars must not flip it back on.
+        assert signal_cfg.enabled is False
+        # Connection details from env are still populated so a later
+        # ``enabled: true`` flip works without re-exporting.
+        assert signal_cfg.extra["http_url"] == "http://localhost:9090"
+        assert signal_cfg.extra["account"] == "+15551234567"
+
+    def test_signal_yaml_enabled_preserved_with_env_vars(self, tmp_path, monkeypatch):
+        """YAML ``platforms.signal.enabled: true`` combined with env vars
+        keeps Signal enabled and lets env vars supply connection details.
+        """
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "platforms:\n"
+            "  signal:\n"
+            "    enabled: true\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("SIGNAL_HTTP_URL", "http://localhost:9090")
+        monkeypatch.setenv("SIGNAL_ACCOUNT", "+15551234567")
+
+        config = load_gateway_config()
+
+        signal_cfg = config.platforms[Platform.SIGNAL]
+        assert signal_cfg.enabled is True
+        assert signal_cfg.extra["http_url"] == "http://localhost:9090"
+        assert signal_cfg.extra["account"] == "+15551234567"
+
+    def test_signal_gateway_json_disabled_beats_env_vars(self, tmp_path, monkeypatch):
+        """Legacy ``gateway.json`` ``platforms.signal.enabled: false`` must also
+        survive SIGNAL_* env vars.
+
+        ``_apply_env_overrides`` treats *any* entry already present in
+        ``config.platforms`` as a persisted opt-out — not just config.yaml
+        entries — so a user who migrated from the legacy JSON persistence
+        and kept Signal disabled there keeps the opt-out without having
+        to re-declare it in config.yaml first.
+        """
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        gateway_json = hermes_home / "gateway.json"
+        gateway_json.write_text(
+            '{"platforms": {"signal": {"enabled": false}}}',
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("SIGNAL_HTTP_URL", "http://localhost:9090")
+        monkeypatch.setenv("SIGNAL_ACCOUNT", "+15551234567")
+
+        config = load_gateway_config()
+
+        assert Platform.SIGNAL in config.platforms
+        signal_cfg = config.platforms[Platform.SIGNAL]
+        # Legacy JSON opt-out is preserved.
+        assert signal_cfg.enabled is False
+        # Env-supplied connection details still populated.
+        assert signal_cfg.extra["http_url"] == "http://localhost:9090"
+        assert signal_cfg.extra["account"] == "+15551234567"
+
+    def test_signal_env_vars_alone_enable_platform(self, monkeypatch):
+        """When Signal is absent from config.yaml, env vars alone enable it.
+
+        Preserves the documented behavior for users who configure Signal
+        purely via .env / SIGNAL_* variables with no YAML section.
+        """
+        monkeypatch.setenv("SIGNAL_HTTP_URL", "http://localhost:9090")
+        monkeypatch.setenv("SIGNAL_ACCOUNT", "+15551234567")
+
+        config = GatewayConfig()
+        _apply_env_overrides(config)
+
+        assert Platform.SIGNAL in config.platforms
+        signal_cfg = config.platforms[Platform.SIGNAL]
+        assert signal_cfg.enabled is True
+        assert signal_cfg.extra["http_url"] == "http://localhost:9090"
+        assert signal_cfg.extra["account"] == "+15551234567"
+
 
 class TestHomeChannelEnvOverrides:
     """Home channel env vars should apply even when the platform was already
