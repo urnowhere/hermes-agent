@@ -185,6 +185,42 @@ def test_feasibility_check_passes_config_context_length(mock_get_client, mock_ct
     )
 
 
+@patch("agent.model_metadata.get_model_context_length", return_value=1_000_000)
+@patch("agent.auxiliary_client.get_text_auxiliary_client")
+def test_feasibility_check_passes_custom_providers_for_aux_context(mock_get_client, mock_ctx_len):
+    """Named custom provider context_length overrides should be available
+    when probing the auxiliary compression model, not just the main model."""
+    agent = _make_agent(main_context=1_000_000, threshold_percent=0.65)
+    agent._custom_providers = [
+        {
+            "name": "modelhub",
+            "base_url": "https://aidp.example.com/v1",
+            "model": "gpt-5.5-2026-04-24",
+            "models": {
+                "gpt-5.5-2026-04-24": {
+                    "context_length": 1_000_000,
+                },
+            },
+        },
+    ]
+    mock_client = MagicMock()
+    mock_client.base_url = "https://aidp.example.com/v1"
+    mock_client.api_key = "sk-custom"
+    mock_get_client.return_value = (mock_client, "gpt-5.5-2026-04-24")
+
+    agent._emit_status = lambda msg: None
+    agent._check_compression_model_feasibility()
+
+    mock_ctx_len.assert_called_once_with(
+        "gpt-5.5-2026-04-24",
+        base_url="https://aidp.example.com/v1",
+        api_key="sk-custom",
+        config_context_length=None,
+        provider="openrouter",
+        custom_providers=agent._custom_providers,
+    )
+
+
 @patch("agent.model_metadata.get_model_context_length", return_value=128_000)
 @patch("agent.auxiliary_client.get_text_auxiliary_client")
 def test_feasibility_check_ignores_invalid_context_length(mock_get_client, mock_ctx_len):
