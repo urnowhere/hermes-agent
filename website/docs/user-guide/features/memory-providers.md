@@ -1,7 +1,7 @@
 ---
 sidebar_position: 4
 title: "Memory Providers"
-description: "External memory provider plugins — Honcho, OpenViking, Mem0, Hindsight, Holographic, RetainDB, ByteRover, Supermemory"
+description: "External memory provider plugins — Honcho, OpenViking, Mem0, Hindsight, Holographic, RetainDB, ByteRover, Supermemory, Pallium"
 ---
 
 # Memory Providers
@@ -22,7 +22,7 @@ Or set manually in `~/.hermes/config.yaml`:
 
 ```yaml
 memory:
-  provider: openviking   # or honcho, mem0, hindsight, holographic, retaindb, byterover, supermemory
+  provider: openviking   # or honcho, mem0, hindsight, holographic, retaindb, byterover, supermemory, pallium
 ```
 
 ## How It Works
@@ -522,6 +522,48 @@ echo 'SUPERMEMORY_API_KEY=***' >> ~/.hermes/.env
 
 ---
 
+### Pallium
+
+Local-first memory sidecar with automatic fact extraction, hybrid retrieval (lexical + vector RRF), and evidence provenance. Multilingual by design — memory is preserved in the original language and cross-language recall works natively.
+
+| | |
+|---|---|
+| **Best for** | Local-only memory with automatic extraction, multilingual agents, long autonomous runs |
+| **Requires** | Running Pallium server (`pip install` from source) + LLM API key for extraction |
+| **Data storage** | Local SQLite + local vector index |
+| **Cost** | Free |
+
+**Tools:** `pallium_query` (search decisions, facts, checkpoints), `pallium_remember` (store explicit facts/decisions)
+
+**Setup:**
+```bash
+# Start Pallium server first (see https://github.com/rotemhermon/pallium)
+python -m app.run serve --host 127.0.0.1 --port 8000
+
+# Then configure Hermes
+hermes memory setup    # select "pallium"
+# Or manually:
+hermes config set memory.provider pallium
+```
+
+**Config:** `$HERMES_HOME/pallium.json`
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `base_url` | `http://localhost:8000` | Pallium server URL |
+| `actor_ref` | `hermes-user` | Stable user identifier for cross-session memory scoping |
+| `container_ref` | `hermes` | Memory container identifier |
+
+**How memory builds automatically:**
+
+Every conversation turn is ingested and processed by two parallel extraction packages:
+- **Work continuity** — decisions, investigation outcomes, task checkpoints
+- **Factual recall** — names, dates, preferences, events, relationships, consolidated by subject across sessions
+
+The agent doesn't need to decide what to remember — extraction is automatic and runs in the background.
+
+---
+
 ## Provider Comparison
 
 | Provider | Storage | Cost | Tools | Dependencies | Unique Feature |
@@ -534,6 +576,7 @@ echo 'SUPERMEMORY_API_KEY=***' >> ~/.hermes/.env
 | **RetainDB** | Cloud | $20/mo | 5 | `requests` | Delta compression |
 | **ByteRover** | Local/Cloud | Free/Paid | 3 | `brv` CLI | Pre-compression extraction |
 | **Supermemory** | Cloud | Paid | 4 | `supermemory` | Context fencing + session graph ingest + multi-container |
+| **Pallium** | Local | Free | 2 | `httpx` + Pallium server | Hybrid retrieval + evidence provenance + multilingual |
 
 ## Profile Isolation
 

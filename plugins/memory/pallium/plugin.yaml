@@ -1,0 +1,12 @@
+name: pallium
+version: 1.0.0
+description: "Pallium — local-first memory sidecar with automatic fact extraction, hybrid retrieval, and evidence provenance. No cloud, no API key."
+pip_dependencies:
+  - httpx
+external_dependencies:
+  - name: pallium-server
+    install: "python -m app.run serve --host 127.0.0.1 --port 8000"
+    check: "curl -sf http://localhost:8000/health"
+hooks:
+  - on_memory_write
+  - on_pre_compress
