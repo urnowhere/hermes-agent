@@ -1298,19 +1298,44 @@ class SlackAdapter(BasePlatformAdapter):
     # ----- User identity resolution -----
 
     async def _resolve_user_name(self, user_id: str, chat_id: str = "") -> str:
-        """Resolve a Slack user ID to a display name, with caching."""
+        """Resolve a Slack user ID to a display name, with caching.
+        
+        Falls back gracefully to user_id if resolution fails, but logs
+        warnings to help diagnose issues.
+        """
         if not user_id:
             return ""
+        
+        # Return cached result if available
         if user_id in self._user_name_cache:
-            return self._user_name_cache[user_id]
+            cached = self._user_name_cache[user_id]
+            # Only return cached user_id if we got an error before
+            if cached == user_id and self._user_name_cache.get(f"_{user_id}_error"):
+                logger.warning(
+                    "[Slack] users.info failed for %s (previous error: %s), "
+                    "using fallback to user_id. Check logs for details.",
+                    user_id,
+                    self._user_name_cache.get(f"_{user_id}_error"),
+                )
+            return cached
 
         if not self._app:
+            # Mark that we couldn't resolve due to missing app connection
+            self._user_name_cache[user_id] = user_id
+            self._user_name_cache[f"_{user_id}_error"] = "App not initialized"
+            logger.warning(
+                "[Slack] Could not resolve user name for %s: Slack app not connected",
+                user_id,
+            )
             return user_id
 
         try:
             client = self._get_client(chat_id) if chat_id else self._app.client
+            
+            # Try to fetch user info from Slack API
             result = await client.users_info(user=user_id)
             user = result.get("user", {})
+            
             # Prefer display_name → real_name → user_id
             profile = user.get("profile", {})
             name = (
@@ -1320,11 +1345,27 @@ class SlackAdapter(BasePlatformAdapter):
                 or user.get("name")
                 or user_id
             )
+            
+            # Store the resolved name (or user_id as fallback)
             self._user_name_cache[user_id] = name
+            
+            # Mark any failures for debugging
+            if name == user_id:
+                self._user_name_cache[f"_{user_id}_error"] = (
+                    "No display_name or real_name found in Slack user profile"
+                )
+            
             return name
+            
         except Exception as e:
-            logger.debug("[Slack] users.info failed for %s: %s", user_id, e)
+            # Log with more detail to help diagnose issues
+            error_msg = f"users.info for {user_id}: {type(e).__name__}: {e}"
+            logger.warning("[Slack] %s", error_msg)
+            
+            # Cache the error for future reference
+            self._user_name_cache[f"_{user_id}_error"] = error_msg
             self._user_name_cache[user_id] = user_id
+            
             return user_id
 
     async def send_image_file(
