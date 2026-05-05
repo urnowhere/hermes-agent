@@ -90,6 +90,26 @@ def test_kill_process_uses_cached_pgid_if_wrapper_already_exited(monkeypatch):
     assert killpg_calls == [(67890, signal.SIGTERM), (67890, 0)]
 
 
+def test_execute_kills_subprocess_if_interrupted_after_spawn(monkeypatch):
+    """execute() also cleans up if interrupted between spawn and wait guard."""
+    env = LocalEnvironment(cwd="/tmp")
+    fake_proc = SimpleNamespace(pid=12345)
+    killed = []
+
+    monkeypatch.setattr(env, "_run_bash", lambda *a, **kw: fake_proc)
+
+    def fake_wait(_proc, timeout=120):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(env, "_wait_for_process", fake_wait)
+    monkeypatch.setattr(env, "_kill_process", lambda proc: killed.append(proc))
+
+    with pytest.raises(KeyboardInterrupt):
+        env.execute("sleep 30", timeout=60)
+
+    assert killed == [fake_proc]
+
+
 def test_wait_for_process_kills_subprocess_on_keyboardinterrupt():
     """When KeyboardInterrupt arrives mid-poll, the subprocess group must be
     killed before the exception is re-raised."""
@@ -99,6 +119,14 @@ def test_wait_for_process_kills_subprocess_on_keyboardinterrupt():
         proc_holder = {}
         started = threading.Event()
         raise_at = [None]  # set by the main thread to tell worker when
+
+        original_wait_for_process = env._wait_for_process
+
+        def observed_wait_for_process(proc, timeout=120):
+            started.set()
+            return original_wait_for_process(proc, timeout=timeout)
+
+        env._wait_for_process = observed_wait_for_process
 
         # Drive execute() on a separate thread so we can SIGNAL-interrupt it
         # via a thread-targeted exception without killing our test process.
@@ -150,6 +178,9 @@ def test_wait_for_process_kills_subprocess_on_keyboardinterrupt():
         )
         pgid = os.getpgid(target_pid)
         assert _pgid_still_alive(pgid), "sanity: subprocess should be alive"
+        assert started.wait(timeout=5.0), (
+            "test setup: worker did not enter _wait_for_process after subprocess spawn"
+        )
 
         # Now inject a KeyboardInterrupt into the worker thread the same
         # way CPython's signal machinery would.  We use ctypes.PyThreadState_SetAsyncExc
