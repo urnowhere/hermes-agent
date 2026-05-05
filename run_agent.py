@@ -8936,17 +8936,20 @@ class AIAgent:
         the internal message history — this method only modifies the outgoing
         API copy.
 
+        Also strips extra_content (e.g. Gemini thought_signature) which strict
+        providers like Fireworks reject with "Extra inputs are not permitted".
+
         Creates new tool_call dicts rather than mutating in-place, so the
         original messages list retains call_id/response_item_id for Codex
         Responses API compatibility (e.g. if the session falls back to a
         Codex provider later).
 
-        Fields stripped: call_id, response_item_id
+        Fields stripped: call_id, response_item_id, extra_content
         """
         tool_calls = api_msg.get("tool_calls")
         if not isinstance(tool_calls, list):
             return api_msg
-        _STRIP_KEYS = {"call_id", "response_item_id"}
+        _STRIP_KEYS = {"call_id", "response_item_id", "extra_content"}
         api_msg["tool_calls"] = [
             {k: v for k, v in tc.items() if k not in _STRIP_KEYS}
             if isinstance(tc, dict) else tc
