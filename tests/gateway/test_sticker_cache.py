@@ -1,6 +1,7 @@
 """Tests for gateway/sticker_cache.py — sticker description cache."""
 
 import json
+import threading
 import time
 from unittest.mock import patch
 
@@ -79,6 +80,40 @@ class TestCacheSticker:
 
         assert r1["description"] == "Cat"
         assert r2["description"] == "Dog"
+
+    def test_concurrent_writes_preserve_all_entries(self, tmp_path, monkeypatch):
+        import gateway.sticker_cache as sticker_cache
+
+        cache_file = tmp_path / "cache.json"
+        original_load_cache = sticker_cache._load_cache
+
+        def slow_load_cache():
+            data = original_load_cache()
+            # Widen race window: without a write lock, many writers read stale
+            # state and overwrite each other.
+            time.sleep(0.01)
+            return data
+
+        monkeypatch.setattr(sticker_cache, "_load_cache", slow_load_cache)
+
+        with patch("gateway.sticker_cache.CACHE_PATH", cache_file):
+            threads = [
+                threading.Thread(
+                    target=cache_sticker_description,
+                    args=(f"uid_{i}", f"Description {i}"),
+                )
+                for i in range(12)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            saved = json.loads(cache_file.read_text(encoding="utf-8"))
+
+        assert len(saved) == 12
+        for i in range(12):
+            assert saved[f"uid_{i}"]["description"] == f"Description {i}"
 
 
 class TestBuildStickerInjection:

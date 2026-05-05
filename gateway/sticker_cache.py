@@ -10,18 +10,94 @@ Cache location: ~/.hermes/sticker_cache.json
 
 import json
 import time
+import threading
+from contextlib import contextmanager
 from typing import Optional
 
 from hermes_cli.config import get_hermes_home
+from utils import atomic_json_write
+
+try:
+    import fcntl
+except Exception:
+    fcntl = None
+try:
+    import msvcrt
+except Exception:
+    msvcrt = None
 
 
 CACHE_PATH = get_hermes_home() / "sticker_cache.json"
+_CACHE_LOCK_TIMEOUT_SECONDS = 5.0
+_cache_lock_holder = threading.local()
+_fallback_lock = threading.RLock()
 
 # Vision prompt for describing stickers -- kept concise to save tokens
 STICKER_VISION_PROMPT = (
     "Describe this sticker in 1-2 sentences. Focus on what it depicts -- "
     "character, action, emotion. Be concise and objective."
 )
+
+
+def _cache_lock_path():
+    return CACHE_PATH.with_suffix(".lock")
+
+
+@contextmanager
+def _cache_store_lock(timeout_seconds: float = _CACHE_LOCK_TIMEOUT_SECONDS):
+    """Cross-process advisory lock for cache read-modify-write operations."""
+    if getattr(_cache_lock_holder, "depth", 0) > 0:
+        _cache_lock_holder.depth += 1
+        try:
+            yield
+        finally:
+            _cache_lock_holder.depth -= 1
+        return
+
+    if fcntl is None and msvcrt is None:
+        with _fallback_lock:
+            _cache_lock_holder.depth = 1
+            try:
+                yield
+            finally:
+                _cache_lock_holder.depth = 0
+        return
+
+    lock_path = _cache_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # On Windows, msvcrt.locking requires at least one byte in the file.
+    if msvcrt and (not lock_path.exists() or lock_path.stat().st_size == 0):
+        lock_path.write_text(" ", encoding="utf-8")
+
+    with lock_path.open("r+" if msvcrt else "a+") as lock_file:
+        deadline = time.time() + max(1.0, timeout_seconds)
+        while True:
+            try:
+                if fcntl:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                else:
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                break
+            except (BlockingIOError, OSError, PermissionError):
+                if time.time() >= deadline:
+                    raise TimeoutError("Timed out waiting for sticker cache lock")
+                time.sleep(0.05)
+
+        _cache_lock_holder.depth = 1
+        try:
+            yield
+        finally:
+            _cache_lock_holder.depth = 0
+            if fcntl:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            elif msvcrt:
+                try:
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                except (OSError, IOError):
+                    pass
 
 
 def _load_cache() -> dict:
@@ -35,12 +111,8 @@ def _load_cache() -> dict:
 
 
 def _save_cache(cache: dict) -> None:
-    """Save the sticker cache to disk."""
-    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CACHE_PATH.write_text(
-        json.dumps(cache, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    """Save the sticker cache to disk atomically."""
+    atomic_json_write(CACHE_PATH, cache, indent=2)
 
 
 def get_cached_description(file_unique_id: str) -> Optional[dict]:
@@ -69,14 +141,15 @@ def cache_sticker_description(
         emoji:          Associated emoji (e.g. "😀").
         set_name:       Sticker set name if available.
     """
-    cache = _load_cache()
-    cache[file_unique_id] = {
-        "description": description,
-        "emoji": emoji,
-        "set_name": set_name,
-        "cached_at": time.time(),
-    }
-    _save_cache(cache)
+    with _cache_store_lock():
+        cache = _load_cache()
+        cache[file_unique_id] = {
+            "description": description,
+            "emoji": emoji,
+            "set_name": set_name,
+            "cached_at": time.time(),
+        }
+        _save_cache(cache)
 
 
 def build_sticker_injection(
