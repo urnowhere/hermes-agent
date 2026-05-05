@@ -12,6 +12,10 @@ __pycache__/
 .env.production.local
 .env.development
 .env.test
+# Bindu adapter writes per-agent DID keys and OAuth credentials here.
+# Never commit — oauth_credentials.json contains a client_secret and
+# private.pem is the agent's signing key.
+.bindu/
 export*
 __pycache__/model_tools.cpython-310.pyc
 __pycache__/web_tools.cpython-310.pyc

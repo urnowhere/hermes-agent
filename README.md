@@ -84,6 +84,19 @@ For the full command lists, see the [CLI guide](https://hermes-agent.nousresearc
 
 ---
 
+## Expose Hermes as an A2A microservice (optional)
+
+`hermes gateway` makes Hermes talk to *humans* on messaging platforms. The **Bindu adapter** makes it talk to *other agents* over the open [A2A protocol](https://a2aproject.github.io/A2A/) — with a cryptographic DID identity, OAuth2 auth, and optional USDC micropayments. Same agent, same skills, same memory. New interface.
+
+```bash
+pip install -e '.[bindu]'
+hermes-bindu                           # serves on http://localhost:3773
+```
+
+Why you might want it: let a LangChain/AG2 agent call Hermes as a research subagent, run a Hermes instance that charges per query, or give your agent a stable cryptographic identity for agent-to-agent trust. See [`bindu_adapter/README.md`](bindu_adapter/README.md) for the full walkthrough, safety tiers, and configuration.
+
+---
+
 ## Documentation
 
 All documentation lives at **[hermes-agent.nousresearch.com/docs](https://hermes-agent.nousresearch.com/docs/)**:
