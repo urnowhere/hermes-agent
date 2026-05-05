@@ -1414,7 +1414,104 @@ class TestSchemaInit:
     def test_schema_version(self, db):
         cursor = db._conn.execute("SELECT version FROM schema_version")
         version = cursor.fetchone()[0]
-        assert version == 11
+        assert version == 12
+
+    def test_v11_inline_fts_migrates_to_v12_external_content(self, tmp_path):
+        """Upgrade rebuilds derived FTS indexes without mutating source messages."""
+        import sqlite3
+
+        old_db = tmp_path / "v11.db"
+        conn = sqlite3.connect(old_db)
+        conn.executescript(
+            """
+            CREATE TABLE schema_version (version INTEGER NOT NULL);
+            INSERT INTO schema_version VALUES (11);
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                user_id TEXT,
+                model TEXT,
+                model_config TEXT,
+                system_prompt TEXT,
+                parent_session_id TEXT,
+                started_at REAL NOT NULL,
+                ended_at REAL,
+                end_reason TEXT,
+                message_count INTEGER DEFAULT 0,
+                tool_call_count INTEGER DEFAULT 0,
+                input_tokens INTEGER DEFAULT 0,
+                output_tokens INTEGER DEFAULT 0,
+                cache_read_tokens INTEGER DEFAULT 0,
+                cache_write_tokens INTEGER DEFAULT 0,
+                reasoning_tokens INTEGER DEFAULT 0,
+                billing_provider TEXT,
+                billing_base_url TEXT,
+                billing_mode TEXT,
+                estimated_cost_usd REAL,
+                actual_cost_usd REAL,
+                cost_status TEXT,
+                cost_source TEXT,
+                pricing_version TEXT,
+                title TEXT,
+                api_call_count INTEGER DEFAULT 0,
+                FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL REFERENCES sessions(id),
+                role TEXT NOT NULL,
+                content TEXT,
+                tool_call_id TEXT,
+                tool_calls TEXT,
+                tool_name TEXT,
+                timestamp REAL NOT NULL,
+                token_count INTEGER,
+                finish_reason TEXT,
+                reasoning TEXT,
+                reasoning_content TEXT,
+                reasoning_details TEXT,
+                codex_reasoning_items TEXT,
+                codex_message_items TEXT
+            );
+            CREATE VIRTUAL TABLE messages_fts USING fts5(content);
+            CREATE VIRTUAL TABLE messages_fts_trigram USING fts5(content, tokenize='trigram');
+            INSERT INTO sessions (id, source, model, started_at, message_count)
+            VALUES ('s1', 'cli', 'test-model', 1700000000, 1);
+            INSERT INTO messages (session_id, role, content, tool_calls, tool_name, timestamp)
+            VALUES ('s1', 'user', 'needle 大别山项目', '[{"name":"read_file"}]', 'read_file', 1700000001);
+            INSERT INTO messages_fts(rowid, content)
+            SELECT id, COALESCE(content, '') || ' ' || COALESCE(tool_name, '') || ' ' || COALESCE(tool_calls, '')
+            FROM messages;
+            INSERT INTO messages_fts_trigram(rowid, content)
+            SELECT id, COALESCE(content, '') || ' ' || COALESCE(tool_name, '') || ' ' || COALESCE(tool_calls, '')
+            FROM messages;
+            """
+        )
+        conn.close()
+
+        db = SessionDB(db_path=old_db)
+
+        version = db._conn.execute("SELECT version FROM schema_version").fetchone()[0]
+        assert version == 12
+        fts_sql = db._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name='messages_fts'"
+        ).fetchone()[0]
+        trigram_sql = db._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name='messages_fts_trigram'"
+        ).fetchone()[0]
+        assert "content='messages'" in fts_sql
+        assert "content_rowid='id'" in fts_sql
+        assert "tool_name" in fts_sql and "tool_calls" in fts_sql
+        assert "content='messages'" in trigram_sql
+        assert "tokenize='trigram'" in trigram_sql
+
+        assert db.search_messages("needle", limit=5)[0]["session_id"] == "s1"
+        assert db.search_messages("read_file", limit=5)[0]["tool_name"] == "read_file"
+        assert db.search_messages("大别山项目", limit=5)[0]["session_id"] == "s1"
+
+        db.append_message("s1", "assistant", "new indexed message", tool_name="write_file")
+        assert db.search_messages("write_file", limit=5)[0]["tool_name"] == "write_file"
+        db.close()
 
     def test_title_column_exists(self, db):
         """Verify the title column was created in the sessions table."""
@@ -1706,12 +1803,12 @@ class TestSchemaInit:
         conn.commit()
         conn.close()
 
-        # Open with SessionDB — should migrate to v9
+        # Open with SessionDB — should migrate through the latest schema.
         migrated_db = SessionDB(db_path=db_path)
 
         # Verify migration
         cursor = migrated_db._conn.execute("SELECT version FROM schema_version")
-        assert cursor.fetchone()[0] == 11
+        assert cursor.fetchone()[0] == 12
 
         # Verify title column exists and is NULL for existing sessions
         session = migrated_db.get_session("existing")
@@ -2901,12 +2998,12 @@ class TestFTS5ToolCallMigration:
                 "v11 migration must backfill tool_name into FTS"
             assert len(session_db.search_messages("LEGACYARG")) == 1, \
                 "v11 migration must backfill tool_calls JSON into FTS"
-            # schema_version bumped
+            # schema_version bumped through the latest schema.
             row = session_db._conn.execute(
                 "SELECT version FROM schema_version LIMIT 1"
             ).fetchone()
             version = row["version"] if hasattr(row, "keys") else row[0]
-            assert version == 11
+            assert version == 12
         finally:
             session_db.close()
 
