@@ -66,6 +66,10 @@ hermes-agent/
 `gateway.log` when running the gateway. Profile-aware via `get_hermes_home()`.
 Browse with `hermes logs [--follow] [--level ...] [--session ...]`.
 
+### Sandbox execution providers (optional)
+
+`config.yaml` root key `sandbox` selects an isolation backend for `execute_code` when `TERMINAL_ENV=local`: `local` (host Python), `docker`, `gvisor` (Docker with `--runtime=runsc`), or `firecracker` (stub only — not wired for `execute_code`). Gateway approval flows still decide whether a tool may run; `sandbox.*` only changes where the approved child process executes (orthogonal to `tools/environments/*` terminal backends). Implementation: `src/sandbox/` (`SandboxProvider`, `get_provider`).
+
 ## File Dependency Chain
 
 ```
