@@ -166,4 +166,7 @@ exclude = ["tinker-atropos"]
 select = [] # disable all lints for now, until we've wrangled typechecks a bit more :3
 
 [tool.uv]
-exclude-newer = "7 days"
+# Rolling window not used because older uv versions (< 0.9.17) reject duration
+# strings in this field. Refresh this date periodically (at least every 60 days)
+# to maintain supply-chain protection.
+exclude-newer = "2026-05-02T00:00:00Z"
