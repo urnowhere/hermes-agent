@@ -238,6 +238,17 @@ def _run_agent(
     # the caller just asked for.
     effective_provider = (provider or "").strip() or None
     explicit_base_url_from_alias: Optional[str] = None
+    try:
+        from hermes_cli.model_switch import resolve_direct_alias
+        direct_alias = resolve_direct_alias(effective_model)
+    except Exception:
+        direct_alias = None
+    if direct_alias is not None:
+        effective_model = direct_alias.model
+        effective_provider = effective_provider or direct_alias.provider
+        if direct_alias.base_url:
+            explicit_base_url_from_alias = direct_alias.base_url.rstrip("/")
+
     if effective_provider is None and (model or env_model):
         # Only auto-detect when the model was explicitly requested via arg or
         # env var (not when it came from config — that's the "use my defaults"

@@ -82,6 +82,41 @@ def _explode_runtime_resolution():
     )
 
 
+def test_gateway_runtime_resolves_direct_model_alias(monkeypatch):
+    runner = _make_runner()
+    calls = {}
+
+    monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "opus")
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.resolve_direct_alias",
+        lambda model: types.SimpleNamespace(
+            model="claude-opus-4-6",
+            provider="custom",
+            base_url="https://custom.example/v1",
+        ) if model == "opus" else None,
+    )
+
+    def _runtime_resolve(**kwargs):
+        calls.update(kwargs)
+        return {
+            "provider": "custom",
+            "api_mode": "chat_completions",
+            "base_url": kwargs["explicit_base_url"],
+            "api_key": "test-key",
+        }
+
+    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", _runtime_resolve)
+
+    model, runtime = runner._resolve_session_agent_runtime()
+
+    assert model == "claude-opus-4-6"
+    assert calls["requested"] == "custom"
+    assert calls["explicit_base_url"] == "https://custom.example/v1"
+    assert calls["target_model"] == "claude-opus-4-6"
+    assert runtime["provider"] == "custom"
+    assert runtime["base_url"] == "https://custom.example/v1"
+
+
 def test_run_agent_prefers_session_override_over_global_runtime(monkeypatch):
     monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
     monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)

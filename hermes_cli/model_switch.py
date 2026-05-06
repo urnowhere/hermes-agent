@@ -255,6 +255,14 @@ def _ensure_direct_aliases() -> None:
         DIRECT_ALIASES.update(_load_direct_aliases())
 
 
+def resolve_direct_alias(raw_input: str) -> Optional[DirectAlias]:
+    """Return an exact config-defined model alias without catalog fallback."""
+    if not isinstance(raw_input, str) or not raw_input.strip():
+        return None
+    _ensure_direct_aliases()
+    return DIRECT_ALIASES.get(raw_input.strip().lower())
+
+
 # ---------------------------------------------------------------------------
 # Result dataclasses
 # ---------------------------------------------------------------------------

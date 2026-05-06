@@ -200,6 +200,40 @@ def test_runtime_resolution_rebuilds_agent_on_routing_change(monkeypatch):
     assert shell.api_mode == "codex_responses"
 
 
+def test_runtime_resolution_resolves_direct_model_alias(monkeypatch):
+    cli = _import_cli()
+    calls = {}
+
+    def _runtime_resolve(**kwargs):
+        calls.update(kwargs)
+        return {
+            "provider": "custom",
+            "api_mode": "chat_completions",
+            "base_url": kwargs["explicit_base_url"],
+            "api_key": "test-key",
+            "source": "direct-alias",
+        }
+
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.resolve_direct_alias",
+        lambda model: SimpleNamespace(
+            model="claude-opus-4-6",
+            provider="custom",
+            base_url="https://custom.example/v1",
+        ) if model == "opus" else None,
+    )
+    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", _runtime_resolve)
+    monkeypatch.setattr("hermes_cli.runtime_provider.format_runtime_provider_error", lambda exc: str(exc))
+
+    shell = cli.HermesCLI(model="opus", provider="custom", compact=True, max_turns=1)
+
+    assert shell._ensure_runtime_credentials() is True
+    assert calls["requested"] == "custom"
+    assert calls["explicit_base_url"] == "https://custom.example/v1"
+    assert calls["target_model"] == "claude-opus-4-6"
+    assert shell.model == "claude-opus-4-6"
+
+
 def test_cli_turn_routing_uses_primary_when_disabled(monkeypatch):
     cli = _import_cli()
     shell = cli.HermesCLI(model="gpt-5", compact=True, max_turns=1)

@@ -3567,11 +3567,26 @@ class HermesCLI:
 
         _primary_exc = None
         runtime = None
+        direct_alias = None
+        resolved_model_from_alias = None
+        requested_provider = self.requested_provider
+        explicit_base_url = self._explicit_base_url
+        try:
+            from hermes_cli.model_switch import resolve_direct_alias
+            direct_alias = resolve_direct_alias(self.model)
+        except Exception:
+            direct_alias = None
+        if direct_alias is not None:
+            resolved_model_from_alias = direct_alias.model
+            requested_provider = direct_alias.provider or requested_provider
+            explicit_base_url = explicit_base_url or direct_alias.base_url or None
+
         try:
             runtime = resolve_runtime_provider(
-                requested=self.requested_provider,
+                requested=requested_provider,
                 explicit_api_key=self._explicit_api_key,
-                explicit_base_url=self._explicit_base_url,
+                explicit_base_url=explicit_base_url,
+                target_model=resolved_model_from_alias or self.model or None,
             )
         except Exception as exc:
             _primary_exc = exc
@@ -3650,6 +3665,8 @@ class HermesCLI:
         self._provider_source = runtime.get("source")
         self.api_key = api_key
         self.base_url = base_url
+        if resolved_model_from_alias:
+            self.model = resolved_model_from_alias
 
         # When a custom_provider entry carries an explicit `model` field,
         # use it as the effective model name.  Without this, running

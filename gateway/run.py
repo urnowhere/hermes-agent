@@ -1603,7 +1603,38 @@ class GatewayRunner:
                 list(self._session_model_overrides.keys())[:5] if self._session_model_overrides else "[]",
             )
 
-        runtime_kwargs = _resolve_runtime_agent_kwargs()
+        direct_alias = None
+        try:
+            from hermes_cli.model_switch import resolve_direct_alias
+            direct_alias = resolve_direct_alias(model)
+        except Exception:
+            direct_alias = None
+
+        if direct_alias is not None:
+            from hermes_cli.runtime_provider import (
+                resolve_runtime_provider,
+                format_runtime_provider_error,
+            )
+            try:
+                runtime = resolve_runtime_provider(
+                    requested=direct_alias.provider,
+                    explicit_base_url=direct_alias.base_url or None,
+                    target_model=direct_alias.model,
+                )
+            except Exception as exc:
+                raise RuntimeError(format_runtime_provider_error(exc)) from exc
+            model = direct_alias.model
+            runtime_kwargs = {
+                "api_key": runtime.get("api_key"),
+                "base_url": runtime.get("base_url"),
+                "provider": runtime.get("provider"),
+                "api_mode": runtime.get("api_mode"),
+                "command": runtime.get("command"),
+                "args": list(runtime.get("args") or []),
+                "credential_pool": runtime.get("credential_pool"),
+            }
+        else:
+            runtime_kwargs = _resolve_runtime_agent_kwargs()
         if override and resolved_session_key:
             model, runtime_kwargs = self._apply_session_model_override(
                 resolved_session_key, model, runtime_kwargs
