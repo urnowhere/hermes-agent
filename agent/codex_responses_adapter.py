@@ -329,8 +329,14 @@ def _chat_messages_to_responses_input(messages: List[Dict[str, Any]]) -> List[Di
                             "content": normalized_content_parts,
                         }
                         item_id = raw_item.get("id")
-                        if isinstance(item_id, str) and item_id.strip():
-                            replay_item["id"] = item_id.strip()
+                        if isinstance(item_id, str):
+                            normalized_item_id = item_id.strip()
+                            # ChatGPT-backed Codex rejects replayed Responses item IDs
+                            # longer than 64 chars. Older/compressed/cross-provider
+                            # sessions may contain much longer synthetic IDs; drop them
+                            # while preserving the message content/status/phase.
+                            if normalized_item_id and len(normalized_item_id) <= 64:
+                                replay_item["id"] = normalized_item_id
                         phase = raw_item.get("phase")
                         if isinstance(phase, str) and phase.strip():
                             replay_item["phase"] = phase.strip()

@@ -1603,6 +1603,49 @@ def test_codex_message_item_status_survives_conversion_and_preflight(monkeypatch
     assert normalized[0]["status"] == "in_progress"
 
 
+def test_codex_message_item_replay_drops_ids_over_64_chars(monkeypatch):
+    """ChatGPT-backed Codex rejects replayed Responses item IDs > 64 chars."""
+    agent = _build_agent(monkeypatch)
+    from agent.codex_responses_adapter import _chat_messages_to_responses_input
+
+    kept_id = "a" * 64
+    dropped_id = "b" * 65
+    items = _chat_messages_to_responses_input([
+        {
+            "role": "assistant",
+            "content": "partial",
+            "codex_message_items": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "in_progress",
+                    "id": kept_id,
+                    "phase": "commentary",
+                    "content": [{"type": "output_text", "text": "kept"}],
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "in_progress",
+                    "id": dropped_id,
+                    "phase": "commentary",
+                    "content": [{"type": "output_text", "text": "dropped"}],
+                },
+            ],
+        }
+    ])
+
+    kept = next(item for item in items if "kept" in str(item.get("content")))
+    assert kept["id"] == kept_id
+    assert kept["status"] == "in_progress"
+    assert kept["phase"] == "commentary"
+
+    dropped = next(item for item in items if "dropped" in str(item.get("content")))
+    assert "id" not in dropped
+    assert dropped["status"] == "in_progress"
+    assert dropped["phase"] == "commentary"
+
+
 def test_duplicate_detection_distinguishes_different_codex_reasoning(monkeypatch):
     """Two consecutive reasoning-only responses with different encrypted content
     must NOT be treated as duplicates."""
