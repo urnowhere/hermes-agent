@@ -89,15 +89,17 @@ class ResponsesApiTransport(ProviderTransport):
         _effort_clamp = {"minimal": "low"}
         reasoning_effort = _effort_clamp.get(reasoning_effort, reasoning_effort)
 
-        kwargs = {
+        _resolved_tools = _responses_tools(tools)
+        kwargs: Dict[str, Any] = {
             "model": model,
             "instructions": instructions,
             "input": _chat_messages_to_responses_input(payload_messages),
-            "tools": _responses_tools(tools),
-            "tool_choice": "auto",
-            "parallel_tool_calls": True,
             "store": False,
         }
+        if _resolved_tools:
+            kwargs["tools"] = _resolved_tools
+            kwargs["tool_choice"] = "auto"
+            kwargs["parallel_tool_calls"] = True
 
         session_id = params.get("session_id")
         if not is_github_responses and session_id:

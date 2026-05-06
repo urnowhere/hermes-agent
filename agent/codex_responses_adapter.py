@@ -711,6 +711,13 @@ def _preflight_codex_api_kwargs(
         if val is not None:
             normalized[passthrough_key] = val
 
+    # Strip tool_choice/parallel_tool_calls when no tools are present to
+    # avoid provider 400 errors (e.g. xAI/Grok rejects tool_choice without
+    # any tools in the tools array — issue #20590).
+    if normalized.get("tool_choice") is not None and not normalized.get("tools"):
+        normalized.pop("tool_choice", None)
+        normalized.pop("parallel_tool_calls", None)
+
     extra_headers = api_kwargs.get("extra_headers")
     if extra_headers is not None:
         if not isinstance(extra_headers, dict):
