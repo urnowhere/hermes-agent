@@ -495,6 +495,29 @@ def _compute_tool_definitions(
 _AGENT_LOOP_TOOLS = {"todo", "memory", "session_search", "delegate_task"}
 _READ_SEARCH_TOOLS = {"read_file", "search_files"}
 
+# Tools that mutate state — blocked when a delegate_task child is spawned
+# with readonly=True.  This is a hard guard: even if the model somehow
+# bypasses toolset filtering, the dispatch layer rejects these tools.
+# The set intentionally covers ALL write-path tools across all toolsets.
+_WRITE_TOOLS = frozenset({
+    # File mutation
+    "write_file", "patch",
+    # Terminal / process (any command may mutate state)
+    "terminal", "process",
+    # Skills management
+    "skill_manage",
+    # Messaging / automation
+    "send_message", "cronjob",
+    # Image/audio generation (writes files)
+    "image_generate", "text_to_speech",
+    # Delegate (already blocked by role=leaf, but belt-and-suspenders)
+    "delegate_task",
+    # Home Assistant (service calls mutate device state)
+    "ha_call_service",
+    # Kanban mutation tools
+    "kanban_complete", "kanban_block", "kanban_create", "kanban_link",
+})
+
 
 # =========================================================================
 # Tool argument type coercion
@@ -708,6 +731,26 @@ def handle_function_call(
     try:
         if function_name in _AGENT_LOOP_TOOLS:
             return json.dumps({"error": f"{function_name} must be handled by the agent loop"})
+
+        # Readonly guard: if the caller provided an enabled_tools list and
+        # the requested tool is a write-path tool that isn't in that list,
+        # block it.  This is the hard defense-in-depth layer — the soft
+        # layer (toolset filtering) prevents the LLM from seeing write
+        # tools in the schema, but this guard catches any that slip through
+        # (e.g. via cached schemas, stale tool lists, or model hallucination).
+        if (
+            enabled_tools is not None
+            and function_name in _WRITE_TOOLS
+            and function_name not in enabled_tools
+        ):
+            return json.dumps({
+                "error": (
+                    f"READ-ONLY mode: '{function_name}' is not allowed. "
+                    "This agent can only read, search, and analyze — "
+                    "file modifications, terminal commands, and state "
+                    "changes are blocked."
+                )
+            })
 
         # Check plugin hooks for a block directive (unless caller already
         # checked — e.g. run_agent._invoke_tool passes skip=True to

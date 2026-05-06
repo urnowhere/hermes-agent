@@ -538,6 +538,7 @@ def _build_child_system_prompt(
     role: str = "leaf",
     max_spawn_depth: int = 2,
     child_depth: int = 1,
+    readonly: bool = False,
 ) -> str:
     """Build a focused system prompt for a child agent.
 
@@ -559,6 +560,20 @@ def _build_child_system_prompt(
             "\nWORKSPACE PATH:\n"
             f"{workspace_path}\n"
             "Use this exact path for local repository/workdir operations unless the task explicitly says otherwise."
+        )
+    if readonly:
+        parts.append(
+            "\n## READ-ONLY MODE\n"
+            "You are operating in READ-ONLY mode. You MUST NOT:\n"
+            "- Modify, create, or delete any files (no write_file, no patch)\n"
+            "- Run terminal commands that change system state\n"
+            "- Use skill_manage to create or modify skills\n"
+            "- Send messages or create cron jobs\n"
+            "- Generate images or audio\n\n"
+            "You CAN: read files, search code, browse the web, analyze images, "
+            "view skills, and use session_search/memory for context.\n"
+            "If your task requires modifications, report what needs to change "
+            "in your summary instead of making the changes yourself."
         )
     parts.append(
         "\nComplete this task using the tools available to you. "
@@ -852,6 +867,9 @@ def _build_child_agent(
     # 'leaf' (default) cannot; 'orchestrator' retains the delegation
     # toolset subject to depth/kill-switch bounds applied below.
     role: str = "leaf",
+    # Readonly mode: restrict child to read-only tools only.
+    # Blocks write_file, patch, terminal, process, skill_manage, etc.
+    readonly: bool = False,
 ):
     """
     Build a child AIAgent on the main thread (thread-safe construction).
@@ -928,6 +946,13 @@ def _build_child_agent(
     if effective_role == "orchestrator" and "delegation" not in child_toolsets:
         child_toolsets.append("delegation")
 
+    # Readonly override: when readonly=True, force the child to only use
+    # read-only tools.  This overrides any explicit toolsets the caller
+    # provided — the intent is "I don't care what toolsets you want, this
+    # child must not mutate anything."
+    if readonly:
+        child_toolsets = ["readonly"]
+
     workspace_hint = _resolve_workspace_hint(parent_agent)
     child_prompt = _build_child_system_prompt(
         goal,
@@ -936,6 +961,7 @@ def _build_child_agent(
         role=effective_role,
         max_spawn_depth=max_spawn,
         child_depth=child_depth,
+        readonly=readonly,
     )
     # Extract parent's API key so subagents inherit auth (e.g. Nous Portal).
     parent_api_key = getattr(parent_agent, "api_key", None)
@@ -1842,6 +1868,7 @@ def delegate_task(
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
+    readonly: bool = False,
     parent_agent=None,
 ) -> str:
     """
@@ -1855,6 +1882,12 @@ def delegate_task(
     'leaf' (default) cannot; 'orchestrator' retains the delegation
     toolset and can spawn its own workers, bounded by
     delegation.max_spawn_depth.  Per-task role beats the top-level one.
+
+    The 'readonly' parameter restricts the child to read-only tools:
+    read_file, search_files, web_search, browser, vision, skills_list,
+    skill_view, etc.  Write tools (write_file, patch, terminal, etc.)
+    are blocked at the dispatch layer.  Useful for code review, research,
+    and analysis tasks where the child must not modify any files.
 
     Returns JSON with results array, one entry per task.
     """
@@ -1929,7 +1962,7 @@ def delegate_task(
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
         task_list = [
-            {"goal": goal, "context": context, "toolsets": toolsets, "role": top_role}
+            {"goal": goal, "context": context, "toolsets": toolsets, "role": top_role, "readonly": readonly}
         ]
     else:
         return tool_error("Provide either 'goal' (single task) or 'tasks' (batch).")
@@ -1966,6 +1999,8 @@ def delegate_task(
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
+            # Per-task readonly beats top-level; default to top-level value.
+            effective_readonly = t.get("readonly", readonly)
             child = _build_child_agent(
                 task_index=i,
                 goal=t["goal"],
@@ -1988,6 +2023,7 @@ def delegate_task(
                     else (acp_args if acp_args is not None else creds.get("args"))
                 ),
                 role=effective_role,
+                readonly=effective_readonly,
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
@@ -2491,6 +2527,10 @@ DELEGATE_TASK_SCHEMA = {
                             "enum": ["leaf", "orchestrator"],
                             "description": "Per-task role override. See top-level 'role' for semantics.",
                         },
+                        "readonly": {
+                            "type": "boolean",
+                            "description": "Per-task readonly override. See top-level 'readonly' for semantics.",
+                        },
                     },
                     "required": ["goal"],
                 },
@@ -2514,6 +2554,19 @@ DELEGATE_TASK_SCHEMA = {
                     "(treated as 'leaf') when the child would exceed "
                     "max_spawn_depth or when "
                     "delegation.orchestrator_enabled=false."
+                ),
+            },
+            "readonly": {
+                "type": "boolean",
+                "description": (
+                    "Restrict the child to read-only tools only (read_file, "
+                    "search_files, web_search, browser, vision, skills_list, "
+                    "skill_view, session_search, etc.). Write tools "
+                    "(write_file, patch, terminal, process, skill_manage, "
+                    "send_message, cronjob) are blocked at the dispatch "
+                    "layer. Useful for: code review, research, architecture "
+                    "analysis, investigation, and any task where the child "
+                    "must not modify files. Overrides explicit toolsets."
                 ),
             },
             "acp_command": {
@@ -2555,6 +2608,7 @@ registry.register(
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
         role=args.get("role"),
+        readonly=args.get("readonly", False),
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,

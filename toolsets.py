@@ -161,7 +161,35 @@ TOOLSETS = {
         "tools": ["read_file", "write_file", "patch", "search_files"],
         "includes": []
     },
-    
+
+    "readonly": {
+        "description": (
+            "Read-only tools — no file modifications, no terminal writes, "
+            "no state changes. Safe for code review, research, and analysis."
+        ),
+        "tools": [
+            # File read/search only
+            "read_file", "search_files",
+            # Web research
+            "web_search", "web_extract",
+            # Browser (navigation + observation only; browser_type is for
+            # form-filling on external sites, not local file edits)
+            "browser_navigate", "browser_snapshot", "browser_click",
+            "browser_type", "browser_scroll", "browser_back",
+            "browser_press", "browser_get_images", "browser_vision",
+            "browser_console", "browser_cdp", "browser_dialog",
+            # Vision
+            "vision_analyze",
+            # Skills (read-only — skill_manage excluded)
+            "skills_list", "skill_view",
+            # Session & memory (read-only)
+            "session_search",
+            # Planning & communication (no state mutation)
+            "todo", "memory", "clarify",
+        ],
+        "includes": []
+    },
+
     "tts": {
         "description": "Text-to-speech: convert text to audio with Edge TTS (free), ElevenLabs, OpenAI, or xAI",
         "tools": ["text_to_speech"],
