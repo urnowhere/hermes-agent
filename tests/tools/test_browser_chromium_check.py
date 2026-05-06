@@ -52,11 +52,13 @@ class TestChromiumInstalled:
         assert bt._chromium_installed() is True
 
     def test_false_when_dir_empty(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(bt.shutil, "which", lambda _cmd: None)
         monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
         monkeypatch.setattr("os.path.expanduser", lambda p: str(tmp_path / "fakehome"))
         assert bt._chromium_installed() is False
 
     def test_false_when_only_unrelated_browsers(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(bt.shutil, "which", lambda _cmd: None)
         monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
         monkeypatch.setattr("os.path.expanduser", lambda p: str(tmp_path / "fakehome"))
         (tmp_path / "firefox-1234").mkdir()
@@ -64,6 +66,7 @@ class TestChromiumInstalled:
         assert bt._chromium_installed() is False
 
     def test_false_when_path_not_a_dir(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(bt.shutil, "which", lambda _cmd: None)
         # User points PLAYWRIGHT_BROWSERS_PATH at a file by mistake.
         bogus = tmp_path / "nope"
         bogus.write_text("")
@@ -86,6 +89,7 @@ class TestCheckBrowserRequirementsChromium:
         monkeypatch.setattr(bt, "_find_agent_browser", lambda: "/usr/local/bin/agent-browser")
         monkeypatch.setattr(bt, "_requires_real_termux_browser_install", lambda _: False)
         monkeypatch.setattr(bt, "_get_cloud_provider", lambda: None)
+        monkeypatch.setattr(bt.shutil, "which", lambda _cmd: None)
         monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
         monkeypatch.setattr("os.path.expanduser", lambda p: str(tmp_path / "fakehome"))
 
@@ -137,6 +141,7 @@ class TestRunBrowserCommandChromiumGuard:
         monkeypatch.setattr(bt, "_find_agent_browser", lambda: "/usr/local/bin/agent-browser")
         monkeypatch.setattr(bt, "_requires_real_termux_browser_install", lambda _: False)
         monkeypatch.setattr(bt, "_is_local_mode", lambda: True)
+        monkeypatch.setattr(bt.shutil, "which", lambda _cmd: None)
         monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
         monkeypatch.setattr("os.path.expanduser", lambda p: str(tmp_path / "fakehome"))
 
@@ -156,6 +161,7 @@ class TestRunBrowserCommandChromiumGuard:
         monkeypatch.setattr(bt, "_requires_real_termux_browser_install", lambda _: False)
         monkeypatch.setattr(bt, "_is_local_mode", lambda: True)
         monkeypatch.setattr(bt, "_running_in_docker", lambda: True)
+        monkeypatch.setattr(bt.shutil, "which", lambda _cmd: None)
         monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
         monkeypatch.setattr("os.path.expanduser", lambda p: str(tmp_path / "fakehome"))
 
@@ -168,6 +174,7 @@ class TestRunBrowserCommandChromiumGuard:
         monkeypatch.setattr(bt, "_requires_real_termux_browser_install", lambda _: False)
         monkeypatch.setattr(bt, "_is_local_mode", lambda: True)
         monkeypatch.setattr(bt, "_running_in_docker", lambda: False)
+        monkeypatch.setattr(bt.shutil, "which", lambda _cmd: None)
         monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
         monkeypatch.setattr("os.path.expanduser", lambda p: str(tmp_path / "fakehome"))
 

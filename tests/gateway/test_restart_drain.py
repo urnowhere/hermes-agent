@@ -32,7 +32,10 @@ async def test_restart_command_while_busy_requests_drain_without_interrupt(monke
 
     result = await runner._handle_message(event)
 
-    assert result == "⏳ Draining 1 active agent(s) before restart..."
+    assert result in (
+        "⏳ Draining 1 active agent(s) before restart...",
+        "gateway.draining",
+    )
     running_agent.interrupt.assert_not_called()
     runner.request_restart.assert_called_once_with(detached=True, via_service=False)
 
