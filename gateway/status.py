@@ -35,6 +35,7 @@ _IS_WINDOWS = sys.platform == "win32"
 _UNSET = object()
 _GATEWAY_LOCK_FILENAME = "gateway.lock"
 _gateway_lock_handle = None
+_NON_RUNNING_PROCESS_STATES = {"T", "t", "Z", "X", "x"}
 # Windows byte-range locks are mandatory for other readers. Lock a byte well
 # past the JSON payload so runtime status / PID readers can still read the file
 # while another process holds the mutual-exclusion lock.
@@ -116,6 +117,21 @@ def _get_process_start_time(pid: int) -> Optional[int]:
         return int(stat_path.read_text().split()[21])
     except (FileNotFoundError, IndexError, PermissionError, ValueError, OSError):
         return None
+
+
+def _get_process_state(pid: int) -> Optional[str]:
+    """Return the Linux /proc state code for a process when available."""
+    status_path = Path(f"/proc/{pid}/status")
+    try:
+        if not status_path.exists():
+            return None
+        for line in status_path.read_text().splitlines():
+            if line.startswith("State:"):
+                parts = line.split()
+                return parts[1] if len(parts) > 1 else None
+    except (OSError, PermissionError):
+        return None
+    return None
 
 
 def get_process_start_time(pid: int) -> Optional[int]:
@@ -516,21 +532,10 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
                     and current_start != existing.get("start_time")
                 ):
                     stale = True
-                # Check if process is stopped (Ctrl+Z / SIGTSTP) — stopped
-                # processes still respond to os.kill(pid, 0) but are not
-                # actually running. Treat them as stale so --replace works.
+                # Stopped or zombie processes still respond to os.kill(pid, 0)
+                # but cannot own a healthy gateway lock.
                 if not stale:
-                    try:
-                        _proc_status = Path(f"/proc/{existing_pid}/status")
-                        if _proc_status.exists():
-                            for _line in _proc_status.read_text().splitlines():
-                                if _line.startswith("State:"):
-                                    _state = _line.split()[1]
-                                    if _state in ("T", "t"):  # stopped or tracing stop
-                                        stale = True
-                                    break
-                    except (OSError, PermissionError):
-                        pass
+                    stale = _get_process_state(existing_pid) in _NON_RUNNING_PROCESS_STATES
         if stale:
             try:
                 lock_path.unlink(missing_ok=True)
