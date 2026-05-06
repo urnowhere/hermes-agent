@@ -166,6 +166,19 @@ def _clear_task_cwd(task_id: str) -> None:
         logger.debug("Failed to clear ACP task cwd override", exc_info=True)
 
 
+def _parse_toolset_env(name: str) -> Optional[List[str]]:
+    raw = os.environ.get(name, "").strip()
+    if raw == "":
+        return None
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return [str(item).strip() for item in parsed if str(item).strip()]
+    except Exception:
+        pass
+    return [piece.strip() for piece in raw.split(",") if piece.strip()]
+
+
 @dataclass
 class SessionState:
     """Tracks per-session state for an ACP-managed Hermes agent."""
@@ -592,16 +605,24 @@ class SessionManager:
             for name, cfg in (config.get("mcp_servers") or {}).items()
             if not isinstance(cfg, dict) or cfg.get("enabled", True) is not False
         ]
+        delegated_enabled_toolsets = _parse_toolset_env("HERMES_ACP_ENABLED_TOOLSETS_JSON")
+        is_delegated_worker = delegated_enabled_toolsets is not None
+        if is_delegated_worker:
+            enabled_toolsets = delegated_enabled_toolsets
+        else:
+            enabled_toolsets = _expand_acp_enabled_toolsets(
+                ["hermes-acp"],
+                mcp_server_names=configured_mcp_servers,
+            )
 
         kwargs = {
             "platform": "acp",
-            "enabled_toolsets": _expand_acp_enabled_toolsets(
-                ["hermes-acp"],
-                mcp_server_names=configured_mcp_servers,
-            ),
+            "enabled_toolsets": enabled_toolsets,
             "quiet_mode": True,
             "session_id": session_id,
             "model": model or default_model,
+            "skip_context_files": is_delegated_worker,
+            "skip_memory": is_delegated_worker,
         }
 
         try:

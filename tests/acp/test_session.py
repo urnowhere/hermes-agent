@@ -596,3 +596,45 @@ class TestPersistence:
 
         assert stdout_buf.getvalue() == ""
         assert stderr_buf.getvalue() == "ACP noise\n"
+
+    def test_delegated_worker_env_override_restricts_enabled_toolsets(self, tmp_path, monkeypatch):
+        """Delegated Hermes ACP workers should honor per-process toolset overrides."""
+
+        def fake_resolve_runtime_provider(requested=None, **kwargs):
+            return {
+                "provider": "copilot-acp",
+                "api_mode": "chat_completions",
+                "base_url": "acp://copilot",
+                "api_key": "test-key",
+                "command": "hermes",
+                "args": ["acp"],
+            }
+
+        captured = {}
+
+        def fake_agent(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                model=kwargs.get("model"),
+                enabled_toolsets=kwargs.get("enabled_toolsets"),
+                _print_fn=None,
+            )
+
+        monkeypatch.setenv("HERMES_ACP_ENABLED_TOOLSETS_JSON", json.dumps(["terminal", "file"]))
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: {
+            "model": {"provider": "copilot-acp", "default": "test-model"}
+        })
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            fake_resolve_runtime_provider,
+        )
+        db = SessionDB(tmp_path / "state.db")
+
+        with patch("run_agent.AIAgent", side_effect=fake_agent):
+            manager = SessionManager(db=db)
+            state = manager.create_session(cwd="/delegated")
+
+        assert captured["enabled_toolsets"] == ["terminal", "file"]
+        assert captured["skip_context_files"] is True
+        assert captured["skip_memory"] is True
+        assert state.agent.enabled_toolsets == ["terminal", "file"]

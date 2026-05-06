@@ -913,6 +913,8 @@ class AIAgent:
         api_mode: str = None,
         acp_command: str = None,
         acp_args: list[str] | None = None,
+        acp_env: Dict[str, str] | None = None,
+        acp_prompt_timeout_seconds: float | None = None,
         command: str = None,
         args: list[str] | None = None,
         model: str = "",
@@ -962,6 +964,10 @@ class AIAgent:
         skip_memory: bool = False,
         session_db=None,
         parent_session_id: str = None,
+        home_id: str = None,
+        profile_name: str = None,
+        transport_kind: str = None,
+        launch_kind: str = None,
         iteration_budget: "IterationBudget" = None,
         fallback_model: Dict[str, Any] = None,
         credential_pool=None,
@@ -1052,6 +1058,20 @@ class AIAgent:
         self.provider = provider_name or ""
         self.acp_command = acp_command or command
         self.acp_args = list(acp_args or args or [])
+        self.acp_env = {str(k): str(v) for k, v in dict(acp_env or {}).items()}
+        try:
+            _acp_prompt_timeout = float(acp_prompt_timeout_seconds) if acp_prompt_timeout_seconds is not None else None
+            self.acp_prompt_timeout_seconds = _acp_prompt_timeout if _acp_prompt_timeout and _acp_prompt_timeout > 0 else None
+        except (TypeError, ValueError):
+            self.acp_prompt_timeout_seconds = None
+        self.acp_stream_stale_timeout_seconds = self.acp_prompt_timeout_seconds
+        self.home_id = str(home_id).strip() if isinstance(home_id, str) and str(home_id).strip() else None
+        inferred_profile = None if self.home_id in {None, "", "default", "custom"} else self.home_id
+        self.profile_name = (
+            str(profile_name).strip() if isinstance(profile_name, str) and str(profile_name).strip() else inferred_profile
+        )
+        self.transport_kind = transport_kind or ("acp" if self.acp_command else "direct")
+        self.launch_kind = launch_kind or "direct"
         if api_mode in {"chat_completions", "codex_responses", "anthropic_messages", "bedrock_converse"}:
             self.api_mode = api_mode
         elif self.provider == "openai-codex":
@@ -1442,6 +1462,10 @@ class AIAgent:
                 if self.provider == "copilot-acp":
                     client_kwargs["command"] = self.acp_command
                     client_kwargs["args"] = self.acp_args
+                    if self.acp_env:
+                        client_kwargs["acp_env"] = dict(self.acp_env)
+                    if self.acp_prompt_timeout_seconds is not None:
+                        client_kwargs["acp_prompt_timeout_seconds"] = self.acp_prompt_timeout_seconds
                 effective_base = base_url
                 if base_url_host_matches(effective_base, "openrouter.ai"):
                     from agent.auxiliary_client import build_or_headers
@@ -2395,6 +2419,13 @@ class AIAgent:
             _sm_timeout = get_provider_request_timeout(self.provider, self.model)
             if _sm_timeout is not None:
                 self._client_kwargs["timeout"] = _sm_timeout
+            if self.provider == "copilot-acp":
+                self._client_kwargs["command"] = self.acp_command
+                self._client_kwargs["args"] = list(self.acp_args or [])
+                if self.acp_env:
+                    self._client_kwargs["acp_env"] = dict(self.acp_env)
+                if self.acp_prompt_timeout_seconds is not None:
+                    self._client_kwargs["acp_prompt_timeout_seconds"] = self.acp_prompt_timeout_seconds
             self.client = self._create_openai_client(
                 dict(self._client_kwargs),
                 reason="switch_model",
@@ -5335,11 +5366,14 @@ class AIAgent:
 
     @staticmethod
     def _cap_delegate_task_calls(tool_calls: list) -> list:
-        """Truncate excess delegate_task calls to max_concurrent_children.
+        """Cap separate delegate_task tool calls in a single turn.
 
-        The delegate_tool caps the task list inside a single call, but the
-        model can emit multiple separate delegate_task tool_calls in one
-        turn.  This truncates the excess, preserving all non-delegate calls.
+        ``delegate_task`` itself already enforces ``delegation.max_concurrent_children``
+        for the batch ``tasks=[...]`` form and returns a clear error if a single call
+        exceeds that limit. This guard only applies when the model emits multiple
+        separate ``delegate_task`` tool calls in one assistant turn. In that case we
+        keep only the first ``max_concurrent_children`` delegate calls and preserve all
+        non-delegate tool calls.
 
         Returns the original list if no truncation was needed.
         """
@@ -5358,7 +5392,7 @@ class AIAgent:
             else:
                 truncated.append(tc)
         logger.warning(
-            "Truncated %d excess delegate_task call(s) to enforce "
+            "Truncated %d excess separate delegate_task call(s) in one turn to enforce "
             "max_concurrent_children=%d limit",
             delegate_count - max_children, max_children,
         )
@@ -6934,7 +6968,17 @@ class AIAgent:
             # attempt's start, not a previous attempt's last chunk.
             last_chunk_time["t"] = time.time()
             self._touch_activity("waiting for provider response (streaming)")
-            stream = request_client_holder["client"].chat.completions.create(**stream_kwargs)
+            stream_or_response = request_client_holder["client"].chat.completions.create(**stream_kwargs)
+
+            # Compatibility shim for lightweight ACP/OpenAI facades that ignore
+            # stream=True and return a completed chat-completions response object.
+            # Hermes can continue down the normal non-streaming response path in
+            # that case instead of trying to iterate the response like a stream.
+            if hasattr(stream_or_response, "choices"):
+                self._capture_rate_limits(getattr(stream_or_response, "response", None))
+                return stream_or_response
+
+            stream = stream_or_response
 
             # Capture rate limit headers from the initial HTTP response.
             # The OpenAI SDK Stream object exposes the underlying httpx
@@ -7465,10 +7509,13 @@ class AIAgent:
                     self._close_request_openai_client(request_client, reason="stream_request_complete")
 
         _stream_stale_timeout_base = float(os.getenv("HERMES_STREAM_STALE_TIMEOUT", 180.0))
+        override_stale_timeout = getattr(self, "acp_stream_stale_timeout_seconds", None)
+        if override_stale_timeout is not None:
+            _stream_stale_timeout = float(override_stale_timeout)
         # Local providers (Ollama, oMLX, llama-cpp) can take 300+ seconds
         # for prefill on large contexts.  Disable the stale detector unless
         # the user explicitly set HERMES_STREAM_STALE_TIMEOUT.
-        if _stream_stale_timeout_base == 180.0 and self.base_url and is_local_endpoint(self.base_url):
+        elif _stream_stale_timeout_base == 180.0 and self.base_url and is_local_endpoint(self.base_url):
             _stream_stale_timeout = float("inf")
             logger.debug("Local provider detected (%s) — stale stream timeout disabled", self.base_url)
         else:
@@ -9460,6 +9507,7 @@ class AIAgent:
             toolsets=function_args.get("toolsets"),
             tasks=function_args.get("tasks"),
             max_iterations=function_args.get("max_iterations"),
+            profile=function_args.get("profile"),
             acp_command=function_args.get("acp_command"),
             acp_args=function_args.get("acp_args"),
             role=function_args.get("role"),

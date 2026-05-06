@@ -8,6 +8,7 @@ from agent.display import (
     build_tool_preview,
     capture_local_edit_snapshot,
     extract_edit_diff,
+    get_cute_tool_message,
     _render_inline_unified_diff,
     _summarize_rendered_diff_sections,
     render_edit_diff_with_delta,
@@ -94,6 +95,25 @@ class TestBuildToolPreview:
         result = build_tool_preview("session_search", {"query": "find something"})
         assert result is not None
         assert "find something" in result
+
+    def test_delegate_task_preview_includes_profile(self):
+        result = build_tool_preview(
+            "delegate_task",
+            {"goal": "Implement the dashboard", "profile": "coder"},
+        )
+        assert result is not None
+        assert "coder" in result
+        assert "Implement the dashboard" in result
+
+    def test_delegate_task_completion_message_prefers_actual_profile(self):
+        result = get_cute_tool_message(
+            "delegate_task",
+            {"goal": "Implement the dashboard", "profile": "requested-profile"},
+            0.5,
+            result='{"results": [{"profile_name": "actual-profile"}]}',
+        )
+        assert "actual-profile" in result
+        assert "requested-profile" not in result
 
     def test_false_like_args_zero(self):
         """Non-dict falsy values should return None, not crash."""

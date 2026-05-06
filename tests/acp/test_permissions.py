@@ -19,7 +19,7 @@ def _make_response(outcome):
     return RequestPermissionResponse(outcome=outcome)
 
 
-def _setup_callback(outcome, timeout=60.0):
+def _setup_callback(outcome, timeout=60.0, *, allow_permanent=True):
     """
     Create a callback wired to a mock request_permission coroutine
     that resolves to the given outcome.
@@ -39,26 +39,35 @@ def _setup_callback(outcome, timeout=60.0):
 
     with patch("acp_adapter.permissions.asyncio.run_coroutine_threadsafe", return_value=future):
         cb = make_approval_callback(mock_rp, loop, session_id="s1", timeout=timeout)
-        result = cb("rm -rf /", "dangerous command")
+        result = cb("rm -rf /", "dangerous command", allow_permanent=allow_permanent)
 
-    return result
+    return result, mock_rp
 
 
 class TestApprovalMapping:
     def test_approval_allow_once_maps_correctly(self):
         outcome = AllowedOutcome(option_id="allow_once", outcome="selected")
-        result = _setup_callback(outcome)
+        result, _mock_rp = _setup_callback(outcome)
         assert result == "once"
 
     def test_approval_allow_always_maps_correctly(self):
         outcome = AllowedOutcome(option_id="allow_always", outcome="selected")
-        result = _setup_callback(outcome)
+        result, _mock_rp = _setup_callback(outcome)
         assert result == "always"
 
     def test_approval_deny_maps_correctly(self):
         outcome = DeniedOutcome(outcome="cancelled")
-        result = _setup_callback(outcome)
+        result, _mock_rp = _setup_callback(outcome)
         assert result == "deny"
+
+    def test_allow_permanent_false_omits_allow_always_option(self):
+        outcome = AllowedOutcome(option_id="allow_once", outcome="selected")
+        result, mock_rp = _setup_callback(outcome, allow_permanent=False)
+        assert result == "once"
+        _args, kwargs = mock_rp.call_args
+        options = kwargs["options"]
+        option_ids = [opt.option_id for opt in options]
+        assert option_ids == ["allow_once", "deny"]
 
     def test_approval_timeout_returns_deny(self):
         """When the future times out, the callback should return 'deny'."""
@@ -70,7 +79,7 @@ class TestApprovalMapping:
 
         with patch("acp_adapter.permissions.asyncio.run_coroutine_threadsafe", return_value=future):
             cb = make_approval_callback(mock_rp, loop, session_id="s1", timeout=0.01)
-            result = cb("rm -rf /", "dangerous")
+            result = cb("rm -rf /", "dangerous", allow_permanent=False)
 
         assert result == "deny"
 

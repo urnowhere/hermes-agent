@@ -167,6 +167,56 @@ def _oneline(text: str) -> str:
     return " ".join(text.split())
 
 
+def _delegate_profile_names_from_args(args: dict | None) -> list[str]:
+    if not isinstance(args, dict):
+        return []
+    names: list[str] = []
+    profile = str(args.get("profile") or "").strip()
+    if profile:
+        names.append(profile)
+    tasks = args.get("tasks")
+    if isinstance(tasks, list):
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            task_profile = str(task.get("profile") or "").strip()
+            if task_profile:
+                names.append(task_profile)
+    deduped: list[str] = []
+    for name in names:
+        if name not in deduped:
+            deduped.append(name)
+    return deduped
+
+
+
+def _delegate_profile_names_from_result(result: str | None) -> list[str]:
+    payload = safe_json_loads(result) if result else None
+    if not isinstance(payload, dict):
+        return []
+    rows = payload.get("results")
+    if not isinstance(rows, list):
+        return []
+    names: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("profile_name") or row.get("home_id") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+
+def _delegate_profile_tag(names: list[str]) -> str:
+    if not names:
+        return ""
+    if len(names) == 1:
+        return f"[{_oneline(names[0])}] "
+    return f"[{_oneline(names[0])} +{len(names) - 1}] "
+
+
+
 def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -> str | None:
     """Build a short preview of a tool call's primary argument for display.
 
@@ -217,6 +267,16 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -
     if tool_name == "session_search":
         query = _oneline(args.get("query", ""))
         return f"recall: \"{query[:25]}{'...' if len(query) > 25 else ''}\""
+
+    if tool_name == "delegate_task":
+        profile_tag = _delegate_profile_tag(_delegate_profile_names_from_args(args))
+        tasks = args.get("tasks")
+        if tasks and isinstance(tasks, list):
+            return f"{profile_tag}{len(tasks)} parallel tasks".strip()
+        goal = _oneline(str(args.get("goal", "")))
+        if goal:
+            return f"{profile_tag}{goal}".strip()
+        return profile_tag.strip() or None
 
     if tool_name == "memory":
         action = args.get("action", "")
@@ -987,9 +1047,11 @@ def get_cute_tool_message(
         return _wrap(f"┊ 🐍 exec      {_trunc(first_line, 35)}  {dur}")
     if tool_name == "delegate_task":
         tasks = args.get("tasks")
+        profile_names = _delegate_profile_names_from_result(result) or _delegate_profile_names_from_args(args)
+        profile_tag = _delegate_profile_tag(profile_names)
         if tasks and isinstance(tasks, list):
-            return _wrap(f"┊ 🔀 delegate  {len(tasks)} parallel tasks  {dur}")
-        return _wrap(f"┊ 🔀 delegate  {_trunc(args.get('goal', ''), 35)}  {dur}")
+            return _wrap(f"┊ 🔀 delegate {profile_tag}{len(tasks)} parallel tasks  {dur}")
+        return _wrap(f"┊ 🔀 delegate {profile_tag}{_trunc(args.get('goal', ''), 35)}  {dur}")
 
     preview = build_tool_preview(tool_name, args) or ""
     return _wrap(f"┊ ⚡ {tool_name[:9]:9} {_trunc(preview, 35)}  {dur}")

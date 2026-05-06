@@ -6,9 +6,30 @@ description: "When and how to use subagent delegation — patterns for parallel 
 
 # Delegation & Parallel Work
 
-Hermes can spawn isolated child agents to work on tasks in parallel. Each subagent gets its own conversation, terminal session, and toolset. Only the final summary comes back — intermediate tool calls never enter your context window.
+Hermes can spawn isolated child agents to work on tasks in parallel. Each subagent gets its own conversation, terminal session, and toolset. Only the child's final response or summary comes back — intermediate tool calls never enter your context window, and they are not forwarded verbatim.
 
 For the full feature reference, see [Subagent Delegation](/docs/user-guide/features/delegation).
+
+## Launch Patterns at a Glance
+
+`delegate_task` is now best thought of as one abstraction with three launch styles:
+
+- Standard subagent — no ACP overrides, just `goal/context/toolsets`
+- Profile-backed Hermes worker — `profile="worker-name"`, which Hermes normalizes to `hermes --profile <worker-name> acp`
+- Generic ACP subprocess — `acp_command/acp_args` for non-Hermes ACP tools like Claude Code or Copilot
+
+A useful rule:
+- use `profile` when you want another Hermes worker by name
+- use `acp_command/acp_args` when you want some other ACP-capable subprocess
+- use `toolsets` to define the delegated worker's capability boundary
+
+Choosing a profile does not silently widen tool access beyond the delegated `toolsets`.
+
+:::note Hermes workers vs generic ACP subprocesses
+For profile-backed Hermes workers, the delegated toolset boundary is enforced on the worker side too. Profile-backed workers skip parent context files and parent memory injection, so pass required context explicitly. They launch through `hermes --profile <name> acp`, which requires `hermes` on the parent's `PATH`. Worker ACP permission requests are denied by default instead of prompting the parent interactively.
+
+For arbitrary ACP subprocesses, Hermes still limits the tool schema it hands over, but the subprocess may expose additional ACP-native capabilities of its own. Treat generic ACP backends as trusted integrations rather than strict sandboxes.
+:::
 
 ---
 
@@ -217,7 +238,7 @@ Restricting toolsets keeps the subagent focused and prevents accidental side eff
 
 ## Constraints
 
-- **Default 3 parallel tasks**: batches default to 3 concurrent subagents (configurable via `delegation.max_concurrent_children` in config.yaml, no hard ceiling, only a floor of 1)
+- **Default concurrency:** 3 parallel subagents (configurable via `delegation.max_concurrent_children` in config.yaml, no hard ceiling, only a floor of 1). A single `delegate_task(tasks=[...])` call over the limit returns a clear error instead of truncating tasks.
 - **Nested delegation is opt-in**: leaf subagents (default) cannot call `delegate_task`, `clarify`, `memory`, `send_message`, or `execute_code`. Orchestrator subagents (`role="orchestrator"`) retain `delegate_task` for further delegation, but only when `delegation.max_spawn_depth` is raised above the default of 1 (1-3 supported); the other four remain blocked. Disable globally via `delegation.orchestrator_enabled: false`.
 
 ### Tuning Concurrency and Depth

@@ -2050,6 +2050,62 @@ class TestConcurrentToolExecution:
             mock_todo.assert_called_once()
         assert "ok" in result
 
+    def test_invoke_tool_forwards_delegate_profile_and_acp_args(self, agent):
+        with patch("tools.delegate_tool.delegate_task", return_value='{"ok":true}') as mock_delegate:
+            result = agent._invoke_tool(
+                "delegate_task",
+                {
+                    "goal": "Use coder profile",
+                    "profile": "coder",
+                    "acp_command": "hermes",
+                    "acp_args": ["--profile", "coder", "acp"],
+                },
+                "task-1",
+            )
+
+        mock_delegate.assert_called_once_with(
+            goal="Use coder profile",
+            context=None,
+            toolsets=None,
+            tasks=None,
+            max_iterations=None,
+            profile="coder",
+            acp_command="hermes",
+            acp_args=["--profile", "coder", "acp"],
+            role=None,
+            parent_agent=agent,
+        )
+        assert "ok" in result
+
+    def test_sequential_delegate_task_forwards_profile_and_acp_args(self, agent):
+        tool_call = _mock_tool_call(
+            name="delegate_task",
+            arguments='{"goal":"Use coder profile","profile":"coder","acp_command":"hermes","acp_args":["--profile","coder","acp"]}',
+            call_id="c1",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tool_call])
+        messages = []
+
+        with patch("tools.delegate_tool.delegate_task", return_value='{"ok":true}') as mock_delegate:
+            agent._execute_tool_calls_sequential(mock_msg, messages, "task-1")
+
+        mock_delegate.assert_called_once_with(
+            goal="Use coder profile",
+            context=None,
+            toolsets=None,
+            tasks=None,
+            max_iterations=None,
+            profile="coder",
+            acp_command="hermes",
+            acp_args=["--profile", "coder", "acp"],
+            role=None,
+            parent_agent=agent,
+        )
+        assert len(messages) == 1
+        assert messages[0]["role"] == "tool"
+        assert messages[0]["tool_call_id"] == "c1"
+        assert "ok" in messages[0]["content"]
+
     def test_invoke_tool_blocked_returns_error_and_skips_execution(self, agent, monkeypatch):
         """_invoke_tool should return error JSON when a plugin blocks the tool."""
         monkeypatch.setattr(
@@ -4110,6 +4166,7 @@ def test_aiagent_uses_copilot_acp_client():
             provider="copilot-acp",
             acp_command="/usr/local/bin/copilot",
             acp_args=["--acp", "--stdio"],
+            acp_prompt_timeout_seconds=777.0,
             quiet_mode=True,
             skip_context_files=True,
             skip_memory=True,
@@ -4122,6 +4179,33 @@ def test_aiagent_uses_copilot_acp_client():
     assert mock_acp_client.call_args.kwargs["api_key"] == "copilot-acp"
     assert mock_acp_client.call_args.kwargs["command"] == "/usr/local/bin/copilot"
     assert mock_acp_client.call_args.kwargs["args"] == ["--acp", "--stdio"]
+    assert mock_acp_client.call_args.kwargs["acp_prompt_timeout_seconds"] == 777.0
+
+
+def test_aiagent_reuses_prompt_timeout_as_stale_stream_timeout():
+    with (
+        patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("agent.auxiliary_client.resolve_provider_client", return_value=(None, None)),
+        patch("run_agent.OpenAI") as mock_openai,
+        patch("agent.copilot_acp_client.CopilotACPClient") as mock_acp_client,
+    ):
+        acp_client = MagicMock()
+        mock_acp_client.return_value = acp_client
+
+        agent = AIAgent(
+            api_key="copilot-acp",
+            base_url="acp://copilot",
+            provider="copilot-acp",
+            acp_command="/usr/local/bin/copilot",
+            acp_args=["--acp", "--stdio"],
+            acp_prompt_timeout_seconds=777.0,
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+
+    assert agent.acp_stream_stale_timeout_seconds == 777.0
 
 
 def test_quiet_spinner_allowed_with_explicit_print_fn(agent):

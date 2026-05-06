@@ -6,7 +6,93 @@ description: "Spawn isolated child agents for parallel workstreams with delegate
 
 # Subagent Delegation
 
-The `delegate_task` tool spawns child AIAgent instances with isolated context, restricted toolsets, and their own terminal sessions. Each child gets a fresh conversation and works independently — only its final summary enters the parent's context.
+The `delegate_task` tool spawns child AIAgent instances with isolated context, restricted toolsets, and their own terminal sessions. Each child gets a fresh conversation and works independently — only its final response or summary enters the parent's context. Intermediate tool output is not a guaranteed verbatim relay.
+
+## Launch Modes
+
+`delegate_task` supports three distinct patterns:
+
+1. Standard subagent
+   - Pass `goal`, `context`, and optional `toolsets`.
+   - Hermes runs a child inside the current runtime family.
+
+2. Profile-backed Hermes worker
+   - Pass `profile="worker-name"`.
+   - Hermes launches `hermes --profile <worker-name> acp`.
+   - The child uses that profile's runtime, home, auth, and profile-local configuration.
+
+3. Generic ACP subprocess
+   - Pass `acp_command` / `acp_args`.
+   - Use this for non-Hermes ACP agents such as Claude Code, Copilot, or other ACP-capable subprocesses.
+
+## Profile vs ACP Overrides
+
+Use `profile` when you want another Hermes worker by name:
+
+```python
+delegate_task(
+    goal="Fix the failing tests",
+    context="Project at /home/user/myproject. Run pytest tests/auth/ -q.",
+    toolsets=["terminal", "file"],
+    profile="coder"
+)
+```
+
+This is normalized internally to:
+
+```bash
+hermes --profile coder acp
+```
+
+Use `acp_command` / `acp_args` only when you are targeting a non-Hermes ACP subprocess or need an advanced manual override:
+
+```python
+delegate_task(
+    goal="Review this repository",
+    context="Repo at /home/user/project",
+    toolsets=["terminal", "file"],
+    acp_command="claude",
+    acp_args=["--acp", "--stdio"]
+)
+```
+
+### Why Hermes Drops `--stdio`
+
+For Hermes itself, `acp` is already the ACP stdio server entrypoint. Running:
+
+```bash
+hermes acp
+```
+
+starts the ACP adapter over stdin/stdout directly. Hermes does not need a separate `--stdio` flag for its own ACP mode.
+
+By contrast, many generic ACP tools (for example `claude --acp --stdio`) do need explicit flags to switch into ACP stdio transport mode.
+
+## Toolsets vs Profile Configuration
+
+Profiles choose the worker's runtime and home:
+- model
+- provider
+- base URL
+- auth/env
+- `HERMES_HOME`
+- profile-local config and skills
+
+`toolsets` choose the worker's allowed capabilities.
+
+That distinction is intentional: choosing a profile does not silently widen tool access. If you delegate with:
+
+```python
+toolsets=["terminal", "file"]
+```
+
+then the delegated worker is constrained to that capability boundary even if the selected profile would normally have broader tools available.
+
+:::note Hermes workers vs generic ACP subprocesses
+For profile-backed Hermes workers, that toolset boundary is enforced on the worker side as well as the parent side. Profile-backed workers intentionally skip parent context files and parent memory injection; pass required context explicitly in `goal` / `context`. They are launched with `hermes --profile <name> acp`, so the `hermes` executable must be available on the parent's `PATH`. ACP permission requests from the worker are denied by default rather than prompting the parent interactively; grant only the toolsets the worker actually needs.
+
+For arbitrary ACP subprocesses launched via `acp_command` / `acp_args`, Hermes still constrains the tool schema it hands to the subprocess, but the subprocess may expose additional ACP-native capabilities of its own. Treat generic ACP backends as trusted integrations, not as strict sandboxes.
+:::
 
 ## Single Task
 
@@ -121,7 +207,7 @@ delegate_task(
 
 When you provide a `tasks` array, subagents run in **parallel** using a thread pool:
 
-- **Maximum concurrency:** 3 tasks by default (configurable via `delegation.max_concurrent_children` or the `DELEGATION_MAX_CONCURRENT_CHILDREN` env var; floor of 1, no hard ceiling). Batches larger than the limit return a tool error rather than being silently truncated.
+- **Maximum concurrency:** configurable via `delegation.max_concurrent_children` (default: 3; env override `DELEGATION_MAX_CONCURRENT_CHILDREN`; floor of 1, no hard ceiling). If you provide more tasks than the limit, Hermes returns a clear error instead of truncating the batch.
 - **Thread pool:** Uses `ThreadPoolExecutor` with the configured concurrency limit as max workers
 - **Progress display:** In CLI mode, a tree-view shows tool calls from each subagent in real-time with per-task completion lines. In gateway mode, progress is batched and relayed to the parent's progress callback
 - **Result ordering:** Results are sorted by task index to match input order regardless of completion order
@@ -240,8 +326,9 @@ For **durable long-running work** that must survive interrupts or outlive the cu
 - **Nested delegation is opt-in** — only `role="orchestrator"` children can delegate further, and only when `max_spawn_depth` is raised from its default of 1 (flat). Disable globally with `orchestrator_enabled: false`.
 - Leaf subagents **cannot** call: `delegate_task`, `clarify`, `memory`, `send_message`, `execute_code`. Orchestrator subagents retain `delegate_task` but still cannot use the other four.
 - **Interrupt propagation** — interrupting the parent interrupts all active children (including grandchildren under orchestrators)
-- Only the final summary enters the parent's context, keeping token usage efficient
-- Subagents inherit the parent's **API key, provider configuration, and credential pool** (enabling key rotation on rate limits)
+- Only the final response or summary enters the parent's context, keeping token usage efficient
+- If the parent needs concrete command output or file contents, the child must include them in its final response explicitly
+- Profile-backed Hermes workers use the selected profile's runtime/home/auth. Generic subagents without `profile` continue to inherit the parent's runtime family, and generic ACP subprocesses use the explicitly provided `acp_command` / `acp_args`.
 
 ## Delegation vs execute_code
 
