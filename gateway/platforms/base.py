@@ -765,6 +765,37 @@ def cache_video_from_bytes(data: bytes, ext: str = ".mp4") -> str:
 # ---------------------------------------------------------------------------
 
 DOCUMENT_CACHE_DIR = get_hermes_dir("cache/documents", "document_cache")
+SCREENSHOT_CACHE_DIR = get_hermes_dir("cache/screenshots", "browser_screenshots")
+
+MEDIA_DELIVERY_ALLOW_DIRS_ENV = "HERMES_MEDIA_ALLOW_DIRS"
+MEDIA_DELIVERY_SAFE_ROOTS = (
+    IMAGE_CACHE_DIR,
+    AUDIO_CACHE_DIR,
+    VIDEO_CACHE_DIR,
+    DOCUMENT_CACHE_DIR,
+    SCREENSHOT_CACHE_DIR,
+)
+
+
+def _media_delivery_allowed_roots() -> list[Path]:
+    """Return roots from which model-emitted MEDIA tags may attach files."""
+    roots = [Path(root) for root in MEDIA_DELIVERY_SAFE_ROOTS]
+    extra_roots = os.environ.get(MEDIA_DELIVERY_ALLOW_DIRS_ENV, "")
+    for chunk in extra_roots.split(os.pathsep):
+        for raw_root in chunk.split(","):
+            raw_root = raw_root.strip()
+            if raw_root:
+                roots.append(Path(os.path.expanduser(raw_root)))
+    return roots
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
 
 SUPPORTED_DOCUMENT_TYPES = {
     ".pdf": "application/pdf",
@@ -1871,6 +1902,47 @@ class BasePlatformAdapter(ABC):
         return await self.send(chat_id=chat_id, content=text, reply_to=reply_to)
 
     @staticmethod
+    def validate_media_delivery_path(path: str) -> Optional[str]:
+        """Validate a MEDIA tag path before native attachment delivery.
+
+        MEDIA tags are model-controlled text. Only existing regular files under
+        Hermes-managed media cache roots (or explicit operator-configured roots)
+        may be delivered. Symlinks are resolved before the containment check so
+        a link inside an allowed cache cannot point at an arbitrary host file.
+        """
+        if not path:
+            return None
+
+        candidate = path.strip()
+        if len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in "`\"'":
+            candidate = candidate[1:-1].strip()
+        candidate = candidate.lstrip("`\"'").rstrip("`\"',.;:)}]")
+        if not candidate:
+            return None
+
+        expanded = Path(os.path.expanduser(candidate))
+        if not expanded.is_absolute():
+            return None
+
+        try:
+            resolved = expanded.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return None
+
+        if not resolved.is_file():
+            return None
+
+        for root in _media_delivery_allowed_roots():
+            try:
+                resolved_root = root.expanduser().resolve(strict=False)
+            except (OSError, RuntimeError):
+                continue
+            if _path_is_within(resolved, resolved_root):
+                return str(resolved)
+
+        return None
+
+    @staticmethod
     def extract_media(content: str) -> Tuple[List[Tuple[str, bool]], str]:
         """
         Extract MEDIA:<path> tags and [[audio_as_voice]] directives from response text.
@@ -2885,11 +2957,19 @@ class BasePlatformAdapter(ABC):
                 _image_paths: list = []
                 _non_image_media: list = []
                 for media_path, is_voice in media_files:
-                    _ext = Path(media_path).suffix.lower()
+                    validated_media_path = self.validate_media_delivery_path(media_path)
+                    if not validated_media_path:
+                        logger.warning(
+                            "[%s] Skipping unsafe MEDIA directive path: %s",
+                            self.name,
+                            media_path,
+                        )
+                        continue
+                    _ext = Path(validated_media_path).suffix.lower()
                     if _ext in _IMAGE_EXTS and not is_voice:
-                        _image_paths.append(media_path)
+                        _image_paths.append(validated_media_path)
                     else:
-                        _non_image_media.append((media_path, is_voice))
+                        _non_image_media.append((validated_media_path, is_voice))
                 _non_image_local: list = []
                 for file_path in local_files:
                     if Path(file_path).suffix.lower() in _IMAGE_EXTS:

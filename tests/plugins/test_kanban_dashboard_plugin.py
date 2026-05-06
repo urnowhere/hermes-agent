@@ -525,7 +525,7 @@ def test_ws_events_rejects_when_token_required(tmp_path, monkeypatch):
     # Stub web_server so _check_ws_token has a token to compare against.
     import hermes_cli
     import types
-    stub = types.SimpleNamespace(_SESSION_TOKEN="secret-xyz")
+    stub = types.SimpleNamespace(_SESSION_TOKEN="***")
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server", stub)
     monkeypatch.setattr(hermes_cli, "web_server", stub, raising=False)
 
@@ -548,7 +548,7 @@ def test_ws_events_rejects_when_token_required(tmp_path, monkeypatch):
 
     # Correct token → accepted (connect then close cleanly from our side).
     with c.websocket_connect(
-        "/api/plugins/kanban/events?token=secret-xyz"
+        f"/api/plugins/kanban/events?token={stub._SESSION_TOKEN}"
     ) as ws:
         assert ws is not None  # handshake succeeded
 

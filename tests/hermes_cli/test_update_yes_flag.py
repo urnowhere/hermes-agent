@@ -9,10 +9,30 @@ Covers:
 """
 
 import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from hermes_cli.main import cmd_update
+
+
+class _TtyProxy:
+    """Proxy stdout/stdin with a deterministic TTY answer for update tests."""
+
+    def __init__(self, wrapped):
+        self._wrapped = wrapped
+
+    def isatty(self):
+        return True
+
+    def write(self, data):
+        return self._wrapped.write(data)
+
+    def flush(self):
+        return self._wrapped.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
 
 
 def _make_run_side_effect(
@@ -114,10 +134,8 @@ class TestUpdateYesConfigMigration:
         args = SimpleNamespace(yes=False)
 
         with patch("builtins.input", return_value="n") as mock_input, patch(
-            "hermes_cli.main.sys"
-        ) as mock_sys:
-            mock_sys.stdin.isatty.return_value = True
-            mock_sys.stdout.isatty.return_value = True
+            "hermes_cli.main.sys.stdin", _TtyProxy(sys.stdin)
+        ), patch("hermes_cli.main.sys.stdout", _TtyProxy(sys.stdout)):
             cmd_update(args)
             # The user was actually prompted.
             assert mock_input.called
@@ -156,7 +174,16 @@ class TestUpdateYesStashRestore:
 
         args = SimpleNamespace(yes=True)
 
-        cmd_update(args)
+        # `cmd_update` is imported at module import time, and some full-suite
+        # runs exercise update paths that can reload/replace hermes_cli.main
+        # symbols. Patch the exact globals dict used by this function as well
+        # as the module attribute so this regression guard stays order-proof.
+        original_restore = cmd_update.__globals__.get("_restore_stashed_changes")
+        cmd_update.__globals__["_restore_stashed_changes"] = mock_restore
+        try:
+            cmd_update(args)
+        finally:
+            cmd_update.__globals__["_restore_stashed_changes"] = original_restore
 
         # _restore_stashed_changes was called, and called with prompt_user=False
         # every time (so the user never sees "Restore local changes now?").
