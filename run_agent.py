@@ -4339,6 +4339,16 @@ class AIAgent:
         if not messages:
             return
 
+        # Re-derive logs_dir from the current HERMES_HOME so that session
+        # files land in the active profile's directory even when the profile
+        # was switched after this agent was created (issue #16582).
+        current_home = get_hermes_home()
+        current_logs_dir = current_home / "sessions"
+        if current_logs_dir != self.logs_dir:
+            self.logs_dir = current_logs_dir
+            self.logs_dir.mkdir(parents=True, exist_ok=True)
+            self.session_log_file = self.logs_dir / f"session_{self.session_id}.json"
+
         try:
             # Clean assistant content for session logs
             cleaned = []
@@ -6879,6 +6889,12 @@ class AIAgent:
         request_client_holder = {"client": None}
         first_delta_fired = {"done": False}
         deltas_were_sent = {"yes": False}  # Track if any deltas were fired (for fallback)
+        # Thread-safe flag for the stale-stream detector.  CPython's GIL
+        # makes bool reads/writes atomic, so the main-thread heartbeat
+        # loop can safely read this without a lock while the _call thread
+        # writes it.  We deliberately avoid reading the mutable list
+        # ``result["partial_tool_names"]`` from the detector thread.
+        tool_call_in_progress = {"flag": False}
         # Wall-clock timestamp of the last real streaming chunk.  The outer
         # poll loop uses this to detect stale connections that keep receiving
         # SSE keep-alive pings but no actual data.
@@ -7079,6 +7095,7 @@ class AIAgent:
                             # at line ~6107 return `tool_calls=None`, silently
                             # discarding the attempted action.
                             result["partial_tool_names"].append(name)
+                            tool_call_in_progress["flag"] = True
 
                 if chunk.choices[0].finish_reason:
                     finish_reason = chunk.choices[0].finish_reason
@@ -7326,6 +7343,7 @@ class AIAgent:
                             # attempt's chunks don't concat onto the dead
                             # stream's partial JSON.
                             result["partial_tool_names"] = []
+                            tool_call_in_progress["flag"] = False
                             deltas_were_sent["yes"] = False
                             first_delta_fired["done"] = False
                             self._emit_status(
@@ -7515,13 +7533,25 @@ class AIAgent:
             # Detect stale streams: connections kept alive by SSE pings
             # but delivering no real chunks.  Kill the client so the
             # inner retry loop can start a fresh connection.
+            #
+            # Tool-call leniency: when the model is mid-generation of a
+            # tool call (partial_tool_names is non-empty), providers can
+            # legitimately pause longer between SSE chunks — especially
+            # for write-heavy tools (write_file with >5KB content) where
+            # the model is generating large JSON argument strings.
+            # Grant 1.5× the base stale timeout so the stale detector
+            # doesn't kill a healthy-but-slow tool-call generation.
+            _effective_stale_timeout = _stream_stale_timeout
+            if tool_call_in_progress["flag"]:
+                _effective_stale_timeout = _stream_stale_timeout * 1.5
             _stale_elapsed = time.time() - last_chunk_time["t"]
-            if _stale_elapsed > _stream_stale_timeout:
+            if _stale_elapsed > _effective_stale_timeout:
                 _est_ctx = sum(len(str(v)) for v in api_kwargs.get("messages", [])) // 4
                 logger.warning(
-                    "Stream stale for %.0fs (threshold %.0fs) — no chunks received. "
+                    "Stream stale for %.0fs (threshold %.0fs%s) — no chunks received. "
                     "model=%s context=~%s tokens. Killing connection.",
-                    _stale_elapsed, _stream_stale_timeout,
+                    _stale_elapsed, _effective_stale_timeout,
+                    " [tool-call leniency]" if _effective_stale_timeout != _stream_stale_timeout else "",
                     api_kwargs.get("model", "unknown"), f"{_est_ctx:,}",
                 )
                 self._emit_status(
