@@ -1091,6 +1091,9 @@ def execute_code(
         _child_cwd = _resolve_child_cwd(_mode, tmpdir)
         _script_path = os.path.join(tmpdir, "script.py")
 
+        from tools.environments.local import _harden_against_proc_environ_leak
+        _harden_against_proc_environ_leak()
+
         proc = subprocess.Popen(
             [_child_python, _script_path],
             cwd=_child_cwd,

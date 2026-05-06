@@ -11,6 +11,8 @@ import time
 
 from tools.environments.base import BaseEnvironment, _pipe_stdin
 
+logger = logging.getLogger(__name__)
+
 _IS_WINDOWS = platform.system() == "Windows"
 
 logger = logging.getLogger(__name__)
@@ -142,8 +144,73 @@ def _build_provider_env_blocklist() -> frozenset:
 _HERMES_PROVIDER_ENV_BLOCKLIST = _build_provider_env_blocklist()
 
 
+_PROC_ENVIRON_HARDENED = False
+_HARDEN_WARNED = False
+
+
+def _warn_harden_failed(reason: str) -> None:
+    global _HARDEN_WARNED
+    if _HARDEN_WARNED:
+        return
+    _HARDEN_WARNED = True
+    logger.warning(
+        "PR_SET_DUMPABLE could not be cleared (%s); /proc/<pid>/environ leak protection inactive — "
+        "subprocess children may recover stripped credentials. See issue #4427.",
+        reason,
+    )
+
+
+def _harden_against_proc_environ_leak() -> None:
+    """Drop the PR_SET_DUMPABLE flag so /proc/<pid>/environ is owned root:root.
+
+    Subprocesses inherit the same UID and can otherwise read the parent's
+    initial environment via /proc/<ppid>/environ — bypassing the env=
+    sanitization done at Popen time.  Dropping dumpable changes the ownership
+    of the /proc files to root:root with mode 400, which blocks same-UID
+    readers on Linux.  No-op on non-Linux platforms.
+
+    Privileged bypass paths still exist (CAP_SYS_PTRACE in the target's user
+    namespace, ptrace-mode FSCREDS overrides) and are out of scope for this
+    function; pair with /proc hidepid=2 mount option for defense in depth.
+    """
+    global _PROC_ENVIRON_HARDENED
+    if platform.system() != "Linux":
+        _PROC_ENVIRON_HARDENED = True
+        return
+    try:
+        import ctypes
+        import ctypes.util
+        libc_name = ctypes.util.find_library("c")
+        try:
+            libc = ctypes.CDLL(libc_name or "libc.so.6", use_errno=True)
+        except OSError:
+            libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl.argtypes = [
+            ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong,
+            ctypes.c_ulong, ctypes.c_ulong,
+        ]
+        libc.prctl.restype = ctypes.c_int
+        PR_GET_DUMPABLE = 3
+        PR_SET_DUMPABLE = 4
+        if libc.prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) == 0:
+            _PROC_ENVIRON_HARDENED = True
+            return
+        rc = libc.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0)
+    except Exception as exc:
+        _warn_harden_failed(f"libc/prctl unavailable: {type(exc).__name__}")
+        return
+    if rc != 0:
+        _warn_harden_failed(f"prctl returned {rc}, errno={ctypes.get_errno()}")
+        return
+    _PROC_ENVIRON_HARDENED = True
+
+
+_harden_against_proc_environ_leak()
+
+
 def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = None) -> dict:
     """Filter Hermes-managed secrets from a subprocess environment."""
+    _harden_against_proc_environ_leak()
     try:
         from tools.env_passthrough import is_env_passthrough as _is_passthrough
     except Exception:
@@ -220,6 +287,7 @@ _SANE_PATH = (
 
 def _make_run_env(env: dict) -> dict:
     """Build a run environment with a sane PATH and provider-var stripping."""
+    _harden_against_proc_environ_leak()
     try:
         from tools.env_passthrough import is_env_passthrough as _is_passthrough
     except Exception:
