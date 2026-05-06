@@ -133,3 +133,56 @@ class TestQueryOllamaNumCtx:
                 result = query_ollama_num_ctx("model", "http://localhost:11434")
 
         assert result is None
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Level 2: run_agent.py fallback — model.context_length used when
+#           /api/show detection fails
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestOllamaNumCtxFallback:
+    """Verify the run_agent.py fallback: when query_ollama_num_ctx() returns None
+    for a local endpoint, the user's model.context_length is used as num_ctx so
+    Ollama does not silently default to 2048 tokens and truncate conversation
+    history (issue #14420)."""
+
+    def test_context_length_fallback_on_detection_failure(self):
+        """query_ollama_num_ctx returning None → context_length used as num_ctx."""
+        with patch("agent.model_metadata.detect_local_server_type", return_value=None):
+            # detect_local_server_type returning None causes query_ollama_num_ctx
+            # to return None immediately.  Simulate the same None return directly.
+            result = query_ollama_num_ctx("qwen3.5:9b", "http://192.168.21.205:11434/v1")
+
+        # query returns None; the caller (run_agent.py) should apply the fallback
+        # using model.context_length.  This test documents the None return that
+        # triggers the fallback, not the fallback itself (which lives in AIAgent.__init__).
+        assert result is None
+
+    def test_detection_failure_via_timeout(self):
+        """A connection timeout should also return None so the fallback kicks in."""
+        import httpx
+
+        with patch("agent.model_metadata.detect_local_server_type", side_effect=httpx.ConnectTimeout("timeout")):
+            result = query_ollama_num_ctx("qwen3.5:9b", "http://192.168.21.205:11434/v1")
+
+        assert result is None
+
+    def test_modelfile_num_ctx_below_context_length_returns_modelfile_value(self):
+        """query_ollama_num_ctx returns the Modelfile num_ctx even if it is below
+        the user's context_length.  run_agent.py is responsible for bumping it up
+        to match context_length (issue #14420 follow-up)."""
+        show_data = {
+            "model_info": {"qwen2.context_length": 131072},
+            "parameters": "num_ctx 32768\ntemperature 0.6",
+        }
+        mock_ctx, _ = _mock_httpx_client(show_data)
+
+        with patch("agent.model_metadata.detect_local_server_type", return_value="ollama"):
+            import httpx
+            with patch.object(httpx, "Client", return_value=mock_ctx):
+                result = query_ollama_num_ctx("qwen3.5:9b", "http://192.168.21.205:11434/v1")
+
+        # The function returns the Modelfile's explicit num_ctx (32768).
+        # run_agent.py will bump this up to model.context_length (64000) if needed.
+        assert result == 32768
