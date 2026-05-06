@@ -6661,6 +6661,34 @@ class GatewayRunner:
                     "Your next message will start a fresh session."
                 )
 
+            # When the agent fails with a format error (e.g. MiniMax API error
+            # 2013: invalid function arguments), the session may be in a corrupt
+            # state that will fail repeatedly on every message.  Detect this and
+            # auto-reset the session to break the stuck loop, then alert the user.
+            _err_str = (agent_result.get("error") or "").lower()
+            _is_format_loop = (
+                agent_result.get("failed")
+                and (
+                    "2013" in _err_str
+                    or "invalid function arguments" in _err_str
+                    or ("format" in _err_str and "error" in _err_str)
+                )
+            )
+            if _is_format_loop and session_entry and session_key:
+                logger.warning(
+                    "Auto-resetting session %s after format error: %s",
+                    session_entry.session_id,
+                    agent_result.get("error", "")[:300],
+                )
+                self.session_store.reset_session(session_key)
+                self._evict_cached_agent(session_key)
+                self._session_model_overrides.pop(session_key, None)
+                response = (response or "") + (
+                    "\n\n🔄 Session auto-reset — the previous request triggered a "
+                    "format error (e.g. MiniMax error 2013). The conversation has "
+                    "been cleared. Your next message will start fresh."
+                )
+
             ts = datetime.now().isoformat()
             
             # If this is a fresh session (no history), write the full tool
