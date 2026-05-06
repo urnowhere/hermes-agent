@@ -321,6 +321,16 @@ def _normalize_role(r: Optional[str]) -> str:
     return "leaf"
 
 
+def _detect_direct_endpoint_api_mode(base_url: str) -> Optional[str]:
+    normalized = (base_url or "").strip().lower().rstrip("/")
+    hostname = base_url_hostname(base_url)
+    if hostname in {"api.openai.com", "api.x.ai"}:
+        return "codex_responses"
+    if normalized.endswith("/anthropic"):
+        return "anthropic_messages"
+    return None
+
+
 def _get_max_concurrent_children() -> int:
     """Read delegation.max_concurrent_children from config, falling back to
     DELEGATION_MAX_CONCURRENT_CHILDREN env var, then the default (3).
@@ -2287,7 +2297,7 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
 
         base_lower = configured_base_url.lower()
         provider = "custom"
-        api_mode = "chat_completions"
+        api_mode = _detect_direct_endpoint_api_mode(configured_base_url) or "chat_completions"
         if (
             base_url_hostname(configured_base_url) == "chatgpt.com"
             and "/backend-api/codex" in base_lower

@@ -853,6 +853,45 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertIsNone(creds["api_key"])
         self.assertEqual(creds["provider"], "custom")
 
+    def test_direct_openai_endpoint_uses_codex_responses_api_mode(self):
+        parent = _make_mock_parent(depth=0)
+        cfg = {
+            "model": "gpt-5-mini",
+            "base_url": "https://api.openai.com/v1",
+            "api_key": "openai-key",
+        }
+
+        creds = _resolve_delegation_credentials(cfg, parent)
+
+        self.assertEqual(creds["provider"], "custom")
+        self.assertEqual(creds["api_mode"], "codex_responses")
+
+    def test_direct_xai_endpoint_uses_codex_responses_api_mode(self):
+        parent = _make_mock_parent(depth=0)
+        cfg = {
+            "model": "grok-code-fast",
+            "base_url": "https://api.x.ai/v1",
+            "api_key": "xai-key",
+        }
+
+        creds = _resolve_delegation_credentials(cfg, parent)
+
+        self.assertEqual(creds["provider"], "custom")
+        self.assertEqual(creds["api_mode"], "codex_responses")
+
+    def test_direct_anthropic_proxy_suffix_uses_anthropic_messages(self):
+        parent = _make_mock_parent(depth=0)
+        cfg = {
+            "model": "claude-sonnet-4",
+            "base_url": "https://proxy.example.com/anthropic",
+            "api_key": "proxy-key",
+        }
+
+        creds = _resolve_delegation_credentials(cfg, parent)
+
+        self.assertEqual(creds["provider"], "custom")
+        self.assertEqual(creds["api_mode"], "anthropic_messages")
+
     @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_nous_provider_resolves_nous_credentials(self, mock_resolve):
         """Nous provider resolves Nous Portal base_url and api_key."""
