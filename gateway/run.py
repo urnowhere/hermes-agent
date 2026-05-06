@@ -6071,7 +6071,7 @@ class GatewayRunner:
                         _hyg_model = _model_cfg.get("default") or _model_cfg.get("model") or _hyg_model
                         # Read explicit context_length override from model config
                         # (same as run_agent.py lines 995-1005)
-                        _raw_ctx = _model_cfg.get("context_length")
+                        _raw_ctx = _model_cfg.get("context_length") or _model_cfg.get("context_window")
                         if _raw_ctx is not None:
                             try:
                                 _hyg_config_context_length = int(_raw_ctx)
@@ -6857,7 +6857,7 @@ class GatewayRunner:
             if data:
                 model_cfg = data.get("model", {})
                 if isinstance(model_cfg, dict):
-                    raw_ctx = model_cfg.get("context_length")
+                    raw_ctx = model_cfg.get("context_length") or model_cfg.get("context_window")
                     if raw_ctx is not None:
                         try:
                             config_context_length = int(raw_ctx)
