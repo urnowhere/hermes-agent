@@ -50,6 +50,18 @@ if [ "$(id -u)" = "0" ]; then
         chmod 640 "$HERMES_HOME/config.yaml" 2>/dev/null || true
     fi
 
+    # Defensive chown of $INSTALL_DIR/ui-tui so the dashboard's Chat tab can
+    # rebuild the TUI bundle if its launcher's _tui_build_needed() trips.
+    # The Dockerfile already chowns this tree at build time (#20500), but a
+    # remapped HERMES_UID changes the runtime hermes UID — without this the
+    # tree appears uid=10000-owned to a process running as the remapped UID,
+    # esbuild fails with EACCES, and pty_ws surfaces "Chat unavailable: 1".
+    # The chown is no-op on already-correctly-owned trees and silently
+    # tolerates rootless containers where chown isn't permitted.
+    if [ -d "$INSTALL_DIR/ui-tui" ]; then
+        chown -R hermes:hermes "$INSTALL_DIR/ui-tui" 2>/dev/null || true
+    fi
+
     echo "Dropping root privileges"
     exec gosu hermes "$0" "$@"
 fi

@@ -60,8 +60,26 @@ RUN npm install --prefer-offline --no-audit && \
 COPY --chown=hermes:hermes . .
 
 # Build browser dashboard and terminal UI assets.
+#
+# NOTE: this RUN executes as root (no preceding USER directive), so the
+# build artifacts that npm/esbuild emit into ui-tui/dist/ and
+# ui-tui/packages/hermes-ink/dist/ end up root-owned.  At runtime the
+# entrypoint drops privileges to the unprivileged ``hermes`` user, and
+# the dashboard's Chat tab launches the TUI which probes
+# ``_tui_build_needed`` — a fresh image where ``dist/`` is current
+# already runnable, but if the launcher decides to rebuild (e.g.
+# manifest drift, or the user rebuilt one workspace and not the other),
+# esbuild fails with EACCES on the root-owned dist dirs and the Chat
+# tab surfaces the unhelpful "Chat unavailable: 1" banner (#20500).
+#
+# Reset ownership of the entire ui-tui tree to ``hermes:hermes`` here
+# so any subsequent in-container rebuild succeeds.  This is cheap (one
+# chown on a tree we've just written) and survives image rebuilds, so
+# users no longer have to chown manually after each ``docker compose
+# pull``.
 RUN cd web && npm run build && \
-    cd ../ui-tui && npm run build
+    cd ../ui-tui && npm run build && \
+    chown -R hermes:hermes /opt/hermes/ui-tui
 
 # ---------- Permissions ----------
 # Make install dir world-readable so any HERMES_UID can read it at runtime.

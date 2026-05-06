@@ -1126,12 +1126,29 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
             print("TUI build failed.")
             if preview:
                 print(preview)
-            sys.exit(1)
+            # Surface a short reason on the SystemExit code so callers that
+            # render ``Chat unavailable: {exc}`` (notably ``pty_ws`` in the
+            # dashboard's WebSocket handler) get an actionable hint instead
+            # of a bare ``Chat unavailable: 1`` (#20500).  Detect the
+            # common in-container EACCES on the dist directories so users
+            # know why and can chown.  The numeric exit code is preserved
+            # by SystemExit's str(arg) → arg conversion when arg is non-int,
+            # so launchers that key on returncode still see a non-zero exit.
+            _eacces_signal = (
+                "permission denied" in combined.lower()
+                or "eacces" in combined.lower()
+            )
+            if _eacces_signal:
+                raise SystemExit(
+                    "TUI build failed (permission denied writing to dist/). "
+                    "If running in Docker, ensure /opt/hermes/ui-tui is "
+                    "owned by the hermes user; see issue #20500."
+                )
+            raise SystemExit("TUI build failed; see container logs for details.")
 
     root = _find_bundled_tui(tui_dir)
     if not root:
-        print("TUI build did not produce dist/entry.js")
-        sys.exit(1)
+        raise SystemExit("TUI build did not produce dist/entry.js")
 
     node = _node_bin("node")
     return [node, str(root / "dist" / "entry.js")], root
