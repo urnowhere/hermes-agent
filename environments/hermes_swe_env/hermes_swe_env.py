@@ -28,6 +28,8 @@ Usage:
         --env.tool_call_parser hermes \\
         --env.terminal_backend modal
 """
+from __future__ import annotations
+
 
 import logging
 import sys

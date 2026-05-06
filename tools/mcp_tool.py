@@ -68,6 +68,8 @@ Thread safety:
     _lock so the code is safe regardless of GIL presence (e.g. Python 3.13+
     free-threading).
 """
+from __future__ import annotations
+
 
 import asyncio
 import concurrent.futures

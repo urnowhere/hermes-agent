@@ -14,6 +14,8 @@ Usage:
     # Compare against a release notes file
     python scripts/contributor_audit.py --since-tag v2026.4.8 --release-file RELEASE_v0.9.0.md
 """
+from __future__ import annotations
+
 
 import argparse
 import json

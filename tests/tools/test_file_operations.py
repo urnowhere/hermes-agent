@@ -1,4 +1,6 @@
 """Tests for tools/file_operations.py — deny list, result dataclasses, helpers."""
+from __future__ import annotations
+
 
 import os
 import pytest

@@ -8,6 +8,8 @@ These tests exercise the full async message flow:
 
 No LLM, no real platform connections.
 """
+from __future__ import annotations
+
 
 import asyncio
 import sys

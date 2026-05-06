@@ -9,6 +9,8 @@ Auth supports:
   - OAuth setup-tokens (sk-ant-oat*) → Bearer auth + beta header
   - Claude Code credentials (~/.claude.json or ~/.claude/.credentials.json) → Bearer auth
 """
+from __future__ import annotations
+
 
 import copy
 import json

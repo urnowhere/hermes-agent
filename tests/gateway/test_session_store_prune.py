@@ -13,6 +13,8 @@ tests pin the prune behaviour:
   * The ``updated_at`` field — not ``created_at`` — drives the decision
     (so a long-running-but-still-active session isn't pruned)
 """
+from __future__ import annotations
+
 
 import json
 import threading

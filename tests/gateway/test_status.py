@@ -1,4 +1,6 @@
 """Tests for gateway runtime status tracking."""
+from __future__ import annotations
+
 
 import json
 import os

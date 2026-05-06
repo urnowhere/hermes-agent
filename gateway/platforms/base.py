@@ -4,6 +4,8 @@ Base platform adapter interface.
 All platform adapters (Telegram, Discord, WhatsApp) inherit from this
 and implement the required methods.
 """
+from __future__ import annotations
+
 
 import asyncio
 import inspect

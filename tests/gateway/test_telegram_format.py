@@ -4,6 +4,8 @@ Covers: _escape_mdv2 (pure function), format_message (markdown-to-MarkdownV2
 conversion pipeline), and edge cases that could produce invalid MarkdownV2
 or corrupt user-visible content.
 """
+from __future__ import annotations
+
 
 import re
 import sys

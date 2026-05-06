@@ -7,6 +7,8 @@ Covers: app_mention handler, send_document, send_video,
 Note: slack-bolt may not be installed in the test environment.
 We mock the slack modules at import time to avoid collection errors.
 """
+from __future__ import annotations
+
 
 import asyncio
 import os

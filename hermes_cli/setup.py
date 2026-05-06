@@ -10,6 +10,8 @@ Modular wizard with independently-runnable sections:
 
 Config files are stored in ~/.hermes/ for easy access.
 """
+from __future__ import annotations
+
 
 import importlib.util
 import json

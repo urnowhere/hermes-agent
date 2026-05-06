@@ -11,6 +11,8 @@ Platform support:
   WSL2    — powershell.exe via WinForms, Get-Clipboard, file-drop fallback
   Linux   — wl-paste (Wayland), xclip (X11)
 """
+from __future__ import annotations
+
 
 import base64
 import logging

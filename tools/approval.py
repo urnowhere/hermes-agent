@@ -7,6 +7,8 @@ This module is the single source of truth for the dangerous command system:
 - Smart approval via auxiliary LLM (auto-approve low-risk commands)
 - Permanent allowlist persistence (config.yaml)
 """
+from __future__ import annotations
+
 
 import contextvars
 import logging

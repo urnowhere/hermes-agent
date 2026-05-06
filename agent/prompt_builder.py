@@ -3,6 +3,8 @@
 All functions are stateless. AIAgent._build_system_prompt() calls these to
 assemble pieces, then combines them with memory and ephemeral prompts.
 """
+from __future__ import annotations
+
 
 import json
 import logging

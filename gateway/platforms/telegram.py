@@ -6,6 +6,8 @@ Uses python-telegram-bot library for:
 - Sending responses back
 - Handling media and commands
 """
+from __future__ import annotations
+
 
 import asyncio
 import json

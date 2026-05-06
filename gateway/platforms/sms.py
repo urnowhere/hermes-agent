@@ -17,6 +17,8 @@ Gateway-specific env vars:
   - SMS_ALLOW_ALL_USERS  (true/false)
   - SMS_HOME_CHANNEL     (phone number for cron delivery)
 """
+from __future__ import annotations
+
 
 import asyncio
 import base64

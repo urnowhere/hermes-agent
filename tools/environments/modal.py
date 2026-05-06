@@ -3,6 +3,8 @@
 Uses ``Sandbox.create()`` + ``Sandbox.exec()`` instead of the older runtime
 wrapper, while preserving Hermes' persistent snapshot behavior across sessions.
 """
+from __future__ import annotations
+
 
 import asyncio
 import base64

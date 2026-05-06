@@ -9,6 +9,8 @@ Usage:
     hermes claw cleanup              # Archive leftover OpenClaw directories
     hermes claw cleanup --dry-run    # Preview what would be archived
 """
+from __future__ import annotations
+
 
 import importlib.util
 import logging

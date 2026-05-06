@@ -1,4 +1,6 @@
 """Tests for the fuzzy matching module."""
+from __future__ import annotations
+
 
 from tools.fuzzy_match import fuzzy_find_and_replace
 

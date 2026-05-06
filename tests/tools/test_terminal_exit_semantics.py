@@ -1,4 +1,6 @@
 """Tests for terminal command exit code semantic interpretation."""
+from __future__ import annotations
+
 
 import pytest
 

@@ -7,6 +7,8 @@ Uses slack-bolt (Python) with Socket Mode for:
 - Handling slash commands
 - Thread support
 """
+from __future__ import annotations
+
 
 import asyncio
 import contextvars

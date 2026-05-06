@@ -8,6 +8,8 @@ are mocked.
 Note: Tests that import ``hermes_cli.auth`` or ``hermes_cli.runtime_provider``
 require Python 3.10+ due to ``str | None`` type syntax in the import chain.
 """
+from __future__ import annotations
+
 
 import os
 from unittest.mock import MagicMock, patch

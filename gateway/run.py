@@ -12,6 +12,8 @@ Usage:
     # Or from CLI
     python cli.py --gateway
 """
+from __future__ import annotations
+
 
 import asyncio
 import dataclasses

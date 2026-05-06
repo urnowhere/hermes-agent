@@ -6,6 +6,8 @@ variants like "Ignore ALL prior instructions" bypassed the scanner.
 
 Fix: allow optional extra words with `(?:\\w+\\s+)*` groups.
 """
+from __future__ import annotations
+
 
 from tools.cronjob_tools import _scan_cron_prompt
 

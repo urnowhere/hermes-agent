@@ -1,4 +1,6 @@
 """Tests for check_all_command_guards() — combined tirith + dangerous command guard."""
+from __future__ import annotations
+
 
 import os
 from unittest.mock import patch, MagicMock

@@ -19,6 +19,8 @@ Architecture:
 Pricing shown in UI strings is as-of the initial commit; we accept drift and
 update when it's noticed.
 """
+from __future__ import annotations
+
 
 import json
 import logging

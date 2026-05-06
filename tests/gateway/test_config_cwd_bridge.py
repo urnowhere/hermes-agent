@@ -8,6 +8,8 @@ The bridge logic is module-level code in gateway/run.py, so we test
 the semantics by reimplementing the relevant config bridge snippet and
 asserting the expected env var outcomes.
 """
+from __future__ import annotations
+
 
 import os
 import json

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """File Tools Module - LLM agent file manipulation tools."""
+from __future__ import annotations
+
 
 import errno
 import json

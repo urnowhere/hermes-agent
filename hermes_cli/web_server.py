@@ -8,6 +8,8 @@ Usage:
     python -m hermes_cli.main web          # Start on http://127.0.0.1:9119
     python -m hermes_cli.main web --port 8080
 """
+from __future__ import annotations
+
 
 import asyncio
 import hmac

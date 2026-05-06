@@ -4,6 +4,8 @@ Security-hardened with --containall, --no-home, capability dropping.
 Supports configurable resource limits and optional filesystem persistence
 via writable overlay directories that survive across sessions.
 """
+from __future__ import annotations
+
 
 import logging
 import os

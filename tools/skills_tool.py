@@ -65,6 +65,8 @@ Usage:
     # View a reference file within a skill (loads linked file)
     content = skill_view("axolotl", "references/dataset-formats.md")
 """
+from __future__ import annotations
+
 
 import json
 import logging

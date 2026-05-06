@@ -25,6 +25,8 @@ Configuration in config.yaml:
           client_id: "your-app-key"      # or DINGTALK_CLIENT_ID env var
           client_secret: "your-secret"   # or DINGTALK_CLIENT_SECRET env var
 """
+from __future__ import annotations
+
 
 import asyncio
 import json

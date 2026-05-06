@@ -5,6 +5,8 @@ Provides options for:
 - Full uninstall: Remove everything including configs and data
 - Keep data: Remove code but keep ~/.hermes/ (configs, sessions, logs)
 """
+from __future__ import annotations
+
 
 import os
 import shutil

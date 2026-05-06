@@ -9,6 +9,8 @@ Usage:
 Subscriptions persist to ~/.hermes/webhook_subscriptions.json and are
 hot-reloaded by the webhook adapter without a gateway restart.
 """
+from __future__ import annotations
+
 
 import json
 import re

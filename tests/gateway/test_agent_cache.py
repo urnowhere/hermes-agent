@@ -8,6 +8,8 @@ Verifies that the agent cache correctly:
 - Evicts on fallback activation
 - Preserves frozen system prompt across turns
 """
+from __future__ import annotations
+
 
 import hashlib
 import json

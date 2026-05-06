@@ -1,4 +1,6 @@
 """Tests for hermes backup and import commands."""
+from __future__ import annotations
+
 
 import json
 import os

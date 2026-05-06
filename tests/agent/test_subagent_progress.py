@@ -7,6 +7,8 @@ Verifies that:
 - Thinking events are relayed correctly
 - Parallel callbacks don't share state
 """
+from __future__ import annotations
+
 
 import io
 import sys

@@ -39,6 +39,8 @@ Payment / credit exhaustion fallback:
   auto-detection chain.  This handles the common case where a user depletes
   their OpenRouter balance but has Codex OAuth or another provider available.
 """
+from __future__ import annotations
+
 
 import json
 import logging

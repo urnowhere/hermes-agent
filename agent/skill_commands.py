@@ -3,6 +3,8 @@
 Shared between CLI (cli.py) and gateway (gateway/run.py) so both surfaces
 can invoke skills via /skill-name commands.
 """
+from __future__ import annotations
+
 
 import json
 import logging

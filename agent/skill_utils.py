@@ -4,6 +4,8 @@ This module intentionally avoids importing the tool registry, CLI config, or any
 heavy dependency chain.  It is safe to import at module level without triggering
 tool registration or provider resolution.
 """
+from __future__ import annotations
+
 
 import logging
 import os

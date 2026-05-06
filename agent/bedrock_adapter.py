@@ -26,6 +26,8 @@ the same Converse API integration in TypeScript via ``@aws-sdk/client-bedrock``.
 
 Requires: ``boto3`` (optional dependency — only needed when using the Bedrock provider).
 """
+from __future__ import annotations
+
 
 import json
 import logging

@@ -5,6 +5,8 @@ with a network error, Telegram re-delivers the `/restart` message to the new
 gateway process.  Without a dedup guard, the new gateway would process
 `/restart` again and immediately restart — a self-perpetuating loop.
 """
+from __future__ import annotations
+
 import asyncio
 import json
 import time

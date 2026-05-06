@@ -13,6 +13,8 @@ Usage:
     python cli.py --list-tools             # List available tools and exit
 """
 
+from __future__ import annotations
+
 import logging
 import os
 import shutil

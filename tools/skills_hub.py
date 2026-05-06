@@ -12,6 +12,8 @@ This is a library module (not an agent tool). It provides:
 
 Used by hermes_cli/skills_hub.py for CLI commands and the /skills slash command.
 """
+from __future__ import annotations
+
 
 import hashlib
 import json

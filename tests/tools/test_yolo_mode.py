@@ -1,4 +1,6 @@
 """Tests for --yolo (HERMES_YOLO_MODE) approval bypass."""
+from __future__ import annotations
+
 
 import os
 import pytest

@@ -8,6 +8,8 @@ that need API keys, run through provider-aware configuration.
 Saves per-platform tool configuration to ~/.hermes/config.yaml under
 the `platform_toolsets` key.
 """
+from __future__ import annotations
+
 
 import json as _json
 import logging

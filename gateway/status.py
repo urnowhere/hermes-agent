@@ -10,6 +10,8 @@ separate HERMES_HOME directories naturally get separate PID files — a property
 that will be useful when we add named profiles (multiple agents running
 concurrently under distinct configurations).
 """
+from __future__ import annotations
+
 
 import hashlib
 import json

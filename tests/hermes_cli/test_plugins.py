@@ -1,4 +1,6 @@
 """Tests for the Hermes plugin system (hermes_cli.plugins)."""
+from __future__ import annotations
+
 
 import logging
 import os

@@ -4,6 +4,8 @@ Sends a message to a user or channel on any connected messaging platform
 (Telegram, Discord, Slack). Supports listing available targets and resolving
 human-friendly channel names to IDs. Works in both CLI and gateway contexts.
 """
+from __future__ import annotations
+
 
 import asyncio
 import json

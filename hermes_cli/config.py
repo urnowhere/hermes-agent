@@ -11,6 +11,8 @@ This module provides:
 - hermes config set      - Set a specific value
 - hermes config wizard   - Re-run setup wizard
 """
+from __future__ import annotations
+
 
 import copy
 import logging

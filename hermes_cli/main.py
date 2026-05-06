@@ -42,6 +42,8 @@ Usage:
 
     hermes claw migrate --dry-run  # Preview migration without changes
 """
+from __future__ import annotations
+
 
 import argparse
 import json

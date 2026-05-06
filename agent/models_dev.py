@@ -17,6 +17,8 @@ Data resolution order (like TypeScript OpenCode):
 Other modules should import the dataclasses and query functions from here
 rather than parsing the raw JSON themselves.
 """
+from __future__ import annotations
+
 
 import json
 import logging

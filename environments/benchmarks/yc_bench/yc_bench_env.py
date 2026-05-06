@@ -36,6 +36,8 @@ Key features:
 
 Requires: pip install hermes-agent[yc-bench]
 """
+from __future__ import annotations
+
 
 import asyncio
 import datetime

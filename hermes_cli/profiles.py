@@ -18,6 +18,8 @@ Usage::
     hermes profile use coder             # set as sticky default
     hermes profile delete coder          # remove profile + alias + service
 """
+from __future__ import annotations
+
 
 import json
 import os

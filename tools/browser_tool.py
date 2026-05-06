@@ -48,6 +48,8 @@ Usage:
     # Click an element
     browser_click("@e5", task_id="task_123")
 """
+from __future__ import annotations
+
 
 import atexit
 import functools

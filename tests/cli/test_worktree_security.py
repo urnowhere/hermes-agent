@@ -1,4 +1,6 @@
 """Security-focused integration tests for CLI worktree setup."""
+from __future__ import annotations
+
 
 import subprocess
 from pathlib import Path

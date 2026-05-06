@@ -2,6 +2,8 @@
 
 Protocol: reads JSON lines from stdin {id, command}, writes {id, ok, output|error} to stdout.
 """
+from __future__ import annotations
+
 
 import argparse
 import contextlib

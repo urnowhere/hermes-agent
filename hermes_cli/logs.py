@@ -16,6 +16,8 @@ Usage examples::
     hermes logs --since 1h         # lines from the last hour
     hermes logs --since 30m -f     # follow, starting 30 min ago
 """
+from __future__ import annotations
+
 
 import re
 import sys

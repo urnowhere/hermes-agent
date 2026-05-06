@@ -19,6 +19,8 @@ Usage:
     # Override CalVer date (e.g. for a belated release)
     python scripts/release.py --bump minor --publish --date 2026.3.15
 """
+from __future__ import annotations
+
 
 import argparse
 import re

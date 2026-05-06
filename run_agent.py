@@ -20,6 +20,8 @@ Usage:
     response = agent.run_conversation("Tell me about the latest Python updates")
 """
 
+from __future__ import annotations
+
 import asyncio
 import base64
 import concurrent.futures

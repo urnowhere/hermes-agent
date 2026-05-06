@@ -24,6 +24,8 @@ PRs #9850, #9934, #7536):
    PR #7536 remains the single source of escalation — no parallel
    counter is added on ``SessionEntry``.
 """
+from __future__ import annotations
+
 
 import asyncio
 import time

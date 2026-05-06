@@ -1,4 +1,6 @@
 """Tests for the dangerous command approval module."""
+from __future__ import annotations
+
 
 import ast
 from pathlib import Path

@@ -6,6 +6,8 @@ controls verbosity: off | result | error | all (default).
 
 Contributed by @PeterFile (PR #593), reimplemented on current main.
 """
+from __future__ import annotations
+
 
 import asyncio
 from types import SimpleNamespace

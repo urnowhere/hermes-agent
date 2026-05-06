@@ -11,6 +11,8 @@ The rewriter fixes this by wrapping the tail in a brace group —
 ``A && { B & }`` — so B runs as a simple backgrounded command inside
 the current shell. No subshell fork, no wait.
 """
+from __future__ import annotations
+
 
 import pytest
 

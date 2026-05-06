@@ -4,6 +4,8 @@ Used by `hermes tools` and `hermes skills` for interactive checklists.
 Provides a curses multi-select with keyboard navigation, plus a
 text-based numbered fallback for terminals without curses support.
 """
+from __future__ import annotations
+
 import sys
 from typing import Callable, List, Optional, Set
 
