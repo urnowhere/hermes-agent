@@ -25,6 +25,22 @@ logger = logging.getLogger(__name__)
 VALID_THREAD_AUTO_ARCHIVE_MINUTES = {60, 1440, 4320, 10080}
 _DISCORD_COMMAND_SYNC_POLICIES = {"safe", "bulk", "off"}
 
+
+def _positive_float_env(name: str, default: float) -> float:
+    """Parse a positive float environment variable without breaking import."""
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %.2f", name, raw, default)
+        return default
+    if value <= 0:
+        logger.warning("Invalid %s=%r; value must be > 0; using default %.2f", name, raw, default)
+        return default
+    return value
+
 try:
     import discord
     from discord import Message as DiscordMessage, Intents
@@ -488,8 +504,9 @@ class DiscordAdapter(BasePlatformAdapter):
     MAX_MESSAGE_LENGTH = 2000
     _SPLIT_THRESHOLD = 1900  # near the 2000-char split point
 
-    # Auto-disconnect from voice channel after this many seconds of inactivity
-    VOICE_TIMEOUT = 300
+    # Auto-disconnect from voice channel after this many seconds of inactivity.
+    # Override with HERMES_DISCORD_VOICE_TIMEOUT, e.g. 3600 for one hour.
+    VOICE_TIMEOUT_DEFAULT = 300.0
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.DISCORD)
@@ -835,9 +852,20 @@ class DiscordAdapter(BasePlatformAdapter):
                 logger.info("[%s] Skipping Discord slash command sync (policy=off)", self.name)
                 return
 
+            sync_guild_id = self._get_discord_command_sync_guild_id()
+            sync_guild = discord.Object(id=sync_guild_id) if sync_guild_id else None
+            sync_scope = f"guild {sync_guild_id}" if sync_guild_id else "global"
+
             if sync_policy == "bulk":
-                synced = await asyncio.wait_for(self._client.tree.sync(), timeout=30)
-                logger.info("[%s] Synced %d slash command(s) via bulk tree sync", self.name, len(synced))
+                if sync_guild is not None:
+                    # Guild-scoped command registration propagates immediately and
+                    # uses a separate, friendlier bucket. This is useful for live
+                    # debugging without touching global application commands.
+                    self._client.tree.copy_global_to(guild=sync_guild)
+                    synced = await asyncio.wait_for(self._client.tree.sync(guild=sync_guild), timeout=30)
+                else:
+                    synced = await asyncio.wait_for(self._client.tree.sync(), timeout=30)
+                logger.info("[%s] Synced %d slash command(s) via bulk tree sync (%s)", self.name, len(synced), sync_scope)
                 return
 
             # Discord's per-app command-management bucket is ~5 writes / 20 s,
@@ -847,11 +875,14 @@ class DiscordAdapter(BasePlatformAdapter):
             # left slash commands broken for ~60 min until the bucket fully
             # recovered. Use a wide ceiling; the cap still guards against a
             # true hang. (#16713)
-            summary = await asyncio.wait_for(self._safe_sync_slash_commands(), timeout=600)
+            summary = await asyncio.wait_for(
+                self._safe_sync_slash_commands(guild_id=sync_guild_id), timeout=600
+            )
             logger.info(
-                "[%s] Safely reconciled %d slash command(s): unchanged=%d updated=%d recreated=%d created=%d deleted=%d",
+                "[%s] Safely reconciled %d slash command(s) (%s): unchanged=%d updated=%d recreated=%d created=%d deleted=%d",
                 self.name,
                 summary["total"],
+                sync_scope,
                 summary["unchanged"],
                 summary["updated"],
                 summary["recreated"],
@@ -870,16 +901,43 @@ class DiscordAdapter(BasePlatformAdapter):
             logger.warning("[%s] Slash command sync failed: %s", self.name, e, exc_info=True)
 
     def _get_discord_command_sync_policy(self) -> str:
-        raw = str(os.getenv("DISCORD_COMMAND_SYNC_POLICY", "safe") or "").strip().lower()
+        raw_value = self.config.extra.get(
+            "command_sync_policy",
+            self.config.extra.get("sync_policy", os.getenv("DISCORD_COMMAND_SYNC_POLICY", "safe")),
+        )
+        raw = str(raw_value or "").strip().lower()
         if raw in _DISCORD_COMMAND_SYNC_POLICIES:
             return raw
         if raw:
             logger.warning(
-                "[%s] Invalid DISCORD_COMMAND_SYNC_POLICY=%r; falling back to 'safe'",
+                "[%s] Invalid Discord command sync policy %r; falling back to 'safe'",
                 self.name,
                 raw,
             )
         return "safe"
+
+    def _get_discord_command_sync_guild_id(self) -> Optional[int]:
+        """Optional guild ID for faster, isolated Discord command sync.
+
+        Global application commands are slow to propagate and share the app's
+        harsh command-management bucket. A guild ID keeps live debugging out of
+        the global bucket and makes slash command changes visible quickly.
+        """
+        raw_value = self.config.extra.get(
+            "command_sync_guild_id",
+            self.config.extra.get("sync_guild_id", os.getenv("DISCORD_COMMAND_SYNC_GUILD_ID", "")),
+        )
+        raw = str(raw_value or "").strip()
+        if not raw:
+            return None
+        if raw.isdigit():
+            return int(raw)
+        logger.warning(
+            "[%s] Ignoring invalid Discord command sync guild ID %r",
+            self.name,
+            raw,
+        )
+        return None
 
     def _canonicalize_app_command_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Reduce command payloads to the semantic fields Hermes manages."""
@@ -972,8 +1030,13 @@ class DiscordAdapter(BasePlatformAdapter):
             "options": canonical["options"],
         }
 
-    async def _safe_sync_slash_commands(self) -> Dict[str, int]:
-        """Diff existing global commands and only mutate the commands that changed."""
+    async def _safe_sync_slash_commands(self, guild_id: Optional[int] = None) -> Dict[str, int]:
+        """Diff existing commands and only mutate the commands that changed.
+
+        When ``guild_id`` is provided, reconcile guild-scoped commands instead
+        of global commands. This is much faster for development and avoids the
+        global application-command propagation/bucket mess.
+        """
         if not self._client:
             return {
                 "total": 0,
@@ -994,7 +1057,8 @@ class DiscordAdapter(BasePlatformAdapter):
             (int(payload.get("type", 1) or 1), str(payload.get("name", "") or "").lower()): payload
             for payload in desired_payloads
         }
-        existing_commands = await tree.fetch_commands()
+        fetch_guild = discord.Object(id=guild_id) if guild_id else None
+        existing_commands = await tree.fetch_commands(guild=fetch_guild)
         existing_by_key = {
             (
                 int(getattr(getattr(command, "type", None), "value", getattr(command, "type", 1)) or 1),
@@ -1013,7 +1077,10 @@ class DiscordAdapter(BasePlatformAdapter):
         for key, desired in desired_by_key.items():
             current = existing_by_key.pop(key, None)
             if current is None:
-                await http.upsert_global_command(app_id, desired)
+                if guild_id:
+                    await http.upsert_guild_command(app_id, guild_id, desired)
+                else:
+                    await http.upsert_global_command(app_id, desired)
                 created += 1
                 continue
 
@@ -1025,16 +1092,26 @@ class DiscordAdapter(BasePlatformAdapter):
                 continue
 
             if self._patchable_app_command_payload(current_existing_payload) == self._patchable_app_command_payload(desired):
-                await http.delete_global_command(app_id, current.id)
-                await http.upsert_global_command(app_id, desired)
+                if guild_id:
+                    await http.delete_guild_command(app_id, guild_id, current.id)
+                    await http.upsert_guild_command(app_id, guild_id, desired)
+                else:
+                    await http.delete_global_command(app_id, current.id)
+                    await http.upsert_global_command(app_id, desired)
                 recreated += 1
                 continue
 
-            await http.edit_global_command(app_id, current.id, desired)
+            if guild_id:
+                await http.edit_guild_command(app_id, guild_id, current.id, desired)
+            else:
+                await http.edit_global_command(app_id, current.id, desired)
             updated += 1
 
         for current in existing_by_key.values():
-            await http.delete_global_command(app_id, current.id)
+            if guild_id:
+                await http.delete_guild_command(app_id, guild_id, current.id)
+            else:
+                await http.delete_global_command(app_id, current.id)
             deleted += 1
 
         return {
@@ -1728,10 +1805,14 @@ class DiscordAdapter(BasePlatformAdapter):
             self._voice_timeout_handler(guild_id)
         )
 
+    def _get_voice_timeout(self) -> float:
+        """Return the Discord voice-channel inactivity timeout in seconds."""
+        return _positive_float_env("HERMES_DISCORD_VOICE_TIMEOUT", self.VOICE_TIMEOUT_DEFAULT)
+
     async def _voice_timeout_handler(self, guild_id: int) -> None:
-        """Auto-disconnect after VOICE_TIMEOUT seconds of inactivity."""
+        """Auto-disconnect after the configured voice inactivity timeout."""
         try:
-            await asyncio.sleep(self.VOICE_TIMEOUT)
+            await asyncio.sleep(self._get_voice_timeout())
         except asyncio.CancelledError:
             return
         text_ch_id = self._voice_text_channels.get(guild_id)

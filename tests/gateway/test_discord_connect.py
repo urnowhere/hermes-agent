@@ -74,6 +74,7 @@ class FakeTree:
     def __init__(self):
         self.sync = AsyncMock(return_value=[])
         self.fetch_commands = AsyncMock(return_value=[])
+        self.copy_global_to = MagicMock()
         self._commands = []
 
     def command(self, *args, **kwargs):
@@ -274,6 +275,7 @@ async def test_connect_does_not_wait_for_slash_sync(monkeypatch):
     adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
 
     monkeypatch.setenv("DISCORD_COMMAND_SYNC_POLICY", "bulk")
+    monkeypatch.delenv("DISCORD_COMMAND_SYNC_GUILD_ID", raising=False)
     monkeypatch.setattr("gateway.status.acquire_scoped_lock", lambda scope, identity, metadata=None: (True, None))
     monkeypatch.setattr("gateway.status.release_scoped_lock", lambda scope, identity: None)
 
@@ -718,3 +720,108 @@ async def test_safe_sync_detects_contexts_drift():
     fake_http.edit_global_command.assert_not_awaited()
     fake_http.delete_global_command.assert_awaited_once_with(999, 77)
     fake_http.upsert_global_command.assert_awaited_once_with(999, desired)
+
+@pytest.mark.asyncio
+async def test_post_connect_bulk_sync_can_target_guild(monkeypatch):
+    adapter = DiscordAdapter(
+        PlatformConfig(
+            enabled=True,
+            token="test-token",
+            extra={"command_sync_policy": "bulk", "command_sync_guild_id": "1234"},
+        )
+    )
+
+    monkeypatch.setattr(
+        discord_platform.discord,
+        "Object",
+        lambda *, id: SimpleNamespace(id=id),
+        raising=False,
+    )
+
+    fake_tree = FakeTree()
+    adapter._client = SimpleNamespace(tree=fake_tree)
+
+    await adapter._run_post_connect_initialization()
+
+    copied_guild = fake_tree.copy_global_to.call_args.kwargs["guild"]
+    synced_guild = fake_tree.sync.await_args.kwargs["guild"]
+    assert copied_guild.id == 1234
+    assert synced_guild.id == 1234
+
+
+@pytest.mark.asyncio
+async def test_safe_sync_slash_commands_can_target_guild(monkeypatch):
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+
+    monkeypatch.setattr(
+        discord_platform.discord,
+        "Object",
+        lambda *, id: SimpleNamespace(id=id),
+        raising=False,
+    )
+
+    desired = {
+        "name": "voice",
+        "description": "Voice controls",
+        "type": 1,
+        "options": [],
+        "nsfw": False,
+        "dm_permission": True,
+        "default_member_permissions": None,
+    }
+
+    class _DesiredCommand:
+        def to_dict(self, tree):
+            assert tree is not None
+            return dict(desired)
+
+    fake_tree = SimpleNamespace(
+        get_commands=lambda: [_DesiredCommand()],
+        fetch_commands=AsyncMock(return_value=[]),
+    )
+    fake_http = SimpleNamespace(
+        upsert_global_command=AsyncMock(),
+        upsert_guild_command=AsyncMock(),
+        edit_guild_command=AsyncMock(),
+        delete_guild_command=AsyncMock(),
+    )
+    adapter._client = SimpleNamespace(
+        tree=fake_tree,
+        http=fake_http,
+        application_id=999,
+        user=SimpleNamespace(id=999),
+    )
+
+    summary = await adapter._safe_sync_slash_commands(guild_id=1234)
+
+    assert summary["created"] == 1
+    assert fake_tree.fetch_commands.await_args.kwargs["guild"].id == 1234
+    fake_http.upsert_guild_command.assert_awaited_once_with(999, 1234, desired)
+    fake_http.upsert_global_command.assert_not_awaited()
+
+
+def test_discord_command_sync_config_prefers_config_extra(monkeypatch):
+    monkeypatch.setenv("DISCORD_COMMAND_SYNC_POLICY", "off")
+    monkeypatch.setenv("DISCORD_COMMAND_SYNC_GUILD_ID", "1111")
+    adapter = DiscordAdapter(
+        PlatformConfig(
+            enabled=True,
+            token="test-token",
+            extra={"command_sync_policy": "bulk", "command_sync_guild_id": "2222"},
+        )
+    )
+
+    assert adapter._get_discord_command_sync_policy() == "bulk"
+    assert adapter._get_discord_command_sync_guild_id() == 2222
+
+
+def test_discord_voice_timeout_env_parser(monkeypatch):
+    monkeypatch.setenv("HERMES_DISCORD_VOICE_TIMEOUT", "3600")
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+    assert adapter._get_voice_timeout() == 3600.0
+
+
+def test_discord_voice_timeout_env_parser_rejects_non_positive(monkeypatch):
+    monkeypatch.setenv("HERMES_DISCORD_VOICE_TIMEOUT", "0")
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+    assert adapter._get_voice_timeout() == 300.0
