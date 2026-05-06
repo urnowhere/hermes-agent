@@ -1730,6 +1730,14 @@ def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) 
     # (#8202). 30s of headroom covers the worst case we've observed.
     _drain_timeout = int(_get_restart_drain_timeout() or 0)
     restart_timeout = max(60, _drain_timeout) + 30
+    # Optional Conflicts= directive block — empty string when no conflicts
+    # configured, so the unit rendering stays byte-identical for users who
+    # haven't opted in.  See #17396.
+    _conflicts = _get_systemd_conflicts()
+    conflicts_block = ""
+    if _conflicts:
+        _joined = " ".join(_conflicts)
+        conflicts_block = f"Conflicts={_joined}\nBefore={_joined}\n"
 
     if system:
         username, group_name, home_dir = _system_service_identity(run_as_user)
@@ -1752,7 +1760,7 @@ def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) 
 Description={SERVICE_DESCRIPTION}
 After=network-online.target
 Wants=network-online.target
-StartLimitIntervalSec=0
+{conflicts_block}StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -1792,7 +1800,7 @@ WantedBy=multi-user.target
 Description={SERVICE_DESCRIPTION}
 After=network-online.target
 Wants=network-online.target
-StartLimitIntervalSec=0
+{conflicts_block}StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -1942,6 +1950,33 @@ def _get_restart_drain_timeout() -> float:
             )
         )
     return parse_restart_drain_timeout(raw)
+
+
+def _get_systemd_conflicts() -> list[str]:
+    """Return the list of systemd units this profile should Conflicts= with.
+
+    Reads top-level ``systemd_conflicts`` from the active profile's config.yaml.
+    Returns the list verbatim (minus empty/whitespace entries) so the caller
+    can drop it straight into a ``Conflicts=`` / ``Before=`` directive.
+
+    When multiple Hermes profiles share a host (common for per-workspace or
+    per-environment separation), each profile's gateway/api service may bind
+    the same port or competing resources.  Declaring them in ``Conflicts=``
+    lets systemd guarantee mutual exclusion at start-time; ``Before=``
+    mirrors the ordering so the active one wins a tie cleanly.  See #17396.
+    """
+    cfg = read_raw_config()
+    if not isinstance(cfg, dict):
+        return []
+    raw = cfg.get("systemd_conflicts", [])
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for entry in raw:
+        name = str(entry or "").strip()
+        if name:
+            out.append(name)
+    return out
 
 
 def systemd_install(force: bool = False, system: bool = False, run_as_user: str | None = None):

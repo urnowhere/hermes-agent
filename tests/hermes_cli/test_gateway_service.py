@@ -210,7 +210,6 @@ class TestGeneratedSystemdUnits:
         monkeypatch.setattr(gateway_cli.shutil, "which", lambda cmd: "/home/test/.nvm/versions/node/v24.14.0/bin/node" if cmd == "node" else None)
 
         unit = gateway_cli.generate_systemd_unit(system=False)
-
         assert "/home/test/.nvm/versions/node/v24.14.0/bin" in unit
 
     def test_user_unit_includes_wsl_windows_interop_paths(self, monkeypatch):
@@ -267,6 +266,51 @@ class TestGeneratedSystemdUnits:
         # (tool subprocess kill, adapter disconnect) runs — issue #8202.
         assert self._expected_timeout_stop_sec() in unit
         assert "WantedBy=multi-user.target" in unit
+
+    def test_unit_omits_conflicts_when_not_configured(self, monkeypatch):
+        """Default case: no systemd_conflicts → no Conflicts= / Before= lines."""
+        monkeypatch.setattr(gateway_cli, "_get_systemd_conflicts", lambda: [])
+        unit = gateway_cli.generate_systemd_unit(system=False)
+        assert "Conflicts=" not in unit
+        assert "Before=" not in unit
+
+    def test_user_unit_includes_conflicts_when_configured(self, monkeypatch):
+        """When config declares systemd_conflicts, render Conflicts= and
+        Before= directives in the [Unit] section.  See #17396."""
+        monkeypatch.setattr(
+            gateway_cli, "_get_systemd_conflicts",
+            lambda: [
+                "hermes-api-hermes-infrastructure.service",
+                "hermes-gateway-hermes-transversal.service",
+            ],
+        )
+        unit = gateway_cli.generate_systemd_unit(system=False)
+        assert (
+            "Conflicts=hermes-api-hermes-infrastructure.service "
+            "hermes-gateway-hermes-transversal.service" in unit
+        )
+        assert (
+            "Before=hermes-api-hermes-infrastructure.service "
+            "hermes-gateway-hermes-transversal.service" in unit
+        )
+
+    def test_system_unit_includes_conflicts_when_configured(self, monkeypatch):
+        monkeypatch.setattr(
+            gateway_cli, "_get_systemd_conflicts",
+            lambda: ["hermes-api-hermes-infrastructure.service"],
+        )
+        unit = gateway_cli.generate_systemd_unit(system=True)
+        assert "Conflicts=hermes-api-hermes-infrastructure.service" in unit
+        assert "Before=hermes-api-hermes-infrastructure.service" in unit
+
+    def test_conflicts_entries_strip_whitespace_and_empties(self, monkeypatch):
+        """Defensive: malformed config entries (empty strings, None) are
+        filtered before rendering so we never emit a bare `Conflicts=`."""
+        monkeypatch.setattr(gateway_cli, "read_raw_config", lambda: {
+            "systemd_conflicts": ["hermes-api.service", "   ", None, "hermes-tx.service"],
+        })
+        result = gateway_cli._get_systemd_conflicts()
+        assert result == ["hermes-api.service", "hermes-tx.service"]
 
 
 class TestGatewayStopCleanup:
