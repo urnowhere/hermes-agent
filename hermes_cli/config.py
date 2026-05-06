@@ -438,15 +438,13 @@ DEFAULT_CONFIG = {
         # After a gateway crash/restart/SIGTERM mid-run, the next user
         # message gets a "[System note: your previous turn was
         # interrupted — process the unfinished tool result(s) first]"
-        # prepended so the model picks up where it left off.  That's the
-        # right behaviour while the interruption is fresh, but stale
-        # markers (transcript last touched hours or days ago) can revive
-        # an unrelated old task when the user's next message starts new
-        # work.  This window is the max age of the last persisted
-        # transcript row for which we still inject the continue note.
-        # Default 3600s comfortably covers a long turn (gateway_timeout
-        # default is 1800s) plus runtime slack.  Set to 0 to disable the
-        # gate and restore pre-fix behaviour (always inject).
+        # prepended so the model picks up where it left off.  Auto-continue
+        # is only allowed for sessions explicitly marked resume_pending by
+        # gateway restart/shutdown drain handling; transcript shape alone is
+        # not a recovery signal.  This window is the max age of that explicit
+        # resume_pending marker.  Default 3600s comfortably covers a long turn
+        # (gateway_timeout default is 1800s) plus runtime slack.  Set to 0 to
+        # disable only the age gate; auto-continue still requires the marker.
         "gateway_auto_continue_freshness": 3600,
         # How user-attached images are presented to the main model on each turn.
         #   "auto"   — attach natively when the active model reports

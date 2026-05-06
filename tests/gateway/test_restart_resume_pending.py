@@ -14,11 +14,9 @@ PRs #9850, #9934, #7536):
 2. ``suspended=True`` (from ``/stop`` or stuck-loop escalation) still
    wins over ``resume_pending`` — the forced-wipe path is preserved.
 
-3. The restart-resume system note injected into the next user message is
-   a superset of the existing tool-tail auto-continue note (from
-   PR #9934), using session-entry metadata rather than just transcript
-   shape so it fires even when the interrupted transcript does NOT end
-   with a ``tool`` role.
+3. The restart-resume system note is gated only by explicit, fresh
+   ``resume_pending`` metadata written during gateway drain timeout.  Bare
+   tool-tail transcript shape is not enough to auto-continue old work.
 
 4. The existing ``.restart_failure_counts`` stuck-loop counter from
    PR #7536 remains the single source of escalation — no parallel
@@ -93,12 +91,13 @@ def _simulate_note_injection(
     agent_history: list | None = None,
     window_secs: float | None = None,
 ) -> str:
-    """Mirror the note-injection logic in gateway/run.py _run_agent().
+    """Mirror the strict resume-note gate in gateway/run.py _run_agent().
 
-    The freshness signal reads ``history[-1].timestamp`` (the raw transcript
-    row), NOT ``agent_history[-1].timestamp`` (which has been stripped).
-    Tests pass the raw ``history`` — ``agent_history`` is derived from it
-    via the real conversion if not supplied explicitly.
+    The freshness signal is the explicit ``SessionEntry.last_resume_marked_at``
+    written by ``SessionStore.mark_resume_pending()`` during a gateway
+    drain-timeout interruption.  Raw transcript timestamps and bare tool-tail
+    shape are intentionally ignored: they are session history, not proof of
+    the turn that was active when the gateway stopped.
     """
     if agent_history is None:
         agent_history = _build_agent_history(history)
@@ -108,8 +107,13 @@ def _simulate_note_injection(
         if window_secs is not None
         else _auto_continue_freshness_window()
     )
+    marker_timestamp = (
+        getattr(resume_entry, "last_resume_marked_at", None)
+        if resume_entry is not None
+        else None
+    )
     interruption_is_fresh = _is_fresh_gateway_interruption(
-        _last_transcript_timestamp(history),
+        marker_timestamp,
         window_secs=window,
     )
 
@@ -119,12 +123,6 @@ def _simulate_note_injection(
         and getattr(resume_entry, "resume_pending", False)
         and interruption_is_fresh
     )
-    has_fresh_tool_tail = bool(
-        agent_history
-        and agent_history[-1].get("role") == "tool"
-        and interruption_is_fresh
-    )
-
     if is_resume_pending:
         reason = getattr(resume_entry, "resume_reason", None) or "restart_timeout"
         reason_phrase = (
@@ -140,15 +138,6 @@ def _simulate_note_injection(
             f"If it contains unfinished tool result(s), process them first and "
             f"summarize what was accomplished, then address the user's new "
             f"message below.]\n\n"
-            + message
-        )
-    elif has_fresh_tool_tail:
-        message = (
-            "[System note: Your previous turn was interrupted before you could "
-            "process the last tool result(s). The conversation history contains "
-            "tool outputs you haven't responded to yet. Please finish processing "
-            "those results and summarize what was accomplished, then address the "
-            "user's new message below.]\n\n"
             + message
         )
     return message
@@ -465,8 +454,8 @@ class TestResumePendingSystemNote:
         # Old tool-tail wording absent
         assert "haven't responded to yet" not in result
 
-    def test_no_resume_pending_preserves_tool_tail_note(self):
-        """Regression: the old PR #9934 tool-tail behaviour is unchanged."""
+    def test_no_resume_pending_does_not_inject_tool_tail_note(self):
+        """Bare tool-tail transcript shape does not auto-continue."""
         history = [
             {"role": "assistant", "content": None, "tool_calls": [
                 {"id": "c1", "function": {"name": "x", "arguments": "{}"}},
@@ -475,16 +464,10 @@ class TestResumePendingSystemNote:
              "timestamp": time.time()},
         ]
         result = _simulate_note_injection(history, "ping", resume_entry=None)
-        assert "[System note:" in result
-        assert "tool result" in result
+        assert result == "ping"
 
     def test_stale_resume_pending_does_not_inject_restart_note(self):
-        """Old restart markers must not revive an unrelated stale task.
-
-        The transcript's last row is from an hour ago — well outside the
-        default 1h freshness window (fixture uses window=1800 to exercise
-        the stale path without tying the test to the production default).
-        """
+        """Old restart markers must not revive an unrelated stale task."""
         entry = self._pending_entry()
         entry.last_resume_marked_at = datetime.now() - timedelta(hours=1)
 
@@ -500,7 +483,42 @@ class TestResumePendingSystemNote:
         )
         assert result == "start a new task"
 
-    def test_fresh_tool_tail_preserves_auto_continue_note(self):
+    def test_resume_pending_freshness_uses_marker_not_transcript_timestamp(self):
+        """A fresh transcript row must not rescue a stale resume marker.
+
+        This is the core strict-resume rule: the only trusted freshness source
+        is when the gateway explicitly marked the still-running session
+        ``resume_pending`` during drain timeout.
+        """
+        entry = self._pending_entry()
+        entry.last_resume_marked_at = datetime.now() - timedelta(hours=2)
+        history = [
+            {"role": "assistant", "content": "recent chat after old marker",
+             "timestamp": time.time()},
+        ]
+
+        result = _simulate_note_injection(
+            history=history,
+            user_message="new task",
+            resume_entry=entry,
+            window_secs=1800,
+        )
+
+        assert result == "new task"
+
+    def test_resume_pending_without_marker_timestamp_does_not_resume(self):
+        entry = self._pending_entry()
+        entry.last_resume_marked_at = None
+        history = [
+            {"role": "assistant", "content": "recent transcript",
+             "timestamp": time.time()},
+        ]
+
+        result = _simulate_note_injection(history, "new task", resume_entry=entry)
+
+        assert result == "new task"
+
+    def test_fresh_tool_tail_without_resume_pending_does_not_auto_continue(self):
         history = [
             {"role": "assistant", "content": None, "tool_calls": [
                 {"id": "c1", "function": {"name": "x", "arguments": "{}"}},
@@ -513,8 +531,7 @@ class TestResumePendingSystemNote:
             },
         ]
         result = _simulate_note_injection(history, "ping", resume_entry=None)
-        assert "[System note:" in result
-        assert "tool result" in result
+        assert result == "ping"
 
     def test_stale_tool_tail_does_not_inject_auto_continue_note(self):
         """The core bug fix: stale tool-tail must not revive a dead task.
@@ -588,8 +605,8 @@ class TestResumePendingSystemNote:
         )
         assert result == "start a new task"
 
-    def test_freshness_gate_disabled_via_zero_window(self):
-        """window_secs=0 restores pre-fix behaviour (always inject)."""
+    def test_zero_window_does_not_revive_bare_tool_tail(self):
+        """Even with the freshness gate disabled, bare tool-tail is not enough."""
         history = [
             {"role": "assistant", "content": None, "tool_calls": [
                 {"id": "c1", "function": {"name": "x", "arguments": "{}"}},
@@ -604,12 +621,10 @@ class TestResumePendingSystemNote:
         result = _simulate_note_injection(
             history, "ping", resume_entry=None, window_secs=0,
         )
-        assert "[System note:" in result
-        assert "tool result" in result
+        assert result == "ping"
 
-    def test_legacy_history_without_timestamps_still_injects(self):
-        """Transcripts predating timestamp persistence must keep the old
-        behaviour — freshness unknown → treat as fresh."""
+    def test_legacy_history_without_timestamps_requires_resume_pending(self):
+        """Legacy transcript timestamps are ignored without explicit resume_pending."""
         history = [
             {"role": "assistant", "content": None, "tool_calls": [
                 {"id": "c1", "function": {"name": "x", "arguments": "{}"}},
@@ -617,8 +632,7 @@ class TestResumePendingSystemNote:
             {"role": "tool", "tool_call_id": "c1", "content": "result"},
         ]
         result = _simulate_note_injection(history, "ping", resume_entry=None)
-        assert "[System note:" in result
-        assert "tool result" in result
+        assert result == "ping"
 
     def test_no_note_when_nothing_to_resume(self):
         history = [
@@ -668,10 +682,10 @@ class TestFreshnessHelpers:
         assert _coerce_gateway_timestamp(False) is None
         assert _coerce_gateway_timestamp([1, 2, 3]) is None
 
-    def test_is_fresh_unknown_is_fresh(self):
-        """Legacy-compat: unknown timestamp → fresh."""
-        assert _is_fresh_gateway_interruption(None) is True
-        assert _is_fresh_gateway_interruption("not-a-timestamp") is True
+    def test_is_fresh_unknown_is_stale(self):
+        """Strict resume: missing/malformed markers fail closed."""
+        assert _is_fresh_gateway_interruption(None) is False
+        assert _is_fresh_gateway_interruption("not-a-timestamp") is False
 
     def test_is_fresh_window_bounds(self):
         now = 1_700_000_000.0
@@ -711,8 +725,7 @@ class TestFreshnessHelpers:
         assert _last_transcript_timestamp(None) is None
 
     def test_last_transcript_timestamp_row_without_timestamp(self):
-        """Legacy transcript row (no timestamp) returns None → caller
-        treats as fresh."""
+        """Legacy transcript row (no timestamp) returns None."""
         history = [
             {"role": "user", "content": "hi"},
             {"role": "assistant", "content": "hey"},
