@@ -6788,6 +6788,19 @@ class GatewayRunner:
                         logger.debug("trailing footer send failed: %s", _e)
                 return None
 
+            # --- Auto-append context usage footer (non-streaming only) ---
+            if response and not agent_result.get("failed"):
+                _ctx_toks = agent_result.get("last_prompt_tokens", 0)
+                _ctx_len = agent_result.get("context_length", 0)
+                if _ctx_toks:
+                    _ctx_pct = min(100, _ctx_toks / _ctx_len * 100) if _ctx_len else 0
+                    # Always show context usage + model name
+                    _model_name = agent_result.get("model", "unknown") or "unknown"
+                    _footer = f"\n\n---\n🤖 {_model_name}  |  📊 Context: {_ctx_toks:,} / {_ctx_len:,} ({_ctx_pct:.0f}%)"
+                    if _ctx_pct >= 70:
+                        _footer += " ⚠️ 建议 /new 开启新会话"
+                    response += _footer
+
             return response
             
         except Exception as e:
@@ -12719,6 +12732,8 @@ class GatewayRunner:
             "api_calls": 1,
             "tools": [],
             "history_offset": len(history),
+            "last_prompt_tokens": 0,
+            "context_length": 0,
             "session_id": session_id,
             "response_previewed": _stream_consumer is not None and bool(full_response),
         }
@@ -13828,7 +13843,9 @@ class GatewayRunner:
             _context_length = 0
             _agent = agent_holder[0]
             if _agent and hasattr(_agent, "context_compressor"):
-                _last_prompt_toks = getattr(_agent.context_compressor, "last_prompt_tokens", 0)
+                _cc = _agent.context_compressor
+                _last_prompt_toks = getattr(_cc, "last_prompt_tokens", 0)
+                _context_length = getattr(_cc, "context_length", 0)
                 _input_toks = getattr(_agent, "session_prompt_tokens", 0)
                 _output_toks = getattr(_agent, "session_completion_tokens", 0)
                 _context_length = getattr(_agent.context_compressor, "context_length", 0) or 0
@@ -13845,6 +13862,7 @@ class GatewayRunner:
                     "tools": tools_holder[0] or [],
                     "history_offset": len(agent_history),
                     "last_prompt_tokens": _last_prompt_toks,
+                    "context_length": _context_length,
                     "input_tokens": _input_toks,
                     "output_tokens": _output_toks,
                     "model": _resolved_model,
@@ -13959,6 +13977,7 @@ class GatewayRunner:
                 "tools": tools_holder[0] or [],
                 "history_offset": _effective_history_offset,
                 "last_prompt_tokens": _last_prompt_toks,
+                "context_length": _context_length,
                 "input_tokens": _input_toks,
                 "output_tokens": _output_toks,
                 "model": _resolved_model,
