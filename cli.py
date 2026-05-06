@@ -2200,6 +2200,9 @@ class HermesCLI:
         self._pending_edit_snapshots = {}
         self._last_input_mode_recovery = 0.0
         self._input_mode_recovery_notice_shown = False
+        # Post-hoc reasoning reveal — captured on every turn, even when
+        # show_reasoning is off.  /reasoning reveal prints this.
+        self._last_reasoning = ""
         
         # Configuration - priority: CLI args > env vars > config file
         # Model comes from: CLI arg or config.yaml (single source of truth).
@@ -7666,6 +7669,8 @@ class HermesCLI:
             /reasoning <level>      Set reasoning effort (none, minimal, low, medium, high, xhigh)
             /reasoning show|on      Show model thinking/reasoning in output
             /reasoning hide|off     Hide model thinking/reasoning from output
+            /reasoning reveal       Show reasoning from the last turn
+            /reasoning reveal --limit N  Show only the last N reasoning blocks
         """
         parts = cmd.strip().split(maxsplit=1)
 
@@ -7681,7 +7686,7 @@ class HermesCLI:
             display_state = "on ✓" if self.show_reasoning else "off"
             _cprint(f"  {_ACCENT}Reasoning effort:  {level}{_RST}")
             _cprint(f"  {_ACCENT}Reasoning display: {display_state}{_RST}")
-            _cprint(f"  {_DIM}Usage: /reasoning <none|minimal|low|medium|high|xhigh|show|hide>{_RST}")
+            _cprint(f"  {_DIM}Usage: /reasoning <none|minimal|low|medium|high|xhigh|show|hide|reveal [--limit N]>{_RST}")
             return
 
         arg = parts[1].strip().lower()
@@ -7701,6 +7706,53 @@ class HermesCLI:
                 self.agent.reasoning_callback = self._current_reasoning_callback()
             save_config_value("display.show_reasoning", False)
             _cprint(f"  {_ACCENT}✓ Reasoning display: OFF (saved){_RST}")
+            return
+        if arg == "reveal" or arg.startswith("reveal "):
+            rtext = getattr(self, "_last_reasoning", "")
+            if not rtext:
+                _cprint(f"  {_DIM}(._.) No reasoning stored from the last turn.{_RST}")
+                return
+            # Parse optional --limit N flag
+            limit = None
+            if arg.startswith("reveal "):
+                import re
+                m = re.search(r"--limit\s+(\d+)", arg)
+                if m:
+                    limit = int(m.group(1))
+            w = shutil.get_terminal_size().columns
+            r_label = " Thinking "
+            r_fill = w - 2 - len(r_label)
+            _cprint(f"\n{_DIM}┌─{r_label}{'─' * max(r_fill - 1, 0)}┐{_RST}")
+            lines = rtext.strip().splitlines()
+            if limit and limit > 0:
+                # Find block boundaries (blank lines or separator lines)
+                blocks = []
+                current_block = []
+                for line in lines:
+                    stripped = line.strip()
+                    if not stripped or stripped == "---":
+                        if current_block:
+                            blocks.append(current_block)
+                            current_block = []
+                    else:
+                        current_block.append(line)
+                if current_block:
+                    blocks.append(current_block)
+                total = len(blocks)
+                # Take only the last N blocks
+                blocks = blocks[-limit:]
+                # Flatten back to lines with blank separators
+                output_lines = []
+                for i, block in enumerate(blocks):
+                    if i > 0:
+                        output_lines.append("")
+                    output_lines.extend(block)
+                lines = output_lines
+                if len(blocks) < total:
+                    _cprint(f"  {_DIM}(showing last {len(blocks)} of {total} reasoning blocks){_RST}")
+            for line in lines:
+                _cprint(f"{_DIM}{line}{_RST}")
+            _cprint(f"{_DIM}└{'─' * (w - 2)}┘{_RST}")
             return
 
         # Effort level change
@@ -9830,6 +9882,18 @@ class HermesCLI:
                     else:
                         display_reasoning = reasoning.strip()
                     _cprint(f"\n{r_top}\n{_DIM}{display_reasoning}{_RST}\n{r_bot}")
+
+            # Capture reasoning for post-hoc reveal (/reasoning reveal)
+            # even when show_reasoning is off or already shown live.
+            _reasoning_for_reveal = result.get("last_reasoning") if result else None
+            if _reasoning_for_reveal:
+                self._last_reasoning = _reasoning_for_reveal
+                if not self.show_reasoning:
+                    lines = _reasoning_for_reveal.count("\n") + 1
+                    chars = len(_reasoning_for_reveal)
+                    _cprint(f"  {_DIM}━━ Thinking: {lines} lines, {chars} chars — /reasoning reveal ━━{_RST}")
+            else:
+                self._last_reasoning = ""
 
             if response and not response_previewed:
                 # Use skin engine for label/color with fallback
