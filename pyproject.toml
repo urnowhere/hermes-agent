@@ -166,4 +166,6 @@ exclude = ["tinker-atropos"]
 select = [] # disable all lints for now, until we've wrangled typechecks a bit more :3
 
 [tool.uv]
-exclude-newer = "7 days"
+# exclude-newer was removed — it blocked dependency resolution for stable
+# packages (setuptools, vercel) that hadn't had a release within 7 days.
+# See issue #19043 for details. Lock files handle reproducibility instead.
