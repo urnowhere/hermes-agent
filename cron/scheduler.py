@@ -1028,6 +1028,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         platform=origin["platform"] if origin else "",
         chat_id=str(origin["chat_id"]) if origin else "",
         chat_name=origin.get("chat_name", "") if origin else "",
+        user_id=str(origin.get("sender_id") or "") if origin else "",
     )
     _cron_delivery_vars = (
         "HERMES_CRON_AUTO_DELIVER_PLATFORM",
@@ -1226,6 +1227,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             load_soul_identity=True,
             skip_memory=True,  # Cron system prompts would corrupt user representations
             platform="cron",
+            user_id=str((origin or {}).get("sender_id") or os.getenv("COMPOSIO_DEFAULT_ENTITY") or "") or None,
             session_id=_cron_session_id,
             session_db=_session_db,
         )

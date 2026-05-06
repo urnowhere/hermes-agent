@@ -1,0 +1,24 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile.railway"
+
+[deploy]
+# One container runs gateway + dashboard + Caddy via docker/railway-launcher.sh
+# (the image's ENTRYPOINT). Restart on failure so a child crash recycles
+# the whole container.
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+healthcheckPath = "/api/status"
+healthcheckTimeout = 30
+
+# Required env vars (set at deploy time):
+#   DASHBOARD_USER          — basic-auth username for the public dashboard
+#   DASHBOARD_PASSWORD_HASH — bcrypt hash; generate with `caddy hash-password`
+#   OPENROUTER_API_KEY      — or another LLM provider key from .env.example
+#
+# Recommended env vars:
+#   COMPOSIO_API_KEY        — auto-enables the composio plugin at boot
+#   TELEGRAM_BOT_TOKEN      — enable Telegram messaging gateway
+#
+# Persistent volume (provision via `railway volume add`):
+#   /opt/data — sessions, memories, skills, cron jobs, hooks, workspace

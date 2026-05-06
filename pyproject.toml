@@ -92,6 +92,7 @@ google = [
 ]
 # `hermes dashboard` (localhost SPA + API).  Not in core to keep the default install lean.
 web = ["fastapi>=0.104.0,<1", "uvicorn[standard]>=0.24.0,<1"]
+composio = ["composio-core>=0.7.0,<1"]
 rl = [
   "atroposlib @ git+https://github.com/NousResearch/atropos.git@c20c85256e5a45ad31edf8b7276e9c5ee1995a30",
   "tinker @ git+https://github.com/thinking-machines-lab/tinker.git@30517b667f18a3dfb7ef33fb56cf686d5820ba2b",
@@ -127,6 +128,7 @@ all = [
   "hermes-agent[mistral]",
   "hermes-agent[bedrock]",
   "hermes-agent[web]",
+  "hermes-agent[composio]",
 ]
 
 [project.scripts]
@@ -175,3 +177,7 @@ exclude = ["*"]
 
 [tool.uv]
 exclude-newer = "7 days"
+# composio-core pins rich<14 conservatively; hermes pins rich>=14.3.3. The
+# APIs composio uses (Console, Progress) are backward-compatible across the
+# 13→14 bump, so force rich 14 everywhere instead of forking the dep tree.
+override-dependencies = ["rich>=14.3.3,<15"]

@@ -16,6 +16,14 @@
 
 Use any model you want — [Nous Portal](https://portal.nousresearch.com), [OpenRouter](https://openrouter.ai) (200+ models), [NVIDIA NIM](https://build.nvidia.com) (Nemotron), [Xiaomi MiMo](https://platform.xiaomimimo.com), [z.ai/GLM](https://z.ai), [Kimi/Moonshot](https://platform.moonshot.ai), [MiniMax](https://www.minimax.io), [Hugging Face](https://huggingface.co), OpenAI, or your own endpoint. Switch with `hermes model` — no code changes, no lock-in.
 
+> **What this fork adds** on top of upstream [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent):
+>
+> - **One-click Railway deploy** — single-container image (gateway + dashboard + Caddy with HTTP Basic auth) + a persistent volume for sessions, skills, and memory. Click the Deploy button below; no infra setup required.
+> - **[Composio](https://composio.dev) plugin** — Gmail, Google Calendar, Google Drive, Slack, GitHub, Notion, Linear, and 250+ other apps registered as agent tools. Per-session entity isolation so a multi-user gateway doesn't cross-contaminate connected accounts. Set `COMPOSIO_API_KEY` and the plugin auto-enables on boot.
+> - **Public dashboard with Basic auth** — the existing Hermes dashboard, exposed on a Railway URL behind a Caddy basic-auth gate. Manage your agent (configure providers, install skills, browse sessions) from any browser.
+>
+> Everything else below is upstream Hermes — same install commands, same docs, same architecture.
+
 <table>
 <tr><td><b>A real terminal interface</b></td><td>Full TUI with multiline editing, slash-command autocomplete, conversation history, interrupt-and-redirect, and streaming tool output.</td></tr>
 <tr><td><b>Lives where you do</b></td><td>Telegram, Discord, Slack, WhatsApp, Signal, and CLI — all from a single gateway process. Voice memo transcription, cross-platform conversation continuity.</td></tr>
@@ -106,6 +114,52 @@ All documentation lives at **[hermes-agent.nousresearch.com/docs](https://hermes
 | [Contributing](https://hermes-agent.nousresearch.com/docs/developer-guide/contributing) | Development setup, PR process, code style |
 | [CLI Reference](https://hermes-agent.nousresearch.com/docs/reference/cli-commands) | All commands and flags |
 | [Environment Variables](https://hermes-agent.nousresearch.com/docs/reference/environment-variables) | Complete env var reference |
+
+---
+
+## Deploy on Railway
+
+Hermes ships with a single-container Railway image that runs the gateway,
+dashboard, and a Caddy reverse-proxy with HTTP Basic auth. After deploy you
+get a public URL where you can manage Hermes (configure providers, install
+skills, view sessions) from any browser.
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/c-uq1y?referralCode=Le2VXH)
+
+### What gets deployed
+
+- **One service** built from `Dockerfile.railway` (Caddy + gateway + dashboard).
+- **One volume** mounted at `/opt/data` for sessions, memories, skills, cron
+  jobs, and the agent's workspace.
+
+### Required environment variables
+
+| Variable | Purpose |
+|----------|---------|
+| `DASHBOARD_USER` | Basic-auth username for the public dashboard URL. |
+| `DASHBOARD_PASSWORD_HASH` | Bcrypt hash of the password. Generate with `docker run --rm caddy:2 caddy hash-password`. |
+| `OPENROUTER_API_KEY` *(or another provider)* | LLM provider key — see `.env.example` for the full list (Gemini, Anthropic, Kimi, MiniMax, etc.). |
+
+### Recommended environment variables
+
+| Variable | Purpose |
+|----------|---------|
+| `COMPOSIO_API_KEY` | Auto-enables the [Composio](https://composio.dev) plugin on boot — exposes Gmail, Calendar, Linear, Slack, GitHub, and 250+ other apps as agent tools. |
+| `TELEGRAM_BOT_TOKEN` | Talk to Hermes from Telegram in addition to the web dashboard. |
+
+The full set of supported variables (every LLM provider, every messaging
+platform, every tool credential) is documented in `.env.example`.
+
+### After deployment
+
+1. Visit the Railway-assigned URL and log in with `DASHBOARD_USER` /
+   the password you hashed.
+2. Run `hermes setup` from the Railway shell (or the dashboard's terminal)
+   if you want the interactive provider/model picker.
+3. Add a custom domain in Railway → Settings → Domains.
+
+The `/opt/data` volume persists across redeploys, so your sessions, skills,
+and memories survive image updates.
 
 ---
 

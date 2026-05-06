@@ -1,0 +1,52 @@
+# Caddy reverse proxy in front of the Hermes dashboard.
+# Adds HTTP basic auth so the dashboard can be safely exposed on a public URL.
+#
+# Env vars read at startup:
+#   PORT                    — Railway-assigned public port (Caddy listens here)
+#   DASHBOARD_USER          — basic auth username
+#   DASHBOARD_PASSWORD_HASH — bcrypt hash (generate with: caddy hash-password)
+#
+# Caddy listens plain-HTTP; Railway terminates TLS at its edge and forwards
+# over its private network, so the basic-auth creds still travel over HTTPS
+# from the user's browser.
+
+{
+    auto_https off
+    admin off
+}
+
+:{$PORT:8080} {
+    # /api/status is the public health endpoint — Railway's healthcheck probe
+    # hits it unauthenticated, so it must bypass Basic-auth. The dashboard
+    # itself returns no sensitive data on this path.
+    @health path /api/status
+    handle @health {
+        reverse_proxy 127.0.0.1:9119 {
+            header_up Host {upstream_hostport}
+        }
+    }
+
+    # API and websocket calls carry a Bearer token that the dashboard
+    # validates itself. Skipping Basic-auth on these paths avoids the
+    # "two competing Authorization schemes" loop in the browser. Everything
+    # else (HTML shell, static assets, plugin assets) stays behind Basic-auth
+    # so the public URL can't be probed without credentials.
+    @apiBearer {
+        header Authorization "Bearer *"
+        path /api/* /ws /ws/*
+    }
+    handle @apiBearer {
+        reverse_proxy 127.0.0.1:9119 {
+            header_up Host {upstream_hostport}
+        }
+    }
+
+    handle {
+        basic_auth {
+            {$DASHBOARD_USER} {$DASHBOARD_PASSWORD_HASH}
+        }
+        reverse_proxy 127.0.0.1:9119 {
+            header_up Host {upstream_hostport}
+        }
+    }
+}

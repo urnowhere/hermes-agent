@@ -1,0 +1,13 @@
+name: composio
+version: 0.1.0
+description: "Connect Hermes to external apps (Gmail, Google Calendar, Slack, GitHub, Notion, etc.) via Composio. Exposes actions as hermes tools and provides OAuth connection helpers."
+author: "Hermes Agent"
+requires_env:
+  - COMPOSIO_API_KEY
+provides_tools:
+  - composio_connect
+  - composio_list_connections
+  - composio_check_connection
+  - composio_disconnect_app
+hooks:
+  - pre_llm_call
