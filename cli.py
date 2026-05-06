@@ -1549,7 +1549,15 @@ def _resolve_attachment_path(raw_path: str) -> Path | None:
     except Exception:
         resolved = path
 
-    if not resolved.exists() or not resolved.is_file():
+    # stat() can raise OSError when a path component exceeds the filesystem's
+    # NAME_MAX (e.g. ENAMETOOLONG / Errno 63 on macOS when a multi-paragraph
+    # prompt starting with "/" is tested as a candidate path). Treat any stat
+    # failure as "not a file" rather than letting it bubble up and crash the
+    # input loop.
+    try:
+        if not resolved.exists() or not resolved.is_file():
+            return None
+    except OSError:
         return None
     return resolved
 

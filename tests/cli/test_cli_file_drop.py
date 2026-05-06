@@ -219,3 +219,24 @@ class TestEdgeCases:
         result = _detect_file_drop(str(link))
         assert result is not None
         assert result["is_image"] is True
+
+    def test_long_slash_prefixed_prompt_does_not_raise(self):
+        """Regression: a long multi-paragraph prompt starting with ``/`` used to
+        crash the input loop with OSError(ENAMETOOLONG) on macOS because the
+        space-walk fallback in ``_detect_file_drop`` would try an oversized
+        prefix as a candidate path and ``Path.exists()`` raised instead of
+        returning False. Must return ``None`` cleanly instead of propagating.
+        """
+        # Simulates the user typing a slash command followed by a long,
+        # multi-paragraph body — the exact shape that reproduced the bug.
+        long_prompt = (
+            "/some-skill " + ("lorem ipsum dolor sit amet consectetur "
+            "adipiscing elit sed do eiusmod tempor incididunt ut labore "
+            "et dolore magna aliqua ut enim ad minim veniam quis nostrud "
+            "exercitation ullamco laboris nisi ut aliquip ex ea commodo "
+            "consequat duis aute irure dolor in reprehenderit in voluptate.")
+        )
+        # The basename of this candidate is well over any mainstream FS's
+        # NAME_MAX (255 bytes), which is what used to raise ENAMETOOLONG.
+        assert len(long_prompt) > 255
+        assert _detect_file_drop(long_prompt) is None
