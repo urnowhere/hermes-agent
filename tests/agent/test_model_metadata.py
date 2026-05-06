@@ -525,6 +525,24 @@ class TestGetModelContextLength:
             assert result == CONTEXT_PROBE_TIERS[0]
 
     @patch("agent.model_metadata.fetch_model_metadata")
+    def test_provider_aware_lookup_is_saved_to_cache(self, mock_fetch):
+        mock_fetch.return_value = {}
+
+        with patch("agent.model_metadata.get_cached_context_length", return_value=None), \
+             patch("hermes_cli.models.get_copilot_model_context", return_value=None), \
+             patch("agent.models_dev.lookup_models_dev_context", return_value=272000) as mock_lookup, \
+             patch("agent.model_metadata.save_context_length") as mock_save:
+            result = get_model_context_length(
+                "gpt-5.4",
+                base_url="acp://copilot",
+                provider="copilot-acp",
+            )
+
+        assert result == 272000
+        mock_lookup.assert_called_once_with("copilot-acp", "gpt-5.4")
+        mock_save.assert_called_once_with("gpt-5.4", "acp://copilot", 272000)
+
+    @patch("agent.model_metadata.fetch_model_metadata")
     @patch("agent.model_metadata.fetch_endpoint_model_metadata")
     def test_custom_endpoint_metadata_beats_fuzzy_default(self, mock_endpoint_fetch, mock_fetch):
         mock_fetch.return_value = {}

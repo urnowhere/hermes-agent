@@ -5,6 +5,7 @@ Uses the same lazy-import + BaseRequest pattern as feishu_comment.py.
 """
 
 import json
+import importlib.util
 import logging
 import threading
 
@@ -52,11 +53,11 @@ FEISHU_DOC_READ_SCHEMA = {
 
 
 def _check_feishu():
-    try:
-        import lark_oapi  # noqa: F401
-        return True
-    except ImportError:
-        return False
+    # Tool availability checks run during agent/tool initialization, so avoid
+    # importing the heavy Lark SDK here. A cheap spec probe is enough to decide
+    # whether the package is installed; the handler still performs the real
+    # import when the tool is actually used.
+    return importlib.util.find_spec("lark_oapi") is not None
 
 
 def _handle_feishu_doc_read(args: dict, **kwargs) -> str:

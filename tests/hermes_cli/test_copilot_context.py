@@ -87,6 +87,13 @@ class TestGetCopilotModelContext:
         assert mock_fetch.call_count == 1
 
     @patch("hermes_cli.models.fetch_github_model_catalog", return_value=_SAMPLE_CATALOG)
+    @patch("hermes_cli.models._resolve_copilot_catalog_api_key", return_value="gh-token")
+    def test_resolves_catalog_api_key_when_not_provided(self, mock_resolve, mock_fetch):
+        assert get_copilot_model_context("gpt-4.1") == 128_000
+        mock_resolve.assert_called_once_with()
+        mock_fetch.assert_called_once_with(api_key="gh-token")
+
+    @patch("hermes_cli.models.fetch_github_model_catalog", return_value=_SAMPLE_CATALOG)
     def test_cache_expires(self, mock_fetch):
         import hermes_cli.models as mod
 
@@ -123,6 +130,24 @@ class TestModelMetadataCopilotIntegration:
 
         ctx = get_model_context_length("claude-sonnet-4", provider="copilot-acp")
         assert ctx == 200_000
+
+    @patch("hermes_cli.models.fetch_github_model_catalog", return_value=_SAMPLE_CATALOG)
+    @patch("hermes_cli.models._resolve_copilot_catalog_api_key", return_value="gh-token")
+    def test_copilot_live_context_is_saved_to_provider_cache(self, mock_resolve, mock_fetch):
+        from agent.model_metadata import get_model_context_length
+
+        with patch("agent.model_metadata.get_cached_context_length", return_value=None), \
+             patch("agent.model_metadata.save_context_length") as mock_save:
+            ctx = get_model_context_length(
+                "claude-sonnet-4",
+                provider="copilot-acp",
+                base_url="acp://copilot",
+            )
+
+        assert ctx == 200_000
+        mock_resolve.assert_called_once_with()
+        mock_fetch.assert_called_once_with(api_key="gh-token")
+        mock_save.assert_called_once_with("claude-sonnet-4", "acp://copilot", 200_000)
 
     @patch("hermes_cli.models.fetch_github_model_catalog", return_value=None)
     def test_falls_through_when_catalog_unavailable(self, mock_fetch):

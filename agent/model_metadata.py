@@ -1385,6 +1385,8 @@ def get_model_context_length(
             from hermes_cli.models import get_copilot_model_context
             ctx = get_copilot_model_context(model, api_key=api_key)
             if ctx:
+                if base_url:
+                    save_context_length(model, base_url, ctx)
                 return ctx
         except Exception:
             pass  # Fall through to models.dev
@@ -1412,6 +1414,8 @@ def get_model_context_length(
         from agent.models_dev import lookup_models_dev_context
         ctx = lookup_models_dev_context(effective_provider, model)
         if ctx:
+            if base_url and provider != "lmstudio":
+                save_context_length(model, base_url, ctx)
             return ctx
 
     # 6. OpenRouter live API metadata (provider-unaware fallback)
