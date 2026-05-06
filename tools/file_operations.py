@@ -27,6 +27,7 @@ Usage:
 
 import os
 import re
+import sys
 import difflib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -55,6 +56,90 @@ WRITE_DENIED_PREFIXES = build_write_denied_prefixes(_HOME)
 
 _OSC_SEQUENCE_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _FENCE_MARKER_RE = re.compile(r"'?\x07?__HERMES_FENCE_[A-Za-z0-9]+__\x07?'?")
+
+# macOS Transparency, Consent, and Control (TCC) protected locations that can
+# trigger repeated permission prompts when a broad home-directory search recurses
+# into them. Values are relative to Path.home(); command-specific helpers convert
+# them to search-root-relative globs or absolute prune paths.
+_MACOS_TCC_HOME_RELATIVE_GLOBS = (
+    "Library/Containers/**",
+    "Library/Group Containers/**",
+    "Library/Mail/**",
+    "Library/Messages/**",
+    "Library/Calendars/**",
+    "Library/Reminders/**",
+    "Library/Mobile Documents/**",
+    "Library/CloudStorage/**",
+    "Library/Application Support/com.apple.sharedfilelist/**",
+    "Library/Application Support/AddressBook/**",
+    "Library/Application Support/CallHistoryTransactions/**",
+    "Library/Application Support/CallHistoryDB/**",
+    "Pictures/Photos Library.photoslibrary/**",
+)
+
+
+def _glob_base_path(glob: str) -> Path:
+    """Return the non-wildcard path prefix for a relative glob."""
+    parts = []
+    for part in Path(glob).parts:
+        if any(ch in part for ch in "*?["):
+            break
+        parts.append(part)
+    return Path(*parts) if parts else Path(".")
+
+
+def _macos_tcc_excluded_globs_for_root(search_root: str) -> list[str]:
+    """Return macOS TCC exclusion globs relative to ``search_root``.
+
+    Only broad searches whose root is an ancestor of a protected location get
+    exclusions. If the user explicitly searches inside a protected path such as
+    ``~/Library/Containers``, return no exclusions so intent is preserved.
+    """
+    if sys.platform != "darwin":
+        return []
+
+    try:
+        root = Path(os.path.realpath(os.path.expanduser(search_root))).resolve()
+        home = Path.home().resolve()
+    except Exception:
+        return []
+
+    excluded: list[str] = []
+    for home_glob in _MACOS_TCC_HOME_RELATIVE_GLOBS:
+        protected_base = (home / _glob_base_path(home_glob)).resolve()
+
+        if root == protected_base or protected_base in root.parents:
+            # Explicit search inside a protected location: respect user intent.
+            continue
+
+        try:
+            rel_base = protected_base.relative_to(root)
+        except ValueError:
+            continue
+
+        suffix = home_glob[len(_glob_base_path(home_glob).as_posix()):].lstrip("/")
+        rel_glob = rel_base.as_posix()
+        if suffix:
+            rel_glob = f"{rel_glob}/{suffix}"
+        if rel_glob and rel_glob != ".":
+            excluded.append(rel_glob)
+
+    return excluded
+
+
+def _include_macos_tcc_paths_enabled(include_tcc_paths: bool = False) -> bool:
+    """Return whether macOS TCC-protected search paths should be included."""
+    if include_tcc_paths:
+        return True
+    try:
+        from hermes_cli.config import load_config
+
+        config = load_config() or {}
+        agent_config = config.get("agent") or {}
+        search_config = agent_config.get("search") or {}
+        return bool(search_config.get("include_tcc_paths", False))
+    except Exception:
+        return False
 
 
 def _strip_terminal_fence_leaks(text: str) -> str:
@@ -292,7 +377,8 @@ class FileOperations(ABC):
     @abstractmethod
     def search(self, pattern: str, path: str = ".", target: str = "content",
                file_glob: Optional[str] = None, limit: int = 50, offset: int = 0,
-               output_mode: str = "content", context: int = 0) -> SearchResult:
+               output_mode: str = "content", context: int = 0,
+               include_tcc_paths: bool = False) -> SearchResult:
         """Search for content or files."""
         ...
 
@@ -599,6 +685,28 @@ class ShellFileOperations(FileOperations):
         """Escape a string for safe use in shell commands."""
         # Use single quotes and escape any single quotes in the string
         return "'" + arg.replace("'", "'\"'\"'") + "'"
+
+    def _find_prune_expr(
+        self,
+        search_root: str,
+        *,
+        exclude_hidden: bool = True,
+        macos_tcc_excludes: Optional[list[str]] = None,
+    ) -> str:
+        """Build a POSIX find prune expression for hidden/TCC directories."""
+        prune_terms: list[str] = []
+        if exclude_hidden:
+            prune_terms.append("-path '*/.*'")
+        for glob in macos_tcc_excludes or []:
+            base = _glob_base_path(glob)
+            if base == Path("."):
+                continue
+            prune_terms.append(
+                f"-path {self._escape_shell_arg(str(Path(search_root) / base))}"
+            )
+        if not prune_terms:
+            return ""
+        return f" \\( {' -o '.join(prune_terms)} \\) -prune -o"
     
     def _unified_diff(self, old_content: str, new_content: str, filename: str) -> str:
         """Generate unified diff between old and new content."""
@@ -1163,7 +1271,8 @@ class ShellFileOperations(FileOperations):
     
     def search(self, pattern: str, path: str = ".", target: str = "content",
                file_glob: Optional[str] = None, limit: int = 50, offset: int = 0,
-               output_mode: str = "content", context: int = 0) -> SearchResult:
+               output_mode: str = "content", context: int = 0,
+               include_tcc_paths: bool = False) -> SearchResult:
         """
         Search for content or files.
         
@@ -1176,6 +1285,8 @@ class ShellFileOperations(FileOperations):
             offset: Skip first N results
             output_mode: "content", "files_only", or "count"
             context: Lines of context around matches
+            include_tcc_paths: On macOS, include TCC-protected paths that are
+                excluded from broad searches by default to avoid permission prompts
         
         Returns:
             SearchResult with matches or file list
@@ -1218,13 +1329,18 @@ class ShellFileOperations(FileOperations):
                 total_count=0
             )
         
+        macos_tcc_excludes = []
+        if not _include_macos_tcc_paths_enabled(include_tcc_paths):
+            macos_tcc_excludes = _macos_tcc_excluded_globs_for_root(path)
+
         if target == "files":
-            return self._search_files(pattern, path, limit, offset)
+            return self._search_files(pattern, path, limit, offset, macos_tcc_excludes)
         else:
             return self._search_content(pattern, path, file_glob, limit, offset, 
-                                        output_mode, context)
+                                        output_mode, context, macos_tcc_excludes)
     
-    def _search_files(self, pattern: str, path: str, limit: int, offset: int) -> SearchResult:
+    def _search_files(self, pattern: str, path: str, limit: int, offset: int,
+                      macos_tcc_excludes: Optional[list[str]] = None) -> SearchResult:
         """Search for files by name pattern (glob-like)."""
         # Auto-prepend **/ for recursive search if not already present
         if not pattern.startswith('**/') and '/' not in pattern:
@@ -1238,11 +1354,13 @@ class ShellFileOperations(FileOperations):
             for part in search_root.parts
         )
 
+        macos_tcc_excludes = macos_tcc_excludes or []
+
         # Prefer ripgrep: respects .gitignore, excludes hidden dirs by
         # default, and has parallel directory traversal (~200x faster than
         # find on wide trees).  Mirrors _search_content which already uses rg.
         if self._has_command('rg'):
-            return self._search_files_rg(search_pattern, path, limit, offset)
+            return self._search_files_rg(search_pattern, path, limit, offset, macos_tcc_excludes)
 
         # Fallback: find (slower, no .gitignore awareness)
         if not self._has_command('find'):
@@ -1252,9 +1370,13 @@ class ShellFileOperations(FileOperations):
                       "https://github.com/BurntSushi/ripgrep#installation"
             )
 
-        # Exclude hidden directories (matching ripgrep's default behavior).
-        hidden_exclude = "-not -path '*/.*'" if not has_hidden_path_ancestor else ""
-        hidden_filter_expr = f" {hidden_exclude}" if hidden_exclude else ""
+        # Exclude hidden directories (matching ripgrep's default behavior) and
+        # prune macOS TCC-protected locations so find does not recurse into them.
+        prune_expr = self._find_prune_expr(
+            path,
+            exclude_hidden=not has_hidden_path_ancestor,
+            macos_tcc_excludes=macos_tcc_excludes,
+        )
 
         # Use shell pagination for standard roots. For hidden roots, gather full
         # output so we can re-apply hidden-descendant filtering while allowing
@@ -1263,14 +1385,14 @@ class ShellFileOperations(FileOperations):
         if not has_hidden_path_ancestor:
             pagination_expr = f" | tail -n +{offset + 1} | head -n {limit}"
 
-        cmd = f"find {self._escape_shell_arg(path)}{hidden_filter_expr} -type f -name {self._escape_shell_arg(search_pattern)} " \
+        cmd = f"find {self._escape_shell_arg(path)}{prune_expr} -type f -name {self._escape_shell_arg(search_pattern)} " \
               f"-printf '%T@ %p\\n' 2>/dev/null | sort -rn{pagination_expr}"
 
         result = self._exec(cmd, timeout=60)
 
         if not result.stdout.strip():
             # Try without -printf (BSD find compatibility -- macOS)
-            cmd_simple = f"find {self._escape_shell_arg(path)}{hidden_filter_expr} -type f -name {self._escape_shell_arg(search_pattern)} " \
+            cmd_simple = f"find {self._escape_shell_arg(path)}{prune_expr} -type f -name {self._escape_shell_arg(search_pattern)} " \
                         f"2>/dev/null | sort -rn{pagination_expr}"
             result = self._exec(cmd_simple, timeout=60)
 
@@ -1306,7 +1428,8 @@ class ShellFileOperations(FileOperations):
             total_count=len(files)
         )
 
-    def _search_files_rg(self, pattern: str, path: str, limit: int, offset: int) -> SearchResult:
+    def _search_files_rg(self, pattern: str, path: str, limit: int, offset: int,
+                         macos_tcc_excludes: Optional[list[str]] = None) -> SearchResult:
         """Search for files by name using ripgrep's --files mode.
 
         rg --files respects .gitignore and excludes hidden directories by
@@ -1321,11 +1444,17 @@ class ShellFileOperations(FileOperations):
         else:
             glob_pattern = pattern
 
+        exclude_parts = []
+        for glob in macos_tcc_excludes or []:
+            exclude_parts.extend(["--glob", self._escape_shell_arg(f"!{glob}")])
+        exclude_flags = " ".join(exclude_parts)
+        exclude_flags = f" {exclude_flags}" if exclude_flags else ""
+
         fetch_limit = limit + offset
         # Try mtime-sorted first (rg 13+); fall back to unsorted if not supported.
         cmd_sorted = (
-            f"rg --files --sortr=modified -g {self._escape_shell_arg(glob_pattern)} "
-            f"{self._escape_shell_arg(path)} 2>/dev/null "
+            f"rg --files --sortr=modified -g {self._escape_shell_arg(glob_pattern)}"
+            f"{exclude_flags} {self._escape_shell_arg(path)} 2>/dev/null "
             f"| head -n {fetch_limit}"
         )
         result = self._exec(cmd_sorted, timeout=60)
@@ -1334,8 +1463,8 @@ class ShellFileOperations(FileOperations):
         if not all_files:
             # --sortr may have failed on older rg; retry without it.
             cmd_plain = (
-                f"rg --files -g {self._escape_shell_arg(glob_pattern)} "
-                f"{self._escape_shell_arg(path)} 2>/dev/null "
+                f"rg --files -g {self._escape_shell_arg(glob_pattern)}"
+                f"{exclude_flags} {self._escape_shell_arg(path)} 2>/dev/null "
                 f"| head -n {fetch_limit}"
             )
             result = self._exec(cmd_plain, timeout=60)
@@ -1350,15 +1479,17 @@ class ShellFileOperations(FileOperations):
         )
     
     def _search_content(self, pattern: str, path: str, file_glob: Optional[str],
-                        limit: int, offset: int, output_mode: str, context: int) -> SearchResult:
+                        limit: int, offset: int, output_mode: str, context: int,
+                        macos_tcc_excludes: Optional[list[str]] = None) -> SearchResult:
         """Search for content inside files (grep-like)."""
+        macos_tcc_excludes = macos_tcc_excludes or []
         # Try ripgrep first (fast), fallback to grep (slower but works)
         if self._has_command('rg'):
             return self._search_with_rg(pattern, path, file_glob, limit, offset, 
-                                        output_mode, context)
+                                        output_mode, context, macos_tcc_excludes)
         elif self._has_command('grep'):
             return self._search_with_grep(pattern, path, file_glob, limit, offset,
-                                          output_mode, context)
+                                          output_mode, context, macos_tcc_excludes)
         else:
             # Neither rg nor grep available (Windows without Git Bash, etc.)
             return SearchResult(
@@ -1367,7 +1498,8 @@ class ShellFileOperations(FileOperations):
             )
     
     def _search_with_rg(self, pattern: str, path: str, file_glob: Optional[str],
-                        limit: int, offset: int, output_mode: str, context: int) -> SearchResult:
+                        limit: int, offset: int, output_mode: str, context: int,
+                        macos_tcc_excludes: Optional[list[str]] = None) -> SearchResult:
         """Search using ripgrep."""
         cmd_parts = ["rg", "--line-number", "--no-heading", "--with-filename"]
         
@@ -1378,6 +1510,11 @@ class ShellFileOperations(FileOperations):
         # Add file glob filter (must be quoted to prevent shell expansion)
         if file_glob:
             cmd_parts.extend(["--glob", self._escape_shell_arg(file_glob)])
+
+        # On macOS broad searches, skip TCC-protected paths to avoid repeated
+        # permission prompts from app containers and privacy-protected stores.
+        for glob in macos_tcc_excludes or []:
+            cmd_parts.extend(["--glob", self._escape_shell_arg(f"!{glob}")])
         
         # Output mode handling
         if output_mode == "files_only":
@@ -1465,21 +1602,29 @@ class ShellFileOperations(FileOperations):
             )
     
     def _search_with_grep(self, pattern: str, path: str, file_glob: Optional[str],
-                          limit: int, offset: int, output_mode: str, context: int) -> SearchResult:
+                          limit: int, offset: int, output_mode: str, context: int,
+                          macos_tcc_excludes: Optional[list[str]] = None) -> SearchResult:
         """Fallback search using grep."""
-        cmd_parts = ["grep", "-rnH"]  # -H forces filename even for single-file searches
+        macos_tcc_excludes = macos_tcc_excludes or []
+        use_find_prefilter = bool(macos_tcc_excludes)
+        cmd_parts = ["grep", "-nH" if use_find_prefilter else "-rnH"]
         
         # Exclude hidden directories (matching ripgrep's default behavior).
         # This prevents searching inside .hub/index-cache/, .git/, etc.
-        cmd_parts.append("--exclude-dir='.*'")
+        if not use_find_prefilter:
+            cmd_parts.append("--exclude-dir='.*'")
         
         # Add context if requested
         if context > 0:
             cmd_parts.extend(["-C", str(context)])
         
         # Add file pattern filter (must be quoted to prevent shell expansion)
+        find_name_filter = ""
         if file_glob:
-            cmd_parts.extend(["--include", self._escape_shell_arg(file_glob)])
+            if use_find_prefilter:
+                find_name_filter = f" -name {self._escape_shell_arg(file_glob)}"
+            else:
+                cmd_parts.extend(["--include", self._escape_shell_arg(file_glob)])
         
         # Output mode handling
         if output_mode == "files_only":
@@ -1489,13 +1634,30 @@ class ShellFileOperations(FileOperations):
         
         # Add pattern and path
         cmd_parts.append(self._escape_shell_arg(pattern))
-        cmd_parts.append(self._escape_shell_arg(path))
+        if not use_find_prefilter:
+            cmd_parts.append(self._escape_shell_arg(path))
         
         # Fetch generously so we can compute total before slicing
         fetch_limit = limit + offset + (200 if context > 0 else 0)
-        cmd_parts.extend(["|", "head", "-n", str(fetch_limit)])
-        
-        cmd = " ".join(cmd_parts)
+        if use_find_prefilter:
+            search_root = Path(path)
+            has_hidden_path_ancestor = any(
+                part not in (".", "..") and part.startswith(".")
+                for part in search_root.parts
+            )
+            prune_expr = self._find_prune_expr(
+                path,
+                exclude_hidden=not has_hidden_path_ancestor,
+                macos_tcc_excludes=macos_tcc_excludes,
+            )
+            grep_cmd = " ".join(cmd_parts)
+            cmd = (
+                f"find {self._escape_shell_arg(path)}{prune_expr} -type f{find_name_filter} "
+                f"-print0 2>/dev/null | xargs -0 {grep_cmd} | head -n {fetch_limit}"
+            )
+        else:
+            cmd_parts.extend(["|", "head", "-n", str(fetch_limit)])
+            cmd = " ".join(cmd_parts)
         result = self._exec(cmd, timeout=60)
         
         # grep exit codes: 0=matches found, 1=no matches, 2=error

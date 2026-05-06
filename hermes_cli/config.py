@@ -463,6 +463,12 @@ DEFAULT_CONFIG = {
         # only controls how inbound user images are presented.
         "image_input_mode": "auto",
         "disabled_toolsets": [],
+        # File-search behavior knobs.
+        "search": {
+            # macOS TCC-protected paths are excluded from broad searches by default
+            # to avoid repeated permission prompts. Set true to restore old behavior.
+            "include_tcc_paths": False,
+        },
     },
     
     "terminal": {

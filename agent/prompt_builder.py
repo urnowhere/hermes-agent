@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -538,6 +539,16 @@ WSL_ENVIRONMENT_HINT = (
     "the Windows username if needed."
 )
 
+MACOS_TCC_FILE_SEARCH_HINT = (
+    "macOS file-search note: broad searches exclude ~/Library/Containers, "
+    "~/Library/Group Containers, ~/Library/Mail, ~/Library/Messages, "
+    "~/Library/Calendars, ~/Library/Reminders, iCloud/Mobile Documents, "
+    "and Photos Library by default to avoid repeated TCC permission prompts. "
+    "If the user explicitly needs those protected locations, ask them to grant "
+    "Full Disk Access to their terminal/Mac app or call search_files with "
+    "include_tcc_paths=True."
+)
+
 
 def build_environment_hints() -> str:
     """Return environment-specific guidance for the system prompt.
@@ -548,6 +559,8 @@ def build_environment_hints() -> str:
     hints: list[str] = []
     if is_wsl():
         hints.append(WSL_ENVIRONMENT_HINT)
+    if sys.platform == "darwin":
+        hints.append(MACOS_TCC_FILE_SEARCH_HINT)
     return "\n\n".join(hints)
 
 

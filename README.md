@@ -47,6 +47,12 @@ source ~/.bashrc    # reload shell (or: source ~/.zshrc)
 hermes              # start chatting!
 ```
 
+### macOS permission prompts during file search
+
+macOS TCC privacy prompts (for example, "Terminal would like to access data from other apps") are OS-level permission checks, not dialogs Hermes can suppress. Hermes avoids the noisy case by excluding protected locations such as `~/Library/Containers`, `~/Library/Group Containers`, Mail, Messages, Calendars, Reminders, iCloud/Mobile Documents, and Photos Library from broad `search_files` walks by default.
+
+If you explicitly want Hermes to search those protected paths, grant Full Disk Access to the app that launches Hermes (Terminal, your terminal emulator, or the Mac app wrapper) in System Settings -> Privacy & Security -> Full Disk Access, or opt in for a single call with `include_tcc_paths=True`. A persistent opt-in is available with `agent.search.include_tcc_paths: true` in `~/.hermes/config.yaml`.
+
 ---
 
 ## Getting Started
