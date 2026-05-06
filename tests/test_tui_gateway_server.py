@@ -451,6 +451,36 @@ def test_history_to_messages_preserves_tool_calls_for_resume_display():
     ]
 
 
+def test_history_to_messages_accepts_multimodal_list_content():
+    history = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "hello from list"},
+                {"type": "image_url", "image_url": {"url": "file:///tmp/demo.png"}},
+                "tail text",
+            ],
+        }
+    ]
+
+    assert server._history_to_messages(history) == [
+        {"role": "user", "text": "hello from list\ntail text"},
+    ]
+
+
+def test_history_to_messages_accepts_structured_dict_content():
+    history = [
+        {
+            "role": "assistant",
+            "content": {"type": "message", "content": [{"type": "text", "text": "hello from dict"}]},
+        }
+    ]
+
+    assert server._history_to_messages(history) == [
+        {"role": "assistant", "text": "hello from dict"},
+    ]
+
+
 def test_session_resume_uses_parent_lineage_for_display(monkeypatch):
     captured = {}
 

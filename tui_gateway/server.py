@@ -1989,6 +1989,29 @@ def _enrich_with_attached_images(user_text: str, image_paths: list[str]) -> str:
 
 
 def _history_to_messages(history: list[dict]) -> list[dict]:
+    def _content_to_text(content) -> str:
+        """Return a best-effort plain-text view for transcript rendering."""
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                text = _content_to_text(item)
+                if text:
+                    parts.append(text)
+            return "\n".join(parts)
+        if isinstance(content, dict):
+            text = content.get("text")
+            if isinstance(text, str):
+                return text
+            nested = content.get("content")
+            if nested is not None and nested is not content:
+                return _content_to_text(nested)
+            return ""
+        return str(content)
+
     messages = []
     tool_call_args = {}
 
@@ -2008,7 +2031,8 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
                     except (json.JSONDecodeError, TypeError):
                         args = {}
                     tool_call_args[tc_id] = (fn["name"], args)
-            if not (m.get("content") or "").strip():
+            content_text = _content_to_text(m.get("content")).strip()
+            if not content_text:
                 continue
         if role == "tool":
             tc_id = m.get("tool_call_id", "")
@@ -2019,9 +2043,10 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
                 {"role": "tool", "name": name, "context": _tool_ctx(name, args)}
             )
             continue
-        if not (m.get("content") or "").strip():
+        content_text = _content_to_text(m.get("content")).strip()
+        if not content_text:
             continue
-        messages.append({"role": role, "text": m.get("content") or ""})
+        messages.append({"role": role, "text": content_text})
 
     return messages
 
