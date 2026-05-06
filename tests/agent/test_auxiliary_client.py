@@ -4,6 +4,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
@@ -24,6 +25,7 @@ from agent.auxiliary_client import (
     _normalize_aux_provider,
     _try_payment_fallback,
     _resolve_auto,
+    _CodexCompletionsAdapter,
 )
 
 
@@ -1417,6 +1419,42 @@ class TestAnthropicCompatImageConversion:
         }]
         result = _convert_openai_images_to_anthropic(messages)
         assert result[0]["content"][0]["source"]["media_type"] == "image/jpeg"
+
+
+class TestCodexAuxiliaryRoleFiltering:
+    def test_codex_adapter_skips_tool_role_messages(self):
+        real_client = MagicMock()
+        stream_cm = MagicMock()
+        final_response = SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    content=[SimpleNamespace(type="output_text", text="ok")],
+                )
+            ],
+            usage=None,
+        )
+        stream_cm.__enter__.return_value = stream_cm
+        stream_cm.__iter__.return_value = iter([])
+        stream_cm.get_final_response.return_value = final_response
+        real_client.responses.stream.return_value = stream_cm
+
+        adapter = _CodexCompletionsAdapter(real_client, "gpt-5.2-codex")
+        adapter.create(
+            model="gpt-5.2-codex",
+            messages=[
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "hello"},
+                {"role": "tool", "content": '{"ok": true}'},
+                {"role": "assistant", "content": "done"},
+            ],
+        )
+
+        stream_kwargs = real_client.responses.stream.call_args.kwargs
+        assert stream_kwargs["input"] == [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "done"},
+        ]
 
 
 class _AuxAuth401(Exception):
