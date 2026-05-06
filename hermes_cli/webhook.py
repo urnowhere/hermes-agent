@@ -25,6 +25,10 @@ from hermes_cli.config import cfg_get
 _SUBSCRIPTIONS_FILENAME = "webhook_subscriptions.json"
 
 
+class SubscriptionStoreError(RuntimeError):
+    """Raised when the webhook subscriptions store cannot be read safely."""
+
+
 def _hermes_home() -> Path:
     from hermes_constants import get_hermes_home
     return get_hermes_home()
@@ -39,10 +43,27 @@ def _load_subscriptions() -> Dict[str, dict]:
     if not path.exists():
         return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
+        raw_data = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return {}
+    except OSError as exc:
+        raise SubscriptionStoreError(
+            f"Could not read webhook subscriptions from {path}: {exc}"
+        ) from exc
+
+    try:
+        data = json.loads(raw_data)
+    except json.JSONDecodeError as exc:
+        raise SubscriptionStoreError(
+            f"Corrupt webhook subscriptions file at {path}; repair or remove it before modifying subscriptions."
+        ) from exc
+
+    if not isinstance(data, dict):
+        raise SubscriptionStoreError(
+            f"Invalid webhook subscriptions file at {path}; expected a JSON object."
+        )
+
+    return data
 
 
 def _save_subscriptions(subs: Dict[str, dict]) -> None:
@@ -124,14 +145,17 @@ def webhook_command(args):
     if not _require_webhook_enabled():
         return
 
-    if sub in ("subscribe", "add"):
-        _cmd_subscribe(args)
-    elif sub in ("list", "ls"):
-        _cmd_list(args)
-    elif sub in ("remove", "rm"):
-        _cmd_remove(args)
-    elif sub == "test":
-        _cmd_test(args)
+    try:
+        if sub in ("subscribe", "add"):
+            _cmd_subscribe(args)
+        elif sub in ("list", "ls"):
+            _cmd_list(args)
+        elif sub in ("remove", "rm"):
+            _cmd_remove(args)
+        elif sub == "test":
+            _cmd_test(args)
+    except SubscriptionStoreError as exc:
+        print(f"Error: {exc}")
 
 
 def _cmd_subscribe(args):
