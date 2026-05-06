@@ -3816,11 +3816,17 @@ class GatewayRunner:
                     continue  # not time yet
 
                 if info["attempts"] >= _MAX_ATTEMPTS:
-                    logger.warning(
-                        "Giving up reconnecting %s after %d attempts",
-                        platform.value, info["attempts"],
+                    # Reset the counter and continue retrying at the
+                    # backoff cap instead of permanently abandoning the
+                    # platform.  A long-running gateway (days/weeks) should
+                    # recover from transient outages that exceed 20 attempts.
+                    logger.info(
+                        "Reconnect %s: %d attempts reached, continuing at "
+                        "backoff cap (%ds)",
+                        platform.value, info["attempts"], _BACKOFF_CAP,
                     )
-                    del self._failed_platforms[platform]
+                    info["attempts"] = 0
+                    info["next_retry"] = time.monotonic() + _BACKOFF_CAP
                     continue
 
                 platform_config = info["config"]
