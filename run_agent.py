@@ -7657,6 +7657,25 @@ class AIAgent:
         if not fb_provider or not fb_model:
             return self._try_activate_fallback()  # skip invalid, try next
 
+        # ── Skip same-provider fallback when credential pool is exhausted ──
+        # If the current provider's credential pool is fully drained (all
+        # entries in exhaustion cooldown), falling back to the SAME provider
+        # is futile — resolve_provider_client will resolve the same blocked
+        # key, producing another immediate failure and burning a fallback slot.
+        # This is the common case for single-key providers (Gemini API key,
+        # Vertex service account) where rotation has nowhere to go.
+        # See: credential pool exhaustion causing silent hang on 403.
+        current_provider = (getattr(self, "provider", "") or "").strip().lower()
+        if fb_provider == current_provider:
+            pool = getattr(self, "_credential_pool", None)
+            if pool is not None and not pool.has_available():
+                logging.info(
+                    "Fallback: skipping same provider %s — credential pool exhausted, "
+                    "trying next in chain",
+                    fb_provider,
+                )
+                return self._try_activate_fallback()  # skip, try next
+
         # Use centralized router for client construction.
         # raw_codex=True because the main agent needs direct responses.stream()
         # access for Codex providers.

@@ -71,6 +71,7 @@ SUPPORTED_POOL_STRATEGIES = {
 # 429 (rate-limited) and 402 (billing/quota) both cool down after 1 hour.
 # Provider-supplied reset_at timestamps override these defaults.
 EXHAUSTED_TTL_429_SECONDS = 60 * 60          # 1 hour
+EXHAUSTED_TTL_403_SECONDS = 5 * 60           # 5 minutes — auth failures recover quickly (key regen)
 EXHAUSTED_TTL_DEFAULT_SECONDS = 60 * 60      # 1 hour
 
 # Pool key prefix for custom OpenAI-compatible endpoints.
@@ -192,6 +193,8 @@ def _exhausted_ttl(error_code: Optional[int]) -> int:
     """Return cooldown seconds based on the HTTP status that caused exhaustion."""
     if error_code == 429:
         return EXHAUSTED_TTL_429_SECONDS
+    if error_code == 403:
+        return EXHAUSTED_TTL_403_SECONDS
     return EXHAUSTED_TTL_DEFAULT_SECONDS
 
 
