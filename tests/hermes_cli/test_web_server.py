@@ -106,11 +106,14 @@ class TestWebServerEndpoints:
         try:
             from starlette.testclient import TestClient
         except ImportError:
-            pytest.skip("fastapi/starlette not installed")
+            pytest.skip("fastapi/uvicorn not installed")
+        try:
+            from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+        except SystemExit:
+            pytest.skip("fastapi/uvicorn not installed")
 
         import hermes_state
         from hermes_constants import get_hermes_home
-        from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
 
         monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", get_hermes_home() / "state.db")
 
@@ -352,6 +355,13 @@ class TestWebServerEndpoints:
 
 
 class TestBuildSchemaFromConfig:
+    @pytest.fixture(autouse=True)
+    def _require_fastapi(self):
+        try:
+            import hermes_cli.web_server  # noqa: F401
+        except SystemExit:
+            pytest.skip("fastapi/uvicorn not installed")
+
     def test_produces_expected_field_count(self):
         from hermes_cli.web_server import CONFIG_SCHEMA
         # DEFAULT_CONFIG has ~150+ leaf fields
@@ -426,8 +436,11 @@ class TestConfigRoundTrip:
         try:
             from starlette.testclient import TestClient
         except ImportError:
-            pytest.skip("fastapi/starlette not installed")
-        from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+            pytest.skip("fastapi/uvicorn not installed")
+        try:
+            from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+        except SystemExit:
+            pytest.skip("fastapi/uvicorn not installed")
         self.client = TestClient(app)
         self.client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
 
@@ -559,11 +572,14 @@ class TestNewEndpoints:
         try:
             from starlette.testclient import TestClient
         except ImportError:
-            pytest.skip("fastapi/starlette not installed")
+            pytest.skip("fastapi/uvicorn not installed")
+        try:
+            from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+        except SystemExit:
+            pytest.skip("fastapi/uvicorn not installed")
 
         import hermes_state
         from hermes_constants import get_hermes_home
-        from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
 
         monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", get_hermes_home() / "state.db")
 
@@ -1048,6 +1064,13 @@ class TestNewEndpoints:
 class TestModelContextLength:
     """Tests for model_context_length in normalize/denormalize and /api/model/info."""
 
+    @pytest.fixture(autouse=True)
+    def _require_fastapi(self):
+        try:
+            import hermes_cli.web_server  # noqa: F401
+        except SystemExit:
+            pytest.skip("fastapi/uvicorn not installed")
+
     def test_normalize_extracts_context_length_from_dict(self):
         """normalize should surface context_length from model dict."""
         from hermes_cli.web_server import _normalize_config_for_web
@@ -1174,6 +1197,13 @@ class TestModelContextLength:
 class TestModelContextLengthSchema:
     """Tests for model_context_length placement in CONFIG_SCHEMA."""
 
+    @pytest.fixture(autouse=True)
+    def _require_fastapi(self):
+        try:
+            import hermes_cli.web_server  # noqa: F401
+        except SystemExit:
+            pytest.skip("fastapi/uvicorn not installed")
+
     def test_schema_has_model_context_length(self):
         from hermes_cli.web_server import CONFIG_SCHEMA
         assert "model_context_length" in CONFIG_SCHEMA
@@ -1200,8 +1230,11 @@ class TestModelInfoEndpoint:
         try:
             from starlette.testclient import TestClient
         except ImportError:
-            pytest.skip("fastapi/starlette not installed")
-        from hermes_cli.web_server import app
+            pytest.skip("fastapi/uvicorn not installed")
+        try:
+            from hermes_cli.web_server import app
+        except SystemExit:
+            pytest.skip("fastapi/uvicorn not installed")
         self.client = TestClient(app)
 
     def test_model_info_returns_200(self):
@@ -1327,6 +1360,13 @@ class TestModelInfoEndpoint:
 class TestProbeGatewayHealth:
     """Tests for _probe_gateway_health() — cross-container gateway detection."""
 
+    @pytest.fixture(autouse=True)
+    def _require_fastapi(self):
+        try:
+            import hermes_cli.web_server  # noqa: F401
+        except SystemExit:
+            pytest.skip("fastapi/uvicorn not installed")
+
     def test_returns_false_when_no_url_configured(self, monkeypatch):
         """When GATEWAY_HEALTH_URL is unset, the probe returns (False, None)."""
         import hermes_cli.web_server as ws
@@ -1429,9 +1469,12 @@ class TestStatusRemoteGateway:
         try:
             from starlette.testclient import TestClient
         except ImportError:
-            pytest.skip("fastapi/starlette not installed")
+            pytest.skip("fastapi/uvicorn not installed")
+        try:
+            from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+        except SystemExit:
+            pytest.skip("fastapi/uvicorn not installed")
 
-        from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
         self.client = TestClient(app)
         self.client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
 
@@ -1520,6 +1563,13 @@ class TestStatusRemoteGateway:
 
 class TestNormaliseThemeDefinition:
     """Tests for _normalise_theme_definition() — parses YAML theme files."""
+
+    @pytest.fixture(autouse=True)
+    def _require_fastapi(self):
+        try:
+            import hermes_cli.web_server  # noqa: F401
+        except SystemExit:
+            pytest.skip("fastapi/uvicorn not installed")
 
     def test_rejects_missing_name(self):
         from hermes_cli.web_server import _normalise_theme_definition
@@ -1653,6 +1703,13 @@ class TestNormaliseThemeDefinition:
 class TestDiscoverUserThemes:
     """Tests for _discover_user_themes() — scans ~/.hermes/dashboard-themes/."""
 
+    @pytest.fixture(autouse=True)
+    def _require_fastapi(self):
+        try:
+            import hermes_cli.web_server  # noqa: F401
+        except SystemExit:
+            pytest.skip("fastapi/uvicorn not installed")
+
     def test_returns_empty_when_dir_missing(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         from hermes_cli import web_server
@@ -1701,6 +1758,13 @@ class TestNormaliseThemeExtensions:
     """Tests for the extended normaliser fields (assets, customCSS,
     componentStyles, layoutVariant) — the surfaces themes use to reskin
     the dashboard without shipping code."""
+
+    @pytest.fixture(autouse=True)
+    def _require_fastapi(self):
+        try:
+            import hermes_cli.web_server  # noqa: F401
+        except SystemExit:
+            pytest.skip("fastapi/uvicorn not installed")
 
     def test_layout_variant_defaults_to_standard(self):
         from hermes_cli.web_server import _normalise_theme_definition
@@ -1829,6 +1893,13 @@ class TestNormaliseThemeExtensions:
 class TestDashboardPluginManifestExtensions:
     """Tests for the extended plugin manifest fields (tab.override,
     tab.hidden, slots) read by _discover_dashboard_plugins()."""
+
+    @pytest.fixture(autouse=True)
+    def _require_fastapi(self):
+        try:
+            import hermes_cli.web_server  # noqa: F401
+        except SystemExit:
+            pytest.skip("fastapi/uvicorn not installed")
 
     def _write_plugin(self, tmp_path, name, manifest):
         import json
@@ -1961,9 +2032,14 @@ skip_on_windows = pytest.mark.skipif(
 class TestPtyWebSocket:
     @pytest.fixture(autouse=True)
     def _setup(self, monkeypatch, _isolate_hermes_home):
-        from starlette.testclient import TestClient
-
-        import hermes_cli.web_server as ws
+        try:
+            from starlette.testclient import TestClient
+        except ImportError:
+            pytest.skip("fastapi/uvicorn not installed")
+        try:
+            import hermes_cli.web_server as ws
+        except SystemExit:
+            pytest.skip("fastapi/uvicorn not installed")
 
         # Avoid exec'ing the actual TUI in tests: every test below installs
         # its own fake argv via ``ws._resolve_chat_argv``.
