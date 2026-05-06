@@ -1,4 +1,5 @@
 import pytest
+pytest.importorskip("acp")
 from acp.schema import ImageContentBlock, TextContentBlock
 
 from acp_adapter.server import HermesACPAgent, _content_blocks_to_openai_user_content

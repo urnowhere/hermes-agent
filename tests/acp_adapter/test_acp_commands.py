@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+pytest.importorskip("acp")
 from acp.schema import TextContentBlock
 
 from acp_adapter.server import HermesACPAgent
