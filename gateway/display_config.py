@@ -100,6 +100,7 @@ _PLATFORM_DEFAULTS: dict[str, dict[str, Any]] = {
     "sms":             _TIER_MINIMAL,
     "webhook":         _TIER_MINIMAL,
     "homeassistant":   _TIER_MINIMAL,
+    "zulip":           _TIER_MEDIUM,
     "api_server":      {**_TIER_HIGH, "tool_preview_length": 0},
 }
 
