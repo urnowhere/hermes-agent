@@ -20,7 +20,7 @@ import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from hermes_constants import get_hermes_home
+from hermes_constants import get_default_hermes_root, get_hermes_home
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -72,8 +72,10 @@ def resolve_config_path() -> Path:
     if local_path.exists():
         return local_path
 
-    # Default profile's config — host blocks accumulate here via setup/clone
-    default_path = Path.home() / ".hermes" / "honcho.json"
+    # Default profile's config — host blocks accumulate here via setup/clone.
+    # Use get_default_hermes_root() so Docker (HERMES_HOME=/data) and custom
+    # deployments resolve to their own root, not the host's ~/.hermes.
+    default_path = get_default_hermes_root() / "honcho.json"
     if default_path != local_path and default_path.exists():
         return default_path
 
