@@ -2872,6 +2872,13 @@ _VALID_CUSTOM_PROVIDER_FIELDS = {
 # Fields that look like they should be inside custom_providers, not at root
 _CUSTOM_PROVIDER_LIKE_FIELDS = {"base_url", "api_key", "rate_limit_delay", "api_mode"}
 
+# Pseudo-values users might guess for model.default that are NOT valid model IDs.
+# Hermes always expects a concrete provider model ID (e.g. "gpt-5.5", "claude-sonnet-4").
+_PSEUDO_MODEL_VALUES = {
+    "latest", "auto", "default", "current", "best",
+    "newest", "recommended", "stable", "preview",
+}
+
 
 @dataclass
 class ConfigIssue:
@@ -3011,6 +3018,20 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
             "    default: your-model-name\n"
             "    base_url: https://...",
         ))
+
+    # ── model.default must not be a pseudo-alias ─────────────────────────
+    if isinstance(model_cfg, dict):
+        default_val = model_cfg.get("default", "") or ""
+        if isinstance(default_val, str) and default_val.strip().lower() in _PSEUDO_MODEL_VALUES:
+            pseudo = default_val.strip()
+            issues.append(ConfigIssue(
+                "warning",
+                f"model.default is set to '{pseudo}', which is not a valid model ID",
+                "Hermes requires a concrete provider model ID such as 'gpt-5.5' or "
+                "'anthropic/claude-sonnet-4'.  The value '" + pseudo + "' will be "
+                "passed literally to the provider and may cause an API error.\n"
+                "Run 'hermes setup' or set model.default to a real model ID.",
+            ))
 
     # ── Root-level keys that look misplaced ──────────────────────────────
     for key in config:

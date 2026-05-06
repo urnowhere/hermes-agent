@@ -193,6 +193,92 @@ class TestMissingModelSection:
         assert not any("no 'model' section" in i.message for i in issues)
 
 
+class TestModelDefaultPseudoValue:
+    """model.default must not be a pseudo-alias like 'latest', 'auto', etc.
+
+    Regression for #14963: a support incident where 'model.default: latest'
+    was incorrectly suggested as a valid Hermes config value.
+    """
+
+    def test_latest_warns(self):
+        """'latest' is a known pseudo-alias and should produce a warning."""
+        issues = validate_config_structure({
+            "model": {"default": "latest", "provider": "openai"},
+        })
+        pseudo_issues = [
+            i for i in issues
+            if "model.default" in i.message and "latest" in i.message
+        ]
+        assert len(pseudo_issues) == 1
+        assert pseudo_issues[0].severity == "warning"
+
+    def test_auto_warns(self):
+        issues = validate_config_structure({
+            "model": {"default": "auto"},
+        })
+        assert any(
+            "model.default" in i.message and "auto" in i.message
+            for i in issues
+        )
+
+    def test_default_warns(self):
+        issues = validate_config_structure({
+            "model": {"default": "default"},
+        })
+        assert any("model.default" in i.message for i in issues)
+
+    def test_case_insensitive(self):
+        """Pseudo-values should be detected regardless of case."""
+        for val in ("Latest", "LATEST", "Auto", "AUTO"):
+            issues = validate_config_structure({
+                "model": {"default": val},
+            })
+            assert any("model.default" in i.message for i in issues), (
+                f"Expected warning for model.default: '{val}'"
+            )
+
+    def test_concrete_model_id_no_warning(self):
+        """Real model IDs like 'gpt-5.5' must not trigger the warning."""
+        for model_id in ("gpt-5.5", "anthropic/claude-sonnet-4", "deepseek-v4-flash", "hermes-3-llama-3.1-405b"):
+            issues = validate_config_structure({
+                "model": {"default": model_id},
+            })
+            pseudo_issues = [i for i in issues if "model.default" in i.message and "not a valid model ID" in i.message]
+            assert len(pseudo_issues) == 0, (
+                f"Concrete model ID '{model_id}' should not trigger pseudo-value warning, got: {pseudo_issues}"
+            )
+
+    def test_hint_mentions_concrete_example(self):
+        """The warning hint should tell the user what to do instead."""
+        issues = validate_config_structure({
+            "model": {"default": "latest"},
+        })
+        pseudo_issues = [i for i in issues if "model.default" in i.message]
+        assert len(pseudo_issues) == 1
+        # Hint should reference 'hermes setup' or a concrete example
+        assert "hermes setup" in pseudo_issues[0].hint or "gpt-" in pseudo_issues[0].hint
+
+    def test_missing_model_section_no_crash(self):
+        """Configs without any model section should not crash the validator."""
+        issues = validate_config_structure({})
+        # No pseudo-value warning when there is no model section
+        assert not any("model.default" in i.message and "not a valid" in i.message for i in issues)
+
+    def test_model_default_empty_string_no_warning(self):
+        """Empty model.default should not trigger pseudo-value warning."""
+        issues = validate_config_structure({
+            "model": {"default": ""},
+        })
+        assert not any("not a valid model ID" in i.message for i in issues)
+
+    def test_model_default_none_no_warning(self):
+        """Null model.default should not trigger pseudo-value warning."""
+        issues = validate_config_structure({
+            "model": {"default": None},
+        })
+        assert not any("not a valid model ID" in i.message for i in issues)
+
+
 class TestConfigIssueDataclass:
     """ConfigIssue should be a proper dataclass."""
 
