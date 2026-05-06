@@ -28,6 +28,10 @@ from pathlib import Path
 from typing import Dict, Optional, Any
 
 from hermes_constants import get_hermes_dir
+from gateway.whatsapp_identity import (
+    normalize_whatsapp_identifier,
+    expand_whatsapp_aliases,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -215,15 +219,18 @@ class WhatsAppAdapter(BasePlatformAdapter):
         if raw is None:
             return set()
         if isinstance(raw, list):
-            return {str(part).strip() for part in raw if str(part).strip()}
-        return {part.strip() for part in str(raw).split(",") if part.strip()}
+            return {normalize_whatsapp_identifier(str(part)) for part in raw if str(part).strip()}
+        return {normalize_whatsapp_identifier(part) for part in str(raw).split(",") if part.strip()}
 
     def _is_dm_allowed(self, sender_id: str) -> bool:
         """Check whether a DM from the given sender should be processed."""
         if self._dm_policy == "disabled":
             return False
         if self._dm_policy == "allowlist":
-            return sender_id in self._allow_from
+            # Expand phone↔LID aliases so allowlist matches regardless of which
+            # identifier format the bridge delivers (bare phone, @s.whatsapp.net
+            # JID, or @lid LID).  Mirrors the logic in gateway.run._is_user_authorized.
+            return bool(expand_whatsapp_aliases(sender_id) & self._allow_from)
         # "open" — all DMs allowed
         return True
 
@@ -232,7 +239,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
         if self._group_policy == "disabled":
             return False
         if self._group_policy == "allowlist":
-            return chat_id in self._group_allow_from
+            return normalize_whatsapp_identifier(chat_id) in self._group_allow_from
         # "open" — all groups allowed
         return True
 
@@ -273,7 +280,10 @@ class WhatsAppAdapter(BasePlatformAdapter):
             return ""
         normalized = str(value).strip()
         if ":" in normalized and "@" in normalized:
-            normalized = normalized.replace(":", "@", 1)
+            # Strip device suffix: "number:10@domain" → "number@domain"
+            # The old replace(":", "@", 1) produced "number@10@domain" which
+            # never matched group participant JIDs (no device suffix).
+            normalized = re.sub(r":\d+@", "@", normalized)
         return normalized
 
     def _bot_ids_from_message(self, data: Dict[str, Any]) -> set[str]:
