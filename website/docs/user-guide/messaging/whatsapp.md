@@ -178,6 +178,30 @@ whatsapp:
 
 WhatsApp supports **streaming (progressive) responses** — the bot edits its message in real-time as the AI generates text, just like Discord and Telegram. Internally, WhatsApp is classified as a TIER_MEDIUM platform for delivery capabilities.
 
+### Inbound batching
+
+Batching mirrors **Telegram** in the gateway: separate quiet periods for **text** vs **rapid photo bursts**.
+
+**Text**
+
+When someone sends several plain-text bubbles (or one long message is split client-side), the adapter merges them after a short quiet window so the agent sees one combined turn:
+
+- **`HERMES_WHATSAPP_TEXT_BATCH_DELAY_SECONDS`** (default `0.6`) — after the last text chunk.
+- **`HERMES_WHATSAPP_TEXT_BATCH_SPLIT_DELAY_SECONDS`** (default `2.0`) — used when the latest chunk is near the split threshold (continuation likely).
+
+Set `HERMES_WHATSAPP_TEXT_BATCH_DELAY_SECONDS=0` to disable **text** batching.
+
+**Photos**
+
+Successive photos from the same chat are merged like Telegram albums:
+
+- **`HERMES_WHATSAPP_MEDIA_BATCH_DELAY_SECONDS`** (default `0.8`) — same knob role as **`HERMES_TELEGRAM_MEDIA_BATCH_DELAY_SECONDS`**.
+- Set to `0` to dispatch each photo immediately.
+
+Other inbound media (voice, video, documents) are not merged on this path.
+
+See [Environment variables](/docs/reference/environment-variables) (`HERMES_WHATSAPP_TEXT_BATCH_*`, `HERMES_WHATSAPP_MEDIA_BATCH_DELAY_SECONDS`).
+
 ### Chunking
 
 Long responses are automatically split into multiple messages at **4,096 characters** per chunk (WhatsApp's practical display limit). You don't need to configure anything — the gateway handles splitting and sends chunks sequentially.
