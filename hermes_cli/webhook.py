@@ -34,15 +34,28 @@ def _subscriptions_path() -> Path:
     return _hermes_home() / _SUBSCRIPTIONS_FILENAME
 
 
+class CorruptSubscriptionsError(Exception):
+    """Raised when the subscriptions file exists but cannot be parsed."""
+
+
 def _load_subscriptions() -> Dict[str, dict]:
     path = _subscriptions_path()
     if not path.exists():
         return {}
+    raw = path.read_text(encoding="utf-8")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise CorruptSubscriptionsError(
+            f"{path} contains invalid JSON and cannot be loaded. "
+            f"Fix or remove the file to continue. Parse error: {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise CorruptSubscriptionsError(
+            f"{path} contains valid JSON but is not a mapping (got {type(data).__name__}). "
+            f"Fix or remove the file to continue."
+        )
+    return data
 
 
 def _save_subscriptions(subs: Dict[str, dict]) -> None:
