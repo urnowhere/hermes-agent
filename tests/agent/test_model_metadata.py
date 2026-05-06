@@ -23,6 +23,7 @@ from agent.model_metadata import (
     CONTEXT_PROBE_TIERS,
     DEFAULT_CONTEXT_LENGTHS,
     _strip_provider_prefix,
+    ensure_v1_suffix,
     estimate_tokens_rough,
     estimate_messages_tokens_rough,
     get_model_context_length,
@@ -30,6 +31,7 @@ from agent.model_metadata import (
     get_cached_context_length,
     parse_context_limit_from_error,
     save_context_length,
+    strip_v1_suffix,
     fetch_model_metadata,
     _MODEL_CACHE_TTL,
 )
@@ -1022,3 +1024,60 @@ class TestContextLengthCache:
         with patch("agent.model_metadata._get_context_cache_path", return_value=cache_file):
             save_context_length(model, url, 200000)
             assert get_cached_context_length(model, url) == 200000
+
+
+# =========================================================================
+# /v1 suffix normalization helpers (#7516)
+# =========================================================================
+
+class TestEnsureV1Suffix:
+    """Pin the helper that rescues local OpenAI-compatible base URLs."""
+
+    def test_appends_v1_when_absent(self):
+        # The user's exact #7516 scenario: Ollama on localhost without /v1.
+        assert ensure_v1_suffix("http://127.0.0.1:11434") == "http://127.0.0.1:11434/v1"
+
+    def test_idempotent_when_already_v1(self):
+        assert ensure_v1_suffix("http://127.0.0.1:11434/v1") == "http://127.0.0.1:11434/v1"
+
+    def test_strips_trailing_slash_then_appends(self):
+        # Users sometimes write trailing slashes; the OpenAI SDK then
+        # produces //chat/completions which 404s on stricter servers.
+        assert ensure_v1_suffix("http://127.0.0.1:11434/") == "http://127.0.0.1:11434/v1"
+
+    def test_strips_trailing_slash_after_v1(self):
+        assert ensure_v1_suffix("http://127.0.0.1:11434/v1/") == "http://127.0.0.1:11434/v1"
+
+    def test_empty_string_returns_empty(self):
+        # Defensive: caller is responsible for is_local_endpoint check, but
+        # the helper must not invent a URL when there is none.
+        assert ensure_v1_suffix("") == ""
+
+    def test_none_returns_empty(self):
+        assert ensure_v1_suffix(None) == ""  # type: ignore[arg-type]
+
+
+class TestStripV1Suffix:
+    """Pin the inverse helper used to reach native (non-OpenAI) endpoints
+    on the same local server (e.g. Ollama's /api/show)."""
+
+    def test_strips_v1_when_present(self):
+        assert strip_v1_suffix("http://127.0.0.1:11434/v1") == "http://127.0.0.1:11434"
+
+    def test_no_op_when_absent(self):
+        assert strip_v1_suffix("http://127.0.0.1:11434") == "http://127.0.0.1:11434"
+
+    def test_strips_trailing_slash_then_v1(self):
+        assert strip_v1_suffix("http://127.0.0.1:11434/v1/") == "http://127.0.0.1:11434"
+
+    def test_does_not_strip_v1_in_path_segment(self):
+        # Only the trailing /v1 should go; an intermediate /v1/ in the
+        # path means the server lives there and must be preserved.
+        assert strip_v1_suffix("http://127.0.0.1:8000/v1/proxy") == "http://127.0.0.1:8000/v1/proxy"
+
+    def test_empty_string_returns_empty(self):
+        assert strip_v1_suffix("") == ""
+
+    def test_round_trip_through_ensure_then_strip(self):
+        original = "http://127.0.0.1:11434"
+        assert strip_v1_suffix(ensure_v1_suffix(original)) == original

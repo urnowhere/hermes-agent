@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 from hermes_cli import auth as auth_mod
 from agent.credential_pool import CredentialPool, PooledCredential, get_custom_provider_pool_key, load_pool
+from agent.model_metadata import ensure_v1_suffix, is_local_endpoint
 from hermes_cli.auth import (
     AuthError,
     DEFAULT_CODEX_BASE_URL,
@@ -539,11 +540,21 @@ def _resolve_named_custom_runtime(
     ]
     api_key = next((candidate for candidate in api_key_candidates if has_usable_secret(candidate)), "")
 
+    api_mode = (
+        custom_provider.get("api_mode")
+        or _detect_api_mode_for_url(base_url)
+        or "chat_completions"
+    )
+    # Same /v1 normalization as _resolve_openrouter_runtime — see #7516.
+    # Named custom providers pointing at a local OpenAI-compatible server
+    # (e.g. custom_providers: { name: ollama-local, base_url:
+    # http://127.0.0.1:11434 }) hit the identical SDK path bug.
+    if api_mode == "chat_completions" and is_local_endpoint(base_url):
+        base_url = ensure_v1_suffix(base_url)
+
     result = {
         "provider": "custom",
-        "api_mode": custom_provider.get("api_mode")
-        or _detect_api_mode_for_url(base_url)
-        or "chat_completions",
+        "api_mode": api_mode,
         "base_url": base_url,
         "api_key": api_key or "no-key-required",
         "source": f"custom_provider:{custom_provider.get('name', requested_provider)}",
@@ -649,11 +660,22 @@ def _resolve_openrouter_runtime(
     if effective_provider == "custom" and not api_key and not _is_openrouter_url:
         api_key = "no-key-required"
 
+    api_mode = (
+        _parse_api_mode(model_cfg.get("api_mode"))
+        or _detect_api_mode_for_url(base_url)
+        or "chat_completions"
+    )
+    # Local OpenAI-compatible servers (Ollama, llama.cpp, vLLM, LM Studio)
+    # serve their OpenAI-compatible API under /v1, but users naturally
+    # configure base_url: http://127.0.0.1:11434 without the version
+    # segment. The OpenAI SDK appends /chat/completions directly, so the
+    # request 404s without the /v1 segment. See [GitHub #7516].
+    if api_mode == "chat_completions" and is_local_endpoint(base_url):
+        base_url = ensure_v1_suffix(base_url)
+
     return {
         "provider": effective_provider,
-        "api_mode": _parse_api_mode(model_cfg.get("api_mode"))
-        or _detect_api_mode_for_url(base_url)
-        or "chat_completions",
+        "api_mode": api_mode,
         "base_url": base_url,
         "api_key": api_key,
         "source": source,

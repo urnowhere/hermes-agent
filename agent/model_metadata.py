@@ -352,6 +352,41 @@ def _is_known_provider_base_url(base_url: str) -> bool:
     return _infer_provider_from_url(base_url) is not None
 
 
+def ensure_v1_suffix(base_url: str) -> str:
+    """Ensure ``base_url`` ends with ``/v1``.
+
+    The OpenAI Python SDK appends ``/chat/completions`` directly to the
+    configured ``base_url`` without inserting a version segment, so callers
+    pointing at OpenAI-compatible endpoints whose API root lives under
+    ``/v1`` (Ollama, llama.cpp server, vLLM, LM Studio, ...) must already
+    include the version segment. Users naturally configure
+    ``base_url: http://127.0.0.1:11434`` and hit HTTP 404 because the SDK
+    requests ``/chat/completions`` instead of ``/v1/chat/completions``.
+
+    See [GitHub #7516].
+    """
+    url = (base_url or "").rstrip("/")
+    if not url:
+        return url
+    if url.endswith("/v1"):
+        return url
+    return f"{url}/v1"
+
+
+def strip_v1_suffix(base_url: str) -> str:
+    """Strip a trailing ``/v1`` so callers reach the server root.
+
+    Inverse of :func:`ensure_v1_suffix`. Used when calling native
+    (non-OpenAI-compatible) endpoints on the same local server, e.g.
+    Ollama's ``/api/show`` or ``/api/tags`` which live under the root,
+    not under ``/v1``.
+    """
+    url = (base_url or "").rstrip("/")
+    if url.endswith("/v1"):
+        return url[: -len("/v1")]
+    return url
+
+
 def is_local_endpoint(base_url: str) -> bool:
     """Return True if base_url points to a local machine.
 

@@ -1759,6 +1759,109 @@ class TestOllamaUrlSubstringLeak:
 
 
 # =============================================================================
+# Local OpenAI-compatible endpoint /v1 normalization (#7516)
+#
+# Users naturally configure base_url: http://127.0.0.1:11434 for Ollama, but
+# the OpenAI SDK appends /chat/completions directly to base_url so the request
+# 404s without the /v1 segment. resolve_runtime_provider must normalize at
+# the runtime resolution boundary so callers downstream (run_agent.py's
+# OpenAI(**client_kwargs) construction) see the corrected URL.
+# =============================================================================
+
+class TestLocalEndpointV1Normalization:
+    """Pin the #7516 fix at the runtime-resolver boundary."""
+
+    def _make_cfg(self, base_url, api_mode=None):
+        cfg = {"base_url": base_url, "api_key": "", "provider": "custom"}
+        if api_mode:
+            cfg["api_mode"] = api_mode
+        return cfg
+
+    def test_local_loopback_base_url_gets_v1_appended(self, monkeypatch):
+        """The reporter's exact #7516 scenario — Ollama on 127.0.0.1:11434
+        without /v1 in config. Must come back with /v1 so the OpenAI SDK
+        produces /v1/chat/completions instead of /chat/completions."""
+        monkeypatch.setenv("OPENAI_API_KEY", "oa-secret")
+        monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "custom")
+        monkeypatch.setattr(rp, "_get_model_config", lambda: self._make_cfg(
+            "http://127.0.0.1:11434"
+        ))
+        monkeypatch.setattr(rp, "load_pool", lambda provider: None)
+        monkeypatch.setattr(rp, "_try_resolve_from_custom_pool", lambda *a, **k: None)
+
+        resolved = rp.resolve_runtime_provider(requested="custom")
+
+        assert resolved["base_url"] == "http://127.0.0.1:11434/v1"
+        assert resolved["api_mode"] == "chat_completions"
+
+    def test_local_localhost_base_url_gets_v1_appended(self, monkeypatch):
+        """`localhost` hostname must get the same treatment as `127.0.0.1`."""
+        monkeypatch.setenv("OPENAI_API_KEY", "oa-secret")
+        monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "custom")
+        monkeypatch.setattr(rp, "_get_model_config", lambda: self._make_cfg(
+            "http://localhost:11434"
+        ))
+        monkeypatch.setattr(rp, "load_pool", lambda provider: None)
+        monkeypatch.setattr(rp, "_try_resolve_from_custom_pool", lambda *a, **k: None)
+
+        resolved = rp.resolve_runtime_provider(requested="custom")
+
+        assert resolved["base_url"] == "http://localhost:11434/v1"
+
+    def test_local_base_url_already_with_v1_is_idempotent(self, monkeypatch):
+        """Users following the workaround (manually appending /v1) must
+        not get a double /v1/v1 path."""
+        monkeypatch.setenv("OPENAI_API_KEY", "oa-secret")
+        monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "custom")
+        monkeypatch.setattr(rp, "_get_model_config", lambda: self._make_cfg(
+            "http://127.0.0.1:11434/v1"
+        ))
+        monkeypatch.setattr(rp, "load_pool", lambda provider: None)
+        monkeypatch.setattr(rp, "_try_resolve_from_custom_pool", lambda *a, **k: None)
+
+        resolved = rp.resolve_runtime_provider(requested="custom")
+
+        assert resolved["base_url"] == "http://127.0.0.1:11434/v1"
+
+    def test_remote_base_url_is_not_modified(self, monkeypatch):
+        """Negative pin: remote (non-local) custom endpoints must NOT have
+        /v1 force-appended. Only local endpoints have the SDK quirk that
+        the reporter hit, and adding /v1 to e.g. https://api.openrouter.ai
+        would break the URL."""
+        monkeypatch.setenv("OPENAI_API_KEY", "oa-secret")
+        monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "custom")
+        monkeypatch.setattr(rp, "_get_model_config", lambda: self._make_cfg(
+            "https://api.openrouter.ai"
+        ))
+        monkeypatch.setattr(rp, "load_pool", lambda provider: None)
+        monkeypatch.setattr(rp, "_try_resolve_from_custom_pool", lambda *a, **k: None)
+
+        resolved = rp.resolve_runtime_provider(requested="custom")
+
+        # Remote URL — no /v1 appended.
+        assert resolved["base_url"] == "https://api.openrouter.ai"
+
+    def test_anthropic_messages_local_endpoint_is_not_modified(self, monkeypatch):
+        """Negative pin: `anthropic_messages` mode does NOT need /v1 — the
+        Anthropic SDK appends /v1/messages itself, so /v1 + /v1/messages
+        would produce /v1/v1/messages and 404. The normalization is
+        gated on api_mode == 'chat_completions' precisely to avoid this."""
+        monkeypatch.setenv("OPENAI_API_KEY", "oa-secret")
+        monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "custom")
+        monkeypatch.setattr(rp, "_get_model_config", lambda: self._make_cfg(
+            "http://127.0.0.1:8080",
+            api_mode="anthropic_messages",
+        ))
+        monkeypatch.setattr(rp, "load_pool", lambda provider: None)
+        monkeypatch.setattr(rp, "_try_resolve_from_custom_pool", lambda *a, **k: None)
+
+        resolved = rp.resolve_runtime_provider(requested="custom")
+
+        assert resolved["api_mode"] == "anthropic_messages"
+        assert resolved["base_url"] == "http://127.0.0.1:8080"
+
+
+# =============================================================================
 # Azure Foundry — both OpenAI-style and Anthropic-style endpoints
 # =============================================================================
 
