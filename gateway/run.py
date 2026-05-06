@@ -12955,15 +12955,39 @@ class GatewayRunner:
                         break
                 return
 
+            # Check config: auto_delete_tool_progress (default: True)
+            try:
+                from hermes_cli.config import load_config as _lc
+                _auto_delete = cfg_get(_lc(), "display", "auto_delete_tool_progress", default=True)
+            except Exception:
+                _auto_delete = True
+
             progress_lines = []      # Accumulated tool lines
             progress_msg_id = None   # ID of the progress message to edit
             can_edit = True          # False once an edit fails (platform doesn't support it)
+            can_delete = True        # Separate from can_edit — Discord supports delete even after edit failures
             _last_edit_ts = 0.0      # Throttle edits to avoid Telegram flood control
             _PROGRESS_EDIT_INTERVAL = 1.5  # Minimum seconds between edits
 
             while True:
                 try:
                     if not _run_still_current():
+                        # Delete the progress bubble if the adapter supports
+                        # it — the run completed before we could process a
+                        # __reset__ signal from the stream consumer.  Without
+                        # this, the progress bubble stays visible on Discord.
+                        if _auto_delete and can_delete and progress_msg_id:
+                            try:
+                                if type(adapter).delete_message is not BasePlatformAdapter.delete_message:
+                                    _progress_chat_id = _progress_thread_id if _progress_thread_id else source.chat_id
+                                    logger.info("Deleting progress bubble %s in chat %s (run-completed)", progress_msg_id, _progress_chat_id)
+                                    result = await adapter.delete_message(_progress_chat_id, progress_msg_id)
+                                    logger.info("Delete result: %s", result)
+                                    if not result:
+                                        can_delete = False
+                            except Exception as e:
+                                logger.warning("Delete error on run completed: %s", e)
+                                can_delete = False
                         while not progress_queue.empty():
                             try:
                                 progress_queue.get_nowait()
@@ -13004,6 +13028,21 @@ class GatewayRunner:
                         # order. Mirrors GatewayStreamConsumer.on_segment_break
                         # on the content side. (Issue: tool + content
                         # linearization regression after PR #7885.)
+
+                        # Delete the closed-off progress bubble if the adapter
+                        # supports it — keeps Discord chats clean
+                        if _auto_delete and can_delete and progress_lines and progress_msg_id:
+                            try:
+                                if type(adapter).delete_message is not BasePlatformAdapter.delete_message:
+                                    _progress_chat_id = _progress_thread_id if _progress_thread_id else source.chat_id
+                                    logger.info("Deleting progress bubble %s in chat %s (__reset__)", progress_msg_id, _progress_chat_id)
+                                    result = await adapter.delete_message(_progress_chat_id, progress_msg_id)
+                                    logger.info("Delete result: %s", result)
+                                    if not result:
+                                        can_delete = False
+                            except Exception as e:
+                                logger.warning("Delete error: %s", e)
+                                can_delete = False
                         progress_msg_id = None
                         progress_lines = []
                         last_progress_msg[0] = None
@@ -13027,6 +13066,22 @@ class GatewayRunner:
                         continue
 
                     if not _run_still_current():
+                        # Delete the progress bubble on normal completion if the
+                        # adapter supports it — keeps Discord chats clean.
+                        # (The CancelledError handler below handles the interrupt
+                        # path; this covers the "agent finished normally" case.)
+                        if _auto_delete and progress_msg_id:
+                            try:
+                                if type(adapter).delete_message is not BasePlatformAdapter.delete_message:
+                                    _progress_chat_id = _progress_thread_id if _progress_thread_id else source.chat_id
+                                    logger.info("Deleting progress bubble %s in chat %s (normal-completion)", progress_msg_id, _progress_chat_id)
+                                    result = await adapter.delete_message(_progress_chat_id, progress_msg_id)
+                                    logger.info("Delete result: %s", result)
+                                    if not result:
+                                        can_delete = False
+                            except Exception as e:
+                                logger.warning("Delete error on normal completion: %s", e)
+                                can_delete = False
                         return
 
                     if can_edit and progress_msg_id is not None:
@@ -13092,6 +13147,24 @@ class GatewayRunner:
                                         )
                                     except Exception:
                                         pass
+                                # Delete the closed-off progress bubble if the
+                                # adapter supports it — keeps Discord chats clean.
+                                # NOTE: Gated on _auto_delete + can_delete (not
+                                # can_edit) — Discord supports delete even when
+                                # editing fails.  Nested-gate bug (May 2026);
+                                # delete was buried inside `if can_edit`.
+                                if _auto_delete and can_delete and progress_msg_id:
+                                    try:
+                                        if type(adapter).delete_message is not BasePlatformAdapter.delete_message:
+                                            _progress_chat_id = _progress_thread_id if _progress_thread_id else source.chat_id
+                                            logger.info("Deleting progress bubble %s in chat %s (__reset__)", progress_msg_id, _progress_chat_id)
+                                            result = await adapter.delete_message(_progress_chat_id, progress_msg_id)
+                                            logger.info("Delete result: %s", result)
+                                            if not result:
+                                                can_delete = False
+                                    except Exception as e:
+                                        logger.warning("Delete error: %s", e)
+                                        can_delete = False
                                 progress_msg_id = None
                                 progress_lines = []
                                 last_progress_msg[0] = None
@@ -13111,6 +13184,21 @@ class GatewayRunner:
                             )
                         except Exception:
                             pass
+
+                    # Delete the progress bubble after final edit if the
+                    # adapter supports it — keeps Discord chats clean
+                    if _auto_delete and progress_msg_id:
+                        try:
+                            if type(adapter).delete_message is not BasePlatformAdapter.delete_message:
+                                _progress_chat_id = _progress_thread_id if _progress_thread_id else source.chat_id
+                                logger.info("Deleting progress bubble %s in chat %s (final-drain)", progress_msg_id, _progress_chat_id)
+                                result = await adapter.delete_message(_progress_chat_id, progress_msg_id)
+                                logger.info("Delete result: %s", result)
+                                if not result:
+                                    can_delete = False
+                        except Exception as e:
+                            logger.warning("Delete error in final drain: %s", e)
+                            can_delete = False
                     return
                 except Exception as e:
                     logger.error("Progress message error: %s", e)
