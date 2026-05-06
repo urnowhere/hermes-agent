@@ -240,6 +240,23 @@ KANBAN_GUIDANCE = (
     "cross-agent handoffs that outlive one API loop."
 )
 
+CREDENTIAL_SAFETY_GUIDANCE = (
+    "# Credential safety\n"
+    "NEVER guess, fabricate, infer, or display passwords, secrets, API keys, tokens, "
+    "or credentials in your responses. This rule is absolute and applies to ALL "
+    "models and ALL platforms.\n"
+    "- Do NOT attempt to guess a user's password based on their username, hostname, "
+    "or any other information.\n"
+    "- Do NOT include passwords or credentials in chat messages, even when "
+    "apologizing or explaining an error.\n"
+    "- When a command requires sudo and the password is not configured, tell the "
+    "user the exact command(s) to run manually. Do NOT try to supply a password.\n"
+    "- When a tool returns an authentication failure, report the failure and suggest "
+    "the user configure the credential. Do NOT fabricate credentials to retry.\n"
+    "- If you discover credentials in tool output, do NOT repeat them in your "
+    "response to the user."
+)
+
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "# Tool-use enforcement\n"
     "You MUST use your tools to take action — do not describe what you would do "

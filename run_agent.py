@@ -149,7 +149,7 @@ from agent.model_metadata import (
 from agent.context_compressor import ContextCompressor
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
-from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
+from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, CREDENTIAL_SAFETY_GUIDANCE, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.codex_responses_adapter import (
     _derive_responses_function_call_id as _codex_derive_responses_function_call_id,
@@ -4944,6 +4944,11 @@ class AIAgent:
         # Pointer to the hermes-agent skill + docs for user questions about Hermes itself.
         prompt_parts.append(HERMES_AGENT_HELP_GUIDANCE)
 
+        # Credential safety — unconditional security invariant (issue #9590).
+        # Weaker/local models lack RLHF refusal training for credential
+        # guessing; the system prompt is the only defense.
+        prompt_parts.append(CREDENTIAL_SAFETY_GUIDANCE)
+
         # Tool-aware behavioral guidance: only inject when the tools are loaded
         tool_guidance = []
         if "memory" in self.valid_tool_names:
@@ -5096,6 +5101,66 @@ class AIAgent:
                 pass
 
         return "\n\n".join(p.strip() for p in prompt_parts if p.strip())
+
+    # =========================================================================
+    # Response-side credential scrubbing (issue #9590)
+    # =========================================================================
+
+    # Pattern 1: Keyword + explicit delimiter (is/:/=) + value.
+    # Catches: "password: hunter2", "password is secret123", "password=abc123"
+    _CREDENTIAL_LEAK_RE = re.compile(
+        r'(?:(?:sudo\s+|root\s+|user\s+|the\s+|your\s+|my\s+)?'
+        r'(?:password|passwd|passcode|passphrase|secret\s+key|api[_\s]?key|token|credential)'
+        r'\s*(?:is|:|=)\s*)'
+        r'([`\'""]?)(\S{3,})(\1)',
+        re.IGNORECASE,
+    )
+
+    # Pattern 2: Context word (with/using/try/enter) + keyword + space + value.
+    # Catches: "With password guessed_pw:" (the exact #9590 pattern)
+    # Requires a leading context word so "strong password" doesn't match.
+    _CREDENTIAL_CONTEXT_LEAK_RE = re.compile(
+        r'(?:with|using|try|enter)\s+'
+        r'(?:password|passwd|passcode|passphrase|secret\s+key|api[_\s]?key|token|credential)'
+        r'\s+'
+        r'([`\'\"\u201c\u201d]?)(\S{3,})(\1)',
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _scrub_credential_leaks(text: str) -> str:
+        """Scrub fabricated credential values from the final response.
+
+        Defence-in-depth for issue #9590: even when the system prompt
+        instructs the model not to guess passwords, weaker/local models
+        may still fabricate credential strings. This method detects common
+        patterns and replaces the value with [REDACTED].
+
+        Only applied to the final response text — never to tool output or
+        conversation history, so debugging is not impaired.
+        """
+        if not text:
+            return text
+
+        def _redact_match(m: re.Match) -> str:
+            # Preserve everything up to the value, replace value with [REDACTED]
+            full = m.group(0)
+            value = m.group(2)
+            q_open = m.group(1) or ""
+            q_close = m.group(3) or ""
+            return full.replace(
+                f"{q_open}{value}{q_close}",
+                f"{q_open}[REDACTED]{q_close}",
+            )
+
+        scrubbed = AIAgent._CREDENTIAL_LEAK_RE.sub(_redact_match, text)
+        scrubbed = AIAgent._CREDENTIAL_CONTEXT_LEAK_RE.sub(_redact_match, scrubbed)
+        if scrubbed != text:
+            logger.warning(
+                "Credential leak scrubbed from final response "
+                "(model attempted to output a credential value)"
+            )
+        return scrubbed
 
     # =========================================================================
     # Pre/post-call guardrails (inspired by PR #1321 — @alireza78a)
@@ -14072,6 +14137,15 @@ class AIAgent:
                 break
 
         # Build result with interrupt info if applicable
+
+        # ── Response-side credential scrubbing (defence-in-depth, #9590) ──
+        # Last-resort guard: even if the system prompt failed to prevent the
+        # model from fabricating a password, scrub common patterns before the
+        # text reaches the user.  Lightweight regex — only fires on password-
+        # like constructs the model might generate, not on every response.
+        if final_response and isinstance(final_response, str):
+            final_response = self._scrub_credential_leaks(final_response)
+
         result = {
             "final_response": final_response,
             "last_reasoning": last_reasoning,
