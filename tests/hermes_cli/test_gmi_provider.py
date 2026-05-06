@@ -284,6 +284,8 @@ class TestGmiAuxiliary:
         assert model == "google/gemini-3.1-flash-lite-preview"
         assert mock_openai.call_args.kwargs["api_key"] == "gmi-test-key"
         assert mock_openai.call_args.kwargs["base_url"] == "https://api.gmi-serving.com/v1"
+        headers = mock_openai.call_args.kwargs["default_headers"]
+        assert headers["User-Agent"].startswith("HermesAgent/")
 
     def test_resolve_provider_client_accepts_gmi_alias(self, monkeypatch):
         monkeypatch.setenv("GMI_API_KEY", "gmi-test-key")
