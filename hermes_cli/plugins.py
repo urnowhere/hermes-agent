@@ -42,6 +42,7 @@ import logging
 import os
 import sys
 import threading
+import time
 import types
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -112,6 +113,28 @@ VALID_HOOKS: Set[str] = {
     "pre_approval_request",
     "post_approval_response",
 }
+
+HOOK_CLASSES: Dict[str, str] = {
+    "pre_tool_call": "blocking",
+    "pre_llm_call": "blocking",
+    "pre_api_request": "blocking",
+    "pre_command": "blocking",
+    "pre_gateway_dispatch": "blocking",
+    "transform_terminal_output": "transforming",
+    "transform_tool_result": "transforming",
+    "post_tool_call": "observer",
+    "post_llm_call": "observer",
+    "post_api_request": "observer",
+    "on_session_start": "observer",
+    "on_session_end": "observer",
+    "on_session_finalize": "observer",
+    "on_session_reset": "observer",
+    "subagent_stop": "observer",
+    "pre_approval_request": "observer",
+    "post_approval_response": "observer",
+}
+
+HOOK_SLOW_WARN_MS = 250.0
 
 ENTRY_POINTS_GROUP = "hermes_agent.plugins"
 
@@ -1104,18 +1127,49 @@ class PluginManager:
         """
         callbacks = self._hooks.get(hook_name, [])
         results: List[Any] = []
+        hook_class = HOOK_CLASSES.get(hook_name, "unknown")
+        hook_total_start = time.perf_counter()
         for cb in callbacks:
+            cb_name = getattr(cb, "__name__", repr(cb))
+            cb_start = time.perf_counter()
             try:
                 ret = cb(**kwargs)
+                elapsed_ms = (time.perf_counter() - cb_start) * 1000.0
+                logger.info(
+                    "latency.phase plugin_hook_ms=%.2f hook=%s class=%s callback=%s returned=%s",
+                    elapsed_ms,
+                    hook_name,
+                    hook_class,
+                    cb_name,
+                    ret is not None,
+                )
+                if elapsed_ms >= HOOK_SLOW_WARN_MS:
+                    logger.warning(
+                        "Slow plugin hook: hook=%s class=%s callback=%s duration_ms=%.2f",
+                        hook_name,
+                        hook_class,
+                        cb_name,
+                        elapsed_ms,
+                    )
                 if ret is not None:
                     results.append(ret)
             except Exception as exc:
+                elapsed_ms = (time.perf_counter() - cb_start) * 1000.0
                 logger.warning(
-                    "Hook '%s' callback %s raised: %s",
+                    "Hook '%s' callback %s raised after %.2fms: %s",
                     hook_name,
-                    getattr(cb, "__name__", repr(cb)),
+                    cb_name,
+                    elapsed_ms,
                     exc,
                 )
+        logger.info(
+            "latency.phase plugin_hook_total_ms=%.2f hook=%s class=%s callbacks=%d results=%d",
+            (time.perf_counter() - hook_total_start) * 1000.0,
+            hook_name,
+            hook_class,
+            len(callbacks),
+            len(results),
+        )
         return results
 
     # -----------------------------------------------------------------------
