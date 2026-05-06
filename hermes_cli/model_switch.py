@@ -255,6 +255,56 @@ def _ensure_direct_aliases() -> None:
         DIRECT_ALIASES.update(_load_direct_aliases())
 
 
+def _resolve_builtin_alias_target(name: str, identity: ModelIdentity) -> str:
+    """Best-effort concrete model ID for a built-in alias.
+
+    Prefers an OpenRouter vendor/model slug because it is unambiguous across
+    providers. Falls back to a broader models.dev search, then finally to the
+    unresolved ``vendor/family`` prefix when the catalog is unavailable.
+    """
+    try:
+        alias_result = resolve_alias(name, "openrouter")
+        if alias_result is not None:
+            return alias_result[1]
+    except Exception:
+        pass
+
+    vendor_prefix = f"{identity.vendor}/{identity.family}".lower()
+    family_prefix = identity.family.lower()
+
+    try:
+        for match in list_provider_models("openrouter"):
+            model_lower = match.lower()
+            if model_lower.startswith(vendor_prefix) or model_lower.startswith(family_prefix):
+                return match
+    except Exception:
+        pass
+
+    return f"{identity.vendor}/{identity.family}"
+
+
+def list_all_aliases() -> list[tuple[str, str, str]]:
+    """Return every discoverable model alias as ``(name, resolved_model, source)``.
+
+    User-configured direct aliases shadow built-in aliases with the same name,
+    matching the runtime resolution order in :func:`resolve_alias`.
+    """
+    _ensure_direct_aliases()
+
+    aliases: list[tuple[str, str, str]] = []
+    user_alias_names = set(DIRECT_ALIASES)
+
+    for name, direct in sorted(DIRECT_ALIASES.items()):
+        aliases.append((name, direct.model, "user"))
+
+    for name, identity in sorted(MODEL_ALIASES.items()):
+        if name in user_alias_names:
+            continue
+        aliases.append((name, _resolve_builtin_alias_target(name, identity), "builtin"))
+
+    return aliases
+
+
 # ---------------------------------------------------------------------------
 # Result dataclasses
 # ---------------------------------------------------------------------------

@@ -5014,6 +5014,34 @@ class HermesCLI:
         print("  Tip: Use 'all' or '*' to enable all toolsets")
         print("  Example: python cli.py --toolsets web,terminal")
         print()
+
+    def _handle_aliases(self) -> None:
+        """Handle /aliases command — list all model shortcuts and aliases."""
+        from hermes_cli.model_switch import list_all_aliases
+
+        aliases = list_all_aliases()
+        if not aliases:
+            _cprint("  No model aliases available.")
+            return
+
+        builtin = [(name, resolved) for name, resolved, source in aliases if source == "builtin"]
+        user = [(name, resolved) for name, resolved, source in aliases if source == "user"]
+
+        print()
+        if builtin:
+            _cprint(f"  {_BOLD}Built-in shortcuts:{_RST}")
+            for name, resolved in builtin:
+                _cprint(f"    {name:<12} → {resolved}")
+        if user:
+            if builtin:
+                print()
+            _cprint(f"  {_BOLD}User-defined aliases:{_RST}")
+            for name, resolved in user:
+                _cprint(f"    {name:<12} → {resolved}")
+        if not user:
+            print()
+            _cprint(f"  {_DIM}Add custom aliases under model_aliases: in config.yaml{_RST}")
+        print()
     
     def _handle_profile_command(self):
         """Display active profile name and home directory."""
@@ -5787,6 +5815,8 @@ class HermesCLI:
         provider_label = result.provider_label or result.target_provider
         _cprint(f"  ✓ Model switched: {result.new_model}")
         _cprint(f"    Provider: {provider_label}")
+        if result.resolved_via_alias:
+            _cprint(f"    Alias: {result.resolved_via_alias}")
 
         # Context: always resolve via the provider-aware chain so Codex OAuth,
         # Copilot, and Nous-enforced caps win over the raw models.dev entry
@@ -6015,6 +6045,8 @@ class HermesCLI:
         provider_label = result.provider_label or result.target_provider
         _cprint(f"  ✓ Model switched: {result.new_model}")
         _cprint(f"    Provider: {provider_label}")
+        if result.resolved_via_alias:
+            _cprint(f"    Alias: {result.resolved_via_alias}")
 
         # Context: always resolve via the provider-aware chain so Codex OAuth,
         # Copilot, and Nous-enforced caps win over the raw models.dev entry
@@ -6751,6 +6783,8 @@ class HermesCLI:
                 self._handle_skills_command(cmd_original)
         elif canonical == "platforms":
             self._show_gateway_status()
+        elif canonical == "aliases":
+            self._handle_aliases()
         elif canonical == "status":
             self._show_session_status()
         elif canonical == "statusbar":

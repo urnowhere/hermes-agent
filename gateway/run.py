@@ -5359,6 +5359,9 @@ class GatewayRunner:
         if canonical == "model":
             return await self._handle_model_command(event)
 
+        if canonical == "aliases":
+            return await self._handle_aliases(event)
+
         if canonical == "personality":
             return await self._handle_personality_command(event)
 
@@ -7750,6 +7753,8 @@ class GatewayRunner:
                         plabel = result.provider_label or result.target_provider
                         lines = [f"Model switched to `{result.new_model}`"]
                         lines.append(f"Provider: {plabel}")
+                        if result.resolved_via_alias:
+                            lines.append(f"Alias: `{result.resolved_via_alias}`")
                         mi = result.model_info
                         from hermes_cli.model_switch import resolve_display_context_length
                         _sw_config_ctx = None
@@ -7907,6 +7912,8 @@ class GatewayRunner:
         provider_label = result.provider_label or result.target_provider
         lines = [f"Model switched to `{result.new_model}`"]
         lines.append(f"Provider: {provider_label}")
+        if result.resolved_via_alias:
+            lines.append(f"Alias: `{result.resolved_via_alias}`")
 
         # Context: always resolve via the provider-aware chain so Codex OAuth,
         # Copilot, and Nous-enforced caps win over the raw models.dev entry.
@@ -7955,6 +7962,34 @@ class GatewayRunner:
             lines.append("Saved to config.yaml (`--global`)")
         else:
             lines.append("_(session only -- add `--global` to persist)_")
+
+        return "\n".join(lines)
+
+    async def _handle_aliases(self, event: MessageEvent) -> str:
+        """Handle /aliases command - list model shortcuts and aliases."""
+        from hermes_cli.model_switch import list_all_aliases
+
+        aliases = list_all_aliases()
+        if not aliases:
+            return "No model aliases available."
+
+        builtin = [(name, resolved) for name, resolved, source in aliases if source == "builtin"]
+        user = [(name, resolved) for name, resolved, source in aliases if source == "user"]
+
+        lines = []
+        if builtin:
+            lines.append("**Built-in shortcuts:**")
+            for name, resolved in builtin:
+                lines.append(f"  `{name}` → `{resolved}`")
+        if user:
+            if builtin:
+                lines.append("")
+            lines.append("**User-defined aliases:**")
+            for name, resolved in user:
+                lines.append(f"  `{name}` → `{resolved}`")
+        if not user:
+            lines.append("")
+            lines.append("_Add custom aliases under `model_aliases:` in `config.yaml`._")
 
         return "\n".join(lines)
 
