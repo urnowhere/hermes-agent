@@ -970,6 +970,7 @@ class AIAgent:
         checkpoint_max_total_size_mb: int = 500,
         checkpoint_max_file_size_mb: int = 10,
         pass_session_id: bool = False,
+        responses_transport: str = "sse",
     ):
         """
         Initialize the AI Agent.
@@ -1045,6 +1046,11 @@ class AIAgent:
         self.skip_context_files = skip_context_files
         self.load_soul_identity = load_soul_identity
         self.pass_session_id = pass_session_id
+        try:
+            from agent.codex_websocket_transport import normalize_codex_responses_transport
+            self.responses_transport = normalize_codex_responses_transport(responses_transport)
+        except Exception:
+            self.responses_transport = "sse"
         self._credential_pool = credential_pool
         self.log_prefix_chars = log_prefix_chars
         self.log_prefix = f"{log_prefix} " if log_prefix else ""
@@ -4799,12 +4805,19 @@ class AIAgent:
         except Exception:
             pass
 
-        # Close the OpenAI/httpx client to release sockets immediately.
+        # Close the OpenAI/httpx client and any session-scoped Codex WebSocket
+        # transport state. A rebuilt agent gets fresh network credentials and
+        # should not inherit stale sockets.
         try:
             client = getattr(self, "client", None)
             if client is not None:
                 self._close_openai_client(client, reason="cache_evict", shared=True)
                 self.client = None
+        except Exception:
+            pass
+        try:
+            from agent.codex_websocket_transport import cleanup_codex_websocket_session
+            cleanup_codex_websocket_session(getattr(self, "session_id", None))
         except Exception:
             pass
 
@@ -4855,12 +4868,18 @@ class AIAgent:
         except Exception:
             pass
 
-        # 5. Close the OpenAI/httpx client
+        # 5. Close the OpenAI/httpx client and session-scoped Codex WebSocket
+        # transport state
         try:
             client = getattr(self, "client", None)
             if client is not None:
                 self._close_openai_client(client, reason="agent_close", shared=True)
                 self.client = None
+        except Exception:
+            pass
+        try:
+            from agent.codex_websocket_transport import cleanup_codex_websocket_session
+            cleanup_codex_websocket_session(getattr(self, "session_id", None))
         except Exception:
             pass
 
@@ -5907,96 +5926,130 @@ class AIAgent:
     def _close_request_openai_client(self, client: Any, *, reason: str) -> None:
         self._close_openai_client(client, reason=reason, shared=False)
 
+    def _collect_codex_stream_events(
+        self,
+        events,
+        get_final_response: callable = None,
+        on_first_delta: callable = None,
+        *,
+        log_label: str = "Codex stream",
+    ):
+        """Collect Responses stream events and preserve existing backfill behavior."""
+        has_tool_calls = False
+        first_delta_fired = False
+        collected_output_items: list = []
+        streamed_text_parts: list = []
+        terminal_response = None
+        for event in events:
+            self._touch_activity("receiving stream response")
+            if self._interrupt_requested:
+                break
+            event_type = getattr(event, "type", "")
+            if "output_text.delta" in event_type or event_type == "response.output_text.delta":
+                delta_text = getattr(event, "delta", "")
+                if delta_text:
+                    streamed_text_parts.append(delta_text)
+                if delta_text and not has_tool_calls:
+                    if not first_delta_fired:
+                        first_delta_fired = True
+                        if on_first_delta:
+                            try:
+                                on_first_delta()
+                            except Exception:
+                                pass
+                    self._fire_stream_delta(delta_text)
+            elif "function_call" in event_type:
+                has_tool_calls = True
+            elif "reasoning" in event_type and "delta" in event_type:
+                reasoning_text = getattr(event, "delta", "")
+                if reasoning_text:
+                    self._fire_reasoning_delta(reasoning_text)
+            elif event_type == "response.output_item.done":
+                done_item = getattr(event, "item", None)
+                if done_item is not None:
+                    collected_output_items.append(done_item)
+            elif event_type in ("response.completed", "response.done", "response.incomplete", "response.failed", "response.cancelled"):
+                terminal_response = getattr(event, "response", None)
+                if event_type in ("response.incomplete", "response.failed", "response.cancelled"):
+                    status = getattr(terminal_response, "status", None) if terminal_response else None
+                    incomplete_details = getattr(terminal_response, "incomplete_details", None) if terminal_response else None
+                    logger.warning(
+                        "Codex Responses stream received terminal event %s "
+                        "(status=%s, incomplete_details=%s, streamed_chars=%d). %s",
+                        event_type, status, incomplete_details,
+                        sum(len(p) for p in streamed_text_parts),
+                        self._client_log_context(),
+                    )
+
+        final_response = get_final_response() if get_final_response else terminal_response
+        if final_response is None:
+            raise RuntimeError("Responses stream did not emit a terminal response.")
+
+        _out = getattr(final_response, "output", None)
+        if isinstance(_out, list) and not _out:
+            if collected_output_items:
+                final_response.output = list(collected_output_items)
+                logger.debug("%s: backfilled %d output items from stream events", log_label, len(collected_output_items))
+            elif streamed_text_parts and not has_tool_calls:
+                assembled = "".join(streamed_text_parts)
+                final_response.output = [SimpleNamespace(
+                    type="message",
+                    role="assistant",
+                    status="completed",
+                    content=[SimpleNamespace(type="output_text", text=assembled)],
+                )]
+                logger.debug(
+                    "%s: synthesized output from %d text deltas (%d chars)",
+                    log_label, len(streamed_text_parts), len(assembled),
+                )
+        self._codex_streamed_text_parts = streamed_text_parts
+        return final_response
+
     def _run_codex_stream(self, api_kwargs: dict, client: Any = None, on_first_delta: callable = None):
         """Execute one streaming Responses API request and return the final response."""
         import httpx as _httpx
 
         active_client = client or self._ensure_primary_openai_client(reason="codex_stream_direct")
+        transport = getattr(self, "responses_transport", "sse") or "sse"
+        if transport != "sse":
+            from agent.codex_websocket_transport import (
+                WebSocketNotStartedError,
+                WebSocketStartedError,
+                run_codex_websocket_stream,
+            )
+            try:
+                return run_codex_websocket_stream(
+                    api_kwargs=api_kwargs,
+                    client=active_client,
+                    provider=self.provider,
+                    base_url=self.base_url,
+                    session_id=self.session_id,
+                    transport=transport,
+                    collect_events=lambda events, getter: self._collect_codex_stream_events(
+                        events, getter, on_first_delta, log_label="Codex WebSocket stream"
+                    ),
+                    interrupted=lambda: self._interrupt_requested,
+                )
+            except WebSocketNotStartedError as exc:
+                if transport == "auto":
+                    logger.debug("Codex WebSocket auto mode fell back to SSE before request start: %s", exc)
+                else:
+                    raise
+            except WebSocketStartedError:
+                raise
+
         max_stream_retries = 1
-        has_tool_calls = False
-        first_delta_fired = False
-        # Accumulate streamed text so we can recover if get_final_response()
-        # returns empty output (e.g. chatgpt.com backend-api sends
-        # response.incomplete instead of response.completed).
-        self._codex_streamed_text_parts: list = []
         for attempt in range(max_stream_retries + 1):
             if self._interrupt_requested:
                 raise InterruptedError("Agent interrupted before Codex stream retry")
-            collected_output_items: list = []
             try:
                 with active_client.responses.stream(**api_kwargs) as stream:
-                    for event in stream:
-                        self._touch_activity("receiving stream response")
-                        if self._interrupt_requested:
-                            break
-                        event_type = getattr(event, "type", "")
-                        # Fire callbacks on text content deltas (suppress during tool calls)
-                        if "output_text.delta" in event_type or event_type == "response.output_text.delta":
-                            delta_text = getattr(event, "delta", "")
-                            if delta_text:
-                                self._codex_streamed_text_parts.append(delta_text)
-                            if delta_text and not has_tool_calls:
-                                if not first_delta_fired:
-                                    first_delta_fired = True
-                                    if on_first_delta:
-                                        try:
-                                            on_first_delta()
-                                        except Exception:
-                                            pass
-                                self._fire_stream_delta(delta_text)
-                        # Track tool calls to suppress text streaming
-                        elif "function_call" in event_type:
-                            has_tool_calls = True
-                        # Fire reasoning callbacks
-                        elif "reasoning" in event_type and "delta" in event_type:
-                            reasoning_text = getattr(event, "delta", "")
-                            if reasoning_text:
-                                self._fire_reasoning_delta(reasoning_text)
-                        # Collect completed output items — some backends
-                        # (chatgpt.com/backend-api/codex) stream valid items
-                        # via response.output_item.done but the SDK's
-                        # get_final_response() returns an empty output list.
-                        elif event_type == "response.output_item.done":
-                            done_item = getattr(event, "item", None)
-                            if done_item is not None:
-                                collected_output_items.append(done_item)
-                        # Log non-completed terminal events for diagnostics
-                        elif event_type in ("response.incomplete", "response.failed"):
-                            resp_obj = getattr(event, "response", None)
-                            status = getattr(resp_obj, "status", None) if resp_obj else None
-                            incomplete_details = getattr(resp_obj, "incomplete_details", None) if resp_obj else None
-                            logger.warning(
-                                "Codex Responses stream received terminal event %s "
-                                "(status=%s, incomplete_details=%s, streamed_chars=%d). %s",
-                                event_type, status, incomplete_details,
-                                sum(len(p) for p in self._codex_streamed_text_parts),
-                                self._client_log_context(),
-                            )
-                    final_response = stream.get_final_response()
-                    # PATCH: ChatGPT Codex backend streams valid output items
-                    # but get_final_response() can return an empty output list.
-                    # Backfill from collected items or synthesize from deltas.
-                    _out = getattr(final_response, "output", None)
-                    if isinstance(_out, list) and not _out:
-                        if collected_output_items:
-                            final_response.output = list(collected_output_items)
-                            logger.debug(
-                                "Codex stream: backfilled %d output items from stream events",
-                                len(collected_output_items),
-                            )
-                        elif self._codex_streamed_text_parts and not has_tool_calls:
-                            assembled = "".join(self._codex_streamed_text_parts)
-                            final_response.output = [SimpleNamespace(
-                                type="message",
-                                role="assistant",
-                                status="completed",
-                                content=[SimpleNamespace(type="output_text", text=assembled)],
-                            )]
-                            logger.debug(
-                                "Codex stream: synthesized output from %d text deltas (%d chars)",
-                                len(self._codex_streamed_text_parts), len(assembled),
-                            )
-                    return final_response
+                    return self._collect_codex_stream_events(
+                        stream,
+                        stream.get_final_response,
+                        on_first_delta,
+                        log_label="Codex stream",
+                    )
             except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
                 if attempt < max_stream_retries:
                     logger.debug(
@@ -9293,6 +9346,11 @@ class AIAgent:
                 self.commit_memory_session(messages)
                 self._session_db.end_session(self.session_id, "compression")
                 old_session_id = self.session_id
+                try:
+                    from agent.codex_websocket_transport import cleanup_codex_websocket_session
+                    cleanup_codex_websocket_session(old_session_id)
+                except Exception:
+                    pass
                 self.session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
                 # Update session_log_file to point to the new session's JSON file
                 self.session_log_file = self.logs_dir / f"session_{self.session_id}.json"

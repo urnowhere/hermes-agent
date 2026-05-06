@@ -165,6 +165,15 @@ def _copilot_runtime_api_mode(model_cfg: Dict[str, Any], api_key: str) -> str:
 
 
 _VALID_API_MODES = {"chat_completions", "codex_responses", "anthropic_messages", "bedrock_converse"}
+_VALID_RESPONSES_TRANSPORTS = {"sse", "websocket", "websocket-cached", "auto"}
+
+
+def _parse_responses_transport(raw: Any) -> str:
+    if isinstance(raw, str):
+        normalized = raw.strip().lower().replace("_", "-")
+        if normalized in _VALID_RESPONSES_TRANSPORTS:
+            return normalized
+    return "sse"
 
 
 def _parse_api_mode(raw: Any) -> Optional[str]:
@@ -1056,6 +1065,7 @@ def resolve_runtime_provider(
                 "api_mode": "codex_responses",
                 "base_url": creds.get("base_url", "").rstrip("/"),
                 "api_key": creds.get("api_key", ""),
+                "responses_transport": _parse_responses_transport(model_cfg.get("responses_transport")),
                 "source": creds.get("source", "hermes-auth-store"),
                 "last_refresh": creds.get("last_refresh"),
                 "requested_provider": requested_provider,
