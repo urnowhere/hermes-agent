@@ -1233,7 +1233,117 @@ class GatewayRunner:
 
 
 
-    # -- Setup skill availability ----------------------------------------
+    def _build_platform_stream_consumer(
+        self,
+        *,
+        source: SessionSource,
+        adapter: Any,
+        scfg: Any,
+        metadata: Optional[Dict[str, Any]],
+        want_stream_deltas: bool,
+        on_new_message: Optional[callable] = None,
+    ) -> tuple[Optional[Any], Optional[Any]]:
+        """Build the appropriate stream consumer for a platform.
+
+        Returns ``(consumer, stream_delta_callback)`` where callback is set only
+        when token deltas should be streamed to the platform.
+        """
+        from gateway.config import Platform
+        from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
+
+        stream_consumer = None
+        stream_delta_cb = None
+
+        # WeCom uses native stream API instead of edit-based streaming.
+        if source.platform == Platform.WECOM:
+            _reply_req_id = getattr(adapter, '_current_reply_req_id', None)
+            _stream_id = getattr(adapter, '_thinking_stream_id', None)
+            if _reply_req_id and _stream_id:
+                from gateway.wecom_stream_consumer import WeComStreamConsumer
+                stream_consumer = WeComStreamConsumer(
+                    adapter=adapter,
+                    chat_id=source.chat_id,
+                    reply_req_id=_reply_req_id,
+                    stream_id=_stream_id,
+                    config=None,
+                    metadata=metadata,
+                )
+                if want_stream_deltas:
+                    stream_delta_cb = stream_consumer.on_delta
+                return stream_consumer, stream_delta_cb
+            return None, None
+
+        # Other platforms use the generic edit-based consumer.
+        # WeCom is the only non-editable platform that bypasses this path via
+        # a dedicated native stream API consumer above. Other non-editable
+        # platforms should skip generic streaming entirely, otherwise they can
+        # emit a partial message that can never be updated and later send a
+        # separate final message.
+        _adapter_supports_edit = getattr(adapter, "SUPPORTS_MESSAGE_EDITING", True)
+        if not _adapter_supports_edit:
+            return None, None
+
+        _effective_cursor = scfg.cursor
+        _buffer_only = False
+        if source.platform == Platform.MATRIX:
+            _effective_cursor = ""
+            _buffer_only = True
+        _fresh_final_secs = (
+            float(getattr(scfg, "fresh_final_after_seconds", 0.0) or 0.0)
+            if source.platform == Platform.TELEGRAM
+            else 0.0
+        )
+        _consumer_cfg = StreamConsumerConfig(
+            edit_interval=scfg.edit_interval,
+            buffer_threshold=scfg.buffer_threshold,
+            cursor=_effective_cursor,
+            buffer_only=_buffer_only,
+            fresh_final_after_seconds=_fresh_final_secs,
+        )
+        stream_consumer = GatewayStreamConsumer(
+            adapter=adapter,
+            chat_id=source.chat_id,
+            config=_consumer_cfg,
+            metadata=metadata,
+            on_new_message=on_new_message,
+        )
+        if want_stream_deltas:
+            stream_delta_cb = stream_consumer.on_delta
+        return stream_consumer, stream_delta_cb
+
+    def _resolve_reasoning_stream_callback(
+        self,
+        *,
+        source: SessionSource,
+        stream_consumer: Any,
+    ) -> Optional[Any]:
+        """Return the per-turn reasoning stream callback, if any.
+
+        Important for cached agents: callers should assign this result every
+        turn, including ``None``, so stale callbacks from prior turns do not
+        leak across show_reasoning toggles or platform changes.
+        """
+        _want_show_reasoning = False
+        try:
+            from gateway.display_config import resolve_display_setting as _rds
+            _want_show_reasoning = bool(_rds(
+                _load_gateway_config(),
+                _platform_config_key(source.platform),
+                "show_reasoning",
+                False,
+            ))
+        except Exception:
+            pass
+
+        try:
+            from gateway.wecom_stream_consumer import WeComStreamConsumer as _WCS
+            if isinstance(stream_consumer, _WCS) and _want_show_reasoning:
+                return stream_consumer.on_reasoning
+        except ImportError:
+            pass
+        return None
+
+
 
     def _has_setup_skill(self) -> bool:
         """Check if the hermes-agent-setup skill is installed."""
@@ -12519,36 +12629,14 @@ class GatewayRunner:
 
         if _streaming_enabled:
             try:
-                from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
                 _adapter = self.adapters.get(source.platform)
                 if _adapter:
-                    _adapter_supports_edit = getattr(_adapter, "SUPPORTS_MESSAGE_EDITING", True)
-                    _effective_cursor = _scfg.cursor if _adapter_supports_edit else ""
-                    _buffer_only = False
-                    if source.platform == Platform.MATRIX:
-                        _effective_cursor = ""
-                        _buffer_only = True
-                    # Fresh-final applies to Telegram only — other
-                    # platforms either edit in place cheaply (Discord,
-                    # Slack) or don't have the timestamp-on-edit
-                    # problem.  (Ported from openclaw/openclaw#72038.)
-                    _fresh_final_secs = (
-                        float(getattr(_scfg, "fresh_final_after_seconds", 0.0) or 0.0)
-                        if source.platform == Platform.TELEGRAM
-                        else 0.0
-                    )
-                    _consumer_cfg = StreamConsumerConfig(
-                        edit_interval=_scfg.edit_interval,
-                        buffer_threshold=_scfg.buffer_threshold,
-                        cursor=_effective_cursor,
-                        buffer_only=_buffer_only,
-                        fresh_final_after_seconds=_fresh_final_secs,
-                    )
-                    _stream_consumer = GatewayStreamConsumer(
+                    _stream_consumer, _ = self._build_platform_stream_consumer(
+                        source=source,
                         adapter=_adapter,
-                        chat_id=source.chat_id,
-                        config=_consumer_cfg,
+                        scfg=_scfg,
                         metadata=_thread_metadata,
+                        want_stream_deltas=False,
                     )
             except Exception as _sc_err:
                 logger.debug("Proxy: could not set up stream consumer: %s", _sc_err)
@@ -13261,57 +13349,22 @@ class GatewayRunner:
             _want_interim_consumer = _want_interim_messages
             if _want_stream_deltas or _want_interim_consumer:
                 try:
-                    from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
                     _adapter = self.adapters.get(source.platform)
                     if _adapter:
-                        # Platforms that don't support editing sent messages
-                        # (e.g. QQ, WeChat) should skip streaming entirely —
-                        # without edit support, the consumer sends a partial
-                        # first message that can never be updated, resulting in
-                        # duplicate messages (partial + final).
-                        _adapter_supports_edit = getattr(_adapter, "SUPPORTS_MESSAGE_EDITING", True)
-                        if not _adapter_supports_edit:
-                            raise RuntimeError("skip streaming for non-editable platform")
-                        _effective_cursor = _scfg.cursor
-                        # Some Matrix clients render the streaming cursor
-                        # as a visible tofu/white-box artifact.  Keep
-                        # streaming text on Matrix, but suppress the cursor.
-                        _buffer_only = False
-                        if source.platform == Platform.MATRIX:
-                            _effective_cursor = ""
-                            _buffer_only = True
-                        # Fresh-final applies to Telegram only — other
-                        # platforms either edit in place cheaply or don't
-                        # have the edit-timestamp-stays-stale problem.
-                        # (Ported from openclaw/openclaw#72038.)
-                        _fresh_final_secs = (
-                            float(getattr(_scfg, "fresh_final_after_seconds", 0.0) or 0.0)
-                            if source.platform == Platform.TELEGRAM
-                            else 0.0
-                        )
-                        _consumer_cfg = StreamConsumerConfig(
-                            edit_interval=_scfg.edit_interval,
-                            buffer_threshold=_scfg.buffer_threshold,
-                            cursor=_effective_cursor,
-                            buffer_only=_buffer_only,
-                            fresh_final_after_seconds=_fresh_final_secs,
-                        )
-                        _stream_consumer = GatewayStreamConsumer(
+                        _stream_consumer, _stream_delta_cb = self._build_platform_stream_consumer(
+                            source=source,
                             adapter=_adapter,
-                            chat_id=source.chat_id,
-                            config=_consumer_cfg,
+                            scfg=_scfg,
                             metadata={"thread_id": _progress_thread_id} if _progress_thread_id else None,
+                            want_stream_deltas=_want_stream_deltas,
                             on_new_message=(
                                 (lambda: progress_queue.put(("__reset__",)))
                                 if progress_queue is not None
                                 else None
                             ),
                         )
-                        if _want_stream_deltas:
-                            def _stream_delta_cb(text: str) -> None:
-                                if _run_still_current():
-                                    _stream_consumer.on_delta(text)
-                        stream_consumer_holder[0] = _stream_consumer
+                        if _stream_consumer is not None:
+                            stream_consumer_holder[0] = _stream_consumer
                 except Exception as _sc_err:
                     logger.debug("Could not set up stream consumer: %s", _sc_err)
 
@@ -13414,6 +13467,13 @@ class GatewayRunner:
             agent.stream_delta_callback = _stream_delta_cb
             agent.interim_assistant_callback = _interim_assistant_cb if _want_interim_messages else None
             agent.status_callback = _status_callback_sync
+            # Always reset the per-turn reasoning callback, including to None,
+            # so cached agents do not leak a stale WeCom reasoning stream
+            # callback across show_reasoning toggles or platform changes.
+            agent.reasoning_callback = self._resolve_reasoning_stream_callback(
+                source=source,
+                stream_consumer=_stream_consumer,
+            )
             agent.reasoning_config = reasoning_config
             agent.service_tier = self._service_tier
             agent.request_overrides = turn_route.get("request_overrides") or {}
@@ -13733,7 +13793,7 @@ class GatewayRunner:
                         if any(p.get("type") == "image_url" for p in _parts):
                             _run_message: Any = _parts
                         else:
-                            # All images failed to read — fall back to plain text.
+                            # All images failed to read, fall back to plain text.
                             _run_message = message
                     except Exception as _img_exc:
                         logger.warning(
@@ -13744,7 +13804,20 @@ class GatewayRunner:
                 else:
                     _run_message = message
 
-                result = agent.run_conversation(_run_message, conversation_history=agent_history, task_id=session_id)
+                result = agent.run_conversation(
+                    _run_message,
+                    conversation_history=agent_history,
+                    task_id=session_id,
+                )
+            except Exception as _agent_exc:
+                # Notify the stream consumer so it can close the think block
+                # with an error hint instead of leaving a silent empty bubble.
+                if _stream_consumer is not None:
+                    try:
+                        _stream_consumer.on_error(f"响应中断: {type(_agent_exc).__name__}")
+                    except Exception:
+                        pass
+                raise
             finally:
                 unregister_gateway_notify(_approval_session_key)
                 reset_current_session_key(_approval_session_token)
