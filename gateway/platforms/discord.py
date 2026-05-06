@@ -3303,12 +3303,20 @@ class DiscordAdapter(BasePlatformAdapter):
         reason = f"Requested by {display_name} via /thread"
         starter_message = (message or "").strip()
 
+        user_member = interaction.user 
+        
         try:
             thread = await parent_channel.create_thread(
                 name=name,
                 auto_archive_duration=auto_archive_duration,
                 reason=reason,
             )
+
+            try:
+                await thread.add_user(user_member)
+            except Exception as e:
+                logger.warning(f"Failed to add user to thread: {e}")
+                
             if starter_message:
                 await thread.send(starter_message)
             return {
@@ -3325,6 +3333,12 @@ class DiscordAdapter(BasePlatformAdapter):
                     auto_archive_duration=auto_archive_duration,
                     reason=reason,
                 )
+
+                try:
+                    await thread.add_user(user_member)
+                except Exception as e:
+                    logger.warning(f"Failed to add user to fallback thread: {e}")
+                    
                 return {
                     "success": True,
                     "thread_id": str(thread.id),
