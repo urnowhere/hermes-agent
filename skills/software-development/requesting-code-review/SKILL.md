@@ -123,7 +123,7 @@ Quick scan before dispatching the reviewer:
 
 ## Step 5 — Independent reviewer subagent
 
-Call `delegate_task` directly — it is NOT available inside execute_code or scripts.
+Call `delegate_task` directly — it is NOT available inside execute_code or scripts. Use the slim result mode (`delegation.result_detail_level: slim` by default); only pass `detail_level="detailed"` when debugging delegate_task internals. Tell the reviewer subagent to return a compact verdict/evidence list and not to paste raw logs, full diffs, or long tool outputs.
 
 The reviewer gets ONLY the diff and static scan results. No shared context with
 the implementer. Fail-closed: unparseable response = fail.

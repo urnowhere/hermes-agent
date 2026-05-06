@@ -18,6 +18,18 @@ Execute implementation plans by dispatching fresh subagents per task with system
 
 **Core principle:** Fresh subagent per task + two-stage review (spec then quality) = high quality, fast iteration.
 
+## Default Hermes delegate_task contract
+
+Every `delegate_task` call in this workflow should rely on the tool's slim result contract (`delegation.result_detail_level: slim` by default). Do not request `detail_level="detailed"` unless debugging the delegation system itself. Child final answers must be compact and parent-actionable:
+
+- status/verdict
+- concise conclusion
+- key evidence with file paths / commands / IDs
+- verification performed
+- blockers or risks
+
+Child agents must compress tool output: do not paste raw logs, full command output, full files, or long search dumps into final summaries. Write bulky evidence to local files when needed and return only paths plus short excerpts.
+
 ## When to Use
 
 Use this skill when:

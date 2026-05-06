@@ -570,7 +570,12 @@ def _build_child_system_prompt(
         "Important workspace rule: Never assume a repository lives at /workspace/... or any other container-style path unless the task/context explicitly gives that path. "
         "If no exact local path is provided, discover it first before issuing git/workdir-specific commands.\n\n"
         "Be thorough but concise -- your response is returned to the "
-        "parent agent as a summary."
+        "parent agent as a summary.\n\n"
+        "Subagent output discipline: compress tool output aggressively. Do not paste raw logs, "
+        "full command output, full file contents, or long search/result dumps into your final "
+        "summary. Write bulky evidence to files when useful, then report only short excerpts, "
+        "paths, counts, verdicts, and the specific facts needed by the parent. If a tool returns "
+        "large output, reduce it to key evidence and verification status before responding."
     )
     if role == "orchestrator":
         child_note = (
@@ -1263,6 +1268,130 @@ def _dump_subagent_timeout_diagnostic(
         return None
 
 
+def _public_scalar(value):
+    """Return JSON-safe lightweight scalar values; drop mocks/objects."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return None
+
+
+def _public_json_value(value):
+    """Best-effort JSON-safe value for detailed delegate payloads."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {
+            str(k): _public_json_value(v)
+            for k, v in value.items()
+            if _public_json_value(v) is not None
+        }
+    if isinstance(value, list):
+        return [v for item in value if (v := _public_json_value(item)) is not None]
+    return None
+
+
+def _token_block_for_child(child, result: Optional[Dict[str, Any]] = None) -> Dict[str, int]:
+    """Best-effort token counters for public delegation diagnostics."""
+    result = result or {}
+    input_tokens = getattr(child, "session_prompt_tokens", 0)
+    output_tokens = getattr(child, "session_completion_tokens", 0)
+    reasoning_tokens = getattr(child, "session_reasoning_tokens", 0)
+    try:
+        input_tokens = int(input_tokens) if isinstance(input_tokens, (int, float)) else 0
+    except Exception:
+        input_tokens = 0
+    try:
+        output_tokens = int(output_tokens) if isinstance(output_tokens, (int, float)) else 0
+    except Exception:
+        output_tokens = 0
+    try:
+        reasoning_tokens = int(reasoning_tokens) if isinstance(reasoning_tokens, (int, float)) else 0
+    except Exception:
+        reasoning_tokens = 0
+    total = input_tokens + output_tokens + reasoning_tokens
+    if not total:
+        usage = result.get("usage") if isinstance(result, dict) else None
+        if isinstance(usage, dict):
+            try:
+                total = int(usage.get("total_tokens") or usage.get("total") or 0)
+            except Exception:
+                total = 0
+    return {
+        "input": input_tokens,
+        "output": output_tokens,
+        "reasoning": reasoning_tokens,
+        "total": total,
+    }
+
+
+def _child_diagnostic_fields(child, result: Optional[Dict[str, Any]] = None, exc: Optional[BaseException] = None) -> Dict[str, Any]:
+    """Lightweight provider/model/error diagnostics for subagent results."""
+    result = result or {}
+    fields: Dict[str, Any] = {
+        "provider": _public_scalar(getattr(child, "provider", None) if child is not None else None),
+        "model": _public_scalar(getattr(child, "model", None) if child is not None else None),
+        "tokens": _token_block_for_child(child, result),
+        "request_dump_path": _public_scalar(
+            result.get("request_dump_path")
+            or getattr(child, "_last_api_request_dump_path", None)
+            or getattr(child, "last_api_request_dump_path", None)
+        ),
+    }
+    if exc is not None:
+        fields["error_type"] = type(exc).__name__
+    elif result.get("error_type"):
+        fields["error_type"] = result.get("error_type")
+    elif result.get("failed") or result.get("error"):
+        fields["error_type"] = "SubagentError"
+    return {k: v for k, v in fields.items() if v not in (None, "", {})}
+
+
+def _public_delegate_entry(entry: Dict[str, Any], *, detailed: bool) -> Dict[str, Any]:
+    """Shape one internal child entry for the parent model.
+
+    Slim mode is the default context-saving contract. Detailed mode preserves
+    legacy observability fields for explicit delegation debugging. Failures keep
+    actionable diagnostics even in slim mode.
+    """
+    slim_keys = (
+        "task_index",
+        "status",
+        "summary",
+        "error",
+        "duration_seconds",
+        "exit_reason",
+        "delegation_id",
+        "child_session_id",
+        "child_role",
+        "depth",
+        "diagnostic_path",
+    )
+    if detailed:
+        return {
+            k: cleaned
+            for k, v in entry.items()
+            if not k.startswith("_") and (cleaned := _public_json_value(v)) is not None
+        }
+
+    public = {
+        k: cleaned
+        for k in slim_keys
+        if k in entry and (cleaned := _public_json_value(entry[k])) is not None
+    }
+    if entry.get("status") in {"error", "failed", "timeout", "interrupted"}:
+        for k in (
+            "error_type",
+            "provider",
+            "model",
+            "tokens",
+            "api_calls",
+            "request_dump_path",
+        ):
+            if k in entry and (cleaned := _public_json_value(entry[k])) is not None:
+                public[k] = cleaned
+    return public
+
+
 def _run_single_child(
     task_index: int,
     goal: str,
@@ -1312,7 +1441,12 @@ def _run_single_child(
     _stale_count = [0]
 
     def _heartbeat_loop():
-        while not _heartbeat_stop.wait(_HEARTBEAT_INTERVAL):
+        heartbeat_interval = (
+            max(0.001, _HEARTBEAT_INTERVAL / 8)
+            if _HEARTBEAT_INTERVAL < 1
+            else _HEARTBEAT_INTERVAL
+        )
+        while not _heartbeat_stop.wait(heartbeat_interval):
             if parent_agent is None:
                 continue
             touch = getattr(parent_agent, "_touch_activity", None)
@@ -1537,7 +1671,7 @@ def _run_single_child(
             else:
                 _err = str(_timeout_exc)
 
-            return {
+            entry = {
                 "task_index": task_index,
                 "status": "timeout" if is_timeout else "error",
                 "summary": None,
@@ -1545,9 +1679,15 @@ def _run_single_child(
                 "exit_reason": "timeout" if is_timeout else "error",
                 "api_calls": child_api_calls,
                 "duration_seconds": duration,
+                "delegation_id": getattr(child, "_subagent_id", None),
+                "child_session_id": getattr(child, "session_id", None),
+                "child_role": getattr(child, "_delegate_role", None),
+                "depth": getattr(child, "_delegate_depth", None),
                 "_child_role": getattr(child, "_delegate_role", None),
                 "diagnostic_path": diagnostic_path,
             }
+            entry.update(_child_diagnostic_fields(child, exc=_timeout_exc))
+            return entry
         finally:
             # Shut down executor without waiting — if the child thread
             # is stuck on blocking I/O, wait=True would hang forever.
@@ -1569,6 +1709,8 @@ def _run_single_child(
 
         if interrupted:
             status = "interrupted"
+        elif result.get("failed"):
+            status = "failed"
         elif summary:
             # A summary means the subagent produced usable output.
             # exit_reason ("completed" vs "max_iterations") already
@@ -1634,15 +1776,12 @@ def _run_single_child(
             "duration_seconds": duration,
             "model": _model if isinstance(_model, str) else None,
             "exit_reason": exit_reason,
-            "tokens": {
-                "input": (
-                    _input_tokens if isinstance(_input_tokens, (int, float)) else 0
-                ),
-                "output": (
-                    _output_tokens if isinstance(_output_tokens, (int, float)) else 0
-                ),
-            },
+            "tokens": _token_block_for_child(child, result),
             "tool_trace": tool_trace,
+            "delegation_id": getattr(child, "_subagent_id", None),
+            "child_session_id": getattr(child, "session_id", None),
+            "child_role": getattr(child, "_delegate_role", None),
+            "depth": getattr(child, "_delegate_depth", None),
             # Captured before the finally block calls child.close() so the
             # parent thread can fire subagent_stop with the correct role.
             # Stripped before the dict is serialised back to the model.
@@ -1663,6 +1802,7 @@ def _run_single_child(
         }
         if status == "failed":
             entry["error"] = result.get("error", "Subagent did not produce a response.")
+            entry.update(_child_diagnostic_fields(child, result=result))
 
         # Cross-agent file-state reminder.  If this subagent wrote any
         # files the parent had already read, surface it so the parent
@@ -1774,15 +1914,22 @@ def _run_single_child(
                 )
             except Exception as e:
                 logger.debug("Progress callback failure relay failed: %s", e)
-        return {
+        entry = {
             "task_index": task_index,
             "status": "error",
             "summary": None,
             "error": str(exc),
+            "exit_reason": "error",
             "api_calls": 0,
             "duration_seconds": duration,
+            "delegation_id": getattr(child, "_subagent_id", None),
+            "child_session_id": getattr(child, "session_id", None),
+            "child_role": getattr(child, "_delegate_role", None),
+            "depth": getattr(child, "_delegate_depth", None),
             "_child_role": getattr(child, "_delegate_role", None),
         }
+        entry.update(_child_diagnostic_fields(child, exc=exc))
+        return entry
 
     finally:
         # Stop the heartbeat thread so it doesn't keep touching parent activity
@@ -1842,6 +1989,7 @@ def delegate_task(
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
+    detail_level: Optional[str] = None,
     parent_agent=None,
 ) -> str:
     """
@@ -1860,6 +2008,23 @@ def delegate_task(
     """
     if parent_agent is None:
         return tool_error("delegate_task requires a parent agent context.")
+
+    # Load config before resolving result detail so config.yaml can define the
+    # default while a tool-call argument can still override it per invocation.
+    cfg = _load_config()
+    configured_detail = cfg.get("result_detail_level", "slim")
+    requested_detail = str(
+        detail_level if detail_level is not None else configured_detail
+    ).strip().lower()
+    if requested_detail not in {"slim", "detailed"}:
+        if detail_level is not None:
+            return tool_error("delegate_task detail_level must be 'slim' or 'detailed'.")
+        logger.warning(
+            "delegation.result_detail_level=%r is invalid; using slim",
+            requested_detail,
+        )
+        requested_detail = "slim"
+    detailed_results = requested_detail == "detailed"
 
     # Operator-controlled kill switch — lets the TUI freeze new fan-out
     # when a runaway tree is detected, without interrupting already-running
@@ -1889,8 +2054,6 @@ def delegate_task(
             }
         )
 
-    # Load config
-    cfg = _load_config()
     default_max_iter = cfg.get("max_iterations", DEFAULT_MAX_ITERATIONS)
     # Model-supplied max_iterations is ignored — the config value is authoritative
     # so users get predictable budgets. The kwarg is retained for internal callers
@@ -2046,6 +2209,8 @@ def delegate_task(
                                     "error": str(exc),
                                     "api_calls": 0,
                                     "duration_seconds": 0,
+                                    "exit_reason": "error",
+                                    "error_type": type(exc).__name__,
                                     "_child_role": getattr(
                                         _child_by_index.get(idx), "_delegate_role", None
                                     ),
@@ -2058,6 +2223,8 @@ def delegate_task(
                                 "error": "Parent agent interrupted — child did not finish in time",
                                 "api_calls": 0,
                                 "duration_seconds": 0,
+                                "exit_reason": "interrupted",
+                                "error_type": "InterruptedError",
                                 "_child_role": getattr(
                                     _child_by_index.get(idx), "_delegate_role", None
                                 ),
@@ -2083,6 +2250,8 @@ def delegate_task(
                             "error": str(exc),
                             "api_calls": 0,
                             "duration_seconds": 0,
+                            "exit_reason": "error",
+                            "error_type": type(exc).__name__,
                             "_child_role": getattr(
                                 _child_by_index.get(idx), "_delegate_role", None
                             ),
@@ -2207,10 +2376,13 @@ def delegate_task(
             logger.debug("Subagent cost rollup failed", exc_info=True)
 
     total_duration = round(time.monotonic() - overall_start, 2)
+    public_results = [
+        _public_delegate_entry(entry, detailed=detailed_results) for entry in results
+    ]
 
     return json.dumps(
         {
-            "results": results,
+            "results": public_results,
             "total_duration_seconds": total_duration,
         },
         ensure_ascii=False,
@@ -2429,7 +2601,9 @@ DELEGATE_TASK_SCHEMA = {
         "(default 2) and can be disabled globally via "
         "delegation.orchestrator_enabled=false.\n"
         "- Each subagent gets its own terminal session (separate working directory and state).\n"
-        "- Results are always returned as an array, one entry per task."
+        "- Results are always returned as an array, one entry per task.\n"
+        "- Result payloads use delegation.result_detail_level (default 'slim'): no api_calls/model/tokens/tool_trace on successful tasks. "
+        "Use detail_level='detailed' only when debugging delegation itself."
     ),
     "parameters": {
         "type": "object",
@@ -2516,6 +2690,15 @@ DELEGATE_TASK_SCHEMA = {
                     "delegation.orchestrator_enabled=false."
                 ),
             },
+            "detail_level": {
+                "type": "string",
+                "enum": ["slim", "detailed"],
+                "description": (
+                    "Result payload verbosity. Defaults to 'slim', returning only status, summary, "
+                    "duration, exit reason, and lightweight traceability. Use 'detailed' only for "
+                    "delegation debugging; it includes api_calls, model, tokens, and tool_trace."
+                ),
+            },
             "acp_command": {
                 "type": "string",
                 "description": (
@@ -2555,6 +2738,7 @@ registry.register(
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
         role=args.get("role"),
+        detail_level=args.get("detail_level"),
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,
