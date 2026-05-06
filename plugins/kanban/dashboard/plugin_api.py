@@ -1527,3 +1527,96 @@ async def stream_events(ws: WebSocket):
             await ws.close()
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Talent Market (OMC)
+# ---------------------------------------------------------------------------
+
+from hermes_cli import talent_market as _tm
+
+
+@router.get("/talent/profiles")
+def talent_profiles(board: Optional[str] = Query(None)):
+    """Return the talent leaderboard for the current board."""
+    try:
+        conn = kanban_db.connect(board=_resolve_board(board))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    try:
+        _tm.init_talent_schema(conn)
+        data = _tm.talent_leaderboard(conn)
+    finally:
+        conn.close()
+    return {"profiles": data}
+
+
+@router.get("/talent/match/{task_id}")
+def talent_match_task(task_id: str, board: Optional[str] = Query(None)):
+    """Score every talent profile against a specific task."""
+    try:
+        conn = kanban_db.connect(board=_resolve_board(board))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    try:
+        task = kanban_db.get_task(conn, task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail=f"task {task_id!r} not found")
+        _tm.init_talent_schema(conn)
+        matches = _tm.match_task_to_profiles(conn, task)
+    finally:
+        conn.close()
+    return {
+        "task_id": task_id,
+        "extracted_skills": sorted(_tm._extract_task_skills(task)),
+        "matches": [m.to_dict() for m in matches],
+    }
+
+
+@router.post("/talent/refresh")
+def talent_refresh(
+    board: Optional[str] = Query(None),
+    profiles: list[str] = Query(default=[]),
+):
+    """Recompute talent profiles from kanban history + disk skills."""
+    try:
+        conn = kanban_db.connect(board=_resolve_board(board))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    try:
+        updated = _tm.refresh_talent_profiles(
+            conn,
+            profiles=profiles or None,
+            include_disk_skills=True,
+        )
+    finally:
+        conn.close()
+    return {"refreshed": len(updated), "profiles": [p.to_dict() for p in updated]}
+
+
+@router.post("/talent/assign/{task_id}")
+def talent_assign_task(
+    task_id: str,
+    board: Optional[str] = Query(None),
+    min_score: float = Query(0.05, ge=0.0, le=1.0),
+    dry_run: bool = Query(False),
+):
+    """Auto-assign a task using the talent market."""
+    try:
+        conn = kanban_db.connect(board=_resolve_board(board))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    try:
+        match = _tm.auto_assign_task(conn, task_id, min_score=min_score, dry_run=dry_run)
+    finally:
+        conn.close()
+    if match is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No suitable candidate found (task may already be assigned or score too low).",
+        )
+    return {
+        "task_id": task_id,
+        "dry_run": dry_run,
+        "match": match.to_dict(),
+    }

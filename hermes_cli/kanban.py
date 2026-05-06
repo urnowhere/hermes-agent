@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from hermes_cli import kanban_db as kb
+from hermes_cli.talent_cli import attach_talent_parser, dispatch_talent_command
 
 
 # ---------------------------------------------------------------------------
@@ -432,7 +433,6 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_tail.add_argument("task_id")
     p_tail.add_argument("--interval", type=float, default=1.0)
 
-    # --- dispatch ---
     p_disp = sub.add_parser(
         "dispatch",
         help="One dispatcher pass: reclaim stale, promote ready, spawn workers",
@@ -445,6 +445,10 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                         default=kb.DEFAULT_SPAWN_FAILURE_LIMIT,
                         help=f"Auto-block a task after this many consecutive spawn failures "
                              f"(default: {kb.DEFAULT_SPAWN_FAILURE_LIMIT})")
+    p_disp.add_argument("--auto-assign", action="store_true",
+                        help="Auto-assign unassigned ready tasks via the talent market before spawning")
+    p_disp.add_argument("--min-match-score", type=float, default=0.05,
+                        help="Minimum talent-match score to auto-assign (default: 0.05)")
     p_disp.add_argument("--json", action="store_true")
 
     # --- daemon (deprecated) ---
@@ -570,6 +574,7 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                       help="Delete worker log files older than N days (default: 30)")
 
     kanban_parser.set_defaults(_kanban_parser=kanban_parser)
+    attach_talent_parser(kanban_parser)
     return kanban_parser
 
 
@@ -669,11 +674,12 @@ def kanban_command(args: argparse.Namespace) -> int:
         "log":      _cmd_log,
         "runs":     _cmd_runs,
         "heartbeat": _cmd_heartbeat,
+        "talent":   dispatch_talent_command,
         "assignees": _cmd_assignees,
-        "notify-subscribe":   _cmd_notify_subscribe,
-        "notify-list":        _cmd_notify_list,
-        "notify-unsubscribe": _cmd_notify_unsubscribe,
         "context":  _cmd_context,
+        "notify-subscribe": _cmd_notify_subscribe,
+        "notify-list": _cmd_notify_list,
+        "notify-unsubscribe": _cmd_notify_unsubscribe,
         "gc":       _cmd_gc,
     }
     handler = handlers.get(action)
@@ -1583,6 +1589,23 @@ def _cmd_tail(args: argparse.Namespace) -> int:
 
 def _cmd_dispatch(args: argparse.Namespace) -> int:
     with kb.connect() as conn:
+        if getattr(args, "auto_assign", False):
+            from hermes_cli import talent_market as tm
+            tm.init_talent_schema(conn)
+            rows = conn.execute(
+                "SELECT id FROM tasks WHERE status = 'ready' AND assignee IS NULL"
+            ).fetchall()
+            assigned = 0
+            for row in rows:
+                match = tm.auto_assign_task(
+                    conn, row["id"],
+                    min_score=getattr(args, "min_match_score", 0.05),
+                    dry_run=False,
+                )
+                if match:
+                    assigned += 1
+            if assigned:
+                print(f"Talent market auto-assigned {assigned} task(s)")
         res = kb.dispatch_once(
             conn,
             dry_run=args.dry_run,

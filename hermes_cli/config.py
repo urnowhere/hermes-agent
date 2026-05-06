@@ -1230,6 +1230,15 @@ DEFAULT_CONFIG = {
         # Seconds between dispatcher ticks (idle or not). Lower = snappier
         # pickup of newly-ready tasks; higher = less SQL pressure.
         "dispatch_interval_seconds": 60,
+        # Auto-assign unassigned ready tasks via the talent market before
+        # spawning. When true, the dispatcher scores all profiles against
+        # each unassigned task and assigns the best match.
+        "auto_assign_talent": False,
+        # Minimum composite match score (0.0–1.0) required for the talent
+        # market to auto-assign a task. Tasks below this threshold stay
+        # unassigned and are skipped until a human assigns them or the
+        # market gets better data (more historical runs).
+        "min_match_score": 0.05,
     },
 
     # execute_code settings — controls the tool used for programmatic tool calls.
