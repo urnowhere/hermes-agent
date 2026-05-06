@@ -9,7 +9,6 @@ Verifies that:
 - Edge cases: empty conversation, missing session DB
 """
 
-import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -19,12 +18,13 @@ import pytest
 
 
 @pytest.fixture
-def session_db(tmp_path):
+def session_db(tmp_path, monkeypatch):
     """Create a real SessionDB for testing."""
-    os.environ["HERMES_HOME"] = str(tmp_path / ".hermes")
-    os.makedirs(tmp_path / ".hermes", exist_ok=True)
+    hermes_home = tmp_path / ".hermes"
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    hermes_home.mkdir(exist_ok=True)
     from hermes_state import SessionDB
-    db = SessionDB(db_path=tmp_path / ".hermes" / "test_sessions.db")
+    db = SessionDB(db_path=hermes_home / "test_sessions.db")
     yield db
     db.close()
 
