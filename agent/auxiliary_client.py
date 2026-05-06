@@ -99,12 +99,20 @@ class _OpenAIProxy:
 
 OpenAI = _OpenAIProxy()  # module-level name, resolves lazily on call/isinstance
 
+from agent.client_headers import get_model_custom_headers, merge_default_headers
 from agent.credential_pool import load_pool
 from hermes_cli.config import get_hermes_home
 from hermes_constants import OPENROUTER_BASE_URL
 from utils import base_url_host_matches, base_url_hostname, normalize_proxy_env_vars
 
 logger = logging.getLogger(__name__)
+
+# Module-level context for propagating default_headers (from
+# custom_providers[].headers or runtime resolution) through the
+# auto-detection chain.  Set by _resolve_auto() / resolve_provider_client()
+# before invoking the chain; read by _try_anthropic().  This avoids changing
+# the _get_provider_chain() callback interface for all _try_* functions.
+_resolution_default_headers: Optional[Dict[str, str]] = None
 
 
 def _safe_isinstance(obj: Any, maybe_type: Any) -> bool:
@@ -123,7 +131,6 @@ def _extract_url_query_params(url: str):
         params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
         return clean, params
     return url, None
-
 
 # Module-level flag: only warn once per process about stale OPENAI_BASE_URL.
 _stale_base_url_warned = False
@@ -378,6 +385,9 @@ _AI_GATEWAY_HEADERS = {
     "X-Title": "Hermes Agent",
     "User-Agent": f"HermesAgent/{_HERMES_VERSION}",
 }
+
+def _headers_with_config(base_headers: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    return merge_default_headers(base_headers, get_model_custom_headers())
 
 # Nous Portal extra_body for product attribution.
 # Callers should pass this as extra_body in chat.completions.create()
@@ -1193,7 +1203,7 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
                     continue
             except ImportError:
                 pass
-            return _try_anthropic()
+            return _try_anthropic(default_headers=_resolution_default_headers)
 
         pool_present, entry = _select_pool_entry(provider_id)
         if pool_present:
@@ -1211,7 +1221,11 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
                 from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_base_url
 
                 if is_native_gemini_base_url(base_url):
-                    return GeminiNativeClient(api_key=api_key, base_url=base_url), model
+                    _gem_headers = _headers_with_config()
+                    return GeminiNativeClient(
+                        api_key=api_key, base_url=base_url,
+                        **({"default_headers": _gem_headers} if _gem_headers else {}),
+                    ), model
             extra = {}
             if base_url_host_matches(base_url, "api.kimi.com"):
                 extra["default_headers"] = {"User-Agent": "claude-code/0.1.0"}
@@ -1227,6 +1241,9 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
                         extra["default_headers"] = dict(_ph_aux.default_headers)
                 except Exception:
                     pass
+            extra_headers = _headers_with_config(extra.get("default_headers"))
+            if extra_headers:
+                extra["default_headers"] = extra_headers
             _client = OpenAI(api_key=api_key, base_url=base_url, **extra)
             _client = _maybe_wrap_anthropic(_client, model, api_key, raw_base_url)
             return _client, model
@@ -1262,6 +1279,9 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
                     extra["default_headers"] = dict(_ph_aux2.default_headers)
             except Exception:
                 pass
+        extra_headers = _headers_with_config(extra.get("default_headers"))
+        if extra_headers:
+            extra["default_headers"] = extra_headers
         _client = OpenAI(api_key=api_key, base_url=base_url, **extra)
         _client = _maybe_wrap_anthropic(_client, model, api_key, raw_base_url)
         return _client, model
@@ -1282,14 +1302,14 @@ def _try_openrouter(explicit_api_key: str = None) -> Tuple[Optional[OpenAI], Opt
         base_url = _pool_runtime_base_url(entry, OPENROUTER_BASE_URL) or OPENROUTER_BASE_URL
         logger.debug("Auxiliary client: OpenRouter via pool")
         return OpenAI(api_key=or_key, base_url=base_url,
-                       default_headers=build_or_headers()), _OPENROUTER_MODEL
+                       default_headers=_headers_with_config(build_or_headers())), _OPENROUTER_MODEL
 
     or_key = explicit_api_key or os.getenv("OPENROUTER_API_KEY")
     if not or_key:
         return None, None
     logger.debug("Auxiliary client: OpenRouter")
     return OpenAI(api_key=or_key, base_url=OPENROUTER_BASE_URL,
-                   default_headers=build_or_headers()), _OPENROUTER_MODEL
+                   default_headers=_headers_with_config(build_or_headers())), _OPENROUTER_MODEL
 
 
 def _describe_openrouter_unavailable() -> str:
@@ -1362,13 +1382,14 @@ def _try_nous(vision: bool = False) -> Tuple[Optional[OpenAI], Optional[str]]:
     else:
         api_key = _nous_api_key(nous or {})
         base_url = str((nous or {}).get("inference_base_url") or _nous_base_url()).rstrip("/")
-    return (
-        OpenAI(
-            api_key=api_key,
-            base_url=base_url,
-        ),
-        model,
-    )
+    openai_kwargs = {
+        "api_key": api_key,
+        "base_url": base_url,
+    }
+    merged_headers = _headers_with_config()
+    if merged_headers:
+        openai_kwargs["default_headers"] = merged_headers
+    return (OpenAI(**openai_kwargs), model)
 
 
 def _read_main_model() -> str:
@@ -1529,28 +1550,37 @@ def _try_custom_endpoint() -> Tuple[Optional[Any], Optional[str]]:
     _clean_base, _dq = _extract_url_query_params(custom_base)
     _extra = {"default_query": _dq} if _dq else {}
     if custom_mode == "codex_responses":
-        real_client = OpenAI(api_key=custom_key, base_url=_clean_base, **_extra)
+        _hdr = _headers_with_config()
+        real_client = OpenAI(api_key=custom_key, base_url=_clean_base,
+                            **_extra, **({"default_headers": _hdr} if _hdr else {}))
         return CodexAuxiliaryClient(real_client, model), model
     if custom_mode == "anthropic_messages":
         # Third-party Anthropic-compatible gateway (MiniMax, Zhipu GLM,
         # LiteLLM proxies, etc.).  Must NEVER be treated as OAuth —
         # Anthropic OAuth claims only apply to api.anthropic.com.
+        _hdr = _headers_with_config()
         try:
             from agent.anthropic_adapter import build_anthropic_client
-            real_client = build_anthropic_client(custom_key, custom_base)
+            real_client = build_anthropic_client(
+                custom_key, custom_base,
+                default_headers=_hdr or None,
+            )
         except ImportError:
             logger.warning(
                 "Custom endpoint declares api_mode=anthropic_messages but the "
                 "anthropic SDK is not installed — falling back to OpenAI-wire."
             )
-            return OpenAI(api_key=custom_key, base_url=_clean_base, **_extra), model
+            return (OpenAI(api_key=custom_key, base_url=_clean_base,
+                           **_extra, **({"default_headers": _hdr} if _hdr else {})), model)
         return (
             AnthropicAuxiliaryClient(real_client, model, custom_key, custom_base, is_oauth=False),
             model,
         )
     # URL-based anthropic detection for custom endpoints that didn't set
     # api_mode explicitly (e.g. kimi.com/coding reached via custom config).
-    _fallback_client = OpenAI(api_key=custom_key, base_url=_clean_base, **_extra)
+    _hdr = _headers_with_config()
+    _fallback_client = OpenAI(api_key=custom_key, base_url=_clean_base,
+                              **_extra, **({"default_headers": _hdr} if _hdr else {}))
     _fallback_client = _maybe_wrap_anthropic(
         _fallback_client, model, custom_key, custom_base, custom_mode,
     )
@@ -1590,15 +1620,16 @@ def _build_codex_client(model: str) -> Tuple[Optional[Any], Optional[str]]:
             return None, None
         base_url = _CODEX_AUX_BASE_URL
     logger.debug("Auxiliary client: Codex OAuth (%s via Responses API)", model)
+    _cf_headers = _codex_cloudflare_headers(codex_token)
     real_client = OpenAI(
         api_key=codex_token,
         base_url=base_url,
-        default_headers=_codex_cloudflare_headers(codex_token),
+        default_headers=_headers_with_config(_cf_headers),
     )
     return CodexAuxiliaryClient(real_client, model), model
 
 
-def _try_anthropic(explicit_api_key: str = None) -> Tuple[Optional[Any], Optional[str]]:
+def _try_anthropic(default_headers: Optional[Dict[str, str]] = None, explicit_api_key: str = None) -> Tuple[Optional[Any], Optional[str]]:
     try:
         from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token
     except ImportError:
@@ -1632,12 +1663,16 @@ def _try_anthropic(explicit_api_key: str = None) -> Tuple[Optional[Any], Optiona
     except Exception:
         pass
 
+    # Use explicitly passed default_headers, or fall back to the
+    # module-level context set by _resolve_auto() / resolve_provider_client().
+    effective_headers = default_headers or _resolution_default_headers
+
     from agent.anthropic_adapter import _is_oauth_token
     is_oauth = _is_oauth_token(token)
     model = _get_aux_model_for_provider("anthropic") or "claude-haiku-4-5-20251001"
     logger.debug("Auxiliary client: Anthropic native (%s) at %s (oauth=%s)", model, base_url, is_oauth)
     try:
-        real_client = build_anthropic_client(token, base_url)
+        real_client = build_anthropic_client(token, base_url, default_headers=effective_headers)
     except ImportError:
         # The anthropic_adapter module imports fine but the SDK itself is
         # missing — build_anthropic_client raises ImportError at call time
@@ -1653,17 +1688,21 @@ _AUTO_PROVIDER_LABELS = {
     "_resolve_api_key_provider": "api-key",
 }
 
-_MAIN_RUNTIME_FIELDS = ("provider", "model", "base_url", "api_key", "api_mode")
+_MAIN_RUNTIME_FIELDS = ("provider", "model", "base_url", "api_key", "api_mode", "default_headers")
 
 
-def _normalize_main_runtime(main_runtime: Optional[Dict[str, Any]]) -> Dict[str, str]:
+def _normalize_main_runtime(main_runtime: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Return a sanitized copy of a live main-runtime override."""
     if not isinstance(main_runtime, dict):
         return {}
-    normalized: Dict[str, str] = {}
+    normalized: Dict[str, Any] = {}
     for field in _MAIN_RUNTIME_FIELDS:
         value = main_runtime.get(field)
-        if isinstance(value, str) and value.strip():
+        if field == "default_headers":
+            # default_headers is a dict, not a string
+            if isinstance(value, dict) and value:
+                normalized[field] = {str(k): str(v) for k, v in value.items() if k and v}
+        elif isinstance(value, str) and value.strip():
             normalized[field] = value.strip()
     provider = normalized.get("provider")
     if provider:
@@ -1946,7 +1985,7 @@ def _resolve_auto(main_runtime: Optional[Dict[str, Any]] = None) -> Tuple[Option
       2. OpenRouter → Nous → custom → Codex → API-key providers (fallback
          chain, only used when the main provider has no working client).
     """
-    global auxiliary_is_nous, _stale_base_url_warned
+    global auxiliary_is_nous, _stale_base_url_warned, _resolution_default_headers
     auxiliary_is_nous = False  # Reset — _try_nous() will set True if it wins
     runtime = _normalize_main_runtime(main_runtime)
     runtime_provider = runtime.get("provider", "")
@@ -2005,17 +2044,24 @@ def _resolve_auto(main_runtime: Optional[Dict[str, Any]] = None) -> Tuple[Option
             return client, resolved or main_model
 
     # ── Step 2: aggregator / fallback chain ──────────────────────────────
-    tried = []
-    for label, try_fn in _get_provider_chain():
-        client, model = try_fn()
-        if client is not None:
-            if tried:
-                logger.info("Auxiliary auto-detect: using %s (%s) — skipped: %s",
-                            label, model or "default", ", ".join(tried))
-            else:
-                logger.info("Auxiliary auto-detect: using %s (%s)", label, model or "default")
-            return client, model
-        tried.append(label)
+    # Propagate default_headers from main_runtime through the chain so
+    # _try_anthropic() can include them when building the Anthropic client.
+    _prev_headers = _resolution_default_headers
+    _resolution_default_headers = runtime.get("default_headers")  # type: ignore[assignment]
+    try:
+        tried = []
+        for label, try_fn in _get_provider_chain():
+            client, model = try_fn()
+            if client is not None:
+                if tried:
+                    logger.info("Auxiliary auto-detect: using %s (%s) — skipped: %s",
+                                label, model or "default", ", ".join(tried))
+                else:
+                    logger.info("Auxiliary auto-detect: using %s (%s)", label, model or "default")
+                return client, model
+            tried.append(label)
+    finally:
+        _resolution_default_headers = _prev_headers
     logger.warning("Auxiliary auto-detect: no provider available (tried: %s). "
                    "Compression, summarization, and memory flush will not work. "
                    "Set OPENROUTER_API_KEY or configure a local model in config.yaml.",
@@ -2068,15 +2114,19 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
     }
     sync_base_url = str(sync_client.base_url)
     if base_url_host_matches(sync_base_url, "openrouter.ai"):
-        async_kwargs["default_headers"] = build_or_headers()
+        async_kwargs["default_headers"] = _headers_with_config(build_or_headers())
     elif base_url_host_matches(sync_base_url, "api.githubcopilot.com"):
         from hermes_cli.copilot_auth import copilot_request_headers
 
-        async_kwargs["default_headers"] = copilot_request_headers(
-            is_agent_turn=True, is_vision=is_vision
+        async_kwargs["default_headers"] = _headers_with_config(
+            copilot_request_headers(is_agent_turn=True, is_vision=is_vision)
         )
     elif base_url_host_matches(sync_base_url, "api.kimi.com"):
-        async_kwargs["default_headers"] = {"User-Agent": "claude-code/0.1.0"}
+        async_kwargs["default_headers"] = _headers_with_config({"User-Agent": "claude-code/0.1.0"})
+    else:
+        _cfg = _headers_with_config()
+        if _cfg:
+            async_kwargs["default_headers"] = _cfg
     return AsyncOpenAI(**async_kwargs), model
 
 
@@ -2258,10 +2308,11 @@ def resolve_provider_client(
                                "but no Codex OAuth token found (run: hermes model)")
                 return None, None
             final_model = _normalize_resolved_model(model, provider)
+            _cf_headers = _codex_cloudflare_headers(codex_token)
             raw_client = OpenAI(
                 api_key=codex_token,
                 base_url=_CODEX_AUX_BASE_URL,
-                default_headers=_codex_cloudflare_headers(codex_token),
+                default_headers=_headers_with_config(_cf_headers),
             )
             return (raw_client, final_model)
         # Standard path: wrap in CodexAuxiliaryClient adapter
@@ -2304,6 +2355,9 @@ def resolve_provider_client(
                 extra["default_headers"] = copilot_request_headers(
                     is_agent_turn=True, is_vision=is_vision
                 )
+            _merged = _headers_with_config(extra.get("default_headers"))
+            if _merged:
+                extra["default_headers"] = _merged
             client = OpenAI(api_key=custom_key, base_url=_clean_base, **extra)
             client = _wrap_if_needed(client, final_model, custom_base, custom_key)
             return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
@@ -2369,6 +2423,13 @@ def resolve_provider_client(
                     raw_base_for_wrap = custom_base
                 _clean_base2, _dq2 = _extract_url_query_params(openai_base)
                 _extra2 = {"default_query": _dq2} if _dq2 else {}
+                _openai_kwargs.update(_extra2)
+                _provider_headers = custom_entry.get("headers")
+                _merged = _headers_with_config(_provider_headers if isinstance(_provider_headers, dict) else None)
+                if _merged:
+                    _openai_kwargs["default_headers"] = _merged
+                client = OpenAI(**_openai_kwargs)
+                client = _wrap_if_needed(client, final_model, custom_base)
                 logger.debug(
                     "resolve_provider_client: named custom provider %r (%s, api_mode=%s)",
                     provider, final_model, entry_api_mode or "chat_completions")
@@ -2438,7 +2499,12 @@ def resolve_provider_client(
 
     if pconfig.auth_type == "api_key":
         if provider == "anthropic":
-            client, default_model = _try_anthropic(explicit_api_key=explicit_api_key)
+            # Propagate default_headers from main_runtime so provider-specific
+            # headers (e.g. custom_providers[].headers) reach the Anthropic client.
+            _mr_headers = None
+            if isinstance(main_runtime, dict):
+                _mr_headers = main_runtime.get("default_headers")
+            client, default_model = _try_anthropic(default_headers=_mr_headers, explicit_api_key=explicit_api_key)
             if client is None:
                 logger.warning("resolve_provider_client: anthropic requested but no Anthropic credentials found")
                 return None, None
@@ -2477,7 +2543,11 @@ def resolve_provider_client(
             from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_base_url
 
             if is_native_gemini_base_url(base_url):
-                client = GeminiNativeClient(api_key=api_key, base_url=base_url)
+                _gem_headers = _headers_with_config()
+                client = GeminiNativeClient(
+                    api_key=api_key, base_url=base_url,
+                    **({"default_headers": _gem_headers} if _gem_headers else {}),
+                )
                 logger.debug("resolve_provider_client: %s (%s)", provider, final_model)
                 return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
                         else (client, final_model))
@@ -2492,8 +2562,9 @@ def resolve_provider_client(
             headers.update(copilot_request_headers(
                 is_agent_turn=True, is_vision=is_vision
             ))
+        _merged = _headers_with_config(headers if headers else None)
         client = OpenAI(api_key=api_key, base_url=base_url,
-                        **({"default_headers": headers} if headers else {}))
+                        **({"default_headers": _merged} if _merged else {}))
 
         # Copilot GPT-5+ models (except gpt-5-mini) require the Responses
         # API — they are not accessible via /chat/completions.  Wrap the
@@ -2685,7 +2756,7 @@ def _resolve_strict_vision_backend(
         # allow-list); callers must specify via auxiliary.<task>.model.
         return resolve_provider_client("openai-codex", model, is_vision=True)
     if provider == "anthropic":
-        return _try_anthropic()
+        return _try_anthropic(default_headers=_resolution_default_headers)
     if provider == "custom":
         return _try_custom_endpoint()
     return None, None

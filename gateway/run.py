@@ -586,6 +586,7 @@ def _resolve_runtime_agent_kwargs() -> dict:
         "command": runtime.get("command"),
         "args": list(runtime.get("args") or []),
         "credential_pool": runtime.get("credential_pool"),
+        "default_headers": runtime.get("default_headers"),
     }
 
 
@@ -1645,6 +1646,7 @@ class GatewayRunner:
             "command": runtime_kwargs.get("command"),
             "args": list(runtime_kwargs.get("args") or []),
             "credential_pool": runtime_kwargs.get("credential_pool"),
+            "default_headers": runtime_kwargs.get("default_headers"),
         }
         route = {
             "model": model,

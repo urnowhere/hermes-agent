@@ -848,6 +848,8 @@ def _build_child_agent(
     # ACP transport overrides — lets a non-ACP parent spawn ACP child agents
     override_acp_command: Optional[str] = None,
     override_acp_args: Optional[List[str]] = None,
+    # Provider-specific custom headers (e.g. from custom_providers[].headers)
+    override_default_headers: Optional[dict] = None,
     # Per-call role controlling whether the child can further delegate.
     # 'leaf' (default) cannot; 'orchestrator' retains the delegation
     # toolset subject to depth/kill-switch bounds applied below.
@@ -992,6 +994,9 @@ def _build_child_agent(
         if override_acp_args is not None
         else (getattr(parent_agent, "acp_args", []) or [])
     )
+    # Resolve provider-specific custom headers: delegation override > parent inherit.
+    # Ensures custom_providers[].headers propagate to subagents in inherit mode.
+    effective_default_headers = override_default_headers or getattr(parent_agent, "_default_headers", None)
 
     # When override_provider is set (e.g. delegation.provider: minimax-cn),
     # the subagent must use direct API calls — not the parent's ACP transport.
@@ -1079,6 +1084,7 @@ def _build_child_agent(
         provider_sort=child_provider_sort,
         tool_progress_callback=child_progress_cb,
         iteration_budget=None,  # fresh budget per subagent
+        default_headers=effective_default_headers,
     )
     child._print_fn = getattr(parent_agent, "_print_fn", None)
     # Set delegation depth so children can't spawn grandchildren
@@ -1987,6 +1993,7 @@ def delegate_task(
                     if task_acp_args is not None
                     else (acp_args if acp_args is not None else creds.get("args"))
                 ),
+                override_default_headers=creds.get("default_headers"),
                 role=effective_role,
             )
             # Override with correct parent tool names (before child construction mutated global)
@@ -2347,6 +2354,7 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
         "api_mode": runtime.get("api_mode"),
         "command": runtime.get("command"),
         "args": list(runtime.get("args") or []),
+        "default_headers": runtime.get("default_headers"),
     }
 
 

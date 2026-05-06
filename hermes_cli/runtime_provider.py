@@ -399,6 +399,7 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                         "base_url": base_url.strip(),
                         "api_key": resolved_api_key,
                         "model": entry.get("default_model", ""),
+                        "headers": entry.get("headers"),
                     }
                     # The v11→v12 migration writes the API mode under the new
                     # ``transport`` field, but hand-edited configs may still
@@ -424,6 +425,7 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                             "base_url": base_url.strip(),
                             "api_key": resolved_api_key,
                             "model": entry.get("default_model", ""),
+                            "headers": entry.get("headers"),
                         }
                         api_mode = _parse_api_mode(entry.get("api_mode") or entry.get("transport"))
                         if api_mode:
@@ -474,6 +476,9 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
         model_name = str(entry.get("model", "") or "").strip()
         if model_name:
             result["model"] = model_name
+        headers = entry.get("headers")
+        if headers and isinstance(headers, dict):
+            result["headers"] = headers
         return result
 
     return None
@@ -552,6 +557,18 @@ def _resolve_named_custom_runtime(
     # provider name differs from the actual model string the API expects.
     if custom_provider.get("model"):
         result["model"] = custom_provider["model"]
+    # Propagate provider-specific custom headers (from custom_providers[].headers
+    # or providers[].headers in config.yaml).
+    _raw_headers = custom_provider.get("headers")
+    if _raw_headers and isinstance(_raw_headers, dict):
+        _sanitized = {}
+        for _k, _v in _raw_headers.items():
+            _k = str(_k).strip() if _k else ""
+            _v = str(_v).strip() if _v is not None else ""
+            if _k and _v:
+                _sanitized[_k] = _v
+        if _sanitized:
+            result["default_headers"] = _sanitized
     return result
 
 

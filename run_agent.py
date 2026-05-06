@@ -57,6 +57,7 @@ from urllib.parse import urlparse, parse_qs, urlunparse
 from datetime import datetime
 from pathlib import Path
 
+from agent.client_headers import get_model_custom_headers, merge_default_headers
 from hermes_constants import get_hermes_home
 
 
@@ -970,6 +971,8 @@ class AIAgent:
         checkpoint_max_total_size_mb: int = 500,
         checkpoint_max_file_size_mb: int = 10,
         pass_session_id: bool = False,
+        persist_session: bool = True,
+        default_headers: Dict[str, str] = None,
     ):
         """
         Initialize the AI Agent.
@@ -1046,6 +1049,7 @@ class AIAgent:
         self.load_soul_identity = load_soul_identity
         self.pass_session_id = pass_session_id
         self._credential_pool = credential_pool
+        self._default_headers = default_headers  # provider-specific headers from runtime
         self.log_prefix_chars = log_prefix_chars
         self.log_prefix = f"{log_prefix} " if log_prefix else ""
         # Store effective base URL for feature detection (prompt caching, reasoning, etc.)
@@ -1385,7 +1389,7 @@ class AIAgent:
                 # the third-party identity-injection bug.
                 from agent.anthropic_adapter import _is_oauth_token as _is_oat
                 self._is_anthropic_oauth = _is_oat(effective_key) if _is_native_anthropic else False
-                self._anthropic_client = build_anthropic_client(effective_key, base_url, timeout=_provider_timeout)
+                self._anthropic_client = build_anthropic_client(effective_key, base_url, timeout=_provider_timeout, default_headers=self._default_headers)
                 # No OpenAI client needed for Anthropic mode
                 self.client = None
                 self._client_kwargs = {}
@@ -1420,6 +1424,7 @@ class AIAgent:
                 _gr_label = " + Guardrails" if self._bedrock_guardrail_config else ""
                 print(f"🤖 AI Agent initialized with model: {self.model} (AWS Bedrock, {self._bedrock_region}{_gr_label})")
         else:
+            custom_headers = get_model_custom_headers()
             if api_key and base_url:
                 # Explicit credentials from CLI/gateway — construct directly.
                 # The runtime provider resolver already handled auth for us.
@@ -1474,6 +1479,18 @@ class AIAgent:
                             client_kwargs["default_headers"] = dict(_ph.default_headers)
                     except Exception:
                         pass
+                if custom_headers:
+                    client_kwargs["default_headers"] = merge_default_headers(
+                        client_kwargs.get("default_headers"),
+                        custom_headers,
+                    )
+                # Merge provider-specific headers passed via __init__ (e.g. from
+                # custom_providers[].headers or gateway runtime resolution).
+                if self._default_headers:
+                    client_kwargs["default_headers"] = merge_default_headers(
+                        client_kwargs.get("default_headers"),
+                        self._default_headers,
+                    )
             else:
                 # No explicit creds — use the centralized provider router
                 from agent.auxiliary_client import resolve_provider_client
@@ -1489,6 +1506,12 @@ class AIAgent:
                     # Preserve any default_headers the router set
                     if hasattr(_routed_client, '_default_headers') and _routed_client._default_headers:
                         client_kwargs["default_headers"] = dict(_routed_client._default_headers)
+                    elif custom_headers:
+                        client_kwargs["default_headers"] = dict(custom_headers)
+                    # Merge provider-specific headers passed via __init__
+                    if self._default_headers:
+                        _existing = client_kwargs.get("default_headers") or {}
+                        client_kwargs["default_headers"] = {**_existing, **self._default_headers}
                 else:
                     # When the user explicitly chose a non-OpenRouter provider
                     # but no credentials were found, fail fast with a clear
@@ -2385,6 +2408,7 @@ class AIAgent:
             self._anthropic_client = build_anthropic_client(
                 effective_key, self._anthropic_base_url,
                 timeout=get_provider_request_timeout(self.provider, self.model),
+                default_headers=getattr(self, "_default_headers", None),
             )
             self._is_anthropic_oauth = _is_oauth_token(effective_key) if _is_native_anthropic else False
             self.client = None
@@ -2637,6 +2661,7 @@ class AIAgent:
             "base_url": getattr(self, "base_url", "") or "",
             "api_key": getattr(self, "api_key", "") or "",
             "api_mode": getattr(self, "api_mode", "") or "",
+            "default_headers": getattr(self, "_default_headers", None),
         }
 
     def _check_compression_model_feasibility(self) -> None:
@@ -6166,8 +6191,12 @@ class AIAgent:
         self.base_url = base_url.strip().rstrip("/")
         self._client_kwargs["api_key"] = self.api_key
         self._client_kwargs["base_url"] = self.base_url
-        # Nous requests should not inherit OpenRouter-only attribution headers.
+        # Nous requests should not inherit OpenRouter-only attribution headers,
+        # but preserve user-configured custom headers (model.custom_headers).
+        _nous_user_headers = get_model_custom_headers()
         self._client_kwargs.pop("default_headers", None)
+        if _nous_user_headers:
+            self._client_kwargs["default_headers"] = _nous_user_headers
 
         if not self._replace_primary_openai_client(reason="nous_credential_refresh"):
             return False
@@ -6246,6 +6275,7 @@ class AIAgent:
                 new_token,
                 getattr(self, "_anthropic_base_url", None),
                 timeout=get_provider_request_timeout(self.provider, self.model),
+                default_headers=self._default_headers,
             )
         except Exception as exc:
             logger.warning("Failed to rebuild Anthropic client after credential refresh: %s", exc)
@@ -6297,6 +6327,24 @@ class AIAgent:
             else:
                 self._client_kwargs.pop("default_headers", None)
 
+        # Always merge user-configured custom headers (model.custom_headers
+        # from config.yaml) and provider-specific headers (e.g. from
+        # custom_providers[].headers).  Without this, credential rotation
+        # via _swap_credential() drops custom headers, causing subagents
+        # that share a credential pool to lose them.
+        _custom = get_model_custom_headers()
+        if _custom:
+            self._client_kwargs["default_headers"] = merge_default_headers(
+                self._client_kwargs.get("default_headers"),
+                _custom,
+            )
+        _dh = getattr(self, "_default_headers", None)
+        if _dh:
+            self._client_kwargs["default_headers"] = merge_default_headers(
+                self._client_kwargs.get("default_headers"),
+                _dh,
+            )
+
     def _swap_credential(self, entry) -> None:
         runtime_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
         runtime_base = getattr(entry, "runtime_base_url", None) or getattr(entry, "base_url", None) or self.base_url
@@ -6314,6 +6362,7 @@ class AIAgent:
             self._anthropic_client = build_anthropic_client(
                 runtime_key, runtime_base,
                 timeout=get_provider_request_timeout(self.provider, self.model),
+                default_headers=self._default_headers,
             )
             self._is_anthropic_oauth = _is_oauth_token(runtime_key) if self.provider == "anthropic" else False
             self.api_key = runtime_key
@@ -6454,6 +6503,7 @@ class AIAgent:
                 self._anthropic_api_key,
                 getattr(self, "_anthropic_base_url", None),
                 timeout=get_provider_request_timeout(self.provider, self.model),
+                default_headers=getattr(self, "_default_headers", None),
                 drop_context_1m_beta=_drop_1m,
             )
 
@@ -7747,6 +7797,7 @@ class AIAgent:
                 self._anthropic_base_url = fb_base_url
                 self._anthropic_client = build_anthropic_client(
                     effective_key, self._anthropic_base_url, timeout=_fb_timeout,
+                    default_headers=self._default_headers,
                 )
                 self._is_anthropic_oauth = _is_oauth_token(effective_key) if fb_provider == "anthropic" else False
                 self.client = None
@@ -7872,6 +7923,7 @@ class AIAgent:
                 self._anthropic_client = build_anthropic_client(
                     rt["anthropic_api_key"], rt["anthropic_base_url"],
                     timeout=get_provider_request_timeout(self.provider, self.model),
+                    default_headers=self._default_headers,
                 )
                 self._is_anthropic_oauth = rt["is_anthropic_oauth"]
                 self.client = None
@@ -7971,6 +8023,7 @@ class AIAgent:
                 self._anthropic_client = build_anthropic_client(
                     rt["anthropic_api_key"], rt["anthropic_base_url"],
                     timeout=get_provider_request_timeout(self.provider, self.model),
+                    default_headers=self._default_headers,
                 )
                 self._is_anthropic_oauth = rt["is_anthropic_oauth"]
                 self.client = None

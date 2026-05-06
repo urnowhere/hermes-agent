@@ -1419,6 +1419,110 @@ class TestAnthropicCompatImageConversion:
         assert result[0]["content"][0]["source"]["media_type"] == "image/jpeg"
 
 
+# ---------------------------------------------------------------------------
+# default_headers propagation through _normalize_main_runtime
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeMainRuntimeDefaultHeaders:
+    def test_preserves_default_headers_dict(self):
+        from agent.auxiliary_client import _normalize_main_runtime
+        runtime = {
+            "provider": "custom",
+            "model": "gpt-4o",
+            "base_url": "https://example.com/v1",
+            "api_key": "sk-test",
+            "api_mode": "chat_completions",
+            "default_headers": {"X-Custom": "value", "X-Provider": "test"},
+        }
+        normalized = _normalize_main_runtime(runtime)
+        assert normalized["default_headers"] == {"X-Custom": "value", "X-Provider": "test"}
+
+    def test_strips_empty_default_headers(self):
+        from agent.auxiliary_client import _normalize_main_runtime
+        runtime = {
+            "provider": "openrouter",
+            "default_headers": {},
+        }
+        normalized = _normalize_main_runtime(runtime)
+        assert "default_headers" not in normalized
+
+    def test_strips_non_dict_default_headers(self):
+        from agent.auxiliary_client import _normalize_main_runtime
+        runtime = {
+            "provider": "openrouter",
+            "default_headers": "not-a-dict",
+        }
+        normalized = _normalize_main_runtime(runtime)
+        assert "default_headers" not in normalized
+
+    def test_sanitizes_default_headers_values(self):
+        from agent.auxiliary_client import _normalize_main_runtime
+        runtime = {
+            "provider": "custom",
+            "default_headers": {None: "value", "X-Valid": 123, "": "empty"},
+        }
+        normalized = _normalize_main_runtime(runtime)
+        # None key and empty key should be filtered; int value should be stringified
+        assert "X-Valid" in normalized.get("default_headers", {})
+        assert normalized["default_headers"]["X-Valid"] == "123"
+
+    def test_no_default_headers_in_runtime(self):
+        from agent.auxiliary_client import _normalize_main_runtime
+        runtime = {"provider": "openrouter", "model": "gpt-4o"}
+        normalized = _normalize_main_runtime(runtime)
+        assert "default_headers" not in normalized
+
+
+class TestTryAnthropicDefaultHeaders:
+    """Verify that _try_anthropic propagates default_headers to build_anthropic_client."""
+
+    def test_default_headers_passed_to_build_anthropic_client(self):
+        with patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)), \
+             patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="sk-ant-api03-testkey"), \
+             patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk:
+            mock_sdk.Anthropic.return_value = MagicMock()
+            from agent.auxiliary_client import _try_anthropic
+            _try_anthropic(default_headers={"X-Provider": "from-provider"})
+            # build_anthropic_client is called internally, verify default_headers
+            # was passed by checking the SDK was called with the right kwargs
+            kwargs = mock_sdk.Anthropic.call_args[1]
+            assert kwargs["default_headers"]["X-Provider"] == "from-provider"
+
+    def test_resolution_context_headers_used_as_fallback(self):
+        """When no default_headers param is given, _try_anthropic reads from module context."""
+        import agent.auxiliary_client as aux_mod
+        with patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)), \
+             patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="sk-ant-api03-testkey"), \
+             patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk:
+            mock_sdk.Anthropic.return_value = MagicMock()
+            # Set the module-level context
+            aux_mod._resolution_default_headers = {"X-Context": "from-context"}
+            try:
+                aux_mod._try_anthropic()
+                kwargs = mock_sdk.Anthropic.call_args[1]
+                assert kwargs["default_headers"]["X-Context"] == "from-context"
+            finally:
+                aux_mod._resolution_default_headers = None
+
+    def test_explicit_default_headers_take_priority_over_context(self):
+        """Explicit default_headers parameter should override module-level context."""
+        import agent.auxiliary_client as aux_mod
+        with patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)), \
+             patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="sk-ant-api03-testkey"), \
+             patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk:
+            mock_sdk.Anthropic.return_value = MagicMock()
+            aux_mod._resolution_default_headers = {"X-Context": "from-context"}
+            try:
+                aux_mod._try_anthropic(default_headers={"X-Explicit": "from-explicit"})
+                kwargs = mock_sdk.Anthropic.call_args[1]
+                assert kwargs["default_headers"]["X-Explicit"] == "from-explicit"
+                # Context header should NOT be present (explicit takes priority,
+                # not merged — _try_anthropic uses `or`, not merge)
+            finally:
+                aux_mod._resolution_default_headers = None
+
+
 class _AuxAuth401(Exception):
     status_code = 401
 
