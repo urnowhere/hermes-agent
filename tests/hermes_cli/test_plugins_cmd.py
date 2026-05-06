@@ -155,6 +155,13 @@ class TestReadManifest:
         result = _read_manifest(tmp_path)
         assert result == {}
 
+    def test_non_mapping_yaml_returns_empty_and_logs(self, tmp_path, caplog):
+        (tmp_path / "plugin.yaml").write_text("- not\n- a\n- mapping\n")
+        with caplog.at_level(logging.WARNING, logger="hermes_cli.plugins_cmd"):
+            result = _read_manifest(tmp_path)
+        assert result == {}
+        assert any("top-level YAML must be a mapping" in r.message for r in caplog.records)
+
 
 # ── cmd_install tests ─────────────────────────────────────────────────────────
 
@@ -210,6 +217,38 @@ class TestCmdInstall:
         assert plugins_dir not in [call.args[0] for call in mock_rmtree.call_args_list]
         mock_move.assert_not_called()
         mock_display_after_install.assert_not_called()
+
+    @patch("hermes_cli.plugins_cmd._display_after_install")
+    @patch("hermes_cli.plugins_cmd.shutil.move")
+    @patch("hermes_cli.plugins_cmd._plugins_dir")
+    @patch("hermes_cli.plugins_cmd.subprocess.run")
+    def test_install_falls_back_to_repo_name_for_non_mapping_manifest(
+        self,
+        mock_run,
+        mock_plugins_dir,
+        mock_move,
+        mock_display_after_install,
+        tmp_path,
+    ):
+        from hermes_cli.plugins_cmd import cmd_install
+
+        plugins_dir = tmp_path / "plugins"
+        plugins_dir.mkdir()
+        mock_plugins_dir.return_value = plugins_dir
+
+        def fake_clone(cmd, capture_output, text, timeout):
+            target = Path(cmd[-1])
+            target.mkdir(parents=True)
+            (target / "plugin.yaml").write_text("- bad\n- manifest\n")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = fake_clone
+
+        cmd_install("owner/repo", enable=False)
+
+        mock_move.assert_called_once()
+        assert Path(mock_move.call_args.args[1]).name == "repo"
+        mock_display_after_install.assert_called_once()
 
 
 # ── cmd_update tests ─────────────────────────────────────────────────────────
