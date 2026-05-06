@@ -216,13 +216,15 @@ def test_cli_turn_routing_uses_primary_when_disabled(monkeypatch):
 
 def test_cli_preserves_anthropic_wif_bearer_flag_for_single_query_route(monkeypatch):
     cli = _import_cli()
+    seen = {}
 
     def _runtime_resolve(**kwargs):
+        seen.update(kwargs)
         return {
             "provider": "anthropic",
             "api_mode": "anthropic_messages",
             "base_url": "https://api.anthropic.com",
-            "api_key": "sk-ant-oat01-testtoken",
+            "api_key": "***",
             "source": "wif",
             "anthropic_force_bearer_auth": True,
         }
@@ -234,6 +236,7 @@ def test_cli_preserves_anthropic_wif_bearer_flag_for_single_query_route(monkeypa
     shell.requested_provider = "anthropic"
 
     assert shell._ensure_runtime_credentials() is True
+    assert seen["target_model"] == "claude-sonnet-4-5"
     assert getattr(shell, "_anthropic_force_bearer_auth", False) is True
 
     route = shell._resolve_turn_agent_config("Reply with only: WIF OK")
