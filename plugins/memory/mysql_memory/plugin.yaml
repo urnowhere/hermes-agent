@@ -1,0 +1,6 @@
+name: mysql_memory
+version: 1.0.0
+description: "MySQL-backed persistent memory for Hermes Agent. Stores cross-session memory in openclaw_memory.memory_entries with source_agent isolation."
+hooks:
+  - on_memory_write
+  - on_session_end
