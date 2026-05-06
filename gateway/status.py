@@ -55,9 +55,9 @@ def _get_gateway_lock_path(pid_path: Optional[Path] = None) -> Path:
     return home / _GATEWAY_LOCK_FILENAME
 
 
-def _get_runtime_status_path() -> Path:
+def _get_runtime_status_path(pid_path: Optional[Path] = None) -> Path:
     """Return the persisted runtime health/status file path."""
-    return _get_pid_path().with_name(_RUNTIME_STATUS_FILE)
+    return (pid_path or _get_pid_path()).with_name(_RUNTIME_STATUS_FILE)
 
 
 def _get_lock_dir() -> Path:
@@ -171,6 +171,45 @@ def _record_looks_like_gateway(record: dict[str, Any]) -> bool:
     return any(pattern in cmdline for pattern in patterns)
 
 
+def _live_gateway_pid_from_record(record: Optional[dict[str, Any]]) -> Optional[int]:
+    """Return the live gateway PID represented by a status record, if valid."""
+    pid = _pid_from_record(record)
+    if pid is None or record is None:
+        return None
+
+    try:
+        os.kill(pid, 0)  # signal 0 = existence check, no actual signal sent
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        # The process exists but belongs to another user/service scope.  If the
+        # persisted metadata is gateway-shaped, keep it visible.
+        return pid if _record_looks_like_gateway(record) else None
+    except OSError:
+        # Windows raises OSError with WinError 87 for an invalid pid
+        # (process is definitely gone). Treat as "process doesn't exist".
+        return None
+
+    recorded_start = record.get("start_time")
+    current_start = _get_process_start_time(pid)
+    if recorded_start is not None and current_start is not None and current_start != recorded_start:
+        return None
+
+    if _looks_like_gateway_process(pid) or _record_looks_like_gateway(record):
+        return pid
+    return None
+
+
+def _live_gateway_pid_from_runtime_status(pid_path: Path) -> Optional[int]:
+    """Return a live gateway PID from gateway_state.json when lock metadata is gone."""
+    record = _read_json_file(_get_runtime_status_path(pid_path))
+    if not record:
+        return None
+    if record.get("gateway_state") not in {"starting", "running"}:
+        return None
+    return _live_gateway_pid_from_record(record)
+
+
 def _build_pid_record() -> dict:
     return {
         "pid": os.getpid(),
@@ -251,23 +290,25 @@ def _pid_from_record(record: Optional[dict[str, Any]]) -> Optional[int]:
 
 
 def _cleanup_invalid_pid_path(pid_path: Path, *, cleanup_stale: bool) -> None:
-    """Delete a stale gateway PID file (and its sibling lock metadata).
+    """Delete a stale gateway PID file.
 
     Called from ``get_running_pid()`` after the runtime lock has already been
-    confirmed inactive, so the on-disk metadata is known to belong to a dead
-    process.  Unlike ``remove_pid_file()`` (which defensively refuses to delete
-    a PID file whose ``pid`` field differs from ``os.getpid()`` to protect
-    ``--replace`` handoffs), this path force-unlinks both files so the next
-    startup sees a clean slate.
+    confirmed inactive.  Unlike ``remove_pid_file()`` (which defensively refuses
+    to delete a PID file whose ``pid`` field differs from ``os.getpid()`` to
+    protect ``--replace`` handoffs), this path force-unlinks the PID file so the
+    next startup sees a clean slate.
+
+    Do not unlink gateway.lock here.  A status observer can check that the lock
+    is inactive, then race with a gateway startup that acquires the same lock
+    path before cleanup runs.  Unlinking at that point leaves the live gateway
+    holding a deleted lock fd, making future observers report it as stopped.
+    Stale lock files are harmless: the next gateway can acquire and rewrite
+    them in place.
     """
     if not cleanup_stale:
         return
     try:
         pid_path.unlink(missing_ok=True)
-    except Exception:
-        pass
-    try:
-        _get_gateway_lock_path(pid_path).unlink(missing_ok=True)
     except Exception:
         pass
 
@@ -813,6 +854,9 @@ def get_running_pid(
     resolved_lock_path = _get_gateway_lock_path(resolved_pid_path)
     lock_active = is_gateway_runtime_lock_active(resolved_lock_path)
     if not lock_active:
+        runtime_pid = _live_gateway_pid_from_runtime_status(resolved_pid_path)
+        if runtime_pid is not None:
+            return runtime_pid
         _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
         return None
 
@@ -820,32 +864,8 @@ def get_running_pid(
     fallback_record = _read_gateway_lock_record(resolved_lock_path)
 
     for record in (primary_record, fallback_record):
-        pid = _pid_from_record(record)
-        if pid is None:
-            continue
-
-        try:
-            os.kill(pid, 0)  # signal 0 = existence check, no actual signal sent
-        except ProcessLookupError:
-            continue
-        except PermissionError:
-            # The process exists but belongs to another user/service scope.
-            # With the runtime lock still held, prefer keeping it visible
-            # rather than deleting the PID file as "stale".
-            if _record_looks_like_gateway(record):
-                return pid
-            continue
-        except OSError:
-            # Windows raises OSError with WinError 87 for an invalid pid
-            # (process is definitely gone). Treat as "process doesn't exist".
-            continue
-
-        recorded_start = record.get("start_time")
-        current_start = _get_process_start_time(pid)
-        if recorded_start is not None and current_start is not None and current_start != recorded_start:
-            continue
-
-        if _looks_like_gateway_process(pid) or _record_looks_like_gateway(record):
+        pid = _live_gateway_pid_from_record(record)
+        if pid is not None:
             return pid
 
     _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)

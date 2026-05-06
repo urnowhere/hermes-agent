@@ -174,13 +174,15 @@ class TestGatewayPidState:
         assert status.get_running_pid() is None
         assert not pid_path.exists()
 
-    def test_get_running_pid_cleans_stale_metadata_from_dead_foreign_pid(self, tmp_path, monkeypatch):
+    def test_get_running_pid_cleans_stale_pid_but_keeps_lock_file(self, tmp_path, monkeypatch):
         """Stale PID file from a *different* PID (crashed process) must still be cleaned.
 
         Regression for: ``remove_pid_file()`` defensively refuses to delete a
         PID file whose pid != ``os.getpid()`` to protect ``--replace``
         handoffs.  Stale-cleanup must not go through that path or real
-        crashed-process PID files never get removed.
+        crashed-process PID files never get removed.  It must also leave the
+        lock file in place: stale lock files are reusable, and unlinking them
+        races with gateway startup.
         """
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         pid_path = tmp_path / "gateway.pid"
@@ -203,10 +205,10 @@ class TestGatewayPidState:
             "start_time": 123,
         }))
 
-        # No live lock holder → get_running_pid should clean both files.
+        # No live lock holder → get_running_pid should clean the PID file only.
         assert status.get_running_pid() is None
         assert not pid_path.exists()
-        assert not lock_path.exists()
+        assert lock_path.exists()
 
     def test_get_running_pid_falls_back_to_live_lock_record(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -243,6 +245,41 @@ class TestGatewayPidState:
             assert status.get_running_pid() == os.getpid()
         finally:
             status.release_gateway_runtime_lock()
+
+    def test_get_running_pid_falls_back_to_live_runtime_status_without_lock(self, tmp_path, monkeypatch):
+        """Regression: a live gateway can hold an unlinked gateway.lock fd."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        state_path = tmp_path / "gateway_state.json"
+        state_path.write_text(json.dumps({
+            "pid": os.getpid(),
+            "kind": "hermes-gateway",
+            "argv": ["/repo/hermes_cli/main.py", "gateway", "run", "--replace"],
+            "start_time": 123,
+            "gateway_state": "running",
+        }))
+
+        monkeypatch.setattr(status.os, "kill", lambda pid, sig: None)
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
+        monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: None)
+
+        assert status.get_running_pid() == os.getpid()
+
+    def test_get_running_pid_ignores_failed_runtime_status_without_lock(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        state_path = tmp_path / "gateway_state.json"
+        state_path.write_text(json.dumps({
+            "pid": os.getpid(),
+            "kind": "hermes-gateway",
+            "argv": ["/repo/hermes_cli/main.py", "gateway", "run", "--replace"],
+            "start_time": 123,
+            "gateway_state": "startup_failed",
+        }))
+
+        monkeypatch.setattr(status.os, "kill", lambda pid, sig: None)
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
+        monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: None)
+
+        assert status.get_running_pid() is None
 
 
 class TestGatewayRuntimeStatus:
