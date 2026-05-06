@@ -790,6 +790,41 @@ def _check_file_staleness(filepath: str, task_id: str) -> str | None:
     return None
 
 
+# AI truncation signatures that indicate placeholder content rather than real code.
+# If these appear in a write that wasn't in the original file, the write is aborted.
+_TRUNCATION_SIGNATURES = [
+    "/* ... full function ... */",
+    "/* ... unchanged ... */",
+    "// ... unchanged ...",
+    "// ... rest of file ...",
+    "# ... rest of file ...",
+    "# ... unchanged ...",
+    "/* ... rest unchanged ... */",
+    "... (rest of file unchanged)",
+    "... (unchanged)",
+    "<!-- ... unchanged ... -->",
+]
+
+
+def _check_truncation_signatures(content: str, original: str | None = None) -> str | None:
+    """Return an error message if content contains AI truncation placeholders.
+
+    Only flags signatures that were not already present in the original file,
+    so legitimate comments containing these strings are not blocked.
+    """
+    content_lower = content.lower()
+    for sig in _TRUNCATION_SIGNATURES:
+        sig_lower = sig.lower()
+        if sig_lower in content_lower:
+            if original is None or sig_lower not in original.lower():
+                return (
+                    f"Refusing to write: content contains AI truncation placeholder {sig!r}. "
+                    "This indicates the content is incomplete. Re-read the file fully and "
+                    "reconstruct the complete content before writing."
+                )
+    return None
+
+
 def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
     """Write content to a file."""
     sensitive_err = _check_sensitive_path(path, task_id)
@@ -800,6 +835,16 @@ def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
             "Refusing to write internal read_file status text as file content. "
             "Re-read the file or reconstruct the intended file contents before writing."
         )
+    # Read original to compare truncation signatures (so existing legitimate
+    # comments are not flagged).
+    try:
+        import pathlib as _pl
+        _orig = _pl.Path(path).read_text(errors="replace") if _pl.Path(path).exists() else None
+    except Exception:
+        _orig = None
+    trunc_err = _check_truncation_signatures(content, _orig)
+    if trunc_err:
+        return tool_error(trunc_err)
     try:
         # Resolve once for the registry lock + stale check.  Failures here
         # fall back to the legacy path — write proceeds, per-task staleness
@@ -851,6 +896,11 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                new_string: str = None, replace_all: bool = False, patch: str = None,
                task_id: str = "default") -> str:
     """Patch a file using replace mode or V4A patch format."""
+    # Guard against AI truncation placeholders in the replacement string
+    if new_string:
+        trunc_err = _check_truncation_signatures(new_string)
+        if trunc_err:
+            return tool_error(trunc_err)
     # Check sensitive paths for both replace (explicit path) and V4A patch (extract paths)
     _paths_to_check = []
     if path:
