@@ -326,7 +326,7 @@ class TestSkillViewPluginGuards:
 
         assert result["success"] is True
         assert "Ignore previous instructions" in result["content"]
-        assert any("injection" in r.message.lower() for r in caplog.records)
+        assert "injection" in caplog.text.lower()
 
 
 class TestBundleContextBanner:
