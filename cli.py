@@ -3592,7 +3592,7 @@ class HermesCLI:
         if self._resumed and self._session_db and not self.conversation_history:
             session_meta = self._session_db.get_session(self.session_id)
             if not session_meta:
-                _cprint(f"\033[1;31m{format_zh("Session not found: ")}{str(self.session_id)}{_RST}")
+                _cprint(f"\033[1;31m{format_zh('Session not found: ')}{str(self.session_id)}{_RST}")
                 _cprint(format_zh(f"{_DIM}Use a session ID from a previous CLI run (hermes sessions list).{_RST}"))
                 return False
             # If the requested session is the (empty) head of a compression
@@ -3827,7 +3827,7 @@ class HermesCLI:
         session_meta = self._session_db.get_session(self.session_id)
         if not session_meta:
             self._console_print(
-                f"[bold red]{format_zh("Session not found: ")}{str(self.session_id)}[/]"
+                f"[bold red]{format_zh('Session not found: ')}{str(self.session_id)}[/]"
             )
             self._console_print(
                 "[dim]Use a session ID from a previous CLI run "
@@ -4192,7 +4192,7 @@ class HermesCLI:
         if subcmd in ("list", "ls"):
             snaps = list_quick_snapshots()
             if not snaps:
-                print("  " + format_zh("No state snapshots yet."))
+                print("  " + format_zh('No state snapshots yet.'))
                 print("  Create one: /snapshot create [label]")
                 return
             print(f"  State snapshots ({display_hermes_home()}/state-snapshots/):\n")
@@ -4377,14 +4377,14 @@ class HermesCLI:
 
         assistant = [m for m in self.conversation_history if m.get("role") == "assistant"]
         if not assistant:
-            _cprint(format_zh("  Nothing to copy yet."))
+            _cprint(format_zh('  Nothing to copy yet.'))
             return
 
         if arg:
             try:
                 idx = int(arg) - 1
             except ValueError:
-                _cprint(format_zh("  Usage: /copy [number]"))
+                _cprint(format_zh('  Usage: /copy [number]'))
                 return
             if idx < 0 or idx >= len(assistant):
                 _cprint(f"  Invalid response number. Use 1-{len(assistant)}.")
@@ -4394,12 +4394,12 @@ class HermesCLI:
             while idx >= 0 and not _assistant_copy_text(assistant[idx].get("content")):
                 idx -= 1
             if idx < 0:
-                _cprint(format_zh("  Nothing to copy in assistant responses yet."))
+                _cprint(format_zh('  Nothing to copy in assistant responses yet.'))
                 return
 
         text = _assistant_copy_text(assistant[idx].get("content"))
         if not text:
-            _cprint(format_zh("  Nothing to copy in that assistant response."))
+            _cprint(format_zh('  Nothing to copy in that assistant response.'))
             return
 
         try:
@@ -5076,13 +5076,13 @@ class HermesCLI:
                             self._pending_title = None
                             title = sanitized
                         except ValueError as e:
-                            _cprint(f"  {e} {format_zh(" — session started untitled.")}")
+                            _cprint(f"  {e} {format_zh(' — session started untitled.')}")
                             title = None
                         except Exception:
                             title = None
                     elif title is not None:
                         # sanitize_title returned empty (whitespace-only / unprintable)
-                        _cprint("  Title is empty after cleanup" + format_zh(" — session started untitled."))
+                        _cprint("  Title is empty after cleanup" + format_zh(' — session started untitled.'))
                         title = None
             # Notify memory providers that session_id rotated to a fresh
             # conversation. reset=True signals providers to flush accumulated
@@ -5114,14 +5114,14 @@ class HermesCLI:
         target = parts[1].strip() if len(parts) > 1 else ""
 
         if not target:
-            _cprint(format_zh("  Usage: /resume <session_id_or_title>"))
+            _cprint(format_zh('  Usage: /resume <session_id_or_title>'))
             if self._show_recent_sessions(reason="resume"):
                 return
-            _cprint(format_zh("  Tip:   Use /history or `hermes sessions list` to find sessions."))
+            _cprint(format_zh('  Tip:   Use /history or `hermes sessions list` to find sessions.'))
             return
 
         if not self._session_db:
-            _cprint(format_zh("  Session database not available."))
+            _cprint(format_zh('  Session database not available.'))
             return
 
         # Resolve title or ID
@@ -5132,7 +5132,7 @@ class HermesCLI:
         session_meta = self._session_db.get_session(target_id)
         if not session_meta:
             _cprint(format_zh(f"  Session not found: ") + str(target))
-            _cprint(format_zh("  Use /history or `hermes sessions list` to see available sessions."))
+            _cprint(format_zh('  Use /history or `hermes sessions list` to see available sessions.'))
             return
 
         # If the target is the empty head of a compression chain, redirect to
@@ -5152,7 +5152,7 @@ class HermesCLI:
                 session_meta = resolved_meta
 
         if target_id == self.session_id:
-            _cprint(format_zh("  Already on that session."))
+            _cprint(format_zh('  Already on that session.'))
             return
 
         old_session_id = self.session_id
@@ -5228,11 +5228,11 @@ class HermesCLI:
         Inspired by Claude Code's /branch command.
         """
         if not self.conversation_history:
-            _cprint(format_zh("  No conversation to branch — send a message first."))
+            _cprint(format_zh('  No conversation to branch — send a message first.'))
             return
 
         if not self._session_db:
-            _cprint(format_zh("  Session database not available."))
+            _cprint(format_zh('  Session database not available.'))
             return
 
         parts = cmd_original.split(None, 1)
@@ -5621,16 +5621,16 @@ class HermesCLI:
             or result.api_mode == "anthropic_messages"
         )
         if cache_enabled:
-            _cprint(format_zh("    Prompt caching: enabled"))
+            _cprint(format_zh('    Prompt caching: enabled'))
         if result.warning_message:
             _cprint(f"    ⚠ {result.warning_message}")
         if persist_global:
             save_config_value("model.default", result.new_model)
             if result.provider_changed:
                 save_config_value("model.provider", result.target_provider)
-            _cprint(format_zh("    Saved to config.yaml (--global)"))
+            _cprint(format_zh('    Saved to config.yaml (--global)'))
         else:
-            _cprint(format_zh("    (session only — add --global to persist)"))
+            _cprint(format_zh('    (session only — add --global to persist)'))
 
     def _handle_model_picker_selection(self, persist_global: bool = False) -> None:
         state = self._model_picker_state
@@ -5744,10 +5744,10 @@ class HermesCLI:
                 providers = []
 
             if not providers:
-                _cprint(format_zh("  No authenticated providers found."))
+                _cprint(format_zh('  No authenticated providers found.'))
                 _cprint("")
-                _cprint(format_zh("  /model <name>                        switch model"))
-                _cprint(format_zh("  /model --provider <slug>             switch provider"))
+                _cprint(format_zh('  /model <name>                        switch model'))
+                _cprint(format_zh('  /model --provider <slug>             switch provider'))
                 return
 
             self._open_model_picker(
@@ -5847,7 +5847,7 @@ class HermesCLI:
             or result.api_mode == "anthropic_messages"
         )
         if cache_enabled:
-            _cprint(format_zh("    Prompt caching: enabled"))
+            _cprint(format_zh('    Prompt caching: enabled'))
 
         # Warning from validation
         if result.warning_message:
@@ -5858,9 +5858,9 @@ class HermesCLI:
             save_config_value("model.default", result.new_model)
             if result.provider_changed:
                 save_config_value("model.provider", result.target_provider)
-            _cprint(format_zh("    Saved to config.yaml (--global)"))
+            _cprint(format_zh('    Saved to config.yaml (--global)'))
         else:
-            _cprint(format_zh("    (session only — add --global to persist)"))
+            _cprint(format_zh('    (session only — add --global to persist)'))
 
     def _should_handle_model_command_inline(self, text: str, has_images: bool = False) -> bool:
         """Return True when /model should be handled immediately on the UI thread."""
@@ -5980,7 +5980,7 @@ class HermesCLI:
                 if save_config_value("agent.system_prompt", ""):
                     print("(^_^)b Personality cleared (saved to config)")
                 else:
-                    print("(^_^) Personality cleared" + format_zh("(session only)"))
+                    print("(^_^) Personality cleared" + format_zh('(session only)'))
                 print("  No personality overlay — using base agent behavior.")
             elif personality_name in self.personalities:
                 self.system_prompt = self._resolve_personality_prompt(self.personalities[personality_name])
@@ -5988,7 +5988,7 @@ class HermesCLI:
                 if save_config_value("agent.system_prompt", self.system_prompt):
                     print(f"(^_^)b Personality set to '{personality_name}' (saved to config)")
                 else:
-                    print(f"(^_^) Personality set to '{personality_name}' {format_zh("(session only)")}")
+                    print(f"(^_^) Personality set to '{personality_name}' {format_zh('(session only)')}")
                 print(f"  \"{self.system_prompt[:60]}{'...' if len(self.system_prompt) > 60 else ''}\"")
             else:
                 print(f"(._.) Unknown personality: {personality_name}")
@@ -6437,7 +6437,7 @@ class HermesCLI:
                         session_id=self.session_id,
                         context_length=ctx_len,
                     )
-                _cprint(format_zh("  ✨ (◕‿◕)✨ Fresh start! Screen cleared and conversation reset.\n"))
+                _cprint(format_zh('  ✨ (◕‿◕)✨ Fresh start! Screen cleared and conversation reset.\n'))
                 # Show a random tip on new session
                 try:
                     from hermes_cli.tips import get_random_tip
@@ -6481,14 +6481,14 @@ class HermesCLI:
                             _cprint(f"  {e}")
                             new_title = None
                         if not new_title:
-                            _cprint(format_zh("  Title is empty after cleanup. Please use printable characters."))
+                            _cprint(format_zh('  Title is empty after cleanup. Please use printable characters.'))
                         elif self._session_db.get_session(self.session_id):
                             # Session exists in DB — set title directly
                             try:
                                 if self._session_db.set_session_title(self.session_id, new_title):
                                     _cprint(format_zh(f"  Session title set: ") + str(new_title))
                                 else:
-                                    _cprint(format_zh("  Session not found in database."))
+                                    _cprint(format_zh('  Session not found in database.'))
                             except ValueError as e:
                                 _cprint(f"  {e}")
                         else:
@@ -6496,14 +6496,14 @@ class HermesCLI:
                             # Check uniqueness proactively with the sanitized title
                             existing = self._session_db.get_session_by_title(new_title)
                             if existing:
-                                _cprint(f"  Title '{new_title}' {format_zh(" is already in use by session ")}{str(existing['id'])}")
+                                _cprint(f"  Title '{new_title}' {format_zh(' is already in use by session ')}{str(existing['id'])}")
                             else:
                                 self._pending_title = new_title
                                 _cprint(format_zh(f"  Session title queued: {new_title} (will be saved on first message)"))
                     else:
-                        _cprint(format_zh("  Session database not available."))
+                        _cprint(format_zh('  Session database not available.'))
                 else:
-                    _cprint(format_zh("  Usage: /title <your session title>"))
+                    _cprint(format_zh('  Usage: /title <your session title>'))
             else:
                 # Show current title and session ID if no argument given
                 if self._session_db:
@@ -6514,9 +6514,9 @@ class HermesCLI:
                     elif self._pending_title:
                         _cprint(format_zh(f"  Title (pending): ") + str(self._pending_title))
                     else:
-                        _cprint("  No title set. " + format_zh("Usage: /title <your session title>"))
+                        _cprint("  No title set. " + format_zh('Usage: /title <your session title>'))
                 else:
-                    _cprint(format_zh("  Session database not available."))
+                    _cprint(format_zh('  Session database not available.'))
         elif canonical == "new":
             parts = cmd_original.split(maxsplit=1)
             title = parts[1].strip() if len(parts) > 1 else None
@@ -6634,7 +6634,7 @@ class HermesCLI:
             parts = cmd_original.split(None, 1)
             payload = parts[1].strip() if len(parts) > 1 else ""
             if not payload:
-                _cprint(format_zh("  Usage: /queue <prompt>"))
+                _cprint(format_zh('  Usage: /queue <prompt>'))
             else:
                 self._pending_input.put(payload)
                 if self._agent_running:
@@ -6650,7 +6650,7 @@ class HermesCLI:
             parts = cmd_original.split(None, 1)
             payload = parts[1].strip() if len(parts) > 1 else ""
             if not payload:
-                _cprint(format_zh("  Usage: /steer <prompt>"))
+                _cprint(format_zh('  Usage: /steer <prompt>'))
             elif self._agent_running and self.agent is not None and hasattr(self.agent, "steer"):
                 try:
                     accepted = self.agent.steer(payload)
@@ -6660,7 +6660,7 @@ class HermesCLI:
                     if accepted:
                         _cprint(f"  ⏩ Steer queued — arrives after the next tool call: {payload[:80]}{'...' if len(payload) > 80 else ''}")
                     else:
-                        _cprint(format_zh("  Steer rejected (empty payload)."))
+                        _cprint(format_zh('  Steer rejected (empty payload).'))
             else:
                 # No active run — treat as a normal next-turn message.
                 self._pending_input.put(payload)
@@ -6792,9 +6792,9 @@ class HermesCLI:
         """
         parts = cmd.strip().split(maxsplit=1)
         if len(parts) < 2 or not parts[1].strip():
-            _cprint(format_zh("  Usage: /background <prompt>"))
-            _cprint(format_zh("  Example: /background Summarize the top HN stories today"))
-            _cprint(format_zh("  The task runs in a separate session and results display here when done."))
+            _cprint(format_zh('  Usage: /background <prompt>'))
+            _cprint(format_zh('  Example: /background Summarize the top HN stories today'))
+            _cprint(format_zh('  The task runs in a separate session and results display here when done.'))
             return
 
         prompt = parts[1].strip()
@@ -6804,12 +6804,12 @@ class HermesCLI:
 
         # Make sure we have valid credentials
         if not self._ensure_runtime_credentials():
-            _cprint(format_zh("  (>_<) Cannot start background task: no valid credentials."))
+            _cprint(format_zh('  (>_<) Cannot start background task: no valid credentials.'))
             return
 
         _cprint(f"  🔄 Background task #{task_num} started: \"{prompt[:60]}{'...' if len(prompt) > 60 else ''}\"")
         _cprint(f"  Task ID: {task_id}")
-        _cprint(format_zh("  You can continue chatting — results will appear when done.\n"))
+        _cprint(format_zh('  You can continue chatting — results will appear when done.\n'))
 
         turn_route = self._resolve_turn_agent_config(prompt)
 
@@ -6902,7 +6902,7 @@ class HermesCLI:
                         padding=(1, 4),
                     ))
                 else:
-                    _cprint(format_zh("  (No response generated)"))
+                    _cprint(format_zh('  (No response generated)'))
 
                 # Play bell if enabled
                 if self.bell_on_complete:
@@ -7224,7 +7224,7 @@ class HermesCLI:
             had = mgr.has_goal()
             mgr.clear()
             if had:
-                _cprint(format_zh("  ✓ Goal cleared."))
+                _cprint(format_zh('  ✓ Goal cleared.'))
             else:
                 _cprint(f"  {_DIM}No active goal.{_RST}")
             return
@@ -7388,7 +7388,7 @@ class HermesCLI:
         elif arg == "":
             new_state = not current
         else:
-            _cprint(format_zh("  Usage: /footer [on|off|status]"))
+            _cprint(format_zh('  Usage: /footer [on|off|status]'))
             return
 
         if save_config_value("display.runtime_footer.enabled", new_state):
@@ -7398,7 +7398,7 @@ class HermesCLI:
             )
             _cprint(f"  Runtime footer: {state}")
         else:
-            _cprint(format_zh("  Failed to save runtime_footer setting to config.yaml"))
+            _cprint(format_zh('  Failed to save runtime_footer setting to config.yaml'))
 
     def _toggle_verbose(self):
         """Cycle tool progress mode: off → new → all → verbose → off."""
@@ -7506,7 +7506,7 @@ class HermesCLI:
         if save_config_value("agent.reasoning_effort", arg):
             _cprint(f"  {_ACCENT}✓ Reasoning effort set to '{arg}' (saved to config){_RST}")
         else:
-            _cprint(f"  {_ACCENT}✓ Reasoning effort set to '{arg}' {format_zh("(session only)")} {_RST}")
+            _cprint(f"  {_ACCENT}✓ Reasoning effort set to '{arg}' {format_zh('(session only)')} {_RST}")
 
     def _handle_busy_command(self, cmd: str):
         """Handle /busy — control what Enter does while Hermes is working.
@@ -7548,12 +7548,12 @@ class HermesCLI:
             _cprint(f"  {_ACCENT}✓ Busy input mode set to '{arg}' (saved to config){_RST}")
             _cprint(f"  {_DIM}{behavior}{_RST}")
         else:
-            _cprint(f"  {_ACCENT}✓ Busy input mode set to '{arg}' {format_zh("(session only)")} {_RST}")
+            _cprint(f"  {_ACCENT}✓ Busy input mode set to '{arg}' {format_zh('(session only)')} {_RST}")
 
     def _handle_fast_command(self, cmd: str):
         """Handle /fast — toggle fast mode (OpenAI Priority Processing / Anthropic Fast Mode)."""
         if not self._fast_command_available():
-            _cprint(format_zh("  (._.) /fast is only available for models that support fast mode (OpenAI Priority Processing or Anthropic Fast Mode)."))
+            _cprint(format_zh('  (._.) /fast is only available for models that support fast mode (OpenAI Priority Processing or Anthropic Fast Mode).'))
             return
 
         # Determine the branding for the current model
@@ -7591,7 +7591,7 @@ class HermesCLI:
         if save_config_value("agent.service_tier", saved_value):
             _cprint(f"  {_ACCENT}✓ {feature_name} set to {label} (saved to config){_RST}")
         else:
-            _cprint(f"  {_ACCENT}✓ {feature_name} set to {label} {format_zh("(session only)")} {_RST}")
+            _cprint(f"  {_ACCENT}✓ {feature_name} set to {label} {format_zh('(session only)')} {_RST}")
 
     def _on_reasoning(self, reasoning_text: str):
         """Callback for intermediate reasoning display during tool-call loops."""
@@ -7628,7 +7628,7 @@ class HermesCLI:
                 focus_topic = parts[1].strip()
 
         original_count = len(self.conversation_history)
-        with self._busy_command(format_zh("Compressing context...", zh="正在压缩上下文...")):
+        with self._busy_command(format_zh('Compressing context...', zh="正在压缩上下文...")):
             try:
                 from agent.model_metadata import estimate_request_tokens_rough
                 from agent.manual_compression_feedback import summarize_manual_compression
@@ -7757,7 +7757,7 @@ class HermesCLI:
         )
         elapsed = format_duration_compact((datetime.now() - self.session_start).total_seconds())
 
-        print("  📊 " + format_zh("Session Token Usage"))
+        print("  📊 " + format_zh('Session Token Usage'))
         print(f"  {'─' * 40}")
         print(f"  Model:                     {agent.model}")
         print(f"  Input tokens:              {input_tokens:>10,}")
@@ -7991,7 +7991,7 @@ class HermesCLI:
                 old_servers = set(_servers.keys())
 
             if not self._command_running:
-                print("🔄 " + format_zh("Reloading MCP servers..."))
+                print("🔄 " + format_zh('Reloading MCP servers...'))
 
             # Shutdown existing connections
             shutdown_mcp_servers()
@@ -8588,7 +8588,7 @@ class HermesCLI:
                 self._enable_voice_mode()
         else:
             _cprint(f"Unknown voice subcommand: {subcommand}")
-            _cprint(format_zh("Usage: /voice [on|off|tts|status]"))
+            _cprint(format_zh('Usage: /voice [on|off|tts|status]'))
 
     def _voice_beeps_enabled(self) -> bool:
         """Return whether CLI voice mode should play record start/stop beeps."""
@@ -8604,7 +8604,7 @@ class HermesCLI:
     def _enable_voice_mode(self):
         """Enable voice mode after checking requirements."""
         if self._voice_mode:
-            _cprint(f"{_DIM}" + format_zh("Voice mode is already enabled.") + "{_RST}")
+            _cprint(f"{_DIM}" + format_zh('Voice mode is already enabled.') + "{_RST}")
             return
 
         from tools.voice_mode import check_voice_requirements, detect_audio_environment
@@ -8612,14 +8612,14 @@ class HermesCLI:
         # Environment detection -- warn and block in incompatible environments
         env_check = detect_audio_environment()
         if not env_check["available"]:
-            _cprint(f"\n{_ACCENT}" + format_zh("Voice mode unavailable in this environment:") + "{_RST}")
+            _cprint(f"\n{_ACCENT}" + format_zh('Voice mode unavailable in this environment:') + "{_RST}")
             for warning in env_check["warnings"]:
                 _cprint(f"  {_DIM}{warning}{_RST}")
             return
 
         reqs = check_voice_requirements()
         if not reqs["available"]:
-            _cprint(f"\n{_ACCENT}" + format_zh("Voice mode requirements not met:") + "{_RST}")
+            _cprint(f"\n{_ACCENT}" + format_zh('Voice mode requirements not met:') + "{_RST}")
             for line in reqs["details"].split("\n"):
                 _cprint(f"  {_DIM}{line}{_RST}")
             if reqs["missing_packages"]:
@@ -8656,7 +8656,7 @@ class HermesCLI:
         # here would drift after a mid-session config edit (Copilot
         # round-14 on #19835, same class as round-13).
         _ptt_display = self._voice_record_key_label()
-        _cprint(f"\n{_ACCENT}" + format_zh("Voice mode enabled") + tts_status + "{_RST}")
+        _cprint(f"\n{_ACCENT}" + format_zh('Voice mode enabled') + tts_status + "{_RST}")
         _cprint(f"  {_DIM}{_ptt_display} to start/stop recording{_RST}")
         _cprint(f"  {_DIM}/voice tts  to toggle speech output{_RST}")
         _cprint(f"  {_DIM}/voice off  to disable voice mode{_RST}")
@@ -8691,7 +8691,7 @@ class HermesCLI:
             pass
         self._voice_tts_done.set()
 
-        _cprint(f"\n{_DIM}" + format_zh("Voice mode disabled.") + "{_RST}")
+        _cprint(f"\n{_DIM}" + format_zh('Voice mode disabled.') + "{_RST}")
 
     def _toggle_voice_tts(self):
         """Toggle TTS output for voice mode."""
@@ -8708,7 +8708,7 @@ class HermesCLI:
             if not check_tts_requirements():
                 _cprint(f"{_DIM}Warning: No TTS provider available. Install edge-tts or set API keys.{_RST}")
 
-        _cprint(f"{_ACCENT}" + format_zh("Voice TTS {status}.", status=status) + "{_RST}")
+        _cprint(f"{_ACCENT}" + format_zh('Voice TTS {status}.', status=status) + "{_RST}")
 
     def _show_voice_status(self):
         """Show current voice mode status."""
@@ -8716,16 +8716,16 @@ class HermesCLI:
 
         reqs = check_voice_requirements()
 
-        _cprint(f"\n{_BOLD}" + format_zh("Voice Mode Status") + "{_RST}")
-        _cprint(f"  " + format_zh("Mode:") + f"      {'ON' if self._voice_mode else 'OFF'}")
-        _cprint(f"  " + format_zh("TTS:") + f"       {'ON' if self._voice_tts else 'OFF'}")
-        _cprint(f"  " + format_zh("Recording:") + f" {'YES' if self._voice_recording else 'no'}")
+        _cprint(f"\n{_BOLD}" + format_zh('Voice Mode Status') + "{_RST}")
+        _cprint(f"  " + format_zh('Mode:') + f"      {'ON' if self._voice_mode else 'OFF'}")
+        _cprint(f"  " + format_zh('TTS:') + f"       {'ON' if self._voice_tts else 'OFF'}")
+        _cprint(f"  " + format_zh('Recording:') + f" {'YES' if self._voice_recording else 'no'}")
         # Display the startup-pinned label so /voice status always
         # matches the live prompt_toolkit binding (Copilot round-14 on
         # #19835, same class as round-13). Reading live config here
         # would drift after a mid-session config edit.
-        _cprint(f"  " + format_zh("Record key:") + f" {self._voice_record_key_label()}")
-        _cprint(f"\n  {_BOLD}" + format_zh("Requirements:") + "{_RST}")
+        _cprint(f"  " + format_zh('Record key:') + f" {self._voice_record_key_label()}")
+        _cprint(f"\n  {_BOLD}" + format_zh('Requirements:') + "{_RST}")
         for line in reqs["details"].split("\n"):
             _cprint(f"    {line}")
 
@@ -8790,7 +8790,7 @@ class HermesCLI:
         self._clarify_freetext = False
         self._clarify_deadline = 0
         self._invalidate()
-        _cprint(f"\n{_DIM}" + format_zh("(clarify timed out after {timeout}s — agent will decide)", timeout=timeout) + "{_RST}")
+        _cprint(f"\n{_DIM}" + format_zh('(clarify timed out after {timeout}s — agent will decide)', timeout=timeout) + "{_RST}")
         return (
             "The user did not provide a response within the time limit. "
             "Use your best judgement to make the choice and proceed."
@@ -8894,12 +8894,12 @@ class HermesCLI:
             self._approval_state = None
             self._approval_deadline = 0
             self._invalidate()
-            _cprint(f"\n{_DIM}  ⏱ " + format_zh("Timeout — denying command") + "{_RST}")
+            _cprint(f"\n{_DIM}  ⏱ " + format_zh('Timeout — denying command') + "{_RST}")
             return "deny"
 
     def _approval_choices(self, command: str, *, allow_permanent: bool = True) -> list[str]:
         """Return approval choices for a dangerous command prompt."""
-        choices = [format_zh("once"), format_zh("session"), format_zh("always"), format_zh("deny")] if allow_permanent else [format_zh("once"), format_zh("session"), format_zh("deny")]
+        choices = [format_zh('once'), format_zh('session'), format_zh('always'), format_zh('deny')] if allow_permanent else [format_zh('once'), format_zh('session'), format_zh('deny')]
         if len(command) > 70:
             choices.append("view")
         return choices
@@ -8975,14 +8975,14 @@ class HermesCLI:
         selected = state.get("selected", 0)
         show_full = state.get("show_full", False)
 
-        title = format_zh("⚠️  Dangerous Command")
+        title = format_zh('⚠️  Dangerous Command')
         cmd_display = command if show_full or len(command) <= 70 else command[:70] + '...'
         choice_labels = {
-            "once": format_zh("Allow once"),
-            "session": format_zh("Allow for this session"),
-            "always": format_zh("Add to permanent allowlist"),
-            "deny": format_zh("Deny"),
-            "view": format_zh("Show full command"),
+            "once": format_zh('Allow once'),
+            "session": format_zh('Allow for this session'),
+            "always": format_zh('Add to permanent allowlist'),
+            "deny": format_zh('Deny'),
+            "view": format_zh('Show full command'),
         }
 
         preview_lines = _wrap_panel_text(description, 60)
@@ -9437,7 +9437,7 @@ class HermesCLI:
                             # But if it does (race condition), don't interrupt.
                             if self._clarify_state or self._clarify_freetext:
                                 continue
-                            print("\n⚡ " + format_zh("New message detected, interrupting..."))
+                            print("\n⚡ " + format_zh('New message detected, interrupting...'))
                             # Signal TTS to stop on interrupt
                             if stop_event is not None:
                                 stop_event.set()
@@ -10541,13 +10541,13 @@ class HermesCLI:
 
             if self._agent_running and self.agent:
                 if now - self._last_ctrl_c_time < 2.0:
-                    print("\n⚡ " + format_zh("Force exiting..."))
+                    print("\n⚡ " + format_zh('Force exiting...'))
                     self._should_exit = True
                     event.app.exit()
                     return
                 
                 self._last_ctrl_c_time = now
-                print("\n⚡ " + format_zh("Interrupting agent... (press Ctrl+C again to force exit)"))
+                print("\n⚡ " + format_zh('Interrupting agent... (press Ctrl+C again to force exit)'))
                 self.agent.interrupt()
             else:
                 # If there's text or images, clear them (like bash).
