@@ -81,9 +81,15 @@ async def test_reset_fires_finalize_hook(mock_invoke_hook):
 
     await runner._handle_reset_command(_make_event("/new"))
 
-    mock_invoke_hook.assert_any_call(
-        "on_session_finalize", session_id="sess-old", platform="telegram"
+    finalize_call = next(
+        c for c in mock_invoke_hook.call_args_list
+        if c[0][0] == "on_session_finalize" and c[1]["session_id"] == "sess-old"
     )
+    assert finalize_call.kwargs["platform"] == "telegram"
+    assert finalize_call.kwargs["source_type"] == "gateway"
+    assert finalize_call.kwargs["session_key"] == build_session_key(_make_source())
+    assert finalize_call.kwargs["chat_id"] == "c1"
+    assert finalize_call.kwargs["session_store"] is runner._session_db
 
 
 @pytest.mark.asyncio
@@ -94,9 +100,15 @@ async def test_reset_fires_reset_hook(mock_invoke_hook):
 
     await runner._handle_reset_command(_make_event("/new"))
 
-    mock_invoke_hook.assert_any_call(
-        "on_session_reset", session_id="sess-new", platform="telegram"
+    reset_call = next(
+        c for c in mock_invoke_hook.call_args_list
+        if c[0][0] == "on_session_reset" and c[1]["session_id"] == "sess-new"
     )
+    assert reset_call.kwargs["platform"] == "telegram"
+    assert reset_call.kwargs["source_type"] == "gateway"
+    assert reset_call.kwargs["session_key"] == build_session_key(_make_source())
+    assert reset_call.kwargs["chat_id"] == "c1"
+    assert reset_call.kwargs["session_store"] is runner._session_db
 
 
 @pytest.mark.asyncio
@@ -137,12 +149,13 @@ async def test_shutdown_fires_finalize_for_active_agents(mock_invoke_hook):
     runner._stop_task = None
     runner._running_agents_ts = {}
     runner._update_runtime_status = MagicMock()
+    runner._session_db = MagicMock()
 
     agent1 = MagicMock()
     agent1.session_id = "sess-a"
     agent2 = MagicMock()
     agent2.session_id = "sess-b"
-    runner._running_agents = {"key-a": agent1, "key-b": agent2}
+    runner._running_agents = {"agent:main:telegram:dm:c1": agent1, "agent:main:discord:channel:c2:t9": agent2}
 
     with patch("gateway.status.remove_pid_file"), \
          patch("gateway.status.write_runtime_status"):
@@ -153,7 +166,16 @@ async def test_shutdown_fires_finalize_for_active_agents(mock_invoke_hook):
         if c[0][0] == "on_session_finalize"
     ]
     session_ids = {c[1]["session_id"] for c in finalize_calls}
+    by_session = {c[1]["session_id"]: c[1] for c in finalize_calls}
     assert session_ids == {"sess-a", "sess-b"}
+    assert by_session["sess-a"]["session_key"] == "agent:main:telegram:dm:c1"
+    assert by_session["sess-a"]["platform"] == "telegram"
+    assert by_session["sess-a"]["chat_id"] == "c1"
+    assert by_session["sess-b"]["session_key"] == "agent:main:discord:channel:c2:t9"
+    assert by_session["sess-b"]["platform"] == "discord"
+    assert by_session["sess-b"]["chat_id"] == "c2"
+    assert all(c[1]["source_type"] == "gateway" for c in finalize_calls)
+    assert all(c[1]["session_store"] is runner._session_db for c in finalize_calls)
 
 
 @pytest.mark.asyncio
@@ -239,7 +261,12 @@ async def test_idle_expiry_fires_finalize_hook(mock_invoke_hook):
         if c[0] and c[0][0] == "on_session_finalize"
     ]
     session_ids = {c[1].get("session_id") for c in finalize_calls}
+    session_keys = {c[1].get("session_key") for c in finalize_calls}
     assert "sess-expired" in session_ids, (
         f"on_session_finalize was not fired during idle expiry; "
         f"got session_ids={session_ids} (regression of #14981)"
     )
+    assert session_key in session_keys
+    assert any(c[1].get("platform") == "telegram" for c in finalize_calls)
+    assert any(c[1].get("chat_id") == "42" for c in finalize_calls)
+    assert any(c[1].get("source_type") == "gateway" for c in finalize_calls)

@@ -210,6 +210,10 @@ class PluginManifest:
     # ``plugins/disk-cleanup/`` the key is ``disk-cleanup``; for a nested
     # category plugin at ``plugins/image_gen/openai/`` the key is
     # ``image_gen/openai``. When empty, falls back to ``name``.
+    # ``autoload``: bundled standalone plugin may opt into loading without
+    # plugins.enabled while still respecting plugins.disabled. Keep false for
+    # third-party/user/project plugins by default.
+    autoload: bool = False
     key: str = ""
 
 
@@ -734,7 +738,9 @@ class PluginManager:
             # Bundled platform plugins (gateway adapters like IRC) auto-load
             # for the same reason: every platform Hermes ships must be
             # available out of the box without the user having to opt in.
-            if manifest.source == "bundled" and manifest.kind in ("backend", "platform"):
+            if manifest.source == "bundled" and (
+                manifest.kind in ("backend", "platform") or manifest.autoload
+            ):
                 self._load_plugin(manifest)
                 continue
 
@@ -930,6 +936,7 @@ class PluginManager:
                 source=source,
                 path=str(plugin_dir),
                 kind=kind,
+                autoload=bool(data.get("autoload", False)),
                 key=key,
             )
         except Exception as exc:

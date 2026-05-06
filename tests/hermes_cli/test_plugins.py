@@ -162,6 +162,58 @@ class TestPluginDiscovery:
         }
         assert len(non_bundled) == 0
 
+
+    def test_bundled_autoload_manifest_loads_without_plugins_enabled(self, tmp_path, monkeypatch):
+        """Bundled standalone plugins may explicitly autoload while remaining user-disableable."""
+        bundled = tmp_path / "bundled"
+        plugin_dir = bundled / "safe_autoload"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "plugin.yaml").write_text(yaml.safe_dump({
+            "name": "safe-autoload",
+            "version": "0.1.0",
+            "kind": "standalone",
+            "autoload": True,
+            "provides_hooks": ["on_session_finalize"],
+        }))
+        (plugin_dir / "__init__.py").write_text(
+            "def register(ctx):\n    ctx.register_hook('on_session_finalize', lambda **kw: 'loaded')\n"
+        )
+        hermes_home = tmp_path / "hermes_home"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text(yaml.safe_dump({"plugins": {"enabled": []}}))
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(bundled))
+
+        mgr = PluginManager()
+        mgr.discover_and_load()
+
+        assert mgr._plugins["safe-autoload"].enabled
+        assert mgr.invoke_hook("on_session_finalize") == ["loaded"]
+
+    def test_bundled_autoload_still_respects_disabled_config(self, tmp_path, monkeypatch):
+        """Explicit plugins.disabled must override bundled autoload."""
+        bundled = tmp_path / "bundled"
+        plugin_dir = bundled / "safe_autoload"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "plugin.yaml").write_text(yaml.safe_dump({
+            "name": "safe-autoload",
+            "version": "0.1.0",
+            "kind": "standalone",
+            "autoload": True,
+        }))
+        (plugin_dir / "__init__.py").write_text("def register(ctx):\n    raise AssertionError('must not load')\n")
+        hermes_home = tmp_path / "hermes_home"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text(yaml.safe_dump({"plugins": {"disabled": ["safe-autoload"]}}))
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(bundled))
+
+        mgr = PluginManager()
+        mgr.discover_and_load()
+
+        assert not mgr._plugins["safe-autoload"].enabled
+        assert "disabled" in (mgr._plugins["safe-autoload"].error or "")
+
     def test_entry_points_scanned(self, tmp_path, monkeypatch):
         """Entry-point based plugins are discovered (mocked)."""
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_test"))

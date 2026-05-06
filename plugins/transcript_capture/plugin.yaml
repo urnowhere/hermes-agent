@@ -1,0 +1,7 @@
+name: transcript-capture
+version: 0.1.0
+description: Safe finalized Hermes transcript export to a flat stock-gBrain corpus.
+kind: standalone
+autoload: true
+provides_hooks:
+  - on_session_finalize

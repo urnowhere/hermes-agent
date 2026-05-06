@@ -700,7 +700,16 @@ def _run_cleanup():
     # session boundary — NOT per-turn inside run_conversation().
     try:
         from hermes_cli.plugins import invoke_hook as _invoke_hook
-        _invoke_hook("on_session_finalize", session_id=_active_agent_ref.session_id if _active_agent_ref else None, platform="cli")
+        _agent_session_key = getattr(_active_agent_ref, "session_key", None)
+        _session_key = _agent_session_key if isinstance(_agent_session_key, str) and _agent_session_key else (_active_agent_ref.session_id if _active_agent_ref else None)
+        _invoke_hook(
+            "on_session_finalize",
+            session_id=_active_agent_ref.session_id if _active_agent_ref else None,
+            session_key=_session_key,
+            platform="cli",
+            source_type="cli",
+            session_store=getattr(_active_agent_ref, "_session_db", None),
+        )
     except Exception:
         pass
     try:
@@ -5210,10 +5219,16 @@ class HermesCLI:
         """
         try:
             from hermes_cli.plugins import invoke_hook as _invoke_hook
+            _session_id = self.agent.session_id if self.agent else None
+            _agent_session_key = getattr(self.agent, "session_key", None)
+            _session_key = _agent_session_key if isinstance(_agent_session_key, str) and _agent_session_key else _session_id
             _invoke_hook(
                 event_type,
-                session_id=self.agent.session_id if self.agent else None,
+                session_id=_session_id,
+                session_key=_session_key,
                 platform=getattr(self, "platform", None) or "cli",
+                source_type="cli",
+                session_store=getattr(self, "_session_db", None),
             )
         except Exception:
             pass

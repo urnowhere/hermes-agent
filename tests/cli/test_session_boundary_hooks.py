@@ -24,13 +24,24 @@ def test_session_finalize_on_reset(mock_invoke_hook):
     cli.new_session(silent=True)
 
     # Check if on_session_finalize was called for the old session
-    mock_invoke_hook.assert_any_call(
-        "on_session_finalize", session_id="test-session-id", platform="cli"
+    finalize_call = next(
+        c for c in mock_invoke_hook.call_args_list
+        if c[0][0] == "on_session_finalize" and c[1]["session_id"] == "test-session-id"
     )
+    assert finalize_call.kwargs["platform"] == "cli"
+    assert finalize_call.kwargs["source_type"] == "cli"
+    assert finalize_call.kwargs["session_key"] == "test-session-id"
+    assert finalize_call.kwargs["session_store"] is cli._session_db
+
     # Check if on_session_reset was called for the new session
-    mock_invoke_hook.assert_any_call(
-        "on_session_reset", session_id=cli.session_id, platform="cli"
+    reset_call = next(
+        c for c in mock_invoke_hook.call_args_list
+        if c[0][0] == "on_session_reset" and c[1]["session_id"] == cli.session_id
     )
+    assert reset_call.kwargs["platform"] == "cli"
+    assert reset_call.kwargs["source_type"] == "cli"
+    assert reset_call.kwargs["session_key"] == cli.session_id
+    assert reset_call.kwargs["session_store"] is cli._session_db
 
 
 @patch("hermes_cli.plugins.invoke_hook")
@@ -45,9 +56,14 @@ def test_session_finalize_on_cleanup(mock_invoke_hook):
 
     cli_mod._run_cleanup()
 
-    mock_invoke_hook.assert_any_call(
-        "on_session_finalize", session_id="cleanup-session-id", platform="cli"
+    finalize_call = next(
+        c for c in mock_invoke_hook.call_args_list
+        if c[0][0] == "on_session_finalize" and c[1]["session_id"] == "cleanup-session-id"
     )
+    assert finalize_call.kwargs["platform"] == "cli"
+    assert finalize_call.kwargs["source_type"] == "cli"
+    assert finalize_call.kwargs["session_key"] == "cleanup-session-id"
+    assert finalize_call.kwargs["session_store"] is mock_agent._session_db
 
 
 @patch("hermes_cli.plugins.invoke_hook")

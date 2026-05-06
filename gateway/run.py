@@ -2537,14 +2537,27 @@ class GatewayRunner:
                     e,
                 )
 
+    @staticmethod
+    def _session_key_platform_chat(session_key: str) -> tuple[str, Optional[str]]:
+        """Best-effort platform/chat extraction from Hermes gateway session keys."""
+        parts = str(session_key or "").split(":")
+        platform = parts[2] if len(parts) > 2 else ""
+        chat_id = parts[4] if len(parts) > 4 else None
+        return platform, chat_id
+
     def _finalize_shutdown_agents(self, active_agents: Dict[str, Any]) -> None:
-        for agent in active_agents.values():
+        for session_key, agent in active_agents.items():
             try:
                 from hermes_cli.plugins import invoke_hook as _invoke_hook
+                platform, chat_id = self._session_key_platform_chat(session_key)
                 _invoke_hook(
                     "on_session_finalize",
                     session_id=getattr(agent, "session_id", None),
-                    platform="gateway",
+                    session_key=session_key,
+                    platform=platform,
+                    source_type="gateway",
+                    chat_id=chat_id,
+                    session_store=getattr(self, "_session_db", None),
                 )
             except Exception:
                 pass
@@ -3208,12 +3221,15 @@ class GatewayRunner:
                     try:
                         try:
                             from hermes_cli.plugins import invoke_hook as _invoke_hook
-                            _parts = key.split(":")
-                            _platform = _parts[2] if len(_parts) > 2 else ""
+                            _platform, _chat_id = self._session_key_platform_chat(key)
                             _invoke_hook(
                                 "on_session_finalize",
                                 session_id=entry.session_id,
+                                session_key=key,
                                 platform=_platform,
+                                source_type="gateway",
+                                chat_id=_chat_id,
+                                session_store=getattr(self, "_session_db", None),
                             )
                         except Exception:
                             pass
@@ -7032,8 +7048,15 @@ class GatewayRunner:
         try:
             from hermes_cli.plugins import invoke_hook as _invoke_hook
             _old_sid = old_entry.session_id if old_entry else None
-            _invoke_hook("on_session_finalize", session_id=_old_sid,
-                         platform=source.platform.value if source.platform else "")
+            _invoke_hook(
+                "on_session_finalize",
+                session_id=_old_sid,
+                session_key=session_key,
+                platform=source.platform.value if source.platform else "",
+                source_type="gateway",
+                chat_id=source.chat_id,
+                session_store=getattr(self, "_session_db", None),
+            )
         except Exception:
             pass
 
@@ -7102,8 +7125,15 @@ class GatewayRunner:
         try:
             from hermes_cli.plugins import invoke_hook as _invoke_hook
             _new_sid = new_entry.session_id if new_entry else None
-            _invoke_hook("on_session_reset", session_id=_new_sid,
-                         platform=source.platform.value if source.platform else "")
+            _invoke_hook(
+                "on_session_reset",
+                session_id=_new_sid,
+                session_key=session_key,
+                platform=source.platform.value if source.platform else "",
+                source_type="gateway",
+                chat_id=source.chat_id,
+                session_store=getattr(self, "_session_db", None),
+            )
         except Exception:
             pass
 
