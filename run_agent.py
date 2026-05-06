@@ -11218,6 +11218,18 @@ class AIAgent:
             # the OpenAI SDK. Sanitizing here prevents the 3-retry cycle.
             _sanitize_messages_surrogates(api_messages)
 
+            # Safety net: if context compression or session resume stripped all
+            # user messages, the upstream provider (e.g. Airrouter/litellm) will
+            # reject the request with 400 "No user query found in messages",
+            # which the jmunch gateway converts to a 502.  Detect this and
+            # inject a continuation prompt so the model can keep going.
+            if not any(m.get("role") == "user" for m in api_messages):
+                api_messages.append({"role": "user", "content": "[System: please continue the conversation from your last response, taking the next appropriate action or providing a final response to the user."})
+                request_logger.info(
+                    "Injected continuation prompt: no user messages found in api_messages (session=%s)",
+                    self.session_id or "-",
+                )
+
             # Calculate approximate request size for logging
             total_chars = sum(len(str(msg)) for msg in api_messages)
             approx_tokens = estimate_messages_tokens_rough(api_messages)
