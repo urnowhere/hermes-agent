@@ -1296,10 +1296,28 @@ class TelegramAdapter(BasePlatformAdapter):
                                 continue
                             # Other BadRequest errors are permanent — don't retry
                             raise
-                        # TimedOut is also a subclass of NetworkError but
-                        # indicates the request may have reached the server —
-                        # retrying risks duplicate message delivery.
+                        # TimedOut is a subclass of NetworkError.  The
+                        # request *may* have reached Telegram, so a naive
+                        # retry risks duplicate delivery.  However, when
+                        # sending multi-chunk messages, aborting on a
+                        # timeout silently drops every subsequent chunk
+                        # — the user sees "(1/3)" and nothing else.
+                        #
+                        # Compromise: for multi-chunk sends, retry once
+                        # after a short delay.  A possible duplicate of
+                        # one chunk is far less harmful than losing 2/3
+                        # of the response.  For single-chunk sends the
+                        # old behaviour (abort) is preserved.
                         if _TimedOut and isinstance(send_err, _TimedOut):
+                            if len(chunks) > 1 and _send_attempt < 1:
+                                logger.warning(
+                                    "[%s] TimedOut on chunk %d/%d (attempt %d/3) "
+                                    "— retrying once to avoid dropping remaining chunks: %s",
+                                    self.name, i + 1, len(chunks),
+                                    _send_attempt + 1, send_err,
+                                )
+                                await asyncio.sleep(3)
+                                continue
                             raise
                         if _send_attempt < 2:
                             wait = 2 ** _send_attempt
