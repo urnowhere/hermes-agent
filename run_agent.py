@@ -1084,6 +1084,8 @@ class AIAgent:
             # AWS Bedrock — auto-detect from provider name or base URL
             # (bedrock-runtime.<region>.amazonaws.com).
             self.api_mode = "bedrock_converse"
+        elif self.provider == "copilot-acp":
+            self.api_mode = "codex_responses"
         else:
             self.api_mode = "chat_completions"
 
