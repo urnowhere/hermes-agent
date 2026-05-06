@@ -759,6 +759,16 @@ def _oauth_trace(event: str, *, sequence_id: Optional[str] = None, **fields: Any
 # =============================================================================
 
 def _auth_file_path() -> Path:
+    # HERMES_AUTH_FILE allows multiple Hermes profiles (or multiple Hermes
+    # processes on different hosts sharing a network mount) to point at one
+    # auth.json. This is required when several profiles share a single OAuth
+    # account: refresh_token rotation is single-use, so without a shared file
+    # the first profile to refresh invalidates the others' tokens. With a
+    # shared path the existing fcntl flock in `_auth_store_lock` (keyed off
+    # `<auth_file>.lock`) serializes refreshes across all consumers.
+    override = os.environ.get("HERMES_AUTH_FILE", "").strip()
+    if override:
+        return Path(override).expanduser()
     path = get_hermes_home() / "auth.json"
     # Seat belt: if pytest is running and HERMES_HOME resolves to the real
     # user's auth store, refuse rather than silently corrupt it. This catches
