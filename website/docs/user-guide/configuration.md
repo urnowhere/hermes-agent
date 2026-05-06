@@ -87,16 +87,17 @@ Hermes supports seven terminal backends. Each determines where the agent's shell
 
 ```yaml
 terminal:
-  backend: local    # local | docker | ssh | modal | daytona | vercel_sandbox | singularity
+  backend: local    # local | docker | ssh | modal | daytona | boxd | vercel_sandbox | singularity
   cwd: "."          # Gateway/cron working directory (CLI always uses launch dir)
   timeout: 180      # Per-command timeout in seconds
   env_passthrough: []  # Env var names to forward to sandboxed execution (terminal + execute_code)
   singularity_image: "docker://nikolaik/python-nodejs:python3.11-nodejs20"  # Container image for Singularity backend
   modal_image: "nikolaik/python-nodejs:python3.11-nodejs20"                 # Container image for Modal backend
   daytona_image: "nikolaik/python-nodejs:python3.11-nodejs20"               # Container image for Daytona backend
+  boxd_image: ""                                                            # boxd VM image; "" = server default (ubuntu:latest)
 ```
 
-For cloud sandboxes such as Modal, Daytona, and Vercel Sandbox, `container_persistent: true` means Hermes will try to preserve filesystem state across sandbox recreation. It does not promise that the same live sandbox, PID space, or background processes will still be running later.
+For cloud sandboxes such as Modal, Daytona, boxd, and Vercel Sandbox, `container_persistent: true` means Hermes will try to preserve filesystem state across sandbox recreation. It does not promise that the same live sandbox, PID space, or background processes will still be running later — except for **boxd**, which preserves the actual running VM (memory + processes) via warm suspend / resume.
 
 ### Backend Overview
 
@@ -107,6 +108,7 @@ For cloud sandboxes such as Modal, Daytona, and Vercel Sandbox, `container_persi
 | **ssh** | Remote server via SSH | Network boundary | Remote dev, powerful hardware |
 | **modal** | Modal cloud sandbox | Full (cloud VM) | Ephemeral cloud compute, evals |
 | **daytona** | Daytona workspace | Full (cloud container) | Managed cloud dev environments |
+| **boxd** | [boxd](https://boxd.sh) cloud microVM | Full (KVM microVM, one process per VM) | Persistent cloud sandbox with sub-ms suspend/resume |
 | **vercel_sandbox** | Vercel Sandbox | Full (cloud microVM) | Cloud execution with snapshot-backed filesystem persistence |
 | **singularity** | Singularity/Apptainer container | Namespaces (--containall) | HPC clusters, shared machines |
 
@@ -226,6 +228,28 @@ terminal:
 **Persistence:** When enabled, sandboxes are stopped (not deleted) on cleanup and resumed on next session. Sandbox names follow the pattern `hermes-{task_id}`.
 
 **Disk limit:** Daytona enforces a 10 GiB maximum. Requests above this are capped with a warning.
+
+### boxd Backend
+
+Runs commands in a [boxd](https://boxd.sh) cloud microVM. Each VM is a dedicated KVM process running boxd's own VMM (`boxd-vmm`) — sub-millisecond warm suspend/resume, virtio-mem, NMI fork. Persistent VMs warm-suspend on cleanup and resume in sub-ms on the next session, preserving filesystem **and** running processes.
+
+```yaml
+terminal:
+  backend: boxd
+  boxd_image: ""                   # "" = server default (ubuntu:latest)
+  container_cpu: 2                 # vCPU
+  container_memory: 8192           # MB → converted to "NG" / "NM"
+  container_disk: 102400           # MB → converted to "NG"
+  container_persistent: true       # Suspend on cleanup vs destroy
+```
+
+**Required:** `BOXD_API_KEY` environment variable. Get one with `boxd keys create` after `boxd login`. Optional install: `pip install 'hermes-agent[boxd]'`.
+
+**Persistence:** When enabled, the VM is suspended (`box.suspend()`) on cleanup, preserving disk and warm process state, and resumed (`box.resume()`) on the next session. VM names follow the pattern `hermes-{task_id}`. With `container_persistent: false`, VMs are destroyed on cleanup.
+
+**Auto-suspend:** Hermes also configures the VM's `auto_suspend_timeout` to 300s by default — boxd suspends idle VMs server-side and wakes them on the next exec. You only pay for compute while a command is running.
+
+**Image:** `boxd_image` accepts any OCI registry reference docker can pull — Docker Hub (`ubuntu:22.04`, `nikolaik/python-nodejs:python3.11-nodejs20`), GHCR (`ghcr.io/org/img:tag`), Quay, custom registries. The worker runs `docker pull`, exports the rootfs, and packs it into a microVM base image. Leave empty to use the cluster's default image (currently `ubuntu:latest`). First pull of a given image is slow (rootfs export); subsequent VMs from the same image hit a local cache.
 
 ### Vercel Sandbox Backend
 

@@ -1302,6 +1302,9 @@ def setup_terminal_backend(config: dict):
     is_linux = _platform.system() == "Linux"
 
     # Build backend choices with descriptions
+    # NOTE: boxd is appended at the end (after vercel_sandbox) on purpose —
+    # tests/hermes_cli/test_setup.py picks vercel_sandbox by its index (5),
+    # so inserting boxd before it would silently break those tests.
     terminal_choices = [
         "Local - run directly on this machine (default)",
         "Docker - isolated container with configurable resources",
@@ -1309,11 +1312,12 @@ def setup_terminal_backend(config: dict):
         "SSH - run on a remote machine",
         "Daytona - persistent cloud development environment",
         "Vercel Sandbox - cloud microVM with snapshot filesystem persistence",
+        "boxd - persistent cloud microVM with sub-ms suspend/resume",
     ]
-    idx_to_backend = {0: "local", 1: "docker", 2: "modal", 3: "ssh", 4: "daytona", 5: "vercel_sandbox"}
-    backend_to_idx = {"local": 0, "docker": 1, "modal": 2, "ssh": 3, "daytona": 4, "vercel_sandbox": 5}
+    idx_to_backend = {0: "local", 1: "docker", 2: "modal", 3: "ssh", 4: "daytona", 5: "vercel_sandbox", 6: "boxd"}
+    backend_to_idx = {"local": 0, "docker": 1, "modal": 2, "ssh": 3, "daytona": 4, "vercel_sandbox": 5, "boxd": 6}
 
-    next_idx = 6
+    next_idx = 7
     if is_linux:
         terminal_choices.append("Singularity/Apptainer - HPC-friendly container")
         idx_to_backend[next_idx] = "singularity"
@@ -1557,6 +1561,68 @@ def setup_terminal_backend(config: dict):
         image = prompt("  Sandbox image", current_image)
         config["terminal"]["daytona_image"] = image
         save_env_value("TERMINAL_DAYTONA_IMAGE", image)
+
+        _prompt_container_resources(config)
+
+    elif selected_backend == "boxd":
+        print_success("Terminal backend: boxd")
+        print_info("Persistent cloud microVMs with sub-millisecond suspend/resume.")
+        print_info("Requires the optional SDK: pip install 'hermes-agent[boxd]'")
+
+        try:
+            __import__("boxd")
+        except ImportError:
+            print_info("Installing boxd SDK...")
+            import subprocess
+
+            uv_bin = shutil.which("uv")
+            if uv_bin:
+                result = subprocess.run(
+                    [uv_bin, "pip", "install", "--python", sys.executable, "boxd"],
+                    capture_output=True,
+                    text=True,
+                )
+            else:
+                result = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "boxd"],
+                    capture_output=True,
+                    text=True,
+                )
+            if result.returncode == 0:
+                print_success("boxd SDK installed")
+            else:
+                print_warning("Install failed — run manually: pip install boxd")
+                if result.stderr:
+                    print_info(f"  Error: {result.stderr.strip().splitlines()[-1]}")
+
+        # boxd API key
+        print()
+        existing_key = get_env_value("BOXD_API_KEY")
+        if existing_key:
+            print_info("  boxd API key: already configured")
+            if prompt_yes_no("  Update API key?", False):
+                api_key = prompt("    boxd API key (bxk_...)", password=True)
+                if api_key:
+                    save_env_value("BOXD_API_KEY", api_key)
+                    print_success("    Updated")
+        else:
+            print_info("  Get one with `boxd keys create` after `boxd login`.")
+            api_key = prompt("    boxd API key (bxk_...)", password=True)
+            if api_key:
+                save_env_value("BOXD_API_KEY", api_key)
+                print_success("    Configured")
+
+        # boxd image (empty == server default ubuntu:latest)
+        current_image = cfg_get(config, "terminal", "boxd_image", default="")
+        image = prompt(
+            "  VM image (leave blank for server default ubuntu:latest)",
+            current_image,
+        )
+        config.setdefault("terminal", {})["boxd_image"] = image
+        if image:
+            save_env_value("TERMINAL_BOXD_IMAGE", image)
+        else:
+            remove_env_value("TERMINAL_BOXD_IMAGE")
 
         _prompt_container_resources(config)
 

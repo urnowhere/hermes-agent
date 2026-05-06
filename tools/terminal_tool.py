@@ -1041,7 +1041,7 @@ def _get_env_config() -> Dict[str, Any]:
         ):
             host_cwd = candidate
             cwd = "/workspace"
-    elif env_type in ("modal", "docker", "singularity", "daytona", "vercel_sandbox") and cwd:
+    elif env_type in ("modal", "docker", "singularity", "daytona", "boxd", "vercel_sandbox") and cwd:
         # Host paths and relative paths that won't work inside containers
         is_host_path = any(cwd.startswith(p) for p in host_prefixes)
         is_relative = not os.path.isabs(cwd)  # e.g. "." or "src/"
@@ -1059,6 +1059,11 @@ def _get_env_config() -> Dict[str, Any]:
         "singularity_image": os.getenv("TERMINAL_SINGULARITY_IMAGE", f"docker://{default_image}"),
         "modal_image": os.getenv("TERMINAL_MODAL_IMAGE", default_image),
         "daytona_image": os.getenv("TERMINAL_DAYTONA_IMAGE", default_image),
+        # boxd: empty string means "let the server pick its default image"
+        # (currently ubuntu:latest). Any OCI registry ref docker can pull
+        # works (Docker Hub, GHCR, Quay, custom). Default is empty so
+        # users without a specific image preference get the cluster default.
+        "boxd_image": os.getenv("TERMINAL_BOXD_IMAGE", ""),
         "vercel_runtime": os.getenv("TERMINAL_VERCEL_RUNTIME", "").strip(),
         "cwd": cwd,
         "host_cwd": host_cwd,
@@ -1208,6 +1213,15 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
         # Lazy import so daytona SDK is only required when backend is selected.
         from tools.environments.daytona import DaytonaEnvironment as _DaytonaEnvironment
         return _DaytonaEnvironment(
+            image=image, cwd=cwd, timeout=timeout,
+            cpu=int(cpu), memory=memory, disk=disk,
+            persistent_filesystem=persistent, task_id=task_id,
+        )
+
+    elif env_type == "boxd":
+        # Lazy import so the boxd SDK is only required when backend is selected.
+        from tools.environments.boxd import BoxdEnvironment as _BoxdEnvironment
+        return _BoxdEnvironment(
             image=image, cwd=cwd, timeout=timeout,
             cpu=int(cpu), memory=memory, disk=disk,
             persistent_filesystem=persistent, task_id=task_id,
@@ -1702,6 +1716,8 @@ def terminal_tool(
             image = overrides.get("modal_image") or config["modal_image"]
         elif env_type == "daytona":
             image = overrides.get("daytona_image") or config["daytona_image"]
+        elif env_type == "boxd":
+            image = overrides.get("boxd_image") or config["boxd_image"]
         else:
             image = ""
 
@@ -2209,10 +2225,26 @@ def check_terminal_requirements() -> bool:
             from daytona import Daytona  # noqa: F401 — SDK presence check
             return os.getenv("DAYTONA_API_KEY") is not None
 
+        elif env_type == "boxd":
+            if importlib.util.find_spec("boxd") is None:
+                logger.error(
+                    "boxd is required for the boxd terminal backend: "
+                    "pip install 'hermes-agent[boxd]' (or pip install boxd)"
+                )
+                return False
+            if not (os.getenv("BOXD_API_KEY") or os.getenv("BOXD_TOKEN")):
+                logger.error(
+                    "boxd backend selected but neither BOXD_API_KEY nor BOXD_TOKEN "
+                    "is set. Create one with `boxd keys create <name>` and add "
+                    "BOXD_API_KEY=bxd_... to ~/.hermes/.env."
+                )
+                return False
+            return True
+
         else:
             logger.error(
                 "Unknown TERMINAL_ENV '%s'. Use one of: local, docker, singularity, "
-                "modal, daytona, vercel_sandbox, ssh.",
+                "modal, daytona, boxd, vercel_sandbox, ssh.",
                 env_type,
             )
             return False
@@ -2255,12 +2287,13 @@ if __name__ == "__main__":
     print(
         "  TERMINAL_ENV: "
         f"{os.getenv('TERMINAL_ENV', 'local')} "
-        "(local/docker/singularity/modal/daytona/vercel_sandbox/ssh)"
+        "(local/docker/singularity/modal/daytona/boxd/vercel_sandbox/ssh)"
     )
     print(f"  TERMINAL_DOCKER_IMAGE: {os.getenv('TERMINAL_DOCKER_IMAGE', default_img)}")
     print(f"  TERMINAL_SINGULARITY_IMAGE: {os.getenv('TERMINAL_SINGULARITY_IMAGE', f'docker://{default_img}')}")
     print(f"  TERMINAL_MODAL_IMAGE: {os.getenv('TERMINAL_MODAL_IMAGE', default_img)}")
     print(f"  TERMINAL_DAYTONA_IMAGE: {os.getenv('TERMINAL_DAYTONA_IMAGE', default_img)}")
+    print(f"  TERMINAL_BOXD_IMAGE: {os.getenv('TERMINAL_BOXD_IMAGE', '(server default: ubuntu:latest)')}")
     print(f"  TERMINAL_CWD: {os.getenv('TERMINAL_CWD', os.getcwd())}")
     from hermes_constants import display_hermes_home as _dhh
     print(f"  TERMINAL_SANDBOX_DIR: {os.getenv('TERMINAL_SANDBOX_DIR', f'{_dhh()}/sandboxes')}")
