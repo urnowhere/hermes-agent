@@ -1357,6 +1357,24 @@ class MatrixAdapter(BasePlatformAdapter):
                     except Exception as exc:
                         logger.warning("Matrix: sync event dispatch error: %s", exc)
                     await self._join_pending_invites(sync_data)
+                else:
+                    err_str = str(getattr(sync_data, "message", sync_data)).lower()
+                    if (
+                        "m_unknown_token" in err_str
+                        or "401" in err_str
+                        or "403" in err_str
+                        or "unauthorized" in err_str
+                        or "forbidden" in err_str
+                    ):
+                        logger.error(
+                            "Matrix: permanent auth error: %s — stopping sync",
+                            getattr(sync_data, "message", sync_data),
+                        )
+                        return
+                    logger.warning(
+                        "Matrix: sync returned unexpected type %s",
+                        type(sync_data).__name__,
+                    )
 
             except asyncio.CancelledError:
                 return

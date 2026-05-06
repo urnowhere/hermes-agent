@@ -23,6 +23,13 @@ from __future__ import annotations
 
 from typing import Any
 
+__all__ = [
+    "OVERRIDEABLE_KEYS",
+    "get_effective_display",
+    "get_platform_defaults",
+    "resolve_display_setting",
+]
+
 # ---------------------------------------------------------------------------
 # Overrideable display settings and their global defaults
 # ---------------------------------------------------------------------------
@@ -105,6 +112,23 @@ _PLATFORM_DEFAULTS: dict[str, dict[str, Any]] = {
 
 # Canonical set of per-platform overrideable keys (for validation).
 OVERRIDEABLE_KEYS = frozenset(_GLOBAL_DEFAULTS.keys())
+
+
+def get_platform_defaults(platform_key: str) -> dict[str, Any]:
+    """Return a copy of the built-in defaults for a platform."""
+    defaults = dict(_GLOBAL_DEFAULTS)
+    platform_defaults = _PLATFORM_DEFAULTS.get(platform_key)
+    if platform_defaults:
+        defaults.update(platform_defaults)
+    return defaults
+
+
+def get_effective_display(user_config: dict, platform_key: str) -> dict[str, Any]:
+    """Return the fully resolved display settings for a platform."""
+    return {
+        key: resolve_display_setting(user_config, platform_key, key)
+        for key in OVERRIDEABLE_KEYS
+    }
 
 
 def resolve_display_setting(

@@ -379,7 +379,8 @@ async def test_session_hygiene_messages_stay_in_originating_topic(monkeypatch, t
             chat_id="-1001",
             chat_type="group",
             thread_id="17585",
-            user_id="12345",
+            user_id="123456",
+            user_name="alice",
         ),
         message_id="1",
     )

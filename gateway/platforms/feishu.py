@@ -1540,33 +1540,56 @@ class FeishuAdapter(BasePlatformAdapter):
         self._allow_bots = settings.allow_bots
         self._require_mention = settings.require_mention
 
+    @staticmethod
+    def _register_event_handler(builder: Any, method_name: str, handler: Any) -> Any:
+        registrar = getattr(builder, method_name, None)
+        if callable(registrar):
+            return registrar(handler)
+        return builder
+
     def _build_event_handler(self) -> Any:
         if EventDispatcherHandler is None:
             return None
-        return (
-            EventDispatcherHandler.builder(
-                self._encrypt_key,
-                self._verification_token,
-            )
-            .register_p2_im_message_message_read_v1(self._on_message_read_event)
-            .register_p2_im_message_receive_v1(self._on_message_event)
-            .register_p2_im_message_reaction_created_v1(
-                lambda data: self._on_reaction_event("im.message.reaction.created_v1", data)
-            )
-            .register_p2_im_message_reaction_deleted_v1(
-                lambda data: self._on_reaction_event("im.message.reaction.deleted_v1", data)
-            )
-            .register_p2_card_action_trigger(self._on_card_action_trigger)
-            .register_p2_im_chat_member_bot_added_v1(self._on_bot_added_to_chat)
-            .register_p2_im_chat_member_bot_deleted_v1(self._on_bot_removed_from_chat)
-            .register_p2_im_chat_access_event_bot_p2p_chat_entered_v1(self._on_p2p_chat_entered)
-            .register_p2_im_message_recalled_v1(self._on_message_recalled)
-            .register_p2_customized_event(
+        builder = EventDispatcherHandler.builder(
+            self._encrypt_key,
+            self._verification_token,
+        )
+        builder = builder.register_p2_im_message_message_read_v1(self._on_message_read_event)
+        builder = builder.register_p2_im_message_receive_v1(self._on_message_event)
+        builder = builder.register_p2_im_message_reaction_created_v1(
+            lambda data: self._on_reaction_event("im.message.reaction.created_v1", data)
+        )
+        builder = builder.register_p2_im_message_reaction_deleted_v1(
+            lambda data: self._on_reaction_event("im.message.reaction.deleted_v1", data)
+        )
+        builder = builder.register_p2_card_action_trigger(self._on_card_action_trigger)
+        builder = self._register_event_handler(
+            builder,
+            "register_p2_im_chat_member_bot_added_v1",
+            self._on_bot_added_to_chat,
+        )
+        builder = self._register_event_handler(
+            builder,
+            "register_p2_im_chat_member_bot_deleted_v1",
+            self._on_bot_removed_from_chat,
+        )
+        builder = self._register_event_handler(
+            builder,
+            "register_p2_im_chat_access_event_bot_p2p_chat_entered_v1",
+            self._on_p2p_chat_entered,
+        )
+        builder = self._register_event_handler(
+            builder,
+            "register_p2_im_message_recalled_v1",
+            self._on_message_recalled,
+        )
+        custom_registrar = getattr(builder, "register_p2_customized_event", None)
+        if callable(custom_registrar):
+            builder = custom_registrar(
                 "drive.notice.comment_add_v1",
                 self._on_drive_comment_event,
             )
-            .build()
-        )
+        return builder.build()
 
     async def connect(self) -> bool:
         """Connect to Feishu/Lark."""
