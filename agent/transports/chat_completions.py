@@ -99,6 +99,76 @@ def _is_gemini_openai_compat_base_url(base_url: Any) -> bool:
     return normalized.endswith("/openai")
 
 
+def _is_mistral_model(model: Optional[str]) -> bool:
+    """Return True for Mistral model slugs, including aggregator prefixes.
+
+    Matches bare names (``mistral-large-latest``), vendor-prefixed slugs
+    (``mistralai/Mistral-Small-3.1-24B-Instruct``), and aggregator-prefixed
+    slugs (``openrouter/mistralai/...``, ``nvidia/mistralai/...``,
+    ``nim/mistral-...``). Detection by slug covers OpenRouter / NVIDIA NIM /
+    other aggregators where the base URL is the aggregator's, not
+    ``api.mistral.ai``. (#20154)
+    """
+    if not model:
+        return False
+
+    normalized = model.strip().lower()
+    if not normalized:
+        return False
+
+    parts = [part for part in normalized.split("/") if part]
+    tail = parts[-1] if parts else normalized
+
+    return (
+        tail == "mistral"
+        or tail.startswith("mistral-")
+        or tail.startswith("mistralai-")
+        or "mistralai" in parts
+    )
+
+
+def _ensure_mistral_role_alternation(
+    messages: List[Dict[str, Any]],
+    model: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Insert a synthetic assistant turn between any ``tool`` -> ``user`` pair.
+
+    Mistral's chat template strictly enforces role alternation and rejects a
+    user message that directly follows a tool result with::
+
+        HTTP 400: Unexpected role 'user' after role 'tool'
+
+    Other OpenAI-compatible providers tolerate the same sequence, so we only
+    patch when the target model is a Mistral variant. The synthetic message uses
+    a single space for ``content`` because some Mistral endpoints reject empty
+    strings. (#20154)
+    """
+    if not _is_mistral_model(model) or not messages:
+        return messages
+
+    previous_role: Optional[str] = None
+    needs_fix = False
+    for msg in messages:
+        role = msg.get("role") if isinstance(msg, dict) else None
+        if previous_role == "tool" and role == "user":
+            needs_fix = True
+            break
+        previous_role = role
+
+    if not needs_fix:
+        return messages
+
+    patched: List[Dict[str, Any]] = []
+    previous_role = None
+    for msg in messages:
+        role = msg.get("role") if isinstance(msg, dict) else None
+        if previous_role == "tool" and role == "user":
+            patched.append({"role": "assistant", "content": " "})
+        patched.append(msg)
+        previous_role = role
+    return patched
+
+
 class ChatCompletionsTransport(ProviderTransport):
     """Transport for api_mode='chat_completions'.
 
@@ -232,6 +302,11 @@ class ChatCompletionsTransport(ProviderTransport):
         ):
             sanitized = list(sanitized)
             sanitized[0] = {**sanitized[0], "role": "developer"}
+
+        # Mistral: insert synthetic assistant between tool and user (#20154).
+        # No-op for non-Mistral models and Mistral conversations without a
+        # ``tool`` -> ``user`` transition.
+        sanitized = _ensure_mistral_role_alternation(sanitized, model)
 
         api_kwargs: dict[str, Any] = {
             "model": model,
@@ -396,6 +471,12 @@ class ChatCompletionsTransport(ProviderTransport):
         ):
             sanitized = list(sanitized)
             sanitized[0] = {**sanitized[0], "role": "developer"}
+
+        # Mistral: insert synthetic assistant between tool and user (#20154).
+        # This must run on the provider-profile path too, because known
+        # OpenAI-compatible aggregators (NVIDIA NIM, OpenRouter, Nous, etc.)
+        # now bypass the legacy flag path.
+        sanitized = _ensure_mistral_role_alternation(sanitized, model)
 
         api_kwargs: dict[str, Any] = {
             "model": model,
