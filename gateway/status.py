@@ -516,9 +516,10 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
                     and current_start != existing.get("start_time")
                 ):
                     stale = True
-                # Check if process is stopped (Ctrl+Z / SIGTSTP) — stopped
-                # processes still respond to os.kill(pid, 0) but are not
+                # Check if process is stopped (Ctrl+Z / SIGTSTP) or zombie —
+                # such processes still respond to os.kill(pid, 0) but are not
                 # actually running. Treat them as stale so --replace works.
+                # (kanban_db.py already does this — see _is_pid_alive there.)
                 if not stale:
                     try:
                         _proc_status = Path(f"/proc/{existing_pid}/status")
@@ -526,7 +527,7 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
                             for _line in _proc_status.read_text().splitlines():
                                 if _line.startswith("State:"):
                                     _state = _line.split()[1]
-                                    if _state in ("T", "t"):  # stopped or tracing stop
+                                    if _state in ("T", "t", "Z"):  # stopped, tracing stop, or zombie
                                         stale = True
                                     break
                     except (OSError, PermissionError):
@@ -839,6 +840,21 @@ def get_running_pid(
             # Windows raises OSError with WinError 87 for an invalid pid
             # (process is definitely gone). Treat as "process doesn't exist".
             continue
+
+        # Zombie processes still respond to os.kill(pid, 0) but have empty
+        # /proc/<pid>/cmdline and are not running — skip them.
+        if sys.platform == "linux":
+            try:
+                _proc_status = Path(f"/proc/{pid}/status")
+                if _proc_status.exists():
+                    for _line in _proc_status.read_text().splitlines():
+                        if _line.startswith("State:"):
+                            _state = _line.split()[1]
+                            if _state == "Z":  # zombie
+                                continue
+                            break
+            except (OSError, PermissionError):
+                pass
 
         recorded_start = record.get("start_time")
         current_start = _get_process_start_time(pid)
