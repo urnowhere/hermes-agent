@@ -396,6 +396,51 @@ class TestAnthropicWifExchangeCaching:
         assert second["access_token"] == "cached-wif-token"
         assert len(calls) == 1
 
+    def test_reuses_persisted_wif_exchange_cache_across_processes(self, monkeypatch, tmp_path):
+        token_file = tmp_path / "oidc.jwt"
+        token_file.write_text("gh-oidc-jwt")
+        monkeypatch.setattr("agent.anthropic_adapter.get_hermes_home", lambda: tmp_path)
+        monkeypatch.setattr("agent.anthropic_adapter._get_claude_code_version", lambda: "2.1.74")
+        anthropic_adapter._WIF_ACCESS_TOKEN_CACHE.clear()
+
+        config = {
+            "federation_rule_id": "fdrl_test123",
+            "organization_id": "org_test456",
+            "service_account_id": "svac_test789",
+            "identity_token_file": str(token_file),
+            "api_base_url": "https://api.anthropic.com",
+        }
+
+        calls = []
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "access_token": "persisted-wif-token",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                }).encode()
+
+        def _fake_urlopen(req, timeout=0):
+            calls.append((req.full_url, timeout))
+            return _Resp()
+
+        with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            first = exchange_anthropic_wif_for_access_token(config)
+            anthropic_adapter._WIF_ACCESS_TOKEN_CACHE.clear()
+            second = exchange_anthropic_wif_for_access_token(config)
+
+        assert first["access_token"] == "persisted-wif-token"
+        assert second["access_token"] == "persisted-wif-token"
+        assert len(calls) == 1
+        assert (tmp_path / ".anthropic_wif_token_cache.json").exists()
+
 
 class TestWriteClaudeCodeCredentials:
     def test_writes_new_file(self, tmp_path, monkeypatch):

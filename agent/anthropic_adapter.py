@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 
 _WIF_ACCESS_TOKEN_CACHE: dict[str, dict[str, Any]] = {}
 _WIF_CACHE_SKEW_SECONDS = 60
+_WIF_CACHE_FILE_NAME = ".anthropic_wif_token_cache.json"
 
 THINKING_BUDGET = {"xhigh": 32000, "high": 16000, "medium": 8000, "low": 4000}
 # Hermes effort → Anthropic adaptive-thinking effort (output_config.effort).
@@ -989,6 +990,39 @@ def _complete_wif_config(config: Dict[str, Any]) -> bool:
     )
 
 
+def _anthropic_wif_cache_file() -> Path:
+    return get_hermes_home() / _WIF_CACHE_FILE_NAME
+
+
+def _read_cached_wif_exchange(cache_key: str) -> Optional[Dict[str, Any]]:
+    cache_file = _anthropic_wif_cache_file()
+    if not cache_file.exists():
+        return None
+    try:
+        payload = json.loads(cache_file.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, IOError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("cache_key") or "") != cache_key:
+        return None
+    return payload if isinstance(payload.get("access_token"), str) else None
+
+
+def _write_cached_wif_exchange(cache_key: str, exchanged: Dict[str, Any]) -> None:
+    cache_file = _anthropic_wif_cache_file()
+    payload = dict(exchanged)
+    payload["cache_key"] = cache_key
+    try:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = cache_file.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp_path.replace(cache_file)
+        cache_file.chmod(0o600)
+    except (OSError, IOError):
+        logger.debug("Failed to persist Anthropic WIF token cache at %s", cache_file, exc_info=True)
+
+
 def read_anthropic_wif_config() -> Optional[Dict[str, Any]]:
     """Resolve explicit Anthropic WIF configuration from env or auth.json.
 
@@ -1077,6 +1111,14 @@ def exchange_anthropic_wif_for_access_token(config: Optional[Dict[str, Any]] = N
         if cached_token and cached_expires_at_ms - now_ms > (_WIF_CACHE_SKEW_SECONDS * 1000):
             return dict(cached)
 
+    cached = _read_cached_wif_exchange(cache_key)
+    if cached:
+        cached_token = str(cached.get("access_token") or "").strip()
+        cached_expires_at_ms = int(cached.get("expires_at_ms") or 0)
+        if cached_token and cached_expires_at_ms - now_ms > (_WIF_CACHE_SKEW_SECONDS * 1000):
+            _WIF_ACCESS_TOKEN_CACHE[cache_key] = dict(cached)
+            return dict(cached)
+
     payload = json.dumps({
         "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
         "assertion": assertion,
@@ -1114,6 +1156,7 @@ def exchange_anthropic_wif_for_access_token(config: Optional[Dict[str, Any]] = N
         "expires_at_ms": int(time.time() * 1000) + (expires_in * 1000),
     }
     _WIF_ACCESS_TOKEN_CACHE[cache_key] = dict(exchanged)
+    _write_cached_wif_exchange(cache_key, exchanged)
     return exchanged
 
 
