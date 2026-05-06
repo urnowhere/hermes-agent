@@ -282,12 +282,20 @@ def _find_skill(name: str) -> Optional[Dict[str, Any]]:
     Searches the local skills dir (~/.hermes/skills/) first, then any
     external dirs configured via skills.external_dirs.  Returns
     {"path": Path} or None.
+
+    Skips .archive, .git, .github, and .hub directories so archived or
+    version-control skills are never returned — matching the exclusion
+    set used by iter_skill_index_files for prompt building and skill
+    discovery.
     """
-    from agent.skill_utils import get_all_skills_dirs
+    from agent.skill_utils import EXCLUDED_SKILL_DIRS, get_all_skills_dirs
     for skills_dir in get_all_skills_dirs():
         if not skills_dir.exists():
             continue
         for skill_md in skills_dir.rglob("SKILL.md"):
+            # Skip any path whose parent chain crosses an excluded dir.
+            if any(p in EXCLUDED_SKILL_DIRS for p in skill_md.parent.parts):
+                continue
             if skill_md.parent.name == name:
                 return {"path": skill_md.parent}
     return None

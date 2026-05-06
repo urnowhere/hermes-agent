@@ -185,6 +185,67 @@ class TestValidateFilePath:
 
 
 # ---------------------------------------------------------------------------
+# _find_skill exclusion filtering
+# ---------------------------------------------------------------------------
+
+
+class TestFindSkillExcludesArchiveAndVcs:
+    """_find_skill must skip .archive, .git, .github, and .hub directories,
+    matching the exclusion set used by iter_skill_index_files."""
+
+    EXCLUDED_DIRS = (".archive", ".git", ".github", ".hub")
+
+    def _create_skill_at(self, skills_root: Path, name: str, subdir: str):
+        """Create a minimal SKILL.md at skills_root/subdir/name/SKILL.md."""
+        skill_dir = skills_root / subdir / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: " + name + "\ndescription: desc.\n---\n\nbody\n", encoding="utf-8"
+        )
+
+    @pytest.mark.parametrize("excluded_dir", EXCLUDED_DIRS)
+    def test_find_skill_skips_excluded_dir(self, tmp_path, excluded_dir):
+        """_find_skill should NOT find a skill inside an excluded directory."""
+        self._create_skill_at(tmp_path, "my-skill", excluded_dir)
+        with _skill_dir(tmp_path):
+            result = _find_skill("my-skill")
+        assert result is None, (
+            f"_find_skill should skip {excluded_dir}/my-skill/SKILL.md"
+        )
+
+    def test_find_skill_still_finds_regular_skill(self, tmp_path):
+        """_find_skill should still find a skill at the root level."""
+        self._create_skill_at(tmp_path, "real-skill", "")
+        # Fixup: _create_skill_at(skills_root, name, "") writes to
+        # skills_root//name (double slash) which is fine for Path.
+        # But we need to ensure the dir name matches.
+        with _skill_dir(tmp_path):
+            result = _find_skill("real-skill")
+        assert result is not None
+        assert result["path"] == tmp_path / "real-skill"
+
+    def test_find_skill_skips_nested_excluded(self, tmp_path):
+        """_find_skill should skip skills even when the excluded dir is
+        nested inside a category directory."""
+        self._create_skill_at(tmp_path, "nested-skill", "devops/.archive")
+        with _skill_dir(tmp_path):
+            result = _find_skill("nested-skill")
+        assert result is None, (
+            "_find_skill should skip devops/.archive/nested-skill/SKILL.md"
+        )
+
+    def test_find_skill_not_confused_by_name_clash(self, tmp_path):
+        """If the same skill name exists in .archive/ AND at root level,
+        _find_skill should return the root-level one, not the archived one."""
+        self._create_skill_at(tmp_path, "clash", ".archive")
+        self._create_skill_at(tmp_path, "clash", "")
+        with _skill_dir(tmp_path):
+            result = _find_skill("clash")
+        assert result is not None
+        assert result["path"] == tmp_path / "clash"
+
+
+# ---------------------------------------------------------------------------
 # CRUD operations
 # ---------------------------------------------------------------------------
 
