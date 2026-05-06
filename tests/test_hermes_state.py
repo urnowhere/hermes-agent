@@ -1,5 +1,6 @@
 """Tests for hermes_state.py — SessionDB SQLite CRUD, FTS5 search, export."""
 
+import json
 import time
 import pytest
 from pathlib import Path
@@ -135,6 +136,59 @@ class TestSessionLifecycle:
 
         child = db.get_session("child")
         assert child["parent_session_id"] == "parent"
+
+
+# =========================================================================
+# Native observability run ledger
+# =========================================================================
+
+class TestObservabilityRunLedger:
+    def test_record_run_start_and_finish(self, db):
+        run_id = db.record_run_start(
+            session_id="s1",
+            source="discord",
+            provider="openai-codex",
+            model="gpt-5.5",
+            metadata={"trace_source": "native", "api_key": "test-secret-value"},
+        )
+
+        assert run_id
+        run = db.get_observability_run(run_id)
+        assert run["session_id"] == "s1"
+        assert run["source"] == "discord"
+        assert run["status"] == "running"
+        assert run["provider"] == "openai-codex"
+        assert run["model"] == "gpt-5.5"
+        assert run["metadata"]["trace_source"] == "native"
+        assert run["metadata"]["api_key"] == "***"
+        assert "test-secret-value" not in json.dumps(run["metadata"])
+        assert run["started_at"] is not None
+        assert run["ended_at"] is None
+
+        db.record_run_finish(
+            run_id,
+            status="success",
+            api_call_count=2,
+            input_tokens=123,
+            output_tokens=45,
+            estimated_cost_usd=0.0123,
+            error_message="api_key=test-secret-value",
+        )
+
+        finished = db.get_observability_run(run_id)
+        assert finished["status"] == "success"
+        assert finished["ended_at"] >= finished["started_at"]
+        assert finished["duration_ms"] >= 0
+        assert finished["api_call_count"] == 2
+        assert finished["input_tokens"] == 123
+        assert finished["output_tokens"] == 45
+        assert finished["estimated_cost_usd"] == 0.0123
+        assert finished["error_message"] == "api_key=***"
+        assert "test-secret-value" not in finished["error_message"]
+
+    def test_record_run_finish_unknown_id_is_noop(self, db):
+        db.record_run_finish("missing", status="error", error_type="RuntimeError")
+        assert db.get_observability_run("missing") is None
 
 
 # =========================================================================
@@ -1414,7 +1468,7 @@ class TestSchemaInit:
     def test_schema_version(self, db):
         cursor = db._conn.execute("SELECT version FROM schema_version")
         version = cursor.fetchone()[0]
-        assert version == 11
+        assert version == 12
 
     def test_title_column_exists(self, db):
         """Verify the title column was created in the sessions table."""
@@ -1706,12 +1760,12 @@ class TestSchemaInit:
         conn.commit()
         conn.close()
 
-        # Open with SessionDB — should migrate to v9
+        # Open with SessionDB — should migrate to current schema
         migrated_db = SessionDB(db_path=db_path)
 
         # Verify migration
         cursor = migrated_db._conn.execute("SELECT version FROM schema_version")
-        assert cursor.fetchone()[0] == 11
+        assert cursor.fetchone()[0] == 12
 
         # Verify title column exists and is NULL for existing sessions
         session = migrated_db.get_session("existing")
@@ -2906,7 +2960,7 @@ class TestFTS5ToolCallMigration:
                 "SELECT version FROM schema_version LIMIT 1"
             ).fetchone()
             version = row["version"] if hasattr(row, "keys") else row[0]
-            assert version == 11
+            assert version == 12
         finally:
             session_db.close()
 

@@ -21,9 +21,11 @@ import re
 import sqlite3
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from agent.memory_manager import sanitize_context
+from agent.redact import redact_sensitive_text
 from hermes_constants import get_hermes_home
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 
@@ -33,7 +35,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -94,10 +96,36 @@ CREATE TABLE IF NOT EXISTS state_meta (
     value TEXT
 );
 
+CREATE TABLE IF NOT EXISTS observability_runs (
+    id TEXT PRIMARY KEY,
+    trace_id TEXT NOT NULL,
+    session_id TEXT,
+    source TEXT,
+    provider TEXT,
+    model TEXT,
+    started_at REAL NOT NULL,
+    ended_at REAL,
+    duration_ms INTEGER,
+    status TEXT NOT NULL DEFAULT 'running',
+    error_type TEXT,
+    error_message TEXT,
+    api_call_count INTEGER DEFAULT 0,
+    input_tokens INTEGER DEFAULT 0,
+    output_tokens INTEGER DEFAULT 0,
+    cache_read_tokens INTEGER DEFAULT 0,
+    cache_write_tokens INTEGER DEFAULT 0,
+    reasoning_tokens INTEGER DEFAULT 0,
+    estimated_cost_usd REAL,
+    metadata TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_observability_runs_session ON observability_runs(session_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_observability_runs_started ON observability_runs(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_observability_runs_status ON observability_runs(status);
 """
 
 FTS_SQL = """
@@ -765,6 +793,135 @@ class SessionDB:
             )
             row = cursor.fetchone()
         return dict(row) if row else None
+
+    # ── Native observability run ledger ─────────────────────────────────
+
+    @staticmethod
+    def _redact_observability_text(value: Optional[str]) -> Optional[str]:
+        """Redact free-form observability text before it reaches the ledger."""
+        if not value:
+            return None
+        redacted = redact_sensitive_text(value, force=True)
+        redacted = re.sub(
+            r"(?i)\b(api[_-]?key|token|password|secret|authorization)\s*=\s*([^\s,;]+)",
+            lambda match: f"{match.group(1)}=***",
+            redacted,
+        )
+        return redacted
+
+    @classmethod
+    def _safe_metadata_json(cls, metadata: Optional[Dict[str, Any]]) -> Optional[str]:
+        """Serialize metadata after forced secret redaction."""
+        if not metadata:
+            return None
+        try:
+            redacted = json.loads(redact_sensitive_text(json.dumps(metadata, default=str), force=True))
+            return json.dumps(redacted, sort_keys=True, default=str)
+        except Exception:
+            return json.dumps({"serialization_error": True})
+
+    def record_run_start(
+        self,
+        *,
+        session_id: Optional[str] = None,
+        source: Optional[str] = None,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Record the beginning of a Hermes agent run.
+
+        This is the local system-of-record ledger for run-level observability.
+        It stores metadata only; prompts, tool arguments, and raw outputs do not
+        belong here.
+        """
+        run_id = str(uuid.uuid4())
+        trace_id = str(uuid.uuid4())
+        started_at = time.time()
+        metadata_json = self._safe_metadata_json(metadata)
+
+        def _do(conn):
+            conn.execute(
+                """INSERT INTO observability_runs
+                   (id, trace_id, session_id, source, provider, model, started_at, status, metadata)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?)""",
+                (run_id, trace_id, session_id, source, provider, model, started_at, metadata_json),
+            )
+        self._execute_write(_do)
+        return run_id
+
+    def record_run_finish(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        error_type: Optional[str] = None,
+        error_message: Optional[str] = None,
+        api_call_count: int = 0,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        reasoning_tokens: int = 0,
+        estimated_cost_usd: Optional[float] = None,
+    ) -> None:
+        """Mark a run complete. Unknown run IDs are a no-op."""
+        ended_at = time.time()
+        safe_error = self._redact_observability_text(error_message)
+
+        def _do(conn):
+            row = conn.execute(
+                "SELECT started_at FROM observability_runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            if not row:
+                return
+            started_at = row["started_at"] if isinstance(row, sqlite3.Row) else row[0]
+            duration_ms = max(0, int((ended_at - float(started_at)) * 1000))
+            conn.execute(
+                """UPDATE observability_runs SET
+                   ended_at = ?, duration_ms = ?, status = ?, error_type = ?, error_message = ?,
+                   api_call_count = ?, input_tokens = ?, output_tokens = ?,
+                   cache_read_tokens = ?, cache_write_tokens = ?, reasoning_tokens = ?,
+                   estimated_cost_usd = ?
+                   WHERE id = ?""",
+                (
+                    ended_at,
+                    duration_ms,
+                    status,
+                    error_type,
+                    safe_error,
+                    api_call_count,
+                    input_tokens,
+                    output_tokens,
+                    cache_read_tokens,
+                    cache_write_tokens,
+                    reasoning_tokens,
+                    estimated_cost_usd,
+                    run_id,
+                ),
+            )
+        self._execute_write(_do)
+
+    def get_observability_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch a run-ledger row by ID."""
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT * FROM observability_runs WHERE id = ?",
+                (run_id,),
+            )
+            row = cursor.fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        if result.get("metadata"):
+            try:
+                result["metadata"] = json.loads(result["metadata"])
+            except (json.JSONDecodeError, TypeError):
+                result["metadata"] = {}
+        else:
+            result["metadata"] = {}
+        return result
 
     def resolve_session_id(self, session_id_or_prefix: str) -> Optional[str]:
         """Resolve an exact or uniquely prefixed session ID to the full ID.

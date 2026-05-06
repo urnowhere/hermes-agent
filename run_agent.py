@@ -25,6 +25,7 @@ import base64
 import concurrent.futures
 import contextvars
 import copy
+import functools
 import hashlib
 import json
 import logging
@@ -40,7 +41,7 @@ import threading
 from types import SimpleNamespace
 import urllib.request
 import uuid
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 from urllib.parse import urlparse, parse_qs, urlunparse
 # NOTE: `from openai import OpenAI` is deliberately NOT at module top — the
 # SDK pulls ~240 ms of imports. We expose `OpenAI` as a thin proxy object
@@ -105,6 +106,222 @@ if _loaded_env_paths:
         logger.info("Loaded environment variables from %s", _env_path)
 else:
     logger.info("No .env file found. Using system environment variables.")
+
+
+_AGENTOPS_CLIENT_READY = False
+_AGENTOPS_INIT_LOCK = threading.Lock()
+_AGENTOPS_UNAVAILABLE_LOGGED = False
+
+
+def _agentops_disabled() -> bool:
+    value = (os.environ.get("HERMES_AGENTOPS_ENABLED") or "").strip().lower()
+    return value in {"0", "false", "no", "off"}
+
+
+def _ensure_agentops_initialized():
+    """Initialize AgentOps once when AGENTOPS_API_KEY is configured.
+
+    AgentOps is optional observability. It must never break Hermes if the SDK,
+    credentials, or upstream service are unavailable.
+    """
+    global _AGENTOPS_CLIENT_READY, _AGENTOPS_UNAVAILABLE_LOGGED
+
+    if _agentops_disabled() or not (os.environ.get("AGENTOPS_API_KEY") or "").strip():
+        return None
+
+    with _AGENTOPS_INIT_LOCK:
+        try:
+            import agentops  # type: ignore
+        except Exception as exc:
+            if not _AGENTOPS_UNAVAILABLE_LOGGED:
+                logger.warning("AgentOps requested but unavailable: %s", exc)
+                _AGENTOPS_UNAVAILABLE_LOGGED = True
+            return None
+
+        if not _AGENTOPS_CLIENT_READY:
+            try:
+                agentops.init(
+                    auto_start_session=False,
+                    default_tags=["hermes-agent"],
+                    env_data_opt_out=True,
+                    fail_safe=True,
+                    instrument_llm_calls=False,
+                    log_session_replay_url=False,
+                    skip_auto_end_session=True,
+                    trace_name="hermes",
+                )
+                _AGENTOPS_CLIENT_READY = True
+                logger.info("AgentOps observability initialized")
+            except Exception as exc:
+                if not _AGENTOPS_UNAVAILABLE_LOGGED:
+                    logger.warning("AgentOps initialization failed: %s", exc)
+                    _AGENTOPS_UNAVAILABLE_LOGGED = True
+                return None
+
+        return agentops
+
+
+def _agentops_safe_tags(attributes: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return redacted/allowlisted tags safe for external observability sinks."""
+    if not attributes:
+        return {}
+    allowed = {
+        "api_mode",
+        "model",
+        "operation",
+        "provider",
+        "streaming",
+    }
+    tags: Dict[str, Any] = {}
+    for key in allowed:
+        value = attributes.get(key)
+        if value is None:
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            tags[key] = value
+        else:
+            tags[key] = str(type(value).__name__)
+    return tags
+
+
+def _agentops_run_operation(
+    name: str,
+    attributes: Optional[Dict[str, Any]],
+    operation: Callable[[], Any],
+) -> Any:
+    """Run an operation under AgentOps when available, always fail-open."""
+    try:
+        if not _ensure_agentops_initialized():
+            return operation()
+        import agentops
+
+        decorator = getattr(agentops, "operation", None)
+        if not callable(decorator):
+            return operation()
+
+        call_state = {"called": False, "result": None, "exception": None}
+
+        def _tracked_operation():
+            call_state["called"] = True
+            try:
+                call_state["result"] = operation()
+                return call_state["result"]
+            except BaseException as exc:
+                call_state["exception"] = exc
+                raise
+
+        wrapped = decorator(
+            name=name,
+            tags=_agentops_safe_tags(attributes),
+            capture_request=False,
+            capture_response=False,
+        )(_tracked_operation)
+    except Exception:
+        logger.debug("AgentOps operation setup failed open", exc_info=True)
+        return operation()
+
+    try:
+        return wrapped()
+    except Exception:
+        if call_state["exception"] is not None:
+            raise call_state["exception"]
+        if call_state["called"]:
+            logger.debug("AgentOps operation instrumentation failed after operation", exc_info=True)
+            return call_state["result"]
+        logger.debug("AgentOps operation instrumentation failed before operation", exc_info=True)
+        return operation()
+
+
+def _agentops_observe_run_conversation(func):
+    """Trace every AIAgent.run_conversation call when observability is configured."""
+
+    def _start_native_run(self) -> Optional[str]:
+        session_db = getattr(self, "_session_db", None)
+        if not session_db or not hasattr(session_db, "record_run_start"):
+            return None
+        try:
+            return session_db.record_run_start(
+                session_id=getattr(self, "session_id", None),
+                source=getattr(self, "platform", None) or getattr(self, "source", None) or "unknown",
+                provider=getattr(self, "provider", None),
+                model=getattr(self, "model", None),
+                metadata={
+                    "span_name": "hermes.run_conversation",
+                    "schema": "hermes.observability.run.v1",
+                    "exporters": ["local_ledger", "agentops" if os.environ.get("AGENTOPS_API_KEY") else "none"],
+                },
+            )
+        except Exception as exc:
+            logger.debug("Native observability run start failed: %s", exc)
+            return None
+
+    def _finish_native_run(self, run_id: Optional[str], status: str, exc: Optional[BaseException] = None) -> None:
+        if not run_id:
+            return
+        session_db = getattr(self, "_session_db", None)
+        if not session_db or not hasattr(session_db, "record_run_finish"):
+            return
+        try:
+            session_db.record_run_finish(
+                run_id,
+                status=status,
+                error_type=type(exc).__name__ if exc else None,
+                error_message=str(exc) if exc else None,
+                api_call_count=getattr(self, "session_api_calls", 0) or 0,
+                input_tokens=getattr(self, "session_input_tokens", 0) or 0,
+                output_tokens=getattr(self, "session_output_tokens", 0) or 0,
+                cache_read_tokens=getattr(self, "session_cache_read_tokens", 0) or 0,
+                cache_write_tokens=getattr(self, "session_cache_write_tokens", 0) or 0,
+                reasoning_tokens=getattr(self, "session_reasoning_tokens", 0) or 0,
+                estimated_cost_usd=getattr(self, "session_estimated_cost_usd", None),
+            )
+        except Exception as finish_exc:
+            logger.debug("Native observability run finish failed: %s", finish_exc)
+
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        native_run_id = _start_native_run(self)
+        agentops = _ensure_agentops_initialized()
+        trace_context = None
+        if agentops is not None:
+            try:
+                trace_context = agentops.start_trace(
+                    trace_name="hermes.run_conversation",
+                    tags={
+                        "platform": getattr(self, "platform", None) or "unknown",
+                        "provider": getattr(self, "provider", None) or "unknown",
+                        "model": getattr(self, "model", None) or "unknown",
+                        "session_id": getattr(self, "session_id", None) or "unknown",
+                    },
+                )
+            except Exception as exc:
+                logger.debug("AgentOps start_trace failed: %s", exc)
+                trace_context = None
+
+        try:
+            result = func(self, *args, **kwargs)
+        except BaseException as exc:
+            _finish_native_run(self, native_run_id, "error", exc)
+            if agentops is not None and trace_context is not None:
+                try:
+                    agentops.end_trace(trace_context, end_state="Error")
+                except Exception as end_exc:
+                    logger.debug("AgentOps end_trace(Error) failed: %s", end_exc)
+            raise
+
+        completed = bool(result.get("completed")) if isinstance(result, dict) else True
+        interrupted = bool(result.get("interrupted")) if isinstance(result, dict) else False
+        native_status = "success" if completed and not interrupted else "partial"
+        _finish_native_run(self, native_run_id, native_status)
+
+        if agentops is not None and trace_context is not None:
+            try:
+                agentops.end_trace(trace_context, end_state="Success")
+            except Exception as exc:
+                logger.debug("AgentOps end_trace(Success) failed: %s", exc)
+        return result
+
+    return wrapper
 
 
 # Import our tool system
@@ -10570,6 +10787,7 @@ class AIAgent:
 
         return final_response
 
+    @_agentops_observe_run_conversation
     def run_conversation(
         self,
         user_message: str,
@@ -11394,12 +11612,23 @@ class AIAgent:
                         if isinstance(getattr(self, "client", None), Mock):
                             _use_streaming = False
 
-                    if _use_streaming:
-                        response = self._interruptible_streaming_api_call(
-                            api_kwargs, on_first_delta=_stop_spinner
-                        )
-                    else:
-                        response = self._interruptible_api_call(api_kwargs)
+                    def _perform_llm_call():
+                        if _use_streaming:
+                            return self._interruptible_streaming_api_call(
+                                api_kwargs, on_first_delta=_stop_spinner
+                            )
+                        return self._interruptible_api_call(api_kwargs)
+
+                    response = _agentops_run_operation(
+                        "hermes.llm",
+                        {
+                            "api_mode": self.api_mode,
+                            "model": self.model,
+                            "provider": self.provider,
+                            "streaming": _use_streaming,
+                        },
+                        _perform_llm_call,
+                    )
                     
                     api_duration = time.time() - api_start_time
                     
