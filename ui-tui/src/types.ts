@@ -167,6 +167,11 @@ export interface Usage {
   input: number
   output: number
   total: number
+  cache_read?: number
+  cache_write?: number
+  compressions?: number
+  output_speed?: number
+  provider?: string
 }
 
 export interface SudoReq {

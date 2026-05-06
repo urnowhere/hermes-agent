@@ -20,7 +20,7 @@ import type { ActiveTool, ActivityItem, Msg, SubagentProgress, TodoItem } from '
 
 import { resetFlowOverlays } from './overlayStore.js'
 import { pushSnapshot } from './spawnHistoryStore.js'
-import { archiveDoneTodos, getTurnState, patchTurnState, resetTurnState } from './turnStore.js'
+import { $sessionTodos, archiveDoneTodos, getTurnState, patchTurnState, resetTurnState } from './turnStore.js'
 import { getUiState, patchUiState } from './uiStore.js'
 
 const INTERRUPT_COOLDOWN_MS = 1500
@@ -324,6 +324,9 @@ class TurnController {
 
     if (todos !== null) {
       patchTurnState({ todos })
+      // Also update the persistent session-level store so the statusbar
+      // can show the last known todo state between turns.
+      $sessionTodos.set(todos)
     }
   }
 

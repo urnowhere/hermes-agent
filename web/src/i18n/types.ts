@@ -162,6 +162,16 @@ export interface Translations {
     perModelBreakdown: string;
     topSkills: string;
     skill: string;
+    skillActivity: string;
+    skillStatus: string;
+    skillEnabled: string;
+    skillActive: string;
+    skillIdle: string;
+    skillNeverUsed: string;
+    skillCleanup: string;
+    skillCleanupDesc: string;
+    skillCleanupPreview: string;
+    skillCleanupConfirm: string;
     loads: string;
     edits: string;
     lastUsed: string;
@@ -176,6 +186,12 @@ export interface Translations {
     perDayAvg: string;
     acrossModels: string;
     inOut: string;
+    collapse: string;
+    expand: string;
+    showing: string;
+    prev: string;
+    next: string;
+    rowsPerPage: string;
   };
 
   // ── Models page ──

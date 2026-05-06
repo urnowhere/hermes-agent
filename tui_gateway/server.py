@@ -830,7 +830,7 @@ def _write_config_key(key_path: str, value):
     _save_cfg(cfg)
 
 
-_STATUSBAR_MODES = frozenset({"off", "top", "bottom"})
+_STATUSBAR_MODES = frozenset({"off", "top", "bottom", "collapsed"})
 
 
 def _coerce_statusbar(raw) -> str:
@@ -1276,6 +1276,7 @@ def _get_usage(agent) -> dict:
     g = lambda k, fb=None: getattr(agent, k, 0) or (getattr(agent, fb, 0) if fb else 0)
     usage = {
         "model": getattr(agent, "model", "") or "",
+        "provider": getattr(agent, "provider", "") or "",
         "input": g("session_input_tokens", "session_prompt_tokens"),
         "output": g("session_output_tokens", "session_completion_tokens"),
         "cache_read": g("session_cache_read_tokens"),
@@ -1284,6 +1285,7 @@ def _get_usage(agent) -> dict:
         "completion": g("session_completion_tokens"),
         "total": g("session_total_tokens"),
         "calls": g("session_api_calls"),
+        "estimated_cost_usd": float(getattr(agent, "session_estimated_cost_usd", 0) or 0),
     }
     comp = getattr(agent, "context_compressor", None)
     if comp:
@@ -1313,6 +1315,12 @@ def _get_usage(agent) -> dict:
             usage["cost_usd"] = float(cost.amount_usd)
     except Exception:
         pass
+    # Output speed: computed from session totals if available
+    # The CLI-side tracking is more accurate; here we use a simple estimate
+    # from the last API response timing stored on the agent.
+    output_speed = getattr(agent, "_last_output_speed", 0.0) or 0.0
+    if output_speed > 0:
+        usage["output_speed"] = round(output_speed, 1)
     return usage
 
 

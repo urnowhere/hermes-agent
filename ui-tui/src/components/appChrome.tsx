@@ -5,17 +5,18 @@ import unicodeSpinners from 'unicode-animations'
 
 import { $delegationState } from '../app/delegationStore.js'
 import type { IndicatorStyle } from '../app/interfaces.js'
-import { useTurnSelector } from '../app/turnStore.js'
+import { $sessionTodos, useTurnSelector } from '../app/turnStore.js'
 import { $uiState } from '../app/uiStore.js'
 import { FACES } from '../content/faces.js'
 import { VERBS } from '../content/verbs.js'
 import { fmtDuration } from '../domain/messages.js'
 import { stickyPromptFromViewport } from '../domain/viewport.js'
 import { buildSubagentTree, treeTotals, widthByDepth } from '../lib/subagentTree.js'
-import { fmtK } from '../lib/text.js'
+import { fmtK, isToolTrailResultLine, parseToolTrailResultLine, splitToolDuration, toolTrailLabel } from '../lib/text.js'
+import { useGitStatus } from '../lib/useGitStatus.js'
 import { useViewportSnapshot } from '../lib/viewportStore.js'
 import type { Theme } from '../theme.js'
-import type { Msg, Usage } from '../types.js'
+import type { Msg, TodoItem, Usage } from '../types.js'
 
 const FACE_TICK_MS = 2500
 const HEART_COLORS = ['#ff5fa2', '#ff4d6d']
@@ -77,12 +78,11 @@ const renderIndicator = (style: IndicatorStyle, tick: number): IndicatorRender =
   return { frame, intervalMs: Math.max(SPINNER_TICK_MS, spinner.interval), showVerb: false }
 }
 
-function FaceTicker({ color, startedAt }: { color: string; startedAt?: null | number }) {
+function FaceTicker({ color, now, startedAt }: { color: string; now: number; startedAt?: null | number }) {
   const ui = useStore($uiState)
   const style = ui.indicatorStyle
   const [tick, setTick] = useState(() => Math.floor(Math.random() * 1000))
   const [verbTick, setVerbTick] = useState(() => Math.floor(Math.random() * VERBS.length))
-  const [now, setNow] = useState(() => Date.now())
 
   // Pre-compute cadence + verb-visibility for the active style so an
   // `/indicator` switch re-arms the interval (and skips the verb timer
@@ -92,14 +92,12 @@ function FaceTicker({ color, startedAt }: { color: string; startedAt?: null | nu
 
   useEffect(() => {
     const glyph = setInterval(() => setTick(n => n + 1), intervalMs)
-    const clock = setInterval(() => setNow(Date.now()), 1000)
     // Verb timer is gated on `showVerb` — `unicode` style hides the verb
     // entirely, so cycling `verbTick` would be an avoidable re-render.
     const verb = showVerb ? setInterval(() => setVerbTick(n => n + 1), FACE_TICK_MS) : null
 
     return () => {
       clearInterval(glyph)
-      clearInterval(clock)
 
       if (verb !== null) {
         clearInterval(verb)
@@ -213,16 +211,7 @@ function SpawnHud({ t }: { t: Theme }) {
   )
 }
 
-function SessionDuration({ startedAt }: { startedAt: number }) {
-  const [now, setNow] = useState(() => Date.now())
-
-  useEffect(() => {
-    setNow(Date.now())
-    const id = setInterval(() => setNow(Date.now()), 1000)
-
-    return () => clearInterval(id)
-  }, [startedAt])
-
+function SessionDuration({ now, startedAt }: { now: number; startedAt: number }) {
   return fmtDuration(now - startedAt)
 }
 
@@ -246,6 +235,148 @@ const shortModelLabel = (model: string) =>
 
 const modelLabel = (model: string, effort?: string, fast?: boolean) =>
   [shortModelLabel(model), effortLabel(effort), fast ? 'fast' : ''].filter(Boolean).join(' ')
+
+// ── Todo progress: "✓ 2/5" or "✓ 3" when all done ──
+// Reads from the persistent $sessionTodos atom so the count survives
+// turn resets (unlike $turnState.todos which is cleared at turn end).
+function TodoSummary() {
+  const todos = useStore($sessionTodos)
+
+  if (!todos.length) {
+    return null
+  }
+
+  const done = todos.filter(t => t.status === 'completed').length
+  const total = todos.length
+
+  return (
+    <Text color={done === total ? t_color_good : t_color_muted}>
+      {' │ ✓ '}
+      {done}
+      {done < total ? `/${total}` : ''}
+    </Text>
+  )
+}
+
+// ── Agent HUD panel: tool usage summary + MCP count + recent trail ──
+function AgentHudPanel({ cols }: { cols: number }) {
+  const ui = useStore($uiState)
+  const trail = useTurnSelector(state => state.turnTrail)
+  const skills = ui.info?.skills
+  const mcpServers = ui.info?.mcp_servers
+
+  // 1. Aggregate tool counts from trail: "✓ Edit ×10 | ✓ Write ×5 | ✓ Read ×2"
+  const counts = new Map<string, { fail: number; ok: number }>()
+  for (const line of trail) {
+    if (!isToolTrailResultLine(line)) continue
+    const parsed = parseToolTrailResultLine(line)
+    if (!parsed) continue
+    const { label } = splitToolDuration(parsed.call)
+    const entry = counts.get(label) ?? { fail: 0, ok: 0 }
+    if (parsed.mark === '✗') entry.fail++
+    else entry.ok++
+    counts.set(label, entry)
+  }
+
+  const toolSummaryPieces: string[] = []
+  // Sort by total count desc, then alphabetical
+  const sorted = [...counts.entries()].sort((a, b) => {
+    const ta = a[1].ok + a[1].fail
+    const tb = b[1].ok + b[1].fail
+    return tb !== ta ? tb - ta : a[0].localeCompare(b[0])
+  })
+
+  for (const [name, { fail, ok }] of sorted) {
+    const total = ok + fail
+    const prefix = fail > 0 ? '✗' : '✓'
+    const display = name.length > 16 ? name.slice(0, 15) + '…' : name
+    toolSummaryPieces.push(`${prefix} ${display} ×${total}`)
+  }
+
+  // 2. MCP count
+  const mcpCount = mcpServers?.length ?? 0
+
+  // 3. Skill count
+  const skillCount = skills
+    ? Object.values(skills).flat().filter(Boolean).length
+    : 0
+
+  // 4. Recent trail lines (last 3 non-transient)
+  const recentLines = trail
+    .filter(l => isToolTrailResultLine(l) && l !== 'analyzing tool output…')
+    .slice(-3)
+
+  // Nothing to show
+  if (!toolSummaryPieces.length && !mcpCount && !skillCount && !recentLines.length) {
+    return null
+  }
+
+  // Build rows — adaptive to available width
+  const rows: ReactNode[] = []
+
+  // Row A: Tool usage summary (e.g. "✓ Edit ×10 | ✓ Write ×5 | ✓ Read ×2")
+  if (toolSummaryPieces.length) {
+    const maxPieces = cols > 100 ? 6 : cols > 70 ? 4 : 2
+    const visible = toolSummaryPieces.slice(0, maxPieces)
+    const rest = toolSummaryPieces.length - maxPieces
+    rows.push(
+      <Text key="tools" color={t_color_muted}>
+        {visible.join(' │ ')}
+        {rest > 0 ? <Text> │ +{rest}</Text> : null}
+      </Text>
+    )
+  }
+
+  // Row B: MCP + Skills counts
+  const metaPieces: string[] = []
+  if (mcpCount > 0) metaPieces.push(`${mcpCount} MCP`)
+  if (skillCount > 0) metaPieces.push(`${skillCount} skills`)
+  if (metaPieces.length) {
+    rows.push(
+      <Text key="meta" color={t_color_muted}>
+        {metaPieces.join(' · ')}
+      </Text>
+    )
+  }
+
+  // Row C: Recent trail (up to 2 lines, compact)
+  if (recentLines.length) {
+    const maxTrail = cols > 100 ? 2 : 1
+    for (const line of recentLines.slice(-maxTrail)) {
+      const parsed = parseToolTrailResultLine(line)
+      if (!parsed) continue
+      const { label, duration } = splitToolDuration(parsed.call)
+      const isError = parsed.mark === '✗'
+      const displayLabel = label.length > 24 ? label.slice(0, 23) + '…' : label
+      const durationStr = duration || ''
+      const detail = parsed.detail
+        ? parsed.detail.length > 40
+          ? parsed.detail.slice(0, 39) + '…'
+          : parsed.detail
+        : ''
+      const fullLine = `${parsed.mark} ${displayLabel}${durationStr}${detail ? ` :: ${detail}` : ''}`
+      rows.push(
+        <Text key={line} color={isError ? t_color_good : t_color_muted} dim={!isError}>
+          {fullLine.length > cols - 4 ? fullLine.slice(0, cols - 5) + '…' : fullLine}
+        </Text>
+      )
+    }
+  }
+
+  if (!rows.length) return null
+
+  return (
+    <Box flexDirection="column" marginLeft={1}>
+      {rows}
+    </Box>
+  )
+}
+
+// Module-level theme color references — resolved lazily from the Theme
+// object passed via props to avoid needing context or global state.
+// These are overwritten by the first StatusRule render.
+let t_color_good = '#5f875f'
+let t_color_muted = '#888'
 
 export function GoodVibesHeart({ tick, t }: { tick: number; t: Theme }) {
   const [active, setActive] = useState(false)
@@ -287,64 +418,239 @@ export function StatusRule({
   showCost,
   turnStartedAt,
   voiceLabel,
+  collapsed,
   t
 }: StatusRuleProps) {
+  // Resolve theme colors for child components that read from stores directly.
+  t_color_good = t.color.statusGood
+  t_color_muted = t.color.muted
+
+  // Single shared clock for all time-dependent children — avoids N
+  // independent setInterval timers (FaceTicker, SessionDuration).
+  const [now, setNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000)
+
+    return () => clearInterval(id)
+  }, [])
+
+  // Git status from cwd
+  const ui = useStore($uiState)
+  const cwd = ui.info?.cwd ?? process.cwd()
+  const git = useGitStatus(cwd)
+
   const pct = usage.context_percent
-  const barColor = ctxBarColor(pct, t)
+
+  // context_used may be 0 right after a model switch (before next API call).
+  // Fall back to session input tokens so the bar stays meaningful.
+  const effectiveCtxUsed = (usage.context_used ?? 0) || usage.input || 0
+
+  // Recalculate percent with the effective value when context_used was stale.
+  const effectivePct = usage.context_max && usage.context_used === 0 && usage.input > 0
+    ? Math.max(0, Math.min(100, Math.round((usage.input / usage.context_max) * 100)))
+    : pct
+
+  const barColor = ctxBarColor(effectivePct, t)
 
   const ctxLabel = usage.context_max
-    ? `${fmtK(usage.context_used ?? 0)}/${fmtK(usage.context_max)}`
+    ? `${fmtK(effectiveCtxUsed)}/${fmtK(usage.context_max)}`
     : usage.total > 0
       ? `${fmtK(usage.total)} tok`
       : ''
 
-  const bar = usage.context_max ? ctxBar(pct) : ''
-  const leftWidth = Math.max(12, cols - cwdLabel.length - 3)
+  // Adaptive context bar width based on terminal columns.
+  const barWidth = cols > 120 ? 14 : cols > 80 ? 10 : 6
+  const bar = usage.context_max ? ctxBar(effectivePct, barWidth) : ''
 
-  return (
-    <Box height={1}>
-      <Box flexShrink={1} width={leftWidth}>
+  const modelTag = modelLabel(model, modelReasoningEffort, modelFast)
+
+  // Token breakdown: always show in/out when data is available
+  const tokenDetail = (usage.input > 0 || usage.output > 0)
+    ? `(in: ${fmtK(usage.input)}, out: ${fmtK(usage.output)})`
+    : ''
+
+  // Todo + tools (hooks must be unconditional)
+  // Use $sessionTodos so the count persists across turns.
+  const todos = useStore($sessionTodos)
+  const todoDone = todos.filter(td => td.status === 'completed').length
+  const todoTotal = todos.length
+
+  // ── Collapsed mode: single-line compact summary ──
+  if (collapsed) {
+    const corePieces: string[] = []
+
+    if (busy) {
+      corePieces.push(turnStartedAt ? fmtDuration(now - turnStartedAt) : '…')
+    } else {
+      corePieces.push(status)
+    }
+
+    if (usage.provider) {
+      corePieces.push(usage.provider)
+    }
+
+    if (git.branch) {
+      corePieces.push(`git:(${git.branch}${git.dirty ? '*' : ''})`)
+    }
+
+    if (ctxLabel) {
+      corePieces.push(`${ctxLabel} ${effectivePct != null ? `${effectivePct}%` : ''}`)
+    }
+
+    if ((usage.cache_read ?? 0) > 0) {
+      corePieces.push(`cache: ${fmtK(usage.cache_read ?? 0)}`)
+    }
+
+    if (showCost && typeof usage.cost_usd === 'number') {
+      corePieces.push(`$${usage.cost_usd.toFixed(2)}`)
+    }
+
+    // Compressions in collapsed
+    if (usage.compressions !== undefined) {
+      corePieces.push(`${usage.compressions ?? 0} compress`)
+    }
+
+    // Todo count in collapsed
+    if (todoTotal > 0) {
+      corePieces.push(`✓${todoDone}/${todoTotal}`)
+    }
+
+    return (
+      <Box height={1}>
         <Text color={t.color.border} wrap="truncate-end">
           {'─ '}
-          {busy ? (
-            <FaceTicker color={statusColor} startedAt={turnStartedAt} />
-          ) : (
-            <Text color={statusColor}>{status}</Text>
-          )}
-          <Text color={t.color.muted}> │ {modelLabel(model, modelReasoningEffort, modelFast)}</Text>
-          {ctxLabel ? <Text color={t.color.muted}> │ {ctxLabel}</Text> : null}
+          <Text color={statusColor}>{corePieces.join(' · ')}</Text>
           {bar ? (
             <Text color={t.color.muted}>
-              {' │ '}
-              <Text color={barColor}>[{bar}]</Text> <Text color={barColor}>{pct != null ? `${pct}%` : ''}</Text>
+              {' '}
+              <Text color={barColor}>[{bar}]</Text>
             </Text>
-          ) : null}
-          {sessionStartedAt ? (
-            <Text color={t.color.muted}>
-              {' │ '}
-              <SessionDuration startedAt={sessionStartedAt} />
-            </Text>
-          ) : null}
-          <SpawnHud t={t} />
-          {voiceLabel ? (
-            <Text
-              color={
-                voiceLabel.startsWith('●') ? t.color.error : voiceLabel.startsWith('◉') ? t.color.warn : t.color.muted
-              }
-            >
-              {' │ '}
-              {voiceLabel}
-            </Text>
-          ) : null}
-          {bgCount > 0 ? <Text color={t.color.muted}> │ {bgCount} bg</Text> : null}
-          {showCost && typeof usage.cost_usd === 'number' ? (
-            <Text color={t.color.muted}> │ ${usage.cost_usd.toFixed(4)}</Text>
           ) : null}
         </Text>
+        <Text color={t.color.border}> ─ </Text>
+        <Text color={t.color.label}>{cwdLabel}</Text>
       </Box>
+    )
+  }
 
-      <Text color={t.color.border}> ─ </Text>
-      <Text color={t.color.label}>{cwdLabel}</Text>
+  // ── Full mode (2 rows when cols >= 60, 1 row otherwise) ──
+  const useTwoRows = cols >= 60
+
+  const leftWidth = Math.max(12, cols - cwdLabel.length - 3)
+
+  // Provider label (from usage)
+  const providerLabel = usage.provider ? `${usage.provider}` : ''
+
+  // Cache display
+  const cacheLabel = (usage.cache_read ?? 0) > 0 ? `cache: ${fmtK(usage.cache_read ?? 0)}` : ''
+
+  // Output speed
+  const speedLabel = (usage.output_speed ?? 0) > 0 ? `out: ${(usage.output_speed ?? 0).toFixed(1)} tok/s` : ''
+
+  // Cost display
+  const costLabel = showCost && typeof usage.cost_usd === 'number' ? `$${usage.cost_usd.toFixed(2)}` : ''
+
+  // Compressions
+  const compressLabel = (usage.compressions ?? 0) >= 0 && 'compressions' in usage
+    ? `${usage.compressions ?? 0} compress`
+    : ''
+
+  // ── Row 1: status, model, git, context ──
+  const row1 = (
+    <Text color={t.color.border} wrap="truncate-end">
+      {'─ '}
+      {busy ? (
+        <FaceTicker color={statusColor} now={now} startedAt={turnStartedAt} />
+      ) : (
+        <Text color={statusColor}>{status}</Text>
+      )}
+      <Text color={t.color.muted}> │ {modelTag}</Text>
+      {providerLabel ? (
+        <Text color={t.color.muted}> · {providerLabel}</Text>
+      ) : null}
+      {git.branch ? (
+        <Text color={git.dirty ? t.color.warn : t.color.muted}>
+          {' │ git:('}
+          {git.branch}
+          {git.dirty ? '*' : ''}
+          {')'}
+        </Text>
+      ) : null}
+      {ctxLabel ? <Text color={t.color.muted}> │ {ctxLabel}</Text> : null}
+      {bar ? (
+        <Text color={t.color.muted}>
+          {' │ '}
+          <Text color={barColor}>[{bar}]</Text> <Text color={barColor}>{effectivePct != null ? `${effectivePct}%` : ''}</Text>
+        </Text>
+      ) : null}
+      {tokenDetail ? <Text color={t.color.muted}> {tokenDetail}</Text> : null}
+      <SpawnHud t={t} />
+      <TodoSummary />
+    </Text>
+  )
+
+  // ── Row 2: calls, cache, compress, session duration, speed, cost, voice, bg ──
+  const row2 = (
+    <Text color={t.color.muted} wrap="truncate-end">
+      {usage.calls > 0 ? <Text> │ {usage.calls} calls</Text> : null}
+      {cacheLabel ? <Text> │ {cacheLabel}</Text> : null}
+      {compressLabel ? <Text> │ {compressLabel}</Text> : null}
+      {sessionStartedAt ? (
+        <Text>
+          {' │ '}
+          <SessionDuration now={now} startedAt={sessionStartedAt} />
+        </Text>
+      ) : null}
+      {speedLabel ? <Text> │ {speedLabel}</Text> : null}
+      {costLabel ? <Text> │ {costLabel}</Text> : null}
+      {voiceLabel ? (
+        <Text
+          color={
+            voiceLabel.startsWith('●') ? t.color.error : voiceLabel.startsWith('◉') ? t.color.warn : t.color.muted
+          }
+        >
+          {' │ '}
+          {voiceLabel}
+        </Text>
+      ) : null}
+      {bgCount > 0 ? <Text> │ {bgCount} bg</Text> : null}
+    </Text>
+  )
+
+  // ── Row 3+: Agent HUD panel (tool summary, MCP, recent trail) ──
+  const hudPanel = <AgentHudPanel cols={cols} />
+
+  if (useTwoRows) {
+    return (
+      <Box flexDirection="column">
+        <Box height={1}>
+          <Box flexShrink={1} width={leftWidth}>{row1}</Box>
+          <Text color={t.color.border}> ─ </Text>
+          <Text color={t.color.label}>{cwdLabel}</Text>
+        </Box>
+        <Box height={1}>
+          <Box flexShrink={1} width={leftWidth}>{row2}</Box>
+          <Text color={t.color.border}> ─ </Text>
+          <Text color={t.color.muted}>{cwdLabel}</Text>
+        </Box>
+        {hudPanel}
+      </Box>
+    )
+  }
+
+  // Fallback: single row for very narrow terminals
+  return (
+    <Box flexDirection="column">
+      <Box height={1}>
+        <Box flexShrink={1} width={leftWidth}>
+          {row1}
+          {row2}
+        </Box>
+        <Text color={t.color.border}> ─ </Text>
+        <Text color={t.color.label}>{cwdLabel}</Text>
+      </Box>
+      {hudPanel}
     </Box>
   )
 }
@@ -444,6 +750,7 @@ export function TranscriptScrollbar({ scrollRef, t }: TranscriptScrollbarProps) 
 interface StatusRuleProps {
   bgCount: number
   busy: boolean
+  collapsed?: boolean
   cols: number
   cwdLabel: string
   model: string

@@ -71,7 +71,19 @@ app = FastAPI(title="Hermes Agent", version=__version__)
 # Generated fresh on every server start — dies when the process exits.
 # Injected into the SPA HTML so only the legitimate web UI can use it.
 # ---------------------------------------------------------------------------
-_SESSION_TOKEN = secrets.token_urlsafe(32)
+# IMPORTANT: This runs at import time. On Windows, the background-server
+# path sets _HERMES_DASHBOARD_TOKEN *before* spawning the subprocess that
+# imports this module, so the subprocess picks up the parent's token.
+# Do NOT move this into start_server() — it must remain module-level
+# because uvicorn imports the app object directly.
+_token_file = os.environ.get("_HERMES_TOKEN_FILE")
+if _token_file and os.path.isfile(_token_file):
+    try:
+        _SESSION_TOKEN = Path(_token_file).read_text().strip()
+    except OSError:
+        _SESSION_TOKEN = secrets.token_urlsafe(32)
+else:
+    _SESSION_TOKEN = secrets.token_urlsafe(32)
 _SESSION_HEADER_NAME = "X-Hermes-Session-Token"
 
 # In-browser Chat tab (/chat, /api/pty, …).  Off unless ``hermes dashboard --tui``
@@ -2641,6 +2653,116 @@ async def toggle_skill(body: SkillToggle):
     return {"ok": True, "name": body.name, "enabled": body.enabled}
 
 
+@app.get("/api/analytics/skill-activity")
+async def get_skill_activity(days: int = 30):
+    """Skill activity analytics: usage stats + enabled/disabled status for all skills.
+
+    Returns a list of skill objects with:
+      - name, description, category, enabled
+      - view_count, manage_count, total_count (from session history)
+      - last_used_at (unix timestamp)
+      - status: "active" | "idle" | "never_used"
+    """
+    from hermes_state import SessionDB
+    from agent.insights import InsightsEngine
+    from tools.skills_tool import _find_all_skills
+    from hermes_cli.skills_config import get_disabled_skills
+
+    config = load_config()
+    disabled = get_disabled_skills(config)
+
+    # All known skills (including disabled ones for full picture)
+    all_skills = _find_all_skills(skip_disabled=True)
+    for s in all_skills:
+        s["enabled"] = s["name"] not in disabled
+
+    # Build lookup from insights
+    db = SessionDB()
+    try:
+        cutoff = time.time() - (days * 86400)
+        insights = InsightsEngine(db)
+        skill_usage = insights._get_skill_usage(cutoff)
+    finally:
+        db.close()
+
+    usage_map: Dict[str, dict] = {}
+    for su in skill_usage:
+        usage_map[su["skill"]] = su
+
+    # Merge usage data into skill list
+    for skill in all_skills:
+        usage = usage_map.get(skill["name"], {})
+        skill["view_count"] = usage.get("view_count", 0)
+        skill["manage_count"] = usage.get("manage_count", 0)
+        skill["total_count"] = usage.get("view_count", 0) + usage.get("manage_count", 0)
+        skill["last_used_at"] = usage.get("last_used_at")
+
+        # Derive activity status
+        if skill["total_count"] == 0:
+            skill["status"] = "never_used"
+        elif skill["last_used_at"] and (time.time() - skill["last_used_at"]) > (days * 86400):
+            skill["status"] = "idle"
+        else:
+            skill["status"] = "active"
+
+    # Sort: active first, then idle, then never_used; within each by total_count desc
+    status_order = {"active": 0, "idle": 1, "never_used": 2}
+    all_skills.sort(key=lambda s: (status_order.get(s["status"], 3), -s["total_count"], s["name"]))
+
+    # Add skills from usage that aren't in local scan (e.g. deleted but still in history)
+    known_names = {s["name"] for s in all_skills}
+    for su in skill_usage:
+        if su["skill"] not in known_names:
+            total = su["view_count"] + su["manage_count"]
+            all_skills.append({
+                "name": su["skill"],
+                "description": "(deleted or external)",
+                "category": "",
+                "enabled": su["skill"] not in disabled,
+                "view_count": su["view_count"],
+                "manage_count": su["manage_count"],
+                "total_count": total,
+                "last_used_at": su.get("last_used_at"),
+                "status": "active" if su.get("last_used_at") and (time.time() - su["last_used_at"]) <= (days * 86400) else "idle",
+            })
+
+    return {
+        "period_days": days,
+        "skills": all_skills,
+        "summary": {
+            "total_skills": len(all_skills),
+            "active_count": sum(1 for s in all_skills if s["status"] == "active"),
+            "idle_count": sum(1 for s in all_skills if s["status"] == "idle"),
+            "never_used_count": sum(1 for s in all_skills if s["status"] == "never_used"),
+            "enabled_count": sum(1 for s in all_skills if s["enabled"]),
+            "disabled_count": sum(1 for s in all_skills if not s["enabled"]),
+        },
+    }
+
+
+@app.put("/api/analytics/skill-activity/auto-cleanup")
+async def auto_cleanup_skills(days: int = 90, dry_run: bool = True):
+    """Auto-disable skills that have never been used in the given period.
+
+    Returns the list of skills that would be (or were) disabled.
+    """
+    activity = await get_skill_activity(days=days)
+    candidates = [s for s in activity["skills"] if s["status"] == "never_used" and s["enabled"]]
+
+    if dry_run:
+        return {"action": "dry_run", "would_disable": [s["name"] for s in candidates], "count": len(candidates)}
+
+    from hermes_cli.skills_config import get_disabled_skills, save_disabled_skills
+    config = load_config()
+    disabled = get_disabled_skills(config)
+    disabled_names = []
+    for s in candidates:
+        disabled.add(s["name"])
+        disabled_names.append(s["name"])
+    save_disabled_skills(config, disabled)
+    return {"action": "disabled", "disabled": disabled_names, "count": len(disabled_names)}
+
+
 @app.get("/api/tools/toolsets")
 async def get_toolsets():
     from hermes_cli.tools_config import (
@@ -4023,8 +4145,14 @@ def start_server(
     allow_public: bool = False,
     *,
     embedded_chat: bool = False,
+    background: bool = False,
 ):
-    """Start the web UI server."""
+    """Start the web UI server.
+
+    If *background* is True, fork the server into a background process so the
+    CLI returns immediately.  The parent opens the browser then exits; the
+    child keeps serving until killed via ``hermes dashboard --stop``.
+    """
     import uvicorn
 
     global _DASHBOARD_EMBEDDED_CHAT_ENABLED
@@ -4050,14 +4178,83 @@ def start_server(
     app.state.bound_host = host
     app.state.bound_port = port
 
-    if open_browser:
-        import webbrowser
+    if not background:
+        # Foreground mode (original behaviour)
+        if open_browser:
+            import webbrowser
 
-        def _open():
+            def _open():
+                time.sleep(1.0)
+                webbrowser.open(f"http://{host}:{port}")
+
+            threading.Thread(target=_open, daemon=True).start()
+
+        print(f"  Hermes Web UI → http://{host}:{port}")
+        uvicorn.run(app, host=host, port=port, log_level="warning")
+        return
+
+    # --- Background mode: fork so the child inherits the session token ---
+    print(f"  Hermes Web UI → http://{host}:{port}")
+
+    if sys.platform == "win32":
+        # Windows has no fork — use subprocess with token passed via temp file
+        import tempfile
+        token_fh = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".token", delete=False, prefix="hermes-")
+        token_fh.write(_SESSION_TOKEN)
+        token_fh.close()
+        os.chmod(token_fh.name, 0o600)
+        env = {**os.environ, "_HERMES_TOKEN_FILE": token_fh.name}
+        subprocess.Popen(
+            [sys.executable, "-m", "uvicorn", "hermes_cli.web_server:app",
+             "--host", host, "--port", str(port), "--log-level", "warning"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
+            close_fds=True,
+        )
+        if open_browser:
+            import webbrowser
             time.sleep(1.0)
             webbrowser.open(f"http://{host}:{port}")
+        print(f"  Started — stop with: hermes dashboard --stop")
+        return
 
-        threading.Thread(target=_open, daemon=True).start()
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        raise SystemExit(
+            f"Failed to fork background server: {exc}\n"
+            "Try running in foreground mode."
+        ) from exc
 
-    print(f"  Hermes Web UI → http://{host}:{port}")
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    if pid > 0:
+        # Parent: wait for child to be listening, then open browser and exit
+        import socket as _socket
+        for _ in range(50):  # up to 5 seconds
+            time.sleep(0.1)
+            try:
+                with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+                    s.settimeout(0.5)
+                    s.connect((host, port))
+                break
+            except OSError:
+                continue
+        if open_browser:
+            import webbrowser
+            webbrowser.open(f"http://{host}:{port}")
+        print(f"  PID {pid} — stop with: hermes dashboard --stop")
+        return
+
+    # Child: detach from controlling terminal and serve
+    os.setsid()
+    devnull = os.open(os.devnull, os.O_RDWR)
+    os.dup2(devnull, 0)  # stdin
+    os.dup2(devnull, 1)  # stdout
+    os.dup2(devnull, 2)  # stderr
+    if devnull > 2:
+        os.close(devnull)
+    try:
+        uvicorn.run(app, host=host, port=port, log_level="warning")
+    except Exception as exc:
+        _log.exception("Dashboard server crashed: %s", exc)
+    finally:
+        os._exit(0)

@@ -328,8 +328,21 @@ const StatusRulePane = memo(function StatusRulePane({
   status
 }: Pick<AppLayoutProps, 'composer' | 'status'> & { at: 'bottom' | 'top' }) {
   const ui = useStore($uiState)
+  const mode = ui.statusBar
 
-  if (ui.statusBar !== at) {
+  // 'collapsed' renders a compact bar at the top position.
+  if (mode === 'off') {
+    return null
+  }
+
+  const isCollapsed = mode === 'collapsed'
+  const showAtTop = mode === 'top' || isCollapsed
+
+  if (at === 'top' && !showAtTop) {
+    return null
+  }
+
+  if (at === 'bottom' && showAtTop) {
     return null
   }
 
@@ -338,6 +351,7 @@ const StatusRulePane = memo(function StatusRulePane({
       <StatusRule
         bgCount={ui.bgTasks.size}
         busy={ui.busy}
+        collapsed={isCollapsed}
         cols={composer.cols}
         cwdLabel={status.cwdLabel}
         model={ui.info?.model ?? ''}

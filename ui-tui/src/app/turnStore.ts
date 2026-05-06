@@ -24,6 +24,13 @@ const buildTurnState = (): TurnState => ({
 
 export const $turnState = atom<TurnState>(buildTurnState())
 
+// Persistent session-level todos — survives turn resets so the statusbar
+// can show the last known todo state from the agent even between turns.
+// Updated by recordTodos() in turnController, never cleared automatically.
+export const $sessionTodos = atom<TodoItem[]>([])
+
+export const getSessionTodos = () => $sessionTodos.get()
+
 export const getTurnState = () => $turnState.get()
 
 const subscribeTurn = (cb: () => void) => $turnState.listen(() => cb())

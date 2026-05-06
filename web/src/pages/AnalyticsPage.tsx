@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
   BarChart3,
   Brain,
+  ChevronDown,
   Cpu,
   RefreshCw,
   TrendingUp,
@@ -15,6 +16,7 @@ import type {
   AnalyticsDailyEntry,
   AnalyticsModelEntry,
   AnalyticsSkillEntry,
+  SkillActivityResponse,
 } from "@/lib/api";
 import { timeAgo } from "@/lib/utils";
 import { Button } from "@nous-research/ui/ui/components/button";
@@ -33,6 +35,7 @@ const PERIODS = [
 ] as const;
 
 const CHART_HEIGHT_PX = 160;
+const DEFAULT_PAGE_SIZE = 15;
 
 function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -110,7 +113,7 @@ function SortHeader({
       onClick={() => toggle(col)}
       className={`cursor-pointer select-none ${className ?? ""}`}
     >
-      <span className="inline-flex items-center gap-1.5 rounded px-1 -mx-1 py-0.5 hover:bg-muted/40 transition-colors">
+      <span className="inline-flex items-center gap-1.5 rounded px-1 -mx-1 py-0.5 hover:bg-secondary/20 transition-colors">
         {label}
         {active ? (
           sortDir === "asc" ? (
@@ -126,6 +129,175 @@ function SortHeader({
   );
 }
 
+// ---------------------------------------------------------------------------
+// Pagination hook
+// ---------------------------------------------------------------------------
+
+function usePagination(pageSize = DEFAULT_PAGE_SIZE) {
+  const [page, setPage] = useState(0);
+
+  const reset = useCallback(() => setPage(0), []);
+
+  const paginate = useCallback(
+    <T,>(items: T[]): { pageItems: T[]; start: number; end: number; totalPages: number } => {
+      const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+      const safePage = Math.min(page, totalPages - 1);
+      const start = safePage * pageSize;
+      const end = Math.min(start + pageSize, items.length);
+      return { pageItems: items.slice(start, end), start, end, totalPages };
+    },
+    [page, pageSize],
+  );
+
+  return { page, setPage, reset, paginate };
+}
+
+function PaginationBar({
+  total,
+  start,
+  end,
+  totalPages,
+  page,
+  onPage,
+}: {
+  total: number;
+  start: number;
+  end: number;
+  totalPages: number;
+  page: number;
+  onPage: (p: number) => void;
+}) {
+  const { t } = useI18n();
+  const [input, setInput] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  if (total <= DEFAULT_PAGE_SIZE) return null;
+
+  const jump = () => {
+    const n = parseInt(input, 10);
+    if (!isNaN(n) && n >= 1 && n <= totalPages) {
+      onPage(n - 1);
+    }
+    setInput("");
+    inputRef.current?.blur();
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") { jump(); }
+    if (e.key === "Escape") { setInput(""); inputRef.current?.blur(); }
+  };
+
+  return (
+    <div className="flex items-center justify-between pt-3 mt-3 border-t border-border/50">
+      <span className="text-xs text-muted-foreground">
+        {t.analytics.showing
+          .replace("{start}", String(start + 1))
+          .replace("{end}", String(end))
+          .replace("{total}", String(total))}
+      </span>
+      <div className="flex items-center gap-1.5">
+        <Button
+          size="xs"
+          outlined
+          disabled={page === 0}
+          onClick={() => onPage(page - 1)}
+        >
+          {t.analytics.prev}
+        </Button>
+        {totalPages <= 7 ? (
+          /* Few pages: show all page buttons */
+          <div className="flex items-center gap-0.5">
+            {Array.from({ length: totalPages }, (_, i) => (
+              <button
+                key={i}
+                onClick={() => onPage(i)}
+                className={`min-w-[1.75rem] h-6 text-xs rounded transition-colors ${
+                  i === page
+                    ? "bg-primary text-primary-foreground font-medium"
+                    : "text-muted-foreground hover:text-foreground hover:bg-secondary/30"
+                }`}
+              >
+                {i + 1}
+              </button>
+            ))}
+          </div>
+        ) : (
+          /* Many pages: show current/total + jump input */
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-muted-foreground tabular-nums">
+              {page + 1} / {totalPages}
+            </span>
+            <input
+              ref={inputRef}
+              type="text"
+              inputMode="numeric"
+              value={input}
+              onChange={(e) => setInput(e.target.value.replace(/\D/g, ""))}
+              onKeyDown={handleKeyDown}
+              onBlur={() => { if (!input) return; jump(); }}
+              placeholder={String(page + 1)}
+              className="w-12 h-6 text-xs text-center bg-secondary/30 border border-border rounded
+                         text-foreground placeholder:text-muted-foreground/50
+                         focus:outline-none focus:ring-1 focus:ring-primary/50"
+            />
+            <Button size="xs" outlined disabled={!input} onClick={jump}>
+              Go
+            </Button>
+          </div>
+        )}
+        <Button
+          size="xs"
+          outlined
+          disabled={page >= totalPages - 1}
+          onClick={() => onPage(page + 1)}
+        >
+          {t.analytics.next}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// CollapsibleCard — wraps Card with collapse/expand in header
+// ---------------------------------------------------------------------------
+
+function CollapsibleCard({
+  icon,
+  title,
+  children,
+  defaultOpen = true,
+  headerExtra,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  children: React.ReactNode;
+  defaultOpen?: boolean;
+  headerExtra?: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+
+  return (
+    <Card>
+      <CardHeader
+        className="cursor-pointer select-none"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            {icon}
+            <CardTitle className="text-base">{title}</CardTitle>
+            <ChevronDown
+              className={`h-4 w-4 text-muted-foreground transition-transform duration-200 ${open ? "" : "-rotate-90"}`}
+            />
+          </div>
+          {headerExtra}
+        </div>
+      </CardHeader>
+      {open && <CardContent>{children}</CardContent>}
+    </Card>
+  );
+}
 
 
 function TokenBarChart({ daily }: { daily: AnalyticsDailyEntry[] }) {
@@ -138,257 +310,458 @@ function TokenBarChart({ daily }: { daily: AnalyticsDailyEntry[] }) {
   );
 
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-center gap-2">
-          <BarChart3 className="h-5 w-5 text-muted-foreground" />
-          <CardTitle className="text-base">
-            {t.analytics.dailyTokenUsage}
-          </CardTitle>
-        </div>
+    <CollapsibleCard
+      icon={<BarChart3 className="h-5 w-5 text-muted-foreground" />}
+      title={t.analytics.dailyTokenUsage}
+      defaultOpen={true}
+      headerExtra={
         <div className="flex items-center gap-4 text-xs text-muted-foreground">
           <div className="flex items-center gap-1.5">
-            <div className="h-2.5 w-2.5 bg-[#ffe6cb]" />
+            <div className="h-2.5 w-2.5 bg-[var(--midground)]/70" />
             {t.analytics.input}
           </div>
           <div className="flex items-center gap-1.5">
-            <div className="h-2.5 w-2.5 bg-emerald-500" />
+            <div className="h-2.5 w-2.5 bg-[var(--color-success)]" />
             {t.analytics.output}
           </div>
         </div>
-      </CardHeader>
-      <CardContent>
-        <div
-          className="flex items-end gap-[2px]"
-          style={{ height: CHART_HEIGHT_PX }}
-        >
-          {daily.map((d) => {
-            const total = d.input_tokens + d.output_tokens;
-            const inputH = Math.round(
-              (d.input_tokens / maxTokens) * CHART_HEIGHT_PX,
-            );
-            const outputH = Math.round(
-              (d.output_tokens / maxTokens) * CHART_HEIGHT_PX,
-            );
-            return (
-              <div
-                key={d.day}
-                className="flex-1 min-w-0 group relative flex flex-col justify-end"
-                style={{ height: CHART_HEIGHT_PX }}
-              >
-                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-10 pointer-events-none">
-                  <div className="bg-card border border-border px-2.5 py-1.5 text-[10px] text-foreground shadow-lg whitespace-nowrap">
-                    <div className="font-medium">{formatDate(d.day)}</div>
-                    <div>
-                      {t.analytics.input}: {formatTokens(d.input_tokens)}
-                    </div>
-                    <div>
-                      {t.analytics.output}: {formatTokens(d.output_tokens)}
-                    </div>
-                    <div>
-                      {t.analytics.total}: {formatTokens(total)}
-                    </div>
+      }
+    >
+      <div
+        className="flex items-end gap-[2px]"
+        style={{ height: CHART_HEIGHT_PX }}
+      >
+        {daily.map((d) => {
+          const total = d.input_tokens + d.output_tokens;
+          const inputH = Math.round(
+            (d.input_tokens / maxTokens) * CHART_HEIGHT_PX,
+          );
+          const outputH = Math.round(
+            (d.output_tokens / maxTokens) * CHART_HEIGHT_PX,
+          );
+          return (
+            <div
+              key={d.day}
+              className="flex-1 min-w-0 group relative flex flex-col justify-end"
+              style={{ height: CHART_HEIGHT_PX }}
+            >
+              <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-10 pointer-events-none">
+                <div className="bg-popover border border-border px-2.5 py-1.5 text-[10px] text-foreground shadow-lg whitespace-nowrap">
+                  <div className="font-medium">{formatDate(d.day)}</div>
+                  <div>
+                    {t.analytics.input}: {formatTokens(d.input_tokens)}
+                  </div>
+                  <div>
+                    {t.analytics.output}: {formatTokens(d.output_tokens)}
+                  </div>
+                  <div>
+                    {t.analytics.total}: {formatTokens(total)}
                   </div>
                 </div>
-
-                <div
-                  className="w-full bg-[#ffe6cb]/70"
-                  style={{ height: Math.max(inputH, total > 0 ? 1 : 0) }}
-                />
-
-                <div
-                  className="w-full bg-emerald-500/70"
-                  style={{
-                    height: Math.max(outputH, d.output_tokens > 0 ? 1 : 0),
-                  }}
-                />
               </div>
-            );
-          })}
-        </div>
 
-        <div className="flex justify-between mt-2 text-[10px] text-muted-foreground">
-          <span>{daily.length > 0 ? formatDate(daily[0].day) : ""}</span>
-          {daily.length > 2 && (
-            <span>{formatDate(daily[Math.floor(daily.length / 2)].day)}</span>
-          )}
-          <span>
-            {daily.length > 1 ? formatDate(daily[daily.length - 1].day) : ""}
-          </span>
-        </div>
-      </CardContent>
-    </Card>
+              <div
+                className="w-full bg-[var(--midground)]/70"
+                style={{ height: Math.max(inputH, total > 0 ? 1 : 0) }}
+              />
+
+              <div
+                className="w-full bg-[var(--color-success)]/70"
+                style={{
+                  height: Math.max(outputH, d.output_tokens > 0 ? 1 : 0),
+                }}
+              />
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="flex justify-between mt-2 text-[10px] text-muted-foreground">
+        <span>{daily.length > 0 ? formatDate(daily[0].day) : ""}</span>
+        {daily.length > 2 && (
+          <span>{formatDate(daily[Math.floor(daily.length / 2)].day)}</span>
+        )}
+        <span>
+          {daily.length > 1 ? formatDate(daily[daily.length - 1].day) : ""}
+        </span>
+      </div>
+    </CollapsibleCard>
   );
 }
 
 function DailyTable({ daily }: { daily: AnalyticsDailyEntry[] }) {
   const { t } = useI18n();
   const { sorted, sortKey, sortDir, toggle } = useTableSort(daily, "day", "desc");
+  const { page, setPage, reset, paginate } = usePagination();
+
+  // Reset page when sort changes or data changes
+  useEffect(() => { reset(); }, [daily, reset]);
 
   if (daily.length === 0) return null;
 
+  const { pageItems, start, end, totalPages } = paginate(sorted);
+
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-center gap-2">
-          <TrendingUp className="h-5 w-5 text-muted-foreground" />
-          <CardTitle className="text-base">
-            {t.analytics.dailyBreakdown}
-          </CardTitle>
-        </div>
-      </CardHeader>
-      <CardContent>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border text-muted-foreground text-xs">
-                <SortHeader label={t.analytics.date} col="day" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-left py-2 pr-4 font-medium" />
-                <SortHeader label={t.sessions.title} col="sessions" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 px-4 font-medium" />
-                <SortHeader label={t.analytics.input} col="input_tokens" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 px-4 font-medium" />
-                <SortHeader label={t.analytics.output} col="output_tokens" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 pl-4 font-medium" />
-              </tr>
-            </thead>
-            <tbody>
-              {sorted.map((d) => (
-                <tr
-                    key={d.day}
-                    className="border-b border-border/50 hover:bg-secondary/20 transition-colors"
-                  >
-                  <td className="py-2 pr-4 font-medium">
-                      {formatDate(d.day)}
-                    </td>
-                  <td className="text-right py-2 px-4 text-muted-foreground">
-                      {d.sessions}
-                    </td>
-                  <td className="text-right py-2 px-4">
-                    <span className="text-[#ffe6cb]">
+    <CollapsibleCard
+      icon={<TrendingUp className="h-5 w-5 text-muted-foreground" />}
+      title={t.analytics.dailyBreakdown}
+    >
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-border text-muted-foreground text-xs">
+              <SortHeader label={t.analytics.date} col="day" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-left py-2 pr-4 font-medium" />
+              <SortHeader label={t.sessions.title} col="sessions" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 px-4 font-medium" />
+              <SortHeader label={t.analytics.input} col="input_tokens" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 px-4 font-medium" />
+              <SortHeader label={t.analytics.output} col="output_tokens" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 pl-4 font-medium" />
+            </tr>
+          </thead>
+          <tbody>
+            {pageItems.map((d) => (
+              <tr
+                  key={d.day}
+                  className="border-b border-border/50 hover:bg-secondary/20 transition-colors"
+                >
+                <td className="py-2 pr-4 font-medium">
+                    {formatDate(d.day)}
+                </td>
+                <td className="text-right py-2 px-4 text-muted-foreground">
+                    {d.sessions}
+                </td>
+                <td className="text-right py-2 px-4">
+                    <span className="text-[var(--midground)]">
                         {formatTokens(d.input_tokens)}
-                      </span>
-                  </td>
-                  <td className="text-right py-2 pl-4">
-                    <span className="text-emerald-400">
+                    </span>
+                </td>
+                <td className="text-right py-2 pl-4">
+                    <span className="text-[var(--color-success)]">
                         {formatTokens(d.output_tokens)}
-                      </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </CardContent>
-    </Card>
+                    </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <PaginationBar
+        total={sorted.length}
+        start={start}
+        end={end}
+        totalPages={totalPages}
+        page={page}
+        onPage={setPage}
+      />
+    </CollapsibleCard>
   );
 }
 
 function ModelTable({ models }: { models: AnalyticsModelEntry[] }) {
   const { t } = useI18n();
   const { sorted, sortKey, sortDir, toggle } = useTableSort(models, "input_tokens", "desc");
+  const { page, setPage, reset, paginate } = usePagination();
+
+  useEffect(() => { reset(); }, [models, reset]);
 
   if (models.length === 0) return null;
 
+  const { pageItems, start, end, totalPages } = paginate(sorted);
+
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-center gap-2">
-          <Cpu className="h-5 w-5 text-muted-foreground" />
-          <CardTitle className="text-base">
-            {t.analytics.perModelBreakdown}
-          </CardTitle>
-        </div>
-      </CardHeader>
-      <CardContent>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border text-muted-foreground text-xs">
-                <SortHeader label={t.analytics.model} col="model" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-left py-2 pr-4 font-medium" />
-                <SortHeader label={t.sessions.title} col="sessions" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 px-4 font-medium" />
-                <SortHeader label={t.analytics.tokens} col="input_tokens" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 pl-4 font-medium" />
-              </tr>
-            </thead>
-            <tbody>
-              {sorted.map((m) => (
-                <tr
-                  key={m.model}
-                  className="border-b border-border/50 hover:bg-secondary/20 transition-colors"
-                >
-                  <td className="py-2 pr-4">
+    <CollapsibleCard
+      icon={<Cpu className="h-5 w-5 text-muted-foreground" />}
+      title={t.analytics.perModelBreakdown}
+    >
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-border text-muted-foreground text-xs">
+              <SortHeader label={t.analytics.model} col="model" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-left py-2 pr-4 font-medium" />
+              <SortHeader label={t.sessions.title} col="sessions" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 px-4 font-medium" />
+              <SortHeader label={t.analytics.tokens} col="input_tokens" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 pl-4 font-medium" />
+            </tr>
+          </thead>
+          <tbody>
+            {pageItems.map((m) => (
+              <tr
+                key={m.model}
+                className="border-b border-border/50 hover:bg-secondary/20 transition-colors"
+              >
+                <td className="py-2 pr-4">
                     <span className="font-mono-ui text-xs">{m.model}</span>
-                  </td>
-                  <td className="text-right py-2 px-4 text-muted-foreground">
+                </td>
+                <td className="text-right py-2 px-4 text-muted-foreground">
                     {m.sessions}
-                  </td>
-                  <td className="text-right py-2 pl-4">
-                    <span className="text-[#ffe6cb]">
-                      {formatTokens(m.input_tokens)}
+                </td>
+                <td className="text-right py-2 pl-4">
+                    <span className="text-[var(--midground)]">
+                        {formatTokens(m.input_tokens)}
                     </span>
                     {" / "}
-                    <span className="text-emerald-400">
-                      {formatTokens(m.output_tokens)}
+                    <span className="text-[var(--color-success)]">
+                        {formatTokens(m.output_tokens)}
                     </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </CardContent>
-    </Card>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <PaginationBar
+        total={sorted.length}
+        start={start}
+        end={end}
+        totalPages={totalPages}
+        page={page}
+        onPage={setPage}
+      />
+    </CollapsibleCard>
   );
 }
 
 function SkillTable({ skills }: { skills: AnalyticsSkillEntry[] }) {
   const { t } = useI18n();
   const { sorted, sortKey, sortDir, toggle } = useTableSort(skills, "total_count", "desc");
+  const { page, setPage, reset, paginate } = usePagination();
+
+  useEffect(() => { reset(); }, [skills, reset]);
 
   if (skills.length === 0) return null;
 
+  const { pageItems, start, end, totalPages } = paginate(sorted);
+
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-center gap-2">
-          <Brain className="h-5 w-5 text-muted-foreground" />
-          <CardTitle className="text-base">{t.analytics.topSkills}</CardTitle>
-        </div>
-      </CardHeader>
-      <CardContent>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border text-muted-foreground text-xs">
-                <SortHeader label={t.analytics.skill} col="skill" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-left py-2 pr-4 font-medium" />
-                <SortHeader label={t.analytics.loads} col="view_count" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 px-4 font-medium" />
-                <SortHeader label={t.analytics.edits} col="manage_count" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 px-4 font-medium" />
-                <SortHeader label={t.analytics.total} col="total_count" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 px-4 font-medium" />
-                <SortHeader label={t.analytics.lastUsed} col="last_used_at" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 pl-4 font-medium" />
-              </tr>
-            </thead>
-            <tbody>
-              {sorted.map((skill) => (
-                <tr
-                  key={skill.skill}
-                  className="border-b border-border/50 hover:bg-secondary/20 transition-colors"
-                >
-                  <td className="py-2 pr-4">
+    <CollapsibleCard
+      icon={<Brain className="h-5 w-5 text-muted-foreground" />}
+      title={t.analytics.topSkills}
+    >
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-border text-muted-foreground text-xs">
+              <SortHeader label={t.analytics.skill} col="skill" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-left py-2 pr-4 font-medium" />
+              <SortHeader label={t.analytics.loads} col="view_count" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 px-4 font-medium" />
+              <SortHeader label={t.analytics.edits} col="manage_count" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 px-4 font-medium" />
+              <SortHeader label={t.analytics.total} col="total_count" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 px-4 font-medium" />
+              <SortHeader label={t.analytics.lastUsed} col="last_used_at" sortKey={sortKey} sortDir={sortDir} toggle={toggle} className="text-right py-2 pl-4 font-medium" />
+            </tr>
+          </thead>
+          <tbody>
+            {pageItems.map((skill) => (
+              <tr
+                key={skill.skill}
+                className="border-b border-border/50 hover:bg-secondary/20 transition-colors"
+              >
+                <td className="py-2 pr-4">
                     <span className="font-mono-ui text-xs">{skill.skill}</span>
-                  </td>
-                  <td className="text-right py-2 px-4 text-muted-foreground">
+                </td>
+                <td className="text-right py-2 px-4 text-muted-foreground">
                     {skill.view_count}
-                  </td>
-                  <td className="text-right py-2 px-4 text-muted-foreground">
+                </td>
+                <td className="text-right py-2 px-4 text-muted-foreground">
                     {skill.manage_count}
-                  </td>
-                  <td className="text-right py-2 px-4">{skill.total_count}</td>
-                  <td className="text-right py-2 pl-4 text-muted-foreground">
+                </td>
+                <td className="text-right py-2 px-4">{skill.total_count}</td>
+                <td className="text-right py-2 pl-4 text-muted-foreground">
                     {skill.last_used_at ? timeAgo(skill.last_used_at) : "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <PaginationBar
+        total={sorted.length}
+        start={start}
+        end={end}
+        totalPages={totalPages}
+        page={page}
+        onPage={setPage}
+      />
+    </CollapsibleCard>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Skill Activity Panel — usage stats + enable/disable management
+// ---------------------------------------------------------------------------
+
+function SkillActivityPanel({ days }: { days: number }) {
+  const { t } = useI18n();
+  const [data, setData] = useState<SkillActivityResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [toggling, setToggling] = useState<string | null>(null);
+  const [cleanupPreview, setCleanupPreview] = useState<{ count: number; names: string[] } | null>(null);
+  const [cleanupLoading, setCleanupLoading] = useState(false);
+  const { page, setPage, reset, paginate } = usePagination(DEFAULT_PAGE_SIZE);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    api.getSkillActivity(days)
+      .then(setData)
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [days]);
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => { reset(); }, [days, reset]);
+
+  const handleToggle = async (name: string, enabled: boolean) => {
+    setToggling(name);
+    try {
+      await api.toggleSkill(name, enabled);
+      setData((prev) => prev ? {
+        ...prev,
+        skills: prev.skills.map((s) => s.name === name ? { ...s, enabled } : s),
+        summary: {
+          ...prev.summary,
+          enabled_count: prev.summary.enabled_count + (enabled ? 1 : -1),
+          disabled_count: prev.summary.disabled_count + (enabled ? -1 : 1),
+        },
+      } : null);
+    } catch { /* ignore */ }
+    setToggling(null);
+  };
+
+  const handleCleanupPreview = async () => {
+    setCleanupLoading(true);
+    try {
+      const res = await api.autoCleanupSkills(days, true);
+      setCleanupPreview({ count: res.count, names: res.would_disable ?? [] });
+    } catch { /* ignore */ }
+    setCleanupLoading(false);
+  };
+
+  const handleCleanupConfirm = async () => {
+    setCleanupLoading(true);
+    try {
+      await api.autoCleanupSkills(days, false);
+      setCleanupPreview(null);
+      load();
+    } catch { /* ignore */ }
+    setCleanupLoading(false);
+  };
+
+  const statusBadge = (status: string) => {
+    const colors: Record<string, string> = {
+      active: "bg-[var(--color-success)]/15 text-[var(--color-success)]",
+      idle: "bg-[var(--color-warning)]/15 text-[var(--color-warning)]",
+      never_used: "bg-muted text-muted-foreground",
+    };
+    const labels: Record<string, string> = {
+      active: t.analytics.skillActive,
+      idle: t.analytics.skillIdle,
+      never_used: t.analytics.skillNeverUsed,
+    };
+    return <Badge tone="secondary" className={`text-[10px] px-1.5 ${colors[status] ?? ""}`}>{labels[status] ?? status}</Badge>;
+  };
+
+  if (loading && !data) return <Spinner className="mx-auto my-8 text-primary" />;
+  if (!data) return null;
+
+  const { summary, skills } = data;
+  const { pageItems, start, end, totalPages } = paginate(skills);
+
+  return (
+    <CollapsibleCard
+      icon={<Brain className="h-5 w-5 text-muted-foreground" />}
+      title={t.analytics.skillActivity}
+      defaultOpen={true}
+      headerExtra={
+        <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+          {summary.never_used_count > 0 && (
+            <>
+              {cleanupPreview ? (
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-muted-foreground">
+                    {t.analytics.skillCleanupPreview}: {cleanupPreview.count}
+                  </span>
+                  <Button size="sm" onClick={handleCleanupConfirm} disabled={cleanupLoading} prefix={cleanupLoading ? <Spinner /> : undefined}>
+                    {t.analytics.skillCleanupConfirm}
+                  </Button>
+                  <Button size="sm" ghost onClick={() => setCleanupPreview(null)}>✕</Button>
+                </div>
+              ) : (
+                <Button size="sm" outlined onClick={handleCleanupPreview} disabled={cleanupLoading} prefix={cleanupLoading ? <Spinner /> : undefined}>
+                  {t.analytics.skillCleanup}
+                </Button>
+              )}
+            </>
+          )}
+          <Button size="sm" outlined onClick={load} prefix={loading ? <Spinner /> : <RefreshCw />}>
+            {t.common.refresh}
+          </Button>
         </div>
-      </CardContent>
-    </Card>
+      }
+    >
+      {/* Summary pills */}
+      <div className="flex flex-wrap gap-2 mb-4">
+        {[
+          { label: t.analytics.skillActive, count: summary.active_count, color: "bg-[var(--color-success)]/15 text-[var(--color-success)]" },
+          { label: t.analytics.skillIdle, count: summary.idle_count, color: "bg-[var(--color-warning)]/15 text-[var(--color-warning)]" },
+          { label: t.analytics.skillNeverUsed, count: summary.never_used_count, color: "bg-muted text-muted-foreground" },
+          { label: t.analytics.skillEnabled, count: summary.enabled_count, color: "bg-primary/15 text-primary" },
+          { label: "Disabled", count: summary.disabled_count, color: "bg-[var(--color-destructive)]/15 text-[var(--color-destructive)]" },
+        ].map((pill) => (
+          <span key={pill.label} className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium ${pill.color}`}>
+            {pill.count} {pill.label}
+          </span>
+        ))}
+      </div>
+
+      {/* Table */}
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-border text-muted-foreground text-xs">
+              <th className="text-left py-2 pr-2 font-medium">{t.analytics.skillEnabled}</th>
+              <th className="text-left py-2 pr-2 font-medium">{t.analytics.skill}</th>
+              <th className="text-left py-2 pr-2 font-medium">{t.analytics.skillStatus}</th>
+              <th className="text-right py-2 px-2 font-medium">{t.analytics.loads}</th>
+              <th className="text-right py-2 px-2 font-medium">{t.analytics.edits}</th>
+              <th className="text-right py-2 px-2 font-medium">{t.analytics.total}</th>
+              <th className="text-right py-2 pl-2 font-medium">{t.analytics.lastUsed}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pageItems.map((s) => (
+              <tr key={s.name} className="border-b border-border/50 hover:bg-secondary/20 transition-colors">
+                <td className="py-2 pr-2">
+                  <button
+                    onClick={() => handleToggle(s.name, !s.enabled)}
+                    disabled={toggling === s.name}
+                    className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors ${
+                      s.enabled
+                        ? "bg-primary"
+                        : "bg-muted-foreground/30"
+                    } ${toggling === s.name ? "opacity-50" : ""}`}
+                  >
+                    <span className={`inline-block h-3.5 w-3.5 rounded-full bg-card-foreground shadow-sm transition-transform ${s.enabled ? "translate-x-4.5" : "translate-x-0.5"}`} />
+                  </button>
+                </td>
+                <td className="py-2 pr-2">
+                  <span className="font-mono-ui text-xs">{s.name}</span>
+                </td>
+                <td className="py-2 pr-2">{statusBadge(s.status)}</td>
+                <td className="text-right py-2 px-2 text-muted-foreground">{s.view_count}</td>
+                <td className="text-right py-2 px-2 text-muted-foreground">{s.manage_count}</td>
+                <td className="text-right py-2 px-2 font-medium">{s.total_count}</td>
+                <td className="text-right py-2 pl-2 text-muted-foreground">
+                  {s.last_used_at ? timeAgo(s.last_used_at) : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <PaginationBar
+        total={skills.length}
+        start={start}
+        end={end}
+        totalPages={totalPages}
+        page={page}
+        onPage={setPage}
+      />
+    </CollapsibleCard>
   );
 }
 
@@ -518,6 +891,7 @@ export default function AnalyticsPage() {
           <DailyTable daily={data.daily} />
           <ModelTable models={data.by_model} />
           <SkillTable skills={data.skills.top_skills} />
+          <SkillActivityPanel days={days} />
         </>
       )}
 

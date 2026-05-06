@@ -8,6 +8,7 @@ const COMMON_COMMANDS: [string, string][] = [
   ['/clear', 'start a new session'],
   ['/resume', 'resume a prior session'],
   ['/details', 'control transcript detail level'],
+  ['/statusbar', 'toggle status bar (top/bottom/collapsed/off)'],
   ['/copy', 'copy selection or last assistant message'],
   ['/quit', 'exit hermes']
 ]

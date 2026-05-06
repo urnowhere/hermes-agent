@@ -850,6 +850,22 @@ DEFAULT_CONFIG = {
             "enabled": False,
             "fields": ["model", "context_pct", "cwd"],  # Order shown; drop any to hide
         },
+        # HUD mode: multi-line status bar (like claude-hud).
+        # Set to true to enable by default; toggle at runtime with /statusbar hud.
+        "hud": True,
+        # Status bar mode: "single" (compact one-line), "more" (expanded multi-line HUD), "off"
+        # Legacy: display.hud=true maps to "more" for backward compat.
+        "statusbar_mode": "single",
+        # Element display order for both single-line and multi-line HUD.
+        # Valid elements: model, cwd, git, duration, session, context, tokens,
+        # speed, cost, mcp, skill, tools, agent, todos
+        "statusbar_funcorder": [
+            "model", "cwd", "git", "duration", "session",
+            "context", "tokens", "speed", "cost",
+            "mcp", "skill", "tools", "agent", "todos",
+        ],
+        # Project path depth in HUD: 1 = basename, 2 = last 2 dirs, 3 = last 3 dirs
+        "hud_path_depth": 1,
         "copy_shortcut": "auto",  # "auto" (platform default) | "ctrl_c" | "ctrl_shift_c" | "disabled"
     },
 
