@@ -64,6 +64,7 @@ const sidebars: SidebarsConfig = {
           items: [
             'user-guide/features/cron',
             'user-guide/features/delegation',
+            'user-guide/features/agent-control',
             'user-guide/features/kanban',
             'user-guide/features/kanban-tutorial',
             'user-guide/features/goals',
@@ -200,6 +201,7 @@ const sidebars: SidebarsConfig = {
             'developer-guide/gateway-internals',
             'developer-guide/session-storage',
             'developer-guide/provider-runtime',
+            'developer-guide/agent-orchestration-adr',
           ],
         },
         {
