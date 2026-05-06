@@ -660,6 +660,7 @@ from cron import get_job
 # Resource cleanup imports for safe shutdown (terminal VMs, browser sessions)
 from tools.terminal_tool import cleanup_all_environments as _cleanup_all_terminals
 from tools.terminal_tool import set_sudo_password_callback, set_approval_callback
+from tools.approval import _coerce_approval_timeout
 from tools.skills_tool import set_secret_capture_callback
 from hermes_cli.callbacks import prompt_for_secret
 from tools.browser_tool import _emergency_cleanup_all_sessions as _cleanup_all_browsers
@@ -9071,7 +9072,11 @@ class HermesCLI:
         import time as _time
 
         with self._approval_lock:
-            timeout = 60
+            approvals_config = CLI_CONFIG.get("approvals", {})
+            if not isinstance(approvals_config, dict):
+                approvals_config = {}
+            timeout = _coerce_approval_timeout(approvals_config.get("timeout", 60))
+            approval_deadline = _time.monotonic() + timeout
             response_queue = queue.Queue()
 
             self._approval_state = {
@@ -9081,7 +9086,7 @@ class HermesCLI:
                 "selected": 0,
                 "response_queue": response_queue,
             }
-            self._approval_deadline = _time.monotonic() + timeout
+            self._approval_deadline = approval_deadline
 
             self._invalidate()
 
