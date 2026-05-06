@@ -7980,7 +7980,7 @@ class GatewayRunner:
             lines.append("• `none` — (no personality overlay)")
             for name, prompt in personalities.items():
                 if isinstance(prompt, dict):
-                    preview = prompt.get("description") or prompt.get("system_prompt", "")[:50]
+                    preview = (prompt.get("description") or prompt.get("system_prompt", ""))[:50]
                 else:
                     preview = prompt[:50] + "..." if len(prompt) > 50 else prompt
                 lines.append(f"• `{name}` — {preview}")

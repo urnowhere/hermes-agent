@@ -69,6 +69,40 @@ class TestCLIPersonalityNone:
         output = " ".join(str(c) for c in mock_print.call_args_list)
         assert "none" in output.lower()
 
+    def test_long_description_is_truncated_in_list(self):
+        """Description longer than 50 chars should be truncated, not shown in full."""
+        long_desc = "A" * 200
+        cli = self._make_cli(personalities={
+            "test": {"description": long_desc, "system_prompt": "short"}
+        })
+        with patch("builtins.print") as mock_print:
+            cli._handle_personality_command("/personality")
+        output = " ".join(str(c) for c in mock_print.call_args_list)
+        assert long_desc not in output  # full 200-char description must NOT appear
+        assert "A" * 50 in output       # but a 50-char truncated version should
+
+    def test_short_description_is_not_padded(self):
+        """Short descriptions should be shown as-is, not padded to 50."""
+        cli = self._make_cli(personalities={
+            "test": {"description": "short desc", "system_prompt": "long prompt"}
+        })
+        with patch("builtins.print") as mock_print:
+            cli._handle_personality_command("/personality")
+        output = " ".join(str(c) for c in mock_print.call_args_list)
+        assert "short desc" in output
+
+    def test_no_description_falls_back_to_system_prompt_preview(self):
+        """When description is missing, system_prompt should be truncated to 50 chars."""
+        long_prompt = "B" * 200
+        cli = self._make_cli(personalities={
+            "test": {"system_prompt": long_prompt}
+        })
+        with patch("builtins.print") as mock_print:
+            cli._handle_personality_command("/personality")
+        output = " ".join(str(c) for c in mock_print.call_args_list)
+        assert long_prompt not in output
+        assert "B" * 50 in output
+
 
 # ── Gateway tests ──────────────────────────────────────────────────────────
 
