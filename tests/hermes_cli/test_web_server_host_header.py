@@ -14,9 +14,25 @@ from pathlib import Path
 
 import pytest
 
-_repo = str(Path(__file__).resolve().parents[1])
+_repo = str(Path(__file__).resolve().parents[2])
 if _repo not in sys.path:
     sys.path.insert(0, _repo)
+
+# hermes_cli.web_server raises SystemExit at import time when fastapi is absent
+# (it converts the underlying ImportError into a SystemExit with an install hint).
+# Catch only SystemExit here so the collection phase doesn't abort on missing
+# soft deps; a real ImportError elsewhere in the import chain (e.g. a regression
+# in hermes_cli.config or gateway.status) should still propagate as a hard error.
+try:
+    import hermes_cli.web_server  # noqa: F401
+    _WEB_SERVER_AVAILABLE = True
+except SystemExit:
+    _WEB_SERVER_AVAILABLE = False
+
+pytestmark = pytest.mark.skipif(
+    not _WEB_SERVER_AVAILABLE,
+    reason="fastapi/uvicorn not installed",
+)
 
 
 class TestHostHeaderValidator:
