@@ -69,6 +69,8 @@ class TestDelegateRequirements(unittest.TestCase):
         self.assertIn("tasks", props)
         self.assertIn("context", props)
         self.assertIn("toolsets", props)
+        self.assertIn("detail_level", props)
+        self.assertEqual(props["detail_level"]["enum"], ["slim", "detailed"])
         # max_iterations is intentionally NOT exposed to the model — it's
         # config-authoritative via delegation.max_iterations so users get
         # predictable budgets.
@@ -92,6 +94,12 @@ class TestChildSystemPrompt(unittest.TestCase):
     def test_empty_context_ignored(self):
         prompt = _build_child_system_prompt("Do something", "  ")
         self.assertNotIn("CONTEXT", prompt)
+
+    def test_prompt_instructs_tool_output_compression(self):
+        prompt = _build_child_system_prompt("Analyze logs")
+        self.assertIn("compress tool output", prompt)
+        self.assertIn("Do not paste raw logs", prompt)
+        self.assertIn("large output", prompt)
 
 
 class TestStripBlockedTools(unittest.TestCase):
@@ -147,7 +155,73 @@ class TestDelegateTask(unittest.TestCase):
         self.assertEqual(len(result["results"]), 1)
         self.assertEqual(result["results"][0]["status"], "completed")
         self.assertEqual(result["results"][0]["summary"], "Done!")
+        self.assertNotIn("api_calls", result["results"][0])
         mock_run.assert_called_once()
+
+    @patch("tools.delegate_tool._run_single_child")
+    def test_single_task_detailed_mode_keeps_observability(self, mock_run):
+        mock_run.return_value = {
+            "task_index": 0, "status": "completed",
+            "summary": "Done!", "api_calls": 3, "duration_seconds": 5.0,
+            "model": "test-model", "tokens": {"input": 1, "output": 2, "total": 3},
+            "tool_trace": [{"tool": "terminal", "status": "ok"}],
+        }
+        parent = _make_mock_parent()
+        result = json.loads(delegate_task(goal="Fix tests", parent_agent=parent, detail_level="detailed"))
+        entry = result["results"][0]
+        self.assertEqual(entry["api_calls"], 3)
+        self.assertEqual(entry["model"], "test-model")
+        self.assertIn("tool_trace", entry)
+
+    @patch("tools.delegate_tool._run_single_child")
+    def test_config_can_default_to_detailed_mode(self, mock_run):
+        mock_run.return_value = {
+            "task_index": 0, "status": "completed",
+            "summary": "Done!", "api_calls": 3, "duration_seconds": 5.0,
+            "model": "test-model", "tokens": {"input": 1, "output": 2, "total": 3},
+            "tool_trace": [{"tool": "terminal", "status": "ok"}],
+        }
+        parent = _make_mock_parent()
+        with patch("tools.delegate_tool._load_config", return_value={"result_detail_level": "detailed"}):
+            entry = json.loads(delegate_task(goal="Fix tests", parent_agent=parent))["results"][0]
+        self.assertEqual(entry["api_calls"], 3)
+        self.assertEqual(entry["model"], "test-model")
+        self.assertIn("tool_trace", entry)
+
+    @patch("tools.delegate_tool._run_single_child")
+    def test_call_detail_level_overrides_config_default(self, mock_run):
+        mock_run.return_value = {
+            "task_index": 0, "status": "completed",
+            "summary": "Done!", "api_calls": 3, "duration_seconds": 5.0,
+            "model": "test-model", "tokens": {"input": 1, "output": 2, "total": 3},
+            "tool_trace": [{"tool": "terminal", "status": "ok"}],
+        }
+        parent = _make_mock_parent()
+        with patch("tools.delegate_tool._load_config", return_value={"result_detail_level": "detailed"}):
+            entry = json.loads(
+                delegate_task(goal="Fix tests", parent_agent=parent, detail_level="slim")
+            )["results"][0]
+        self.assertNotIn("api_calls", entry)
+        self.assertNotIn("tool_trace", entry)
+
+    @patch("tools.delegate_tool._run_single_child")
+    def test_failed_child_keeps_diagnostics_in_slim_mode(self, mock_run):
+        mock_run.return_value = {
+            "task_index": 0, "status": "failed", "summary": None,
+            "error": "Connection error", "error_type": "APIConnectionError",
+            "provider": "openai-codex", "model": "gpt-5.4",
+            "tokens": {"input": 78000, "output": 0, "reasoning": 0, "total": 78000},
+            "request_dump_path": "/tmp/request_dump.json",
+            "api_calls": 3, "duration_seconds": 5.0, "exit_reason": "error",
+        }
+        parent = _make_mock_parent()
+        entry = json.loads(delegate_task(goal="Break", parent_agent=parent))["results"][0]
+        self.assertEqual(entry["error_type"], "APIConnectionError")
+        self.assertEqual(entry["provider"], "openai-codex")
+        self.assertEqual(entry["model"], "gpt-5.4")
+        self.assertEqual(entry["tokens"]["total"], 78000)
+        self.assertEqual(entry["request_dump_path"], "/tmp/request_dump.json")
+        self.assertNotIn("tool_trace", entry)
 
     @patch("tools.delegate_tool._run_single_child")
     def test_batch_mode(self, mock_run):
@@ -433,7 +507,7 @@ class TestDelegateObservability(unittest.TestCase):
             }
             MockAgent.return_value = mock_child
 
-            result = json.loads(delegate_task(goal="Test observability", parent_agent=parent))
+            result = json.loads(delegate_task(goal="Test observability", parent_agent=parent, detail_level="detailed"))
             entry = result["results"][0]
 
             # Core observability fields
@@ -472,7 +546,7 @@ class TestDelegateObservability(unittest.TestCase):
             }
             MockAgent.return_value = mock_child
 
-            result = json.loads(delegate_task(goal="Test error trace", parent_agent=parent))
+            result = json.loads(delegate_task(goal="Test error trace", parent_agent=parent, detail_level="detailed"))
             trace = result["results"][0]["tool_trace"]
             self.assertEqual(trace[0]["status"], "error")
 
@@ -504,7 +578,7 @@ class TestDelegateObservability(unittest.TestCase):
             }
             MockAgent.return_value = mock_child
 
-            result = json.loads(delegate_task(goal="Test parallel", parent_agent=parent))
+            result = json.loads(delegate_task(goal="Test parallel", parent_agent=parent, detail_level="detailed"))
             trace = result["results"][0]["tool_trace"]
 
             # All three tool calls should have results
@@ -784,7 +858,9 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertEqual(creds["base_url"], "https://openrouter.ai/api/v1")
         self.assertEqual(creds["api_key"], "sk-or-test-key")
         self.assertEqual(creds["api_mode"], "chat_completions")
-        mock_resolve.assert_called_once_with(requested="openrouter")
+        mock_resolve.assert_called_once_with(
+            requested="openrouter", target_model="google/gemini-3-flash-preview"
+        )
 
     @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_provider_resolution_uses_runtime_model_when_config_model_missing(self, mock_resolve):
@@ -804,7 +880,7 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertEqual(creds["model"], "server-default-model")
         self.assertEqual(creds["provider"], "custom")
         self.assertEqual(creds["base_url"], "https://my-server.example/v1")
-        mock_resolve.assert_called_once_with(requested="custom:my-server")
+        mock_resolve.assert_called_once_with(requested="custom:my-server", target_model=None)
 
     def test_direct_endpoint_uses_configured_base_url_and_api_key(self):
         parent = _make_mock_parent(depth=0)
@@ -868,7 +944,9 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertEqual(creds["provider"], "nous")
         self.assertEqual(creds["base_url"], "https://inference-api.nousresearch.com/v1")
         self.assertEqual(creds["api_key"], "nous-agent-key-xyz")
-        mock_resolve.assert_called_once_with(requested="nous")
+        mock_resolve.assert_called_once_with(
+            requested="nous", target_model="hermes-3-llama-3.1-8b"
+        )
 
     @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_provider_resolution_failure_raises_valueerror(self, mock_resolve):
@@ -1628,9 +1706,10 @@ class TestDelegateHeartbeat(unittest.TestCase):
 
         child.run_conversation.side_effect = slow_run
 
-        # At interval 0.05s, idle threshold (5 cycles) trips at ~0.25s.
-        # We should see the heartbeat stop firing well before 0.6s.
-        with patch("tools.delegate_tool._HEARTBEAT_INTERVAL", 0.05):
+        # Patch the idle threshold low so the test stays fast while preserving
+        # the runtime default's larger production safety window.
+        with patch("tools.delegate_tool._HEARTBEAT_INTERVAL", 0.05), \
+             patch("tools.delegate_tool._HEARTBEAT_STALE_CYCLES_IDLE", 5):
             _run_single_child(
                 task_index=0,
                 goal="Test wedged child",
@@ -1638,13 +1717,14 @@ class TestDelegateHeartbeat(unittest.TestCase):
                 parent_agent=parent,
             )
 
-        # With idle threshold=5 + interval=0.05s, touches should cap
-        # around 5. Bound loosely to avoid timing flakes.
+        # With idle threshold=15, touches should cap around 15. Bound
+        # loosely to avoid timing flakes while still proving the heartbeat
+        # stops before the full sleep duration would produce many more ticks.
         self.assertLess(
-            len(touch_calls), 9,
+            len(touch_calls), 20,
             f"Idle stale detection did not fire: got {len(touch_calls)} "
             f"touches over 0.6s — expected heartbeat to stop after "
-            f"~5 stale cycles",
+            f"~15 stale cycles",
         )
 
 

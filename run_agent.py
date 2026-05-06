@@ -4302,6 +4302,9 @@ class AIAgent:
                 encoding="utf-8",
             )
 
+            self._last_api_request_dump_path = str(dump_file)
+            self._last_api_request_dump_reason = reason
+            self._last_api_request_error_type = type(error).__name__ if error is not None else None
             self._vprint(f"{self.log_prefix}🧾 Request debug dump written to: {dump_file}")
 
             if env_var_enabled("HERMES_DUMP_REQUEST_STDOUT"):
@@ -9467,6 +9470,7 @@ class AIAgent:
             acp_command=function_args.get("acp_command"),
             acp_args=function_args.get("acp_args"),
             role=function_args.get("role"),
+            detail_level=function_args.get("detail_level"),
             parent_agent=self,
         )
 
@@ -12884,10 +12888,12 @@ class AIAgent:
                             compression_attempts = 0
                             primary_recovery_attempted = False
                             continue
+                        request_dump_path = None
                         if api_kwargs is not None:
-                            self._dump_api_request_debug(
+                            request_dump = self._dump_api_request_debug(
                                 api_kwargs, reason="non_retryable_client_error", error=api_error,
                             )
+                            request_dump_path = str(request_dump) if request_dump else None
                         self._emit_status(
                             f"❌ Non-retryable error (HTTP {status_code}): "
                             f"{self._summarize_api_error(api_error)}"
@@ -12931,6 +12937,8 @@ class AIAgent:
                             "completed": False,
                             "failed": True,
                             "error": str(api_error),
+                            "error_type": type(api_error).__name__,
+                            "request_dump_path": request_dump_path,
                         }
 
                     if retry_count >= max_retries:
@@ -12992,10 +13000,12 @@ class AIAgent:
                             self.log_prefix, max_retries, _final_summary,
                             _provider, _model, len(api_messages), f"{approx_tokens:,}",
                         )
+                        request_dump_path = None
                         if api_kwargs is not None:
-                            self._dump_api_request_debug(
+                            request_dump = self._dump_api_request_debug(
                                 api_kwargs, reason="max_retries_exhausted", error=api_error,
                             )
+                            request_dump_path = str(request_dump) if request_dump else None
                         self._persist_session(messages, conversation_history)
                         _final_response = f"API call failed after {max_retries} retries: {_final_summary}"
                         if _is_stream_drop:
@@ -13014,6 +13024,8 @@ class AIAgent:
                             "completed": False,
                             "failed": True,
                             "error": _final_summary,
+                            "error_type": type(api_error).__name__,
+                            "request_dump_path": request_dump_path,
                         }
 
                     # For rate limits, respect the Retry-After header if present
