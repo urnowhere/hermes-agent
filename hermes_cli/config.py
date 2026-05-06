@@ -262,6 +262,10 @@ def _secure_dir(path):
     permissions (0750) so interactive users in the hermes group can
     share state with the gateway service.
 
+    Also skipped when HERMES_SKIP_PERMISSIONS_SETUP is set, which is useful
+    for multi-container deployments where the data directory is shared
+    between containers running as different UIDs.
+
     The mode can be overridden via the HERMES_HOME_MODE environment variable
     (e.g. HERMES_HOME_MODE=0701) for deployments where a web server (nginx,
     caddy, etc.) needs to traverse HERMES_HOME to reach a served subdirectory.
@@ -269,6 +273,9 @@ def _secure_dir(path):
     directory listings.
     """
     if is_managed():
+        return
+    # Skip permission setup when explicitly requested (e.g., multi-container setups)
+    if os.environ.get("HERMES_SKIP_PERMISSIONS_SETUP", "").lower() in ("1", "true", "yes"):
         return
     try:
         mode_str = os.environ.get("HERMES_HOME_MODE", "").strip()
