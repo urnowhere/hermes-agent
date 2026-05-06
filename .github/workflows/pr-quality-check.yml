@@ -1,0 +1,75 @@
+name: PR Quality Check
+
+on:
+    pull_request:
+        branches: [main]
+        paths-ignore:
+            - "**/*.md"
+            - "docs/**"
+
+permissions:
+    contents: read
+
+concurrency:
+    group: pr-quality-${{ github.event.pull_request.number }}
+    cancel-in-progress: true
+
+jobs:
+    quality:
+        runs-on: ubuntu-latest
+        timeout-minutes: 40
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+              with:
+                  fetch-depth: 0
+
+            - name: Install system dependencies
+              run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+            - name: Install uv
+              uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+
+            - name: Set up Python 3.11
+              run: uv python install 3.11
+
+            - name: Install dependencies
+              run: |
+                  uv venv .venv --python 3.11
+                  source .venv/bin/activate
+                  uv pip install -e ".[all,dev]"
+
+            - name: Run quality checks and capture report
+              id: checks
+              continue-on-error: true
+              shell: bash
+              run: |
+                  set -o pipefail
+                  source .venv/bin/activate
+
+                  mkdir -p .ci
+                  {
+                    echo "# PR Quality Report"
+                    echo
+                    echo "Repository: ${{ github.repository }}"
+                    echo "PR: #${{ github.event.pull_request.number }}"
+                    echo "SHA: ${{ github.sha }}"
+                    echo
+                    echo "## Changed files"
+                    git diff --name-only origin/main...HEAD || true
+                    echo
+                    echo "## scripts/run_tests.sh output"
+                    scripts/run_tests.sh -q 2>&1
+                  } | tee .ci/pr-quality-report.md
+
+            - name: Upload report artifact
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: pr-quality-report-${{ github.run_id }}
+                  path: .ci/pr-quality-report.md
+                  if-no-files-found: warn
+
+            - name: Fail workflow on failed checks
+              if: steps.checks.outcome != 'success'
+              run: exit 1

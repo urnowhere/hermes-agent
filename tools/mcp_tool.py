@@ -172,7 +172,11 @@ _MCP_MESSAGE_HANDLER_SUPPORTED = False
 # HTTP transport path even on older-but-supported SDK versions.
 LATEST_PROTOCOL_VERSION = "2025-03-26"
 try:
-    from mcp import ClientSession, StdioServerParameters
+    from mcp import ClientSession
+    try:
+        from mcp import StdioServerParameters  # Neuere Versionen
+    except ImportError:
+        from mcp.client.stdio import StdioServerParameters  # Ältere Versionen
     from mcp.client.stdio import stdio_client
     _MCP_AVAILABLE = True
     try:

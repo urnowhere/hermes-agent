@@ -1,0 +1,183 @@
+name: PR Auto Triage
+
+on:
+    workflow_run:
+        workflows: ["PR Quality Check"]
+        types: [completed]
+
+permissions:
+    actions: read
+    contents: read
+    issues: write
+    pull-requests: write
+
+jobs:
+    triage-failure:
+        if: >-
+            github.event.workflow_run.conclusion == 'failure' &&
+            github.event.workflow_run.event == 'pull_request'
+        runs-on: ubuntu-latest
+        steps:
+            - name: Download quality report artifact
+              id: download
+              uses: actions/github-script@v7
+              with:
+                  script: |
+                      const runId = context.payload.workflow_run.id;
+                      const { owner, repo } = context.repo;
+
+                      const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
+                        owner,
+                        repo,
+                        run_id: runId,
+                      });
+
+                      const reportArtifact = artifacts.data.artifacts.find((a) =>
+                        a.name.startsWith("pr-quality-report-"),
+                      );
+
+                      if (!reportArtifact) {
+                        core.setOutput("found", "false");
+                        return;
+                      }
+
+                      const archive = await github.rest.actions.downloadArtifact({
+                        owner,
+                        repo,
+                        artifact_id: reportArtifact.id,
+                        archive_format: "zip",
+                      });
+
+                      const fs = require("fs");
+                      fs.writeFileSync("artifact.zip", Buffer.from(archive.data));
+                      core.setOutput("found", "true");
+
+            - name: Extract report
+              if: steps.download.outputs.found == 'true'
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y unzip
+                  unzip -o artifact.zip -d artifact_out
+
+            - name: Build prompt context
+              shell: bash
+              run: |
+                  REPORT_FILE=$(find artifact_out -type f -name "*.md" | head -n 1 || true)
+                  if [ -n "$REPORT_FILE" ]; then
+                    cp "$REPORT_FILE" pr-report.md
+                  else
+                    echo "# PR Quality Report" > pr-report.md
+                    echo "No report artifact found for this failed run." >> pr-report.md
+                  fi
+
+                  cat > llm-system-prompt.txt << 'EOF'
+                  You are a senior Python CI reviewer.
+                  Analyze the CI report and produce:
+                  1) likely root cause(s),
+                  2) an ordered fix plan,
+                  3) concrete patch suggestions.
+                  Keep answers concise and actionable.
+                  EOF
+
+            - name: Generate LLM remediation suggestion
+              shell: bash
+              env:
+                  LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+                  LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+                  LLM_MODEL: ${{ secrets.LLM_MODEL }}
+              run: |
+                  set -euo pipefail
+
+                  if [ -z "${LLM_API_KEY:-}" ]; then
+                    {
+                      echo "LLM not configured (missing LLM_API_KEY secret)."
+                      echo
+                      echo "Suggested manual next step: inspect the PR Quality report and fix failing checks."
+                    } > llm-suggestion.md
+                    exit 0
+                  fi
+
+                  BASE_URL="${LLM_BASE_URL:-https://openrouter.ai/api/v1/chat/completions}"
+                  MODEL="${LLM_MODEL:-anthropic/claude-3.5-sonnet}"
+
+                  REPORT_CONTENT=$(cat pr-report.md)
+                  SYSTEM_PROMPT=$(cat llm-system-prompt.txt)
+
+                  JSON_PAYLOAD=$(jq -n \
+                    --arg model "$MODEL" \
+                    --arg system "$SYSTEM_PROMPT" \
+                    --arg user "$REPORT_CONTENT" \
+                    '{
+                      model: $model,
+                      messages: [
+                        {role: "system", content: $system},
+                        {role: "user", content: $user}
+                      ],
+                      temperature: 0.2
+                    }')
+
+                  RESPONSE=$(curl -sS "$BASE_URL" \
+                    -H "Authorization: Bearer ${LLM_API_KEY}" \
+                    -H "Content-Type: application/json" \
+                    -d "$JSON_PAYLOAD")
+
+                  echo "$RESPONSE" | jq -r '.choices[0].message.content // "No suggestion returned."' > llm-suggestion.md
+
+            - name: Create issue and PR comment
+              uses: actions/github-script@v7
+              with:
+                  script: |
+                      const fs = require("fs");
+                      const { owner, repo } = context.repo;
+                      const wr = context.payload.workflow_run;
+
+                      const linkedPrs = wr.pull_requests || [];
+                      if (!linkedPrs.length) {
+                        core.warning("No linked pull request found on workflow_run payload.");
+                        return;
+                      }
+
+                      const pr = linkedPrs[0];
+                      const prNumber = pr.number;
+
+                      const report = fs.existsSync("pr-report.md")
+                        ? fs.readFileSync("pr-report.md", "utf8")
+                        : "No report available.";
+                      const suggestion = fs.existsSync("llm-suggestion.md")
+                        ? fs.readFileSync("llm-suggestion.md", "utf8")
+                        : "No LLM suggestion available.";
+
+                      const issueTitle = `[AUTO][PR #${prNumber}] Quality checks failed`;
+                      const issueBody = [
+                        `Automatically created for PR #${prNumber}.`,
+                        "",
+                        "## CI report",
+                        report,
+                        "",
+                        "## LLM remediation suggestion",
+                        suggestion,
+                      ].join("\n");
+
+                      const createdIssue = await github.rest.issues.create({
+                        owner,
+                        repo,
+                        title: issueTitle,
+                        body: issueBody,
+                        labels: ["ci", "automation", "triage"],
+                      });
+
+                      const commentBody = [
+                        "Automatic PR quality check failed.",
+                        "",
+                        `Created triage issue: #${createdIssue.data.number}`,
+                        "",
+                        "### LLM remediation suggestion",
+                        suggestion,
+                      ].join("\n");
+
+                      await github.rest.issues.createComment({
+                        owner,
+                        repo,
+                        issue_number: prNumber,
+                        body: commentBody,
+                      });
