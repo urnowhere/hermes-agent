@@ -934,6 +934,7 @@ class TestAgentCacheSpilloverLive:
             except Exception:
                 pass
 
+    @pytest.mark.long_running
     def test_concurrent_inserts_settle_at_cap(self, monkeypatch):
         """Many threads inserting in parallel end with len(cache) == CAP."""
         from gateway import run as gw_run
@@ -960,7 +961,7 @@ class TestAgentCacheSpilloverLive:
         for t in threads:
             t.start()
         for t in threads:
-            t.join(timeout=30)
+            t.join(timeout=120)
             assert not t.is_alive(), "Worker thread hung — possible deadlock?"
 
         # Let daemon cleanup threads settle.

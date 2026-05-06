@@ -6993,6 +6993,14 @@ def cmd_update(args):
         _finalize_update_output(_update_io_state)
 
 
+def _cmd_update_interactive_tty() -> bool:
+    """True when stdin/stdout look like a real terminal (prompts may run)."""
+    try:
+        return bool(sys.stdin.isatty() and sys.stdout.isatty())
+    except Exception:
+        return False
+
+
 def _cmd_update_impl(args, gateway_mode: bool):
     """Body of ``cmd_update`` — kept separate so the wrapper can always
     restore stdio even on ``sys.exit``."""
@@ -7125,7 +7133,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         prompt_for_restore = (
             auto_stash_ref is not None
             and not assume_yes
-            and (gateway_mode or (sys.stdin.isatty() and sys.stdout.isatty()))
+            and (gateway_mode or _cmd_update_interactive_tty())
         )
 
         # Check if there are updates
@@ -7401,7 +7409,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     .strip()
                     .lower()
                 )
-            elif not (sys.stdin.isatty() and sys.stdout.isatty()):
+            elif not _cmd_update_interactive_tty():
                 print("  ℹ Non-interactive session — skipping config migration prompt.")
                 print(
                     "    Run 'hermes config migrate' later to apply any new config/env options."

@@ -359,6 +359,8 @@ class TestOwnerPidCrossProcess:
             bt, "_get_session_info",
             lambda task_id: {"session_name": session_name},
         )
+        # CI often has no Chromium; local-mode guard returns before owner_pid write.
+        monkeypatch.setattr(bt, "_chromium_installed", lambda: True)
 
         calls = []
         orig_write = bt._write_owner_pid

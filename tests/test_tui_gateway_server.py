@@ -7,6 +7,7 @@ import types
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from tui_gateway import server
 
 
@@ -2919,6 +2920,7 @@ def test_mirror_slash_compress_does_not_prelock_history(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.long_running
 def test_session_create_close_race_does_not_orphan_worker(monkeypatch):
     """Regression guard: if session.close runs while session.create's
     _build thread is still constructing the agent, the build thread

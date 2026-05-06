@@ -3612,7 +3612,8 @@ class AIAgent:
         forked conversation. Writes directly to the shared memory/skill stores.
         Never modifies the main conversation history or produces user-visible output.
         """
-        import threading
+        # Use module-level ``threading`` so tests can patch ``run_agent.threading.Thread``.
+        # A local ``import threading`` here would bind a different local name and miss patches.
 
         # Pick the right prompt based on which triggers fired
         if review_memory and review_skills:
@@ -7219,7 +7220,16 @@ class AIAgent:
                     # retry can block for the full stream-read timeout (120s+),
                     # causing multi-minute delays between /stop and response.
                     if self._interrupt_requested:
-                        raise InterruptedError("Agent interrupted before stream retry")
+                        # Stash for the poller to re-raise — a bare ``raise`` here
+                        # bubbles past the ``except`` below, hits ``finally`` in the
+                        # worker thread, and then dies without setting
+                        # ``result["error"]``, so the main thread would return
+                        # ``result["response"]`` (None) with no exception (see
+                        # test_stream_interrupt_retry::test_interrupt_before_first_attempt).
+                        result["error"] = InterruptedError(
+                            "Agent interrupted before stream retry"
+                        )
+                        return
                     try:
                         if self.api_mode == "anthropic_messages":
                             self._try_refresh_anthropic_client_credentials()

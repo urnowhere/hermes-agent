@@ -12,6 +12,7 @@ import logging
 import os
 import select
 import shlex
+import signal
 import subprocess
 import threading
 import time
@@ -624,8 +625,25 @@ class BaseEnvironment(ABC):
             try:
                 self._kill_process(proc)
                 drain_thread.join(timeout=2)
-            except Exception:
+            except BaseException:
                 pass  # cleanup is best-effort
+            # Belt-and-suspenders: if cleanup itself was interrupted midway,
+            # force-kill the process group once more so descendants cannot
+            # survive as orphans under init.
+            try:
+                pgid = getattr(proc, "_hermes_pgid", None)
+                if pgid is None:
+                    try:
+                        pgid = os.getpgid(proc.pid)
+                    except Exception:
+                        pgid = None
+                if isinstance(pgid, int) and pgid > 0 and hasattr(os, "killpg"):
+                    try:
+                        os.killpg(pgid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError, OSError):
+                        pass
+            except Exception:
+                pass
             raise
 
         # Drain thread now exits promptly after bash does (~300ms idle

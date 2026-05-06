@@ -64,8 +64,8 @@ class TestCoerceNumber:
     def test_scientific_notation(self):
         assert _coerce_number("1e5") == 100000
 
-    def test_inf_stays_string(self):
-        """Infinity is not JSON-serializable, so it should stay as string."""
+    def test_inf_stays_string_for_integer_only(self):
+        """Infinity/NaN are not JSON-serializable; keep original string token."""
         result = _coerce_number("inf")
         assert result == "inf"
         assert isinstance(result, str)

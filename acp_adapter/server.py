@@ -6,7 +6,6 @@ import asyncio
 import contextvars
 import json
 import logging
-import os
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Deque, Optional
@@ -68,6 +67,10 @@ from acp_adapter.events import (
 from acp_adapter.permissions import make_approval_callback
 from acp_adapter.session import SessionManager, SessionState, _expand_acp_enabled_toolsets
 from acp_adapter.tools import build_tool_complete, build_tool_start
+from tools.approval import (
+    reset_hermes_interactive_context,
+    set_hermes_interactive_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -920,18 +923,14 @@ class HermesACPAgent(acp.Agent):
         # Approval callback is per-thread (thread-local, GHSA-qg5c-hvr5-hjgr).
         # Set it INSIDE _run_agent so the TLS write happens in the executor
         # thread — setting it here would write to the event-loop thread's TLS,
-        # not the executor's. Also set HERMES_INTERACTIVE so approval.py
-        # takes the CLI-interactive path (which calls the registered
-        # callback via prompt_dangerous_approval) instead of the
-        # non-interactive auto-approve branch (GHSA-96vc-wcxf-jjff).
-        # ACP's conn.request_permission maps cleanly to the interactive
-        # callback shape — not the gateway-queue HERMES_EXEC_ASK path,
-        # which requires a notify_cb registered in _gateway_notify_cbs.
-        previous_approval_cb = None
-        previous_interactive = None
+        # not the executor's.
+        # Interactive routing uses contextvars in tools.approval (not os.environ)
+        # so concurrent executor threads cannot race on HERMES_INTERACTIVE
+        # (GHSA-96vc-wcxf-jjff). ACP maps conn.request_permission to the
+        # callback shape — not the gateway-queue HERMES_EXEC_ASK path.
 
         def _run_agent() -> dict:
-            nonlocal previous_approval_cb, previous_interactive
+            nonlocal previous_approval_cb
             # Bind HERMES_SESSION_KEY for this session so per-session caches
             # (e.g. the interactive sudo password cache in tools.terminal_tool)
             # scope to the ACP session rather than leaking across sessions
@@ -955,10 +954,7 @@ class HermesACPAgent(acp.Agent):
                     _terminal_tool.set_approval_callback(approval_cb)
                 except Exception:
                     logger.debug("Could not set ACP approval callback", exc_info=True)
-            # Signal to tools.approval that we have an interactive callback
-            # and the non-interactive auto-approve path must not fire.
-            previous_interactive = os.environ.get("HERMES_INTERACTIVE")
-            os.environ["HERMES_INTERACTIVE"] = "1"
+            interactive_tok = set_hermes_interactive_context(True)
             try:
                 result = agent.run_conversation(
                     user_message=user_content,
@@ -971,11 +967,7 @@ class HermesACPAgent(acp.Agent):
                 logger.exception("Agent error in session %s", session_id)
                 return {"final_response": f"Error: {e}", "messages": state.history}
             finally:
-                # Restore HERMES_INTERACTIVE.
-                if previous_interactive is None:
-                    os.environ.pop("HERMES_INTERACTIVE", None)
-                else:
-                    os.environ["HERMES_INTERACTIVE"] = previous_interactive
+                reset_hermes_interactive_context(interactive_tok)
                 if approval_cb:
                     try:
                         from tools import terminal_tool as _terminal_tool

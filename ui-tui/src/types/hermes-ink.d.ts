@@ -134,6 +134,7 @@ declare module '@hermes/ink' {
 
   export function forceRedraw(stdout?: NodeJS.WriteStream): boolean
   export function render(node: React.ReactNode, options?: NodeJS.WriteStream | RenderOptions): Instance
+  export function forceRedraw(stdout?: NodeJS.WriteStream): boolean
 
   export function useApp(): { readonly exit: (error?: Error) => void }
   export type RunExternalProcess = () => Promise<void>

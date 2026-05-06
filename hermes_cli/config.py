@@ -4102,9 +4102,9 @@ def load_env() -> Dict[str, str]:
     env_vars = {}
     
     if env_path.exists():
-        # On Windows, open() defaults to the system locale (cp1252) which can
-        # fail on UTF-8 .env files. Use explicit UTF-8 only on Windows.
-        open_kw = {"encoding": "utf-8", "errors": "replace"} if _IS_WINDOWS else {}
+        # Always decode as UTF-8: CI/Linux locale may not be UTF-8; Windows cp1252
+        # also breaks UTF-8 .env files without explicit encoding.
+        open_kw = {"encoding": "utf-8", "errors": "replace"}
         with open(env_path, **open_kw) as f:
             raw_lines = f.readlines()
         # Sanitize before parsing: split concatenated lines & drop stale

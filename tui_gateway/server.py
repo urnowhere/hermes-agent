@@ -558,6 +558,16 @@ def _start_agent_build(sid: str, session: dict) -> None:
             # pending_title applied post-first-message (see cli.exec handler).
             current["agent"] = agent
 
+            _pending_early = (current.get("pending_title") or "").strip()
+            if _pending_early:
+                _db_early = _get_db()
+                if _db_early:
+                    try:
+                        if _db_early.set_session_title(key, _pending_early):
+                            current["pending_title"] = None
+                    except Exception:
+                        current["pending_title"] = None
+
             try:
                 worker = _SlashWorker(key, getattr(agent, "model", _resolve_model()))
                 current["slash_worker"] = worker
@@ -2059,18 +2069,10 @@ def _(rid, params: dict) -> dict:
         "transport": current_transport() or _stdio_transport,
     }
 
-    # Return the lightweight session immediately so Ink can paint the composer
-    # + skeleton panel, then build the real AIAgent just after this response is
-    # flushed.  This keeps startup responsive while still hydrating tools/skills
-    # without requiring the user to submit a first prompt.
-    def _deferred_build() -> None:
-        session = _sessions.get(sid)
-        if session is not None:
-            _start_agent_build(sid, session)
-
-    build_timer = threading.Timer(0.05, _deferred_build)
-    build_timer.daemon = True
-    build_timer.start()
+    # Start agent build immediately in the background.
+    # This preserves startup responsiveness while ensuring create/close race
+    # cleanup paths are exercised deterministically (worker/notify orphan guards).
+    _start_agent_build(sid, _sessions[sid])
 
     return _ok(
         rid,
@@ -3219,6 +3221,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                         )
                     except Exception:
                         # Transient DB failure — keep pending_title for retry.
+                        # ValueError (invalid/duplicate) is handled above and clears pending_title.
                         pass
 
             if (

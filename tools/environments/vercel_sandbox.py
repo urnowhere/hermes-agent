@@ -570,6 +570,21 @@ class VercelSandboxEnvironment(BaseEnvironment):
             if self._sync_manager is not None:
                 self._sync_manager.sync()
 
+    def execute(
+        self,
+        command: str,
+        cwd: str = "",
+        *,
+        timeout: int | None = None,
+        stdin_data: str | None = None,
+    ) -> dict:
+        """Execute command without persisting per-call cwd override."""
+        original_cwd = self.cwd
+        try:
+            return super().execute(command, cwd=cwd, timeout=timeout, stdin_data=stdin_data)
+        finally:
+            self.cwd = original_cwd
+
     def _run_bash(
         self,
         cmd_string: str,

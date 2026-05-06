@@ -276,6 +276,22 @@ def _hermetic_environment(tmp_path, monkeypatch):
     (fake_hermes_home / "skills").mkdir()
     monkeypatch.setenv("HERMES_HOME", str(fake_hermes_home))
 
+    # 3b. Isolate Playwright browser downloads from ~/.cache/ms-playwright.
+    #     GitHub-hosted runners often retain chromium-* dirs there; combined
+    #     with the old multi-root scan that caused false "installed" positives,
+    #     browser subprocess calls hung until command timeout. Point at an empty
+    #     per-test dir and rely on browser_tool._chromium_search_roots() honoring
+    #     PLAYWRIGHT_BROWSERS_PATH exclusively when set.
+    _pw_root = tmp_path / "ms_playwright_browsers"
+    _pw_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(_pw_root))
+    try:
+        from tools import browser_tool as _browser_tool_mod
+
+        _browser_tool_mod._cached_chromium_installed = None
+    except Exception:
+        pass
+
     # 4. Deterministic locale / timezone / hashseed. CI runs in UTC with
     #    C.UTF-8 locale; local dev often doesn't. Pin everything.
     monkeypatch.setenv("TZ", "UTC")
@@ -291,6 +307,10 @@ def _hermetic_environment(tmp_path, monkeypatch):
     monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
     monkeypatch.setenv("AWS_METADATA_SERVICE_TIMEOUT", "1")
     monkeypatch.setenv("AWS_METADATA_SERVICE_NUM_ATTEMPTS", "1")
+
+    # Terminal: hermetic defaults so file/terminal tool tests pass without Modal creds
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+    monkeypatch.setenv("TERMINAL_MODAL_MODE", "auto")
 
     # 5. Reset plugin singleton so tests don't leak plugins from
     #    ~/.hermes/plugins/ (which, per step 3, is now empty — but the
@@ -440,6 +460,18 @@ def _reset_module_state():
     except Exception:
         pass
 
+    # tools.terminal_tool — stale sandbox per-task_id must not win over
+    # TERMINAL_CWD in file_tools._resolve_path_for_task (xdist workers
+    # reuse a process; a prior test may have left "default" container cwd
+    # equal to the repo root).
+    try:
+        from tools import terminal_tool as _tt_mod
+        with _tt_mod._env_lock:
+            _tt_mod._active_environments.clear()
+        _tt_mod._task_env_overrides.clear()
+    except Exception:
+        pass
+
     yield
 
 
@@ -509,14 +541,21 @@ def _ensure_current_event_loop(request):
 
 
 @pytest.fixture(autouse=True)
-def _enforce_test_timeout():
+def _enforce_test_timeout(request):
     """Kill any individual test that takes longer than 30 seconds.
     SIGALRM is Unix-only; skip on Windows."""
     if sys.platform == "win32":
         yield
         return
+    if request.node.get_closest_marker("long_running"):
+        yield
+        return
+    # Async tests are more sensitive to short SIGALRM budgets under xdist;
+    # keep a larger cap instead of disabling timeouts entirely (which can let
+    # one hung coroutine stall the whole CI job until workflow timeout).
+    timeout_s = 240 if request.node.get_closest_marker("asyncio") is not None else 30
     old = signal.signal(signal.SIGALRM, _timeout_handler)
-    signal.alarm(30)
+    signal.alarm(timeout_s)
     yield
     signal.alarm(0)
     signal.signal(signal.SIGALRM, old)

@@ -20,7 +20,24 @@ class TestIsWsl:
     """Test the shared is_wsl() utility."""
 
     def setup_method(self):
-        # Reset cached value between tests
+        import os as _os
+
+        hermes_constants._wsl_detected = None
+
+        def _exists(path):
+            # CI images may expose binfmt_misc/WSLInterop without being WSL; deny so
+            # tests control detection via ``hermes_constants._builtin_open`` mocks.
+            if str(path).replace("\\", "/").rstrip("/").endswith("WSLInterop"):
+                return False
+            return _os.path.exists(path)
+
+        self._exists_patcher = patch.object(
+            hermes_constants.os.path, "exists", side_effect=_exists
+        )
+        self._exists_patcher.start()
+
+    def teardown_method(self):
+        self._exists_patcher.stop()
         hermes_constants._wsl_detected = None
 
     def test_detects_wsl2(self):
@@ -28,7 +45,11 @@ class TestIsWsl:
             "Linux version 5.15.146.1-microsoft-standard-WSL2 "
             "(gcc (GCC) 11.2.0) #1 SMP Thu Jan 11 04:09:03 UTC 2024\n"
         )
-        with patch("builtins.open", mock_open(read_data=fake_content)):
+        with patch.object(
+            hermes_constants,
+            "_builtin_open",
+            mock_open(read_data=fake_content),
+        ):
             assert hermes_constants.is_wsl() is True
 
     def test_detects_wsl1(self):
@@ -36,7 +57,11 @@ class TestIsWsl:
             "Linux version 4.4.0-19041-Microsoft "
             "(Microsoft@Microsoft.com) (gcc version 5.4.0) #1\n"
         )
-        with patch("builtins.open", mock_open(read_data=fake_content)):
+        with patch.object(
+            hermes_constants,
+            "_builtin_open",
+            mock_open(read_data=fake_content),
+        ):
             assert hermes_constants.is_wsl() is True
 
     def test_native_linux(self):
@@ -44,18 +69,30 @@ class TestIsWsl:
             "Linux version 6.5.0-44-generic (buildd@lcy02-amd64-015) "
             "(x86_64-linux-gnu-gcc-12 (Ubuntu 12.3.0-1ubuntu1~22.04) 12.3.0) #44\n"
         )
-        with patch("builtins.open", mock_open(read_data=fake_content)):
+        with patch.object(
+            hermes_constants,
+            "_builtin_open",
+            mock_open(read_data=fake_content),
+        ):
             assert hermes_constants.is_wsl() is False
 
     def test_no_proc_version(self):
-        with patch("builtins.open", side_effect=FileNotFoundError):
+        with patch.object(
+            hermes_constants,
+            "_builtin_open",
+            side_effect=FileNotFoundError,
+        ):
             assert hermes_constants.is_wsl() is False
 
     def test_result_is_cached(self):
         """After first detection, subsequent calls return the cached value."""
         hermes_constants._wsl_detected = True
         # Even with open raising, cached value is returned
-        with patch("builtins.open", side_effect=FileNotFoundError):
+        with patch.object(
+            hermes_constants,
+            "_builtin_open",
+            side_effect=FileNotFoundError,
+        ):
             assert hermes_constants.is_wsl() is True
 
 

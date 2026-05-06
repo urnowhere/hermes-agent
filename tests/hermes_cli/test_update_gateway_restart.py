@@ -6,6 +6,8 @@ rather than leaving zombie processes or telling users to manually restart
 when launchd will auto-respawn.
 """
 
+import os
+import signal
 import subprocess
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
@@ -171,7 +173,7 @@ class TestLaunchdPlistPath:
                 path_value = path_value.replace("<string>", "").replace("</string>", "")
                 detected = gateway_cli._detect_venv_dir()
                 venv_bin = str(detected / "bin") if detected else str(gateway_cli.PROJECT_ROOT / "venv" / "bin")
-                assert path_value.startswith(venv_bin + ":")
+                assert path_value.startswith(venv_bin + os.pathsep)
                 break
         else:
             raise AssertionError("PATH key not found in plist")
@@ -184,7 +186,8 @@ class TestLaunchdPlistPath:
             if "<key>PATH</key>" in line.strip():
                 path_value = lines[i + 1].strip()
                 path_value = path_value.replace("<string>", "").replace("</string>", "")
-                assert node_bin in path_value.split(":")
+                parts = [p for p in path_value.split(os.pathsep) if p]
+                assert node_bin in parts
                 break
         else:
             raise AssertionError("PATH key not found in plist")
@@ -204,7 +207,7 @@ class TestLaunchdPlistPath:
             if "<key>PATH</key>" in line.strip():
                 path_value = lines[i + 1].strip()
                 path_value = path_value.replace("<string>", "").replace("</string>", "")
-                parts = path_value.split(":")
+                parts = [p for p in path_value.split(os.pathsep) if p]
                 assert parts.count(venv_bin) == 1
                 break
         else:
@@ -415,8 +418,11 @@ class TestCmdUpdateLaunchdRestart:
             pid=12345,
         )
 
-        with patch.object(gateway_cli, "find_gateway_pids", return_value=[12345]), \
-             patch.object(gateway_cli, "find_profile_gateway_processes", return_value=[process]), \
+        with patch.object(
+            gateway_cli,
+            "find_gateway_pids",
+            side_effect=[[12345], []],
+        ), patch.object(gateway_cli, "find_profile_gateway_processes", return_value=[process]), \
              patch.object(gateway_cli, "launch_detached_profile_gateway_restart", return_value=True) as restart, \
              patch.object(gateway_cli, "_graceful_restart_via_sigusr1", return_value=True) as graceful, \
              patch("os.kill") as kill:
@@ -453,8 +459,11 @@ class TestCmdUpdateLaunchdRestart:
             pid=12345,
         )
 
-        with patch.object(gateway_cli, "find_gateway_pids", return_value=[12345]), \
-             patch.object(gateway_cli, "find_profile_gateway_processes", return_value=[process]), \
+        with patch.object(
+            gateway_cli,
+            "find_gateway_pids",
+            side_effect=[[12345], []],
+        ), patch.object(gateway_cli, "find_profile_gateway_processes", return_value=[process]), \
              patch.object(gateway_cli, "launch_detached_profile_gateway_restart", return_value=True) as restart, \
              patch.object(gateway_cli, "_graceful_restart_via_sigusr1", return_value=False) as graceful, \
              patch("os.kill") as kill:
@@ -497,6 +506,10 @@ class TestCmdUpdateLaunchdRestart:
         ]
         assert len(restart_calls) == 1
 
+    @pytest.mark.skipif(
+        not hasattr(signal, "SIGUSR1"),
+        reason="POSIX-only: graceful SIGUSR1 gateway drain",
+    )
     @patch("shutil.which", return_value=None)
     @patch("subprocess.run")
     def test_update_prefers_sigusr1_over_systemctl_restart_when_mainpid_known(
@@ -872,7 +885,12 @@ class TestServicePidExclusion:
             launchctl_loaded=True,
         )
 
+        _find_calls = {"n": 0}
+
         def fake_find(exclude_pids=None, all_profiles=False):
+            _find_calls["n"] += 1
+            if _find_calls["n"] >= 2:
+                return []
             _exclude = exclude_pids or set()
             return [p for p in [SERVICE_PID, MANUAL_PID] if p not in _exclude]
 

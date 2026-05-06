@@ -109,6 +109,7 @@ class TestPtyBridgeResize:
             [sys.executable, "-c", winsize_script],
             cols=80,
             rows=24,
+            env={**os.environ, "TERM": "xterm"},
         )
         try:
             bridge.resize(cols=123, rows=45)

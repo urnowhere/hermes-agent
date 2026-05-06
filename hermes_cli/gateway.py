@@ -6,6 +6,7 @@ Handles: hermes gateway [run|start|stop|restart|status|install|uninstall|setup]
 
 import asyncio
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -2229,7 +2230,14 @@ def get_launchd_label() -> str:
 
 
 def _launchd_domain() -> str:
-    return f"gui/{os.getuid()}"
+    """Return launchd domain (``gui/<uid>``). Non-Unix has no ``os.getuid``."""
+    getuid = getattr(os, "getuid", None)
+    if callable(getuid):
+        try:
+            return f"gui/{int(getuid())}"
+        except (AttributeError, OSError, TypeError, ValueError):
+            pass
+    return "gui/0"
 
 
 def generate_launchd_plist() -> str:
@@ -2257,9 +2265,12 @@ def generate_launchd_plist() -> str:
         resolved_node_dir = str(Path(resolved_node).resolve().parent)
         if resolved_node_dir not in priority_dirs:
             priority_dirs.append(resolved_node_dir)
-    sane_path = ":".join(
-        dict.fromkeys(priority_dirs + [p for p in os.environ.get("PATH", "").split(":") if p])
-    )
+    _raw_path = os.environ.get("PATH", "") or ""
+    _shell_dirs = [p for p in re.split(r"[;:]", _raw_path) if p]
+    # Use native pathsep so Windows drive letters (``E:\...``) are not split
+    # on ``:``. launchd/macOS uses ``:`` (``os.pathsep`` there is ``:``).
+    _path_sep = os.pathsep
+    sane_path = _path_sep.join(dict.fromkeys(priority_dirs + _shell_dirs))
 
     # Build ProgramArguments array, including --profile when using a named profile
     prog_args = [

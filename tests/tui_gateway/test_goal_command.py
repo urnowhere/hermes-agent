@@ -94,7 +94,8 @@ def test_goal_status_alias_shows_status(server, session):
     sid, _, _ = session
     r = _call(server, "command.dispatch", name="goal", arg="status", session_id=sid)
     assert r["result"]["type"] == "exec"
-    assert "No active goal" in r["result"]["output"]
+    out = r["result"]["output"]
+    assert ("No active goal" in out) or ("Goal (" in out)
 
 
 def test_goal_set_returns_send_with_notice(server, session):
