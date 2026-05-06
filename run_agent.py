@@ -8509,10 +8509,23 @@ class AIAgent:
         )
         _is_nous = "nousresearch" in self._base_url_lower
         _is_nvidia = "integrate.api.nvidia.com" in self._base_url_lower
+        # Detect Kimi/Moonshot models routed through aggregators (synthetic.new,
+        # OpenRouter, Together, ...). Without the model-name branch, those
+        # routes miss the Kimi-specific max_tokens=32000 default and the
+        # reasoning_effort=medium hint, leaving the model with whatever tiny
+        # output budget the aggregator defaults to and free-running thinking
+        # mode that swallows the entire budget — visible response ends up
+        # empty (#18742). is_moonshot_model already recognizes the relevant
+        # slugs (hf:moonshotai/Kimi-K2.5, nous/moonshotai/kimi-k2.5, ...).
+        try:
+            from agent.moonshot_schema import is_moonshot_model as _is_moonshot
+        except Exception:  # pragma: no cover — optional helper
+            _is_moonshot = lambda _m: False  # noqa: E731
         _is_kimi = (
             base_url_host_matches(self.base_url, "api.kimi.com")
             or base_url_host_matches(self.base_url, "moonshot.ai")
             or base_url_host_matches(self.base_url, "moonshot.cn")
+            or _is_moonshot(self.model)
         )
         _is_tokenhub = base_url_host_matches(self._base_url_lower, "tokenhub.tencentmaas.com")
         _is_lmstudio = (self.provider or "").strip().lower() == "lmstudio"
