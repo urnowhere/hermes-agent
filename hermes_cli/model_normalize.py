@@ -393,6 +393,13 @@ def normalize_model_for_provider(model_input: str, target_provider: str) -> str:
     if provider in _AGGREGATOR_PROVIDERS:
         return _prepend_vendor(name)
 
+    # --- Vertex AI: OpenAPI endpoint strictly requires google/ publisher prefix ---
+    if provider == "vertex":
+        bare = _strip_matching_provider_prefix(name, provider)
+        if not bare.startswith("google/"):
+            return f"google/{bare}"
+        return bare
+
     # --- OpenCode Zen: Claude stays hyphenated; other models keep dots ---
     if provider == "opencode-zen":
         bare = _strip_matching_provider_prefix(name, provider)

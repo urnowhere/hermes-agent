@@ -9,7 +9,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer = "2026-04-26T01:41:26.251358Z"
 exclude-newer-span = "P7D"
 
 [[package]]
@@ -1998,6 +1998,7 @@ all = [
     { name = "fastapi" },
     { name = "faster-whisper" },
     { name = "google-api-python-client" },
+    { name = "google-auth" },
     { name = "google-auth-httplib2" },
     { name = "google-auth-oauthlib" },
     { name = "honcho-ai" },
@@ -2119,6 +2120,9 @@ tts-premium = [
 vercel = [
     { name = "vercel" },
 ]
+vertex = [
+    { name = "google-auth" },
+]
 voice = [
     { name = "faster-whisper" },
     { name = "numpy" },
@@ -2160,6 +2164,7 @@ requires-dist = [
     { name = "fire", specifier = ">=0.7.1,<1" },
     { name = "firecrawl-py", specifier = ">=4.16.0,<5" },
     { name = "google-api-python-client", marker = "extra == 'google'", specifier = ">=2.100,<3" },
+    { name = "google-auth", marker = "extra == 'vertex'", specifier = ">=2.0.0,<3" },
     { name = "google-auth-httplib2", marker = "extra == 'google'", specifier = ">=0.2,<1" },
     { name = "google-auth-oauthlib", marker = "extra == 'google'", specifier = ">=1.0,<2" },
     { name = "hermes-agent", extras = ["acp"], marker = "extra == 'all'" },
@@ -2189,6 +2194,7 @@ requires-dist = [
     { name = "hermes-agent", extras = ["sms"], marker = "extra == 'all'" },
     { name = "hermes-agent", extras = ["tts-premium"], marker = "extra == 'all'" },
     { name = "hermes-agent", extras = ["vercel"], marker = "extra == 'all'" },
+    { name = "hermes-agent", extras = ["vertex"], marker = "extra == 'all'" },
     { name = "hermes-agent", extras = ["voice"], marker = "extra == 'all'" },
     { name = "hermes-agent", extras = ["web"], marker = "extra == 'all'" },
     { name = "honcho-ai", marker = "extra == 'honcho'", specifier = ">=2.0.1,<3" },
@@ -2237,7 +2243,7 @@ requires-dist = [
     { name = "wandb", marker = "extra == 'rl'", specifier = ">=0.15.0,<1" },
     { name = "yc-bench", marker = "python_full_version >= '3.12' and extra == 'yc-bench'", git = "https://github.com/collinear-ai/yc-bench.git?rev=bfb0c88062450f46341bd9a5298903fc2e952a5c" },
 ]
-provides-extras = ["modal", "daytona", "vercel", "dev", "messaging", "cron", "slack", "matrix", "cli", "tts-premium", "voice", "pty", "honcho", "mcp", "homeassistant", "sms", "acp", "mistral", "bedrock", "termux", "dingtalk", "feishu", "google", "web", "rl", "yc-bench", "all"]
+provides-extras = ["modal", "daytona", "vercel", "dev", "messaging", "cron", "slack", "matrix", "cli", "tts-premium", "voice", "pty", "honcho", "mcp", "homeassistant", "sms", "acp", "mistral", "bedrock", "termux", "dingtalk", "feishu", "google", "web", "rl", "yc-bench", "vertex", "all"]
 
 [[package]]
 name = "hf-transfer"
