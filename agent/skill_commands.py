@@ -403,6 +403,77 @@ def resolve_skill_command_key(command: str) -> Optional[str]:
     return cmd_key if cmd_key in get_skill_commands() else None
 
 
+def _resolve_co_loads(
+    loaded_skill: dict[str, Any],
+    primary_name: str,
+    task_id: str | None = None,
+    seen: set[str] | None = None,
+) -> list[str]:
+    """Resolve skills declared in the primary skill's ``co-load:`` frontmatter.
+
+    A skill can opt into automatic loading of dependent skills by adding a
+    ``co-load:`` field to its frontmatter::
+
+        ---
+        name: my-orchestrator
+        co-load: [shared-helpers, telemetry]
+        ---
+
+    Resolution is non-transitive (depth-1) — co-loaded skills are NOT
+    themselves expanded — and de-duplicated against ``seen`` so a future
+    transitive resolver cannot loop. Missing dependencies log a warning and
+    are skipped; they do not abort the primary skill's invocation.
+
+    Returns a list of formatted skill-message strings ready to be appended
+    to the primary skill's message body.
+    """
+    try:
+        from agent.skill_utils import parse_frontmatter
+    except Exception:
+        return []
+
+    raw_content = str(loaded_skill.get("raw_content") or loaded_skill.get("content") or "")
+    if not raw_content:
+        return []
+
+    frontmatter, _ = parse_frontmatter(raw_content)
+    co_load_names = frontmatter.get("co-load") or []
+    if isinstance(co_load_names, str):
+        co_load_names = [co_load_names]
+    if not co_load_names:
+        return []
+
+    if seen is None:
+        seen = set()
+    seen.add(primary_name.lower())
+
+    parts: list[str] = []
+    for co_name in co_load_names:
+        co_name_lower = (co_name or "").strip().lower()
+        if not co_name_lower or co_name_lower in seen:
+            continue
+        seen.add(co_name_lower)
+
+        loaded = _load_skill_payload(co_name, task_id=task_id)
+        if not loaded:
+            logger.warning(
+                "Co-load skill '%s' (required by '%s') not found",
+                co_name, primary_name,
+            )
+            continue
+
+        co_loaded_skill, co_skill_dir, co_display_name = loaded
+        activation_note = (
+            f'[SYSTEM: Co-loaded "{co_display_name}" '
+            f'(required by "{primary_name}")]'
+        )
+        msg = _build_skill_message(co_loaded_skill, co_skill_dir, activation_note)
+        if msg:
+            parts.append(msg)
+
+    return parts
+
+
 def build_skill_invocation_message(
     cmd_key: str,
     user_instruction: str = "",
@@ -440,7 +511,7 @@ def build_skill_invocation_message(
         f'[IMPORTANT: The user has invoked the "{skill_name}" skill, indicating they want '
         "you to follow its instructions. The full skill content is loaded below.]"
     )
-    return _build_skill_message(
+    msg = _build_skill_message(
         loaded_skill,
         skill_dir,
         activation_note,
@@ -448,6 +519,11 @@ def build_skill_invocation_message(
         runtime_note=runtime_note,
         session_id=task_id,
     )
+
+    co_loaded_parts = _resolve_co_loads(loaded_skill, skill_name, task_id=task_id)
+    if co_loaded_parts:
+        return msg + "\n\n" + "\n\n".join(co_loaded_parts)
+    return msg
 
 
 def build_preloaded_skills_prompt(
