@@ -2,6 +2,7 @@ import atexit
 import concurrent.futures
 import contextvars
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -118,6 +119,12 @@ from tui_gateway.render import make_stream_renderer, render_diff, render_message
 _sessions: dict[str, dict] = {}
 _methods: dict[str, callable] = {}
 _pending: dict[str, tuple[str, threading.Event]] = {}
+
+_ACCOUNT_LIMIT_CACHE_TTL_SECONDS = 300
+_ACCOUNT_LIMIT_CACHE_RETRY_SECONDS = 60
+_ACCOUNT_LIMIT_FETCH_TIMEOUT_SECONDS = 2.0
+_ACCOUNT_LIMIT_CACHE: dict[tuple[str, str, str, str], tuple[float, Optional[dict]]] = {}
+_ACCOUNT_LIMIT_CACHE_LOCK = threading.Lock()
 _answers: dict[str, str] = {}
 _db = None
 _db_error: str | None = None
@@ -1272,6 +1279,167 @@ def _sync_session_key_after_compress(
             pass
 
 
+def _account_limit_provider_label(provider: Optional[str]) -> str:
+    normalized = str(provider or "").strip().lower()
+    labels = {
+        "openai-codex": "Codex",
+        "anthropic": "Claude",
+        "openrouter": "OpenRouter",
+    }
+    if normalized in labels:
+        return labels[normalized]
+    if not normalized:
+        return "Account"
+    return normalized.replace("_", "-").replace("-", " ").title().replace(" ", "")
+
+
+def _account_limit_window_label(label: str) -> str:
+    normalized = str(label or "").strip().lower()
+    if "session" in normalized:
+        return "5h"
+    if "opus" in normalized and "week" in normalized:
+        return "opus wk"
+    if "sonnet" in normalized and "week" in normalized:
+        return "sonnet wk"
+    if "week" in normalized or "weekly" in normalized:
+        return "weekly"
+    if "quota" in normalized:
+        return "quota"
+    cleaned = "-".join(part for part in normalized.replace("_", "-").split("-") if part)
+    return cleaned[:10] if cleaned else "limit"
+
+
+def _account_limit_level(remaining: int) -> str:
+    if remaining <= 10:
+        return "critical"
+    if remaining <= 25:
+        return "warn"
+    return "ok"
+
+
+def _active_credential_label(agent) -> Optional[str]:
+    for attr in ("credential_label", "credential_name", "auth_label"):
+        label = str(getattr(agent, attr, "") or "").strip()
+        if label:
+            return label
+
+    pool = getattr(agent, "_credential_pool", None)
+    agent_api_key = str(getattr(agent, "api_key", "") or "")
+    if pool is None or not agent_api_key:
+        return None
+    for method_name in ("current", "peek"):
+        try:
+            method = getattr(pool, method_name, None)
+            entry = method() if callable(method) else None
+        except Exception:
+            entry = None
+        if entry is None:
+            continue
+        entry_api_key = str(
+            getattr(entry, "runtime_api_key", None)
+            or getattr(entry, "access_token", None)
+            or getattr(entry, "api_key", None)
+            or ""
+        )
+        if entry_api_key != agent_api_key:
+            continue
+        label = str(getattr(entry, "label", "") or "").strip()
+        if label:
+            return label
+    return None
+
+
+def _account_limit_cache_key(agent) -> Optional[tuple[str, str, str, str]]:
+    provider = str(getattr(agent, "provider", "") or "").strip().lower()
+    if provider in {"", "auto", "custom"}:
+        return None
+    base_url = str(getattr(agent, "base_url", "") or "").strip().rstrip("/")
+    api_key = str(getattr(agent, "api_key", "") or "")
+    api_key_hash = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12] if api_key else ""
+    credential_label = _active_credential_label(agent) or ""
+    return provider, base_url, api_key_hash, credential_label
+
+
+def _format_account_limit_status(snapshot, credential_label: Optional[str] = None) -> Optional[dict]:
+    if not snapshot or not getattr(snapshot, "windows", None):
+        return None
+
+    windows = []
+    lowest_remaining: Optional[int] = None
+    for window in list(getattr(snapshot, "windows", ()) or ())[:4]:
+        used_percent = getattr(window, "used_percent", None)
+        if used_percent is None:
+            continue
+        try:
+            used = max(0, min(100, round(float(used_percent))))
+        except Exception:
+            continue
+        remaining = max(0, min(100, round(100 - float(used_percent))))
+        lowest_remaining = remaining if lowest_remaining is None else min(lowest_remaining, remaining)
+        raw_label = str(getattr(window, "label", "") or "")
+        level = _account_limit_level(remaining)
+        item = {
+            "label": _account_limit_window_label(raw_label),
+            "full_label": raw_label,
+            "used_percent": used,
+            "remaining_percent": remaining,
+            "level": level,
+        }
+        reset_at = getattr(window, "reset_at", None)
+        if reset_at:
+            try:
+                item["reset_at"] = reset_at.isoformat()
+            except Exception:
+                pass
+        windows.append(item)
+
+    if not windows:
+        return None
+
+    overall_remaining = lowest_remaining if lowest_remaining is not None else 100
+    payload = {
+        "provider": getattr(snapshot, "provider", "") or "",
+        "label": _account_limit_provider_label(getattr(snapshot, "provider", None)),
+        "level": _account_limit_level(overall_remaining),
+        "windows": windows,
+    }
+    if credential_label:
+        payload["credential_label"] = credential_label
+    return payload
+
+
+def _get_account_limit_status(agent) -> Optional[dict]:
+    key = _account_limit_cache_key(agent)
+    if not key:
+        return None
+
+    now = time.monotonic()
+    with _ACCOUNT_LIMIT_CACHE_LOCK:
+        cached = _ACCOUNT_LIMIT_CACHE.get(key)
+        if cached and cached[0] > now:
+            return copy.deepcopy(cached[1]) if cached[1] is not None else None
+
+    payload = None
+    try:
+        from agent.account_usage import fetch_account_usage
+
+        provider, base_url, _api_key_hash, credential_label = key
+        snapshot = fetch_account_usage(
+            provider,
+            base_url=base_url,
+            api_key=getattr(agent, "api_key", None),
+            timeout=_ACCOUNT_LIMIT_FETCH_TIMEOUT_SECONDS,
+        )
+        payload = _format_account_limit_status(snapshot, credential_label=credential_label or None)
+    except Exception:
+        payload = None
+
+    with _ACCOUNT_LIMIT_CACHE_LOCK:
+        ttl = _ACCOUNT_LIMIT_CACHE_TTL_SECONDS if payload is not None else _ACCOUNT_LIMIT_CACHE_RETRY_SECONDS
+        _ACCOUNT_LIMIT_CACHE[key] = (now + ttl, copy.deepcopy(payload))
+    return payload
+
+
 def _get_usage(agent) -> dict:
     g = lambda k, fb=None: getattr(agent, k, 0) or (getattr(agent, fb, 0) if fb else 0)
     usage = {
@@ -1383,6 +1551,7 @@ def _session_info(agent) -> dict:
         "update_behind": None,
         "update_command": "",
         "usage": _get_usage(agent),
+        "account_limits": _get_account_limit_status(agent),
     }
     try:
         from hermes_cli import __version__, __release_date__
@@ -1853,7 +2022,7 @@ def _make_agent(sid: str, key: str, session_id: str | None = None):
         requested=requested_provider,
         target_model=model or None,
     )
-    return AIAgent(
+    agent = AIAgent(
         model=model,
         max_iterations=_cfg_max_turns(cfg, 90),
         provider=runtime.get("provider"),
@@ -1878,6 +2047,11 @@ def _make_agent(sid: str, key: str, session_id: str | None = None):
         skip_memory=is_truthy_value(os.environ.get("HERMES_IGNORE_RULES")),
         **_agent_cbs(sid),
     )
+    for attr in ("credential_id", "credential_label"):
+        value = runtime.get(attr)
+        if value:
+            setattr(agent, attr, value)
+    return agent
 
 
 def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
@@ -3144,7 +3318,12 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                 raw = str(result)
                 status = "complete"
 
-            payload = {"text": raw, "usage": _get_usage(agent), "status": status}
+            payload = {
+                "text": raw,
+                "usage": _get_usage(agent),
+                "account_limits": _get_account_limit_status(agent),
+                "status": status,
+            }
             if last_reasoning:
                 payload["reasoning"] = last_reasoning
             if status_note:

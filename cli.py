@@ -13,6 +13,7 @@ Usage:
     python cli.py --list-tools             # List available tools and exit
 """
 
+import hashlib
 import logging
 import os
 import shutil
@@ -2325,6 +2326,11 @@ class HermesCLI:
 
         # Status bar visibility (toggled via /statusbar)
         self._status_bar_visible = True
+        self._account_limit_status_enabled = True
+        self._account_limit_status_cache = None
+        self._account_limit_status_refreshing = False
+        self._account_limit_status_lock = threading.Lock()
+        self._account_limit_status_ttl = 300.0
 
         # Background task tracking: {task_id: threading.Thread}
         self._background_tasks: Dict[str, threading.Thread] = {}
@@ -2388,6 +2394,237 @@ class HermesCLI:
         safe_percent = max(0, min(100, percent_used or 0))
         filled = round((safe_percent / 100) * width)
         return f"[{('█' * filled) + ('░' * max(0, width - filled))}]"
+
+    @staticmethod
+    def _account_limit_provider_label(provider: Optional[str]) -> str:
+        normalized = str(provider or "").strip().lower()
+        labels = {
+            "openai-codex": "Codex",
+            "anthropic": "Claude",
+            "openrouter": "OpenRouter",
+        }
+        if normalized in labels:
+            return labels[normalized]
+        if not normalized:
+            return "Account"
+        return normalized.replace("_", "-").replace("-", " ").title().replace(" ", "")
+
+    @staticmethod
+    def _compact_account_limit_credential_label(label: Optional[str], max_width: int = 10) -> str:
+        cleaned = re.sub(r"\s+", "-", str(label or "").strip())
+        cleaned = re.sub(r"[^A-Za-z0-9._@+-]+", "-", cleaned).strip("-")
+        if not cleaned:
+            return ""
+        if len(cleaned) <= max_width:
+            return cleaned
+        return cleaned[: max(1, max_width - 1)] + "…"
+
+    def _account_limit_credential_label(self, agent) -> str:
+        for attr in ("credential_label", "credential_name", "auth_label"):
+            label = self._compact_account_limit_credential_label(getattr(agent, attr, None))
+            if label:
+                return label
+
+        pool = getattr(agent, "_credential_pool", None) or getattr(self, "_credential_pool", None)
+        agent_api_key = str(getattr(agent, "api_key", None) or getattr(self, "api_key", None) or "")
+        if pool is None or not agent_api_key:
+            return ""
+        for method_name in ("current", "peek"):
+            try:
+                method = getattr(pool, method_name, None)
+                entry = method() if callable(method) else None
+            except Exception:
+                entry = None
+            if entry is None:
+                continue
+            entry_api_key = str(
+                getattr(entry, "runtime_api_key", None)
+                or getattr(entry, "access_token", None)
+                or getattr(entry, "api_key", None)
+                or ""
+            )
+            if entry_api_key != agent_api_key:
+                continue
+            label = self._compact_account_limit_credential_label(getattr(entry, "label", None))
+            if label:
+                return label
+        return ""
+
+    @staticmethod
+    def _account_limit_window_label(label: str) -> str:
+        normalized = str(label or "").strip().lower()
+        if "session" in normalized:
+            return "5h"
+        if "opus" in normalized and "week" in normalized:
+            return "opus wk"
+        if "sonnet" in normalized and "week" in normalized:
+            return "sonnet wk"
+        if "week" in normalized or "weekly" in normalized:
+            return "weekly"
+        if "quota" in normalized:
+            return "quota"
+        cleaned = re.sub(r"[^A-Za-z0-9]+", "-", normalized).strip("-")
+        return cleaned[:10] if cleaned else "limit"
+
+    @staticmethod
+    def _format_account_limit_reset(reset_at) -> Optional[str]:
+        if not reset_at:
+            return None
+        try:
+            now = datetime.now(reset_at.tzinfo) if getattr(reset_at, "tzinfo", None) else datetime.now()
+            seconds = int((reset_at - now).total_seconds())
+        except Exception:
+            return None
+        if seconds <= 0:
+            return "now"
+        minutes = max(1, seconds // 60)
+        if minutes >= 24 * 60:
+            return f"{minutes // (24 * 60)}d"
+        if minutes >= 60:
+            return f"{minutes // 60}h"
+        return f"{minutes}m"
+
+    @classmethod
+    def _format_account_limit_status(cls, snapshot, credential_label: Optional[str] = None) -> Optional[Dict[str, str]]:
+        if not snapshot or not getattr(snapshot, "windows", None):
+            return None
+
+        parts: list[str] = []
+        lowest_remaining: Optional[int] = None
+        for index, window in enumerate(list(snapshot.windows)[:3]):
+            used_percent = getattr(window, "used_percent", None)
+            if used_percent is None:
+                continue
+            try:
+                remaining = max(0, min(100, round(100 - float(used_percent))))
+            except Exception:
+                continue
+            lowest_remaining = remaining if lowest_remaining is None else min(lowest_remaining, remaining)
+            label = cls._account_limit_window_label(getattr(window, "label", ""))
+            parts.append(f"{label} {remaining}%" if label else f"{remaining}%")
+
+        if not parts:
+            return None
+
+        if lowest_remaining is not None and lowest_remaining <= 10:
+            level = "critical"
+        elif lowest_remaining is not None and lowest_remaining <= 25:
+            level = "warn"
+        else:
+            level = "ok"
+        provider_label = cls._account_limit_provider_label(getattr(snapshot, "provider", None))
+        label_prefix = provider_label
+        credential_label = cls._compact_account_limit_credential_label(credential_label)
+        if credential_label:
+            label_prefix = f"{provider_label} {credential_label}"
+        return {"text": f"{label_prefix} {' • '.join(parts)}", "level": level}
+
+    @staticmethod
+    def _status_bar_account_limit_style(level: Optional[str]) -> str:
+        if level == "critical":
+            return "class:status-bar-critical"
+        if level == "warn":
+            return "class:status-bar-warn"
+        return "class:status-bar-dim"
+
+    def _ensure_account_limit_status_state(self) -> None:
+        if not hasattr(self, "_account_limit_status_lock"):
+            self._account_limit_status_lock = threading.Lock()
+        if not hasattr(self, "_account_limit_status_cache"):
+            self._account_limit_status_cache = None
+        if not hasattr(self, "_account_limit_status_refreshing"):
+            self._account_limit_status_refreshing = False
+        if not hasattr(self, "_account_limit_status_ttl"):
+            self._account_limit_status_ttl = 300.0
+
+    def _account_limit_status_cache_key(self, agent) -> Optional[tuple[str, str, str, str]]:
+        provider = str(getattr(agent, "provider", None) or getattr(self, "provider", None) or "").strip().lower()
+        if provider in {"", "auto", "custom"}:
+            return None
+        base_url = str(getattr(agent, "base_url", None) or getattr(self, "base_url", None) or "").strip()
+        api_key = str(getattr(agent, "api_key", None) or getattr(self, "api_key", None) or "")
+        api_fingerprint = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12] if api_key else ""
+        credential_label = self._account_limit_credential_label(agent)
+        return (provider, base_url, api_fingerprint, credential_label)
+
+    def _get_cached_account_limit_status(self, key: tuple[str, ...], now: Optional[float] = None):
+        self._ensure_account_limit_status_state()
+        now = time.monotonic() if now is None else now
+        cache = getattr(self, "_account_limit_status_cache", None)
+        if not isinstance(cache, dict):
+            return None
+        if cache.get("key") != key:
+            return None
+        if float(cache.get("expires_at") or 0.0) <= now:
+            return None
+        text = str(cache.get("text") or "").strip()
+        if not text:
+            return None
+        return cache
+
+    def _refresh_account_limit_status(self, agent, key: tuple[str, ...]) -> None:
+        self._ensure_account_limit_status_state()
+        provider = key[0]
+        base_url = key[1] if len(key) > 1 else ""
+        credential_label = key[3] if len(key) > 3 else self._account_limit_credential_label(agent)
+        cache_key = (provider, base_url, key[2] if len(key) > 2 else "", credential_label)
+        api_key = getattr(agent, "api_key", None) or getattr(self, "api_key", None)
+        try:
+            # Lazy import keeps CLI startup fast; account-limit status only needs
+            # the usage fetcher when the status cache refreshes.
+            from agent.account_usage import fetch_account_usage
+
+            snapshot = fetch_account_usage(provider, base_url=base_url, api_key=api_key or None)
+            formatted = self._format_account_limit_status(snapshot, credential_label=credential_label)
+        except Exception:
+            formatted = None
+
+        ttl = float(getattr(self, "_account_limit_status_ttl", 300.0) or 300.0)
+        retry_ttl = min(ttl, 60.0)
+        cache = {
+            "key": cache_key,
+            "expires_at": time.monotonic() + (ttl if formatted else retry_ttl),
+            "text": (formatted or {}).get("text", ""),
+            "level": (formatted or {}).get("level", "ok"),
+        }
+        with self._account_limit_status_lock:
+            self._account_limit_status_cache = cache
+            self._account_limit_status_refreshing = False
+        self._invalidate()
+
+    def _get_account_limit_status_for_status_bar(self, agent):
+        if not agent:
+            return None
+        key = self._account_limit_status_cache_key(agent)
+        if not key:
+            return None
+        cached = self._get_cached_account_limit_status(key)
+        if cached:
+            return cached
+        now = time.monotonic()
+        raw_cache = getattr(self, "_account_limit_status_cache", None)
+        if (
+            isinstance(raw_cache, dict)
+            and raw_cache.get("key") == key
+            and float(raw_cache.get("expires_at") or 0.0) > now
+        ):
+            return None
+        stale = raw_cache if isinstance(raw_cache, dict) and raw_cache.get("key") == key else None
+        if not getattr(self, "_account_limit_status_enabled", False):
+            return None
+
+        self._ensure_account_limit_status_state()
+        with self._account_limit_status_lock:
+            if self._account_limit_status_refreshing:
+                return stale if stale and str(stale.get("text") or "").strip() else None
+            self._account_limit_status_refreshing = True
+        thread = threading.Thread(
+            target=self._refresh_account_limit_status,
+            args=(agent, key),
+            daemon=True,
+        )
+        thread.start()
+        return stale if stale and str(stale.get("text") or "").strip() else None
 
     @staticmethod
     def _format_prompt_elapsed(prompt_start_time: Optional[float], prompt_duration: float, live: bool = False) -> str:
@@ -2656,6 +2893,7 @@ class HermesCLI:
         """Return a compact one-line session status string for the TUI footer."""
         try:
             snapshot = self._get_status_bar_snapshot()
+            agent = getattr(self, "agent", None)
             if width is None:
                 width = self._get_tui_terminal_width()
             percent = snapshot["context_percent"]
@@ -2682,6 +2920,9 @@ class HermesCLI:
             prompt_elapsed = snapshot.get("prompt_elapsed")
             if prompt_elapsed:
                 parts.append(prompt_elapsed)
+            account_limit_status = self._get_account_limit_status_for_status_bar(agent)
+            if account_limit_status and account_limit_status.get("text"):
+                parts.append(str(account_limit_status["text"]))
             return self._trim_status_bar_text(" │ ".join(parts), width)
         except Exception:
             return f"⚕ {self.model if getattr(self, 'model', None) else 'Hermes'}"
@@ -2691,6 +2932,7 @@ class HermesCLI:
             return []
         try:
             snapshot = self._get_status_bar_snapshot()
+            agent = getattr(self, "agent", None)
             # Use prompt_toolkit's own terminal width when running inside the
             # TUI — shutil.get_terminal_size() can return stale or fallback
             # values (especially on SSH) that differ from what prompt_toolkit
@@ -2746,6 +2988,13 @@ class HermesCLI:
                     if prompt_elapsed:
                         frags.append(("class:status-bar-dim", " │ "))
                         frags.append(("class:status-bar-dim", prompt_elapsed))
+                    account_limit_status = self._get_account_limit_status_for_status_bar(agent)
+                    if account_limit_status and account_limit_status.get("text"):
+                        frags.append(("class:status-bar-dim", " │ "))
+                        frags.append((
+                            self._status_bar_account_limit_style(account_limit_status.get("level")),
+                            str(account_limit_status["text"]),
+                        ))
                     frags.append(("class:status-bar", " "))
 
             total_width = sum(self._status_bar_display_width(text) for _, text in frags)
@@ -3475,6 +3724,8 @@ class HermesCLI:
         self.acp_args = resolved_acp_args
         self._credential_pool = resolved_credential_pool
         self._provider_source = runtime.get("source")
+        self.credential_id = runtime.get("credential_id")
+        self.credential_label = runtime.get("credential_label")
         self.api_key = api_key
         self.base_url = base_url
 
@@ -3698,6 +3949,10 @@ class HermesCLI:
                 stream_delta_callback=self._stream_delta if self.streaming_enabled else None,
                 tool_gen_callback=self._on_tool_gen_start if self.streaming_enabled else None,
             )
+            for attr in ("credential_id", "credential_label"):
+                value = getattr(self, attr, None)
+                if value:
+                    setattr(self.agent, attr, value)
             # Store reference for atexit memory provider shutdown
             global _active_agent_ref
             _active_agent_ref = self.agent

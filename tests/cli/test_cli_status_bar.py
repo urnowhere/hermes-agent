@@ -1,8 +1,9 @@
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from agent.account_usage import AccountUsageSnapshot, AccountUsageWindow
 from cli import HermesCLI
 
 
@@ -180,6 +181,85 @@ class TestCLIStatusBar:
 
         text = cli_obj._build_status_bar_text(width=120)
         assert "$" not in text  # cost is never shown in status bar
+
+    def test_build_status_bar_text_includes_cached_account_limits(self):
+        cli_obj = _attach_agent(
+            _make_cli(model="gpt-5.3-codex"),
+            prompt_tokens=10000,
+            completion_tokens=5000,
+            total_tokens=15000,
+            api_calls=7,
+            context_tokens=50000,
+            context_length=200_000,
+        )
+        cli_obj.agent.provider = "openai-codex"
+        cli_obj.agent.api_key = "active-runtime-token"
+        cli_obj.agent._credential_pool = SimpleNamespace(
+            current=lambda: SimpleNamespace(label="main", access_token="active-runtime-token"),
+            peek=lambda: SimpleNamespace(label="main", access_token="active-runtime-token"),
+        )
+        cache_key = cli_obj._account_limit_status_cache_key(cli_obj.agent)
+        cli_obj._account_limit_status_cache = {
+            "key": cache_key,
+            "expires_at": 9999999999.0,
+            "text": "Codex main 5h 98% • weekly 43%",
+            "level": "ok",
+        }
+
+        text = cli_obj._build_status_bar_text(width=140)
+
+        assert "Codex main 5h 98% • weekly 43%" in text
+
+    def test_account_limit_credential_label_fallback_requires_matching_token(self):
+        cli_obj = _make_cli(model="gpt-5.3-codex")
+        cli_obj.api_key = "active-runtime-token"
+        agent = SimpleNamespace(
+            api_key="active-runtime-token",
+            _credential_pool=SimpleNamespace(
+                current=lambda: SimpleNamespace(label="reserve00", access_token="other-token"),
+                peek=lambda: SimpleNamespace(label="main", access_token="active-runtime-token"),
+            ),
+        )
+
+        assert cli_obj._account_limit_credential_label(agent) == "main"
+
+    def test_account_limit_refresh_populates_compact_cache(self):
+        cli_obj = _attach_agent(
+            _make_cli(model="gpt-5.3-codex"),
+            prompt_tokens=10000,
+            completion_tokens=5000,
+            total_tokens=15000,
+            api_calls=7,
+            context_tokens=50000,
+            context_length=200_000,
+        )
+        cli_obj.agent.provider = "openai-codex"
+        cli_obj.agent.api_key = "active-runtime-token"
+        cli_obj.agent._credential_pool = SimpleNamespace(
+            current=lambda: SimpleNamespace(label="main", access_token="active-runtime-token"),
+            peek=lambda: SimpleNamespace(label="main", access_token="active-runtime-token"),
+        )
+        reset_at = datetime.now(timezone.utc) + timedelta(minutes=25)
+        snapshot = AccountUsageSnapshot(
+            provider="openai-codex",
+            source="usage_api",
+            fetched_at=datetime.now(timezone.utc),
+            windows=(
+                AccountUsageWindow("Session", used_percent=2.0, reset_at=reset_at),
+                AccountUsageWindow("Weekly", used_percent=57.0),
+            ),
+        )
+
+        with patch("agent.account_usage.fetch_account_usage", return_value=snapshot) as fetch_mock:
+            key = cli_obj._account_limit_status_cache_key(cli_obj.agent)
+            cli_obj._refresh_account_limit_status(cli_obj.agent, key)
+
+        fetch_mock.assert_called_once_with("openai-codex", base_url="", api_key="active-runtime-token")
+        cache_key = cli_obj._account_limit_status_cache["key"]
+        assert cache_key[:2] == ("openai-codex", "")
+        assert cache_key[3] == "main"
+        assert cli_obj._account_limit_status_cache["text"] == "Codex main 5h 98% • weekly 43%"
+        assert cli_obj._account_limit_status_cache["level"] == "ok"
 
     def test_build_status_bar_text_collapses_for_narrow_terminal(self):
         cli_obj = _attach_agent(

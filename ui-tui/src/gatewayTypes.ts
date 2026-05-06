@@ -1,4 +1,4 @@
-import type { SessionInfo, SlashCategory, Usage } from './types.js'
+import type { AccountLimitStatus, SessionInfo, SlashCategory, Usage } from './types.js'
 
 export interface GatewaySkin {
   banner_hero?: string
@@ -516,7 +516,13 @@ export type GatewayEvent =
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.complete' }
   | { payload: { rendered?: string; text?: string }; session_id?: string; type: 'message.delta' }
   | {
-      payload?: { reasoning?: string; rendered?: string; text?: string; usage?: Usage }
+      payload?: {
+        account_limits?: AccountLimitStatus | null
+        reasoning?: string
+        rendered?: string
+        text?: string
+        usage?: Usage
+      }
       session_id?: string
       type: 'message.complete'
     }

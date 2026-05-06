@@ -5,6 +5,8 @@ from hermes_cli import runtime_provider as rp
 
 def test_resolve_runtime_provider_uses_credential_pool(monkeypatch):
     class _Entry:
+        id = "cred-main"
+        label = "main"
         access_token = "pool-token"
         source = "manual"
         base_url = "https://chatgpt.com/backend-api/codex"
@@ -25,6 +27,8 @@ def test_resolve_runtime_provider_uses_credential_pool(monkeypatch):
     assert resolved["api_key"] == "pool-token"
     assert resolved["credential_pool"] is not None
     assert resolved["source"] == "manual"
+    assert resolved["credential_id"] == "cred-main"
+    assert resolved["credential_label"] == "main"
 
 
 def test_resolve_runtime_provider_anthropic_pool_respects_config_base_url(monkeypatch):

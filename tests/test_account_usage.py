@@ -1,3 +1,5 @@
+import base64
+import json
 from datetime import datetime, timezone
 
 from agent.account_usage import (
@@ -47,6 +49,76 @@ class _RoutingClient:
 
     def get(self, url, headers=None):
         return _Response(self._payloads[url])
+
+
+class _RecordingClient:
+    def __init__(self, payload):
+        self._payload = payload
+        self.requests = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def get(self, url, headers=None):
+        self.requests.append({"url": url, "headers": dict(headers or {})})
+        return _Response(self._payload)
+
+
+def _jwt_with_codex_account(account_id: str) -> str:
+    header = {"alg": "none"}
+    payload = {
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": account_id,
+        }
+    }
+
+    def encode(part):
+        raw = json.dumps(part, separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    return f"{encode(header)}.{encode(payload)}.signature"
+
+
+def test_fetch_account_usage_codex_honors_explicit_runtime_token(monkeypatch):
+    singleton_token = _jwt_with_codex_account("acct_singleton")
+    active_token = _jwt_with_codex_account("acct_active")
+    client = _RecordingClient(
+        {
+            "plan_type": "prolite",
+            "rate_limit": {
+                "primary_window": {"used_percent": 13, "reset_at": 1_900_000_000},
+                "secondary_window": {"used_percent": 59, "reset_at": 1_900_500_000},
+            },
+        }
+    )
+    monkeypatch.setattr(
+        "agent.account_usage.resolve_codex_runtime_credentials",
+        lambda refresh_if_expiring=True: {
+            "provider": "openai-codex",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "api_key": singleton_token,
+        },
+    )
+    monkeypatch.setattr(
+        "agent.account_usage._read_codex_tokens",
+        lambda: {"tokens": {"account_id": "acct_singleton"}},
+    )
+    monkeypatch.setattr("agent.account_usage.httpx.Client", lambda timeout=15.0: client)
+
+    snapshot = fetch_account_usage(
+        "openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_key=active_token,
+    )
+
+    assert snapshot is not None
+    assert snapshot.plan == "Prolite"
+    assert snapshot.windows[0].used_percent == 13.0
+    assert client.requests[0]["headers"]["Authorization"] == f"Bearer {active_token}"
+    assert client.requests[0]["headers"]["ChatGPT-Account-Id"] == "acct_active"
 
 
 def test_fetch_account_usage_codex(monkeypatch):
