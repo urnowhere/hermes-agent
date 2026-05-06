@@ -42,7 +42,7 @@ import httpx
 import yaml
 
 from hermes_cli.config import get_hermes_home, get_config_path, read_raw_config
-from hermes_constants import OPENROUTER_BASE_URL
+from hermes_constants import OPENROUTER_BASE_URL, get_default_hermes_root
 from utils import atomic_replace, atomic_yaml_write, is_truthy_value
 
 logger = logging.getLogger(__name__)
@@ -965,6 +965,30 @@ def get_auth_provider_display_name(provider_id: str) -> str:
     return SERVICE_PROVIDER_NAMES.get(normalized, provider_id)
 
 
+def _credential_pool_share_base_enabled() -> bool:
+    try:
+        config = read_raw_config()
+    except Exception:
+        return False
+    agent_cfg = config.get("agent") if isinstance(config, dict) else None
+    if not isinstance(agent_cfg, dict):
+        return False
+    return is_truthy_value(agent_cfg.get("credential_pool_share_base"))
+
+
+def _load_base_auth_store_for_pool_fallback() -> Optional[Dict[str, Any]]:
+    if not _credential_pool_share_base_enabled():
+        return None
+    try:
+        active_auth_path = _auth_file_path().resolve(strict=False)
+        base_auth_path = (get_default_hermes_root() / "auth.json").resolve(strict=False)
+    except Exception:
+        return None
+    if active_auth_path == base_auth_path:
+        return None
+    return _load_auth_store(base_auth_path)
+
+
 def read_credential_pool(provider_id: Optional[str] = None) -> Dict[str, Any]:
     """Return the persisted credential pool, or one provider slice."""
     auth_store = _load_auth_store()
@@ -974,7 +998,17 @@ def read_credential_pool(provider_id: Optional[str] = None) -> Dict[str, Any]:
     if provider_id is None:
         return dict(pool)
     provider_entries = pool.get(provider_id)
-    return list(provider_entries) if isinstance(provider_entries, list) else []
+    if isinstance(provider_entries, list) and provider_entries:
+        return list(provider_entries)
+
+    fallback_store = _load_base_auth_store_for_pool_fallback()
+    if fallback_store is not None:
+        fallback_pool = fallback_store.get("credential_pool")
+        if isinstance(fallback_pool, dict):
+            fallback_entries = fallback_pool.get(provider_id)
+            if isinstance(fallback_entries, list):
+                return list(fallback_entries)
+    return []
 
 
 def write_credential_pool(provider_id: str, entries: List[Dict[str, Any]]) -> Path:
