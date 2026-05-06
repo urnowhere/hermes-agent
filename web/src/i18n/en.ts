@@ -207,6 +207,7 @@ export const en: Translations = {
     namePlaceholder: "e.g. Daily summary",
     prompt: "Prompt",
     promptPlaceholder: "What should the agent do on each run?",
+    profile: "Profile",
     schedule: "Schedule (cron expression)",
     schedulePlaceholder: "0 9 * * *",
     deliverTo: "Deliver to",

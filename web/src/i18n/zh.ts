@@ -204,6 +204,7 @@ export const zh: Translations = {
     namePlaceholder: "例如：每日总结",
     prompt: "提示词",
     promptPlaceholder: "代理每次运行时应执行什么操作？",
+    profile: "多Agent配置",
     schedule: "调度表达式（cron）",
     schedulePlaceholder: "0 9 * * *",
     deliverTo: "投递至",

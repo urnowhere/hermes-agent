@@ -211,6 +211,7 @@ export interface Translations {
     namePlaceholder: string;
     prompt: string;
     promptPlaceholder: string;
+    profile: string;
     schedule: string;
     schedulePlaceholder: string;
     deliverTo: string;

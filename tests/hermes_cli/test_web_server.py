@@ -191,6 +191,44 @@ class TestWebServerEndpoints:
         assert resp.json()["gateway_state"] == "startup_failed"
         assert resp.json()["gateway_platforms"] == {}
 
+    def test_cron_jobs_can_be_scoped_by_profile(self):
+        from hermes_constants import get_hermes_home
+
+        hermes_home = get_hermes_home()
+        (hermes_home / "profiles" / "coder").mkdir(parents=True)
+
+        default_resp = self.client.post(
+            "/api/cron/jobs?profile=default",
+            json={
+                "prompt": "default profile job",
+                "schedule": "every 1h",
+                "name": "default-job",
+                "deliver": "local",
+            },
+        )
+        coder_resp = self.client.post(
+            "/api/cron/jobs?profile=coder",
+            json={
+                "prompt": "coder profile job",
+                "schedule": "every 2h",
+                "name": "coder-job",
+                "deliver": "local",
+            },
+        )
+
+        assert default_resp.status_code == 200
+        assert coder_resp.status_code == 200
+
+        default_jobs = self.client.get("/api/cron/jobs?profile=default")
+        coder_jobs = self.client.get("/api/cron/jobs?profile=coder")
+
+        assert default_jobs.status_code == 200
+        assert coder_jobs.status_code == 200
+        assert [job["name"] for job in default_jobs.json()] == ["default-job"]
+        assert [job["name"] for job in coder_jobs.json()] == ["coder-job"]
+        assert (hermes_home / "cron" / "jobs.json").exists()
+        assert (hermes_home / "profiles" / "coder" / "cron" / "jobs.json").exists()
+
     def test_get_config_schema(self):
         resp = self.client.get("/api/config/schema")
         assert resp.status_code == 200

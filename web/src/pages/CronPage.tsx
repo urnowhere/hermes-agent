@@ -6,7 +6,7 @@ import { Select, SelectOption } from "@nous-research/ui/ui/components/select";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { H2 } from "@/components/NouiTypography";
 import { api } from "@/lib/api";
-import type { CronJob } from "@/lib/api";
+import type { CronJob, ProfileInfo } from "@/lib/api";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { useToast } from "@/hooks/useToast";
 import { useConfirmDelete } from "@/hooks/useConfirmDelete";
@@ -33,6 +33,8 @@ const STATUS_TONE: Record<string, "success" | "warning" | "destructive"> = {
 
 export default function CronPage() {
   const [jobs, setJobs] = useState<CronJob[]>([]);
+  const [profiles, setProfiles] = useState<ProfileInfo[]>([]);
+  const [selectedProfile, setSelectedProfile] = useState("default");
   const [loading, setLoading] = useState(true);
   const { toast, showToast } = useToast();
   const { t } = useI18n();
@@ -46,11 +48,30 @@ export default function CronPage() {
 
   const loadJobs = useCallback(() => {
     api
-      .getCronJobs()
+      .getCronJobs(selectedProfile)
       .then(setJobs)
       .catch(() => showToast(t.common.loading, "error"))
       .finally(() => setLoading(false));
-  }, [showToast, t.common.loading]);
+  }, [selectedProfile, showToast, t.common.loading]);
+
+  useEffect(() => {
+    api
+      .getProfiles()
+      .then((res) => setProfiles(res.profiles))
+      .catch(() =>
+        setProfiles([
+          {
+            name: "default",
+            path: "",
+            is_default: true,
+            model: null,
+            provider: null,
+            has_env: false,
+            skill_count: 0,
+          },
+        ]),
+      );
+  }, []);
 
   useEffect(() => {
     loadJobs();
@@ -63,12 +84,15 @@ export default function CronPage() {
     }
     setCreating(true);
     try {
-      await api.createCronJob({
-        prompt: prompt.trim(),
-        schedule: schedule.trim(),
-        name: name.trim() || undefined,
-        deliver,
-      });
+      await api.createCronJob(
+        {
+          prompt: prompt.trim(),
+          schedule: schedule.trim(),
+          name: name.trim() || undefined,
+          deliver,
+        },
+        selectedProfile,
+      );
       showToast(t.common.create + " ✓", "success");
       setPrompt("");
       setSchedule("");
@@ -86,13 +110,13 @@ export default function CronPage() {
     try {
       const isPaused = job.state === "paused";
       if (isPaused) {
-        await api.resumeCronJob(job.id);
+        await api.resumeCronJob(job.id, selectedProfile);
         showToast(
           `${t.cron.resume}: "${job.name || job.prompt.slice(0, 30)}"`,
           "success",
         );
       } else {
-        await api.pauseCronJob(job.id);
+        await api.pauseCronJob(job.id, selectedProfile);
         showToast(
           `${t.cron.pause}: "${job.name || job.prompt.slice(0, 30)}"`,
           "success",
@@ -106,7 +130,7 @@ export default function CronPage() {
 
   const handleTrigger = async (job: CronJob) => {
     try {
-      await api.triggerCronJob(job.id);
+      await api.triggerCronJob(job.id, selectedProfile);
       showToast(
         `${t.cron.triggerNow}: "${job.name || job.prompt.slice(0, 30)}"`,
         "success",
@@ -122,7 +146,7 @@ export default function CronPage() {
       async (id: string) => {
         const job = jobs.find((j) => j.id === id);
         try {
-          await api.deleteCronJob(id);
+          await api.deleteCronJob(id, selectedProfile);
           showToast(
             `${t.common.delete}: "${job?.name || (job?.prompt ?? "").slice(0, 30) || id}"`,
             "success",
@@ -133,7 +157,14 @@ export default function CronPage() {
           throw e;
         }
       },
-      [jobs, loadJobs, showToast, t.common.delete, t.status.error],
+      [
+        jobs,
+        loadJobs,
+        selectedProfile,
+        showToast,
+        t.common.delete,
+        t.status.error,
+      ],
     ),
   });
 
@@ -166,6 +197,26 @@ export default function CronPage() {
         }
         loading={jobDelete.isDeleting}
       />
+
+      <div className="flex flex-col gap-2 sm:max-w-xs">
+        <Label htmlFor="cron-profile">{t.cron.profile}</Label>
+        <Select
+          id="cron-profile"
+          value={selectedProfile}
+          onValueChange={(value) => {
+            setLoading(true);
+            setSelectedProfile(value);
+          }}
+        >
+          {profiles.map((profile) => (
+            <SelectOption key={profile.name} value={profile.name}>
+              {profile.is_default
+                ? `${profile.name} (${t.profiles.defaultBadge})`
+                : profile.name}
+            </SelectOption>
+          ))}
+        </Select>
+      </div>
 
       <Card>
         <CardHeader>

@@ -12,6 +12,11 @@ declare global {
 let _sessionToken: string | null = null;
 const SESSION_HEADER = "X-Hermes-Session-Token";
 
+function profileQuery(profile?: string): string {
+  if (!profile) return "";
+  return `?${new URLSearchParams({ profile }).toString()}`;
+}
+
 function setSessionHeader(headers: Headers, token: string): void {
   if (!headers.has(SESSION_HEADER)) {
     headers.set(SESSION_HEADER, token);
@@ -116,21 +121,37 @@ export const api = {
   },
 
   // Cron jobs
-  getCronJobs: () => fetchJSON<CronJob[]>("/api/cron/jobs"),
-  createCronJob: (job: { prompt: string; schedule: string; name?: string; deliver?: string }) =>
-    fetchJSON<CronJob>("/api/cron/jobs", {
+  getCronJobs: (profile?: string) =>
+    fetchJSON<CronJob[]>(`/api/cron/jobs${profileQuery(profile)}`),
+  createCronJob: (
+    job: { prompt: string; schedule: string; name?: string; deliver?: string },
+    profile?: string,
+  ) =>
+    fetchJSON<CronJob>(`/api/cron/jobs${profileQuery(profile)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(job),
     }),
-  pauseCronJob: (id: string) =>
-    fetchJSON<{ ok: boolean }>(`/api/cron/jobs/${id}/pause`, { method: "POST" }),
-  resumeCronJob: (id: string) =>
-    fetchJSON<{ ok: boolean }>(`/api/cron/jobs/${id}/resume`, { method: "POST" }),
-  triggerCronJob: (id: string) =>
-    fetchJSON<{ ok: boolean }>(`/api/cron/jobs/${id}/trigger`, { method: "POST" }),
-  deleteCronJob: (id: string) =>
-    fetchJSON<{ ok: boolean }>(`/api/cron/jobs/${id}`, { method: "DELETE" }),
+  pauseCronJob: (id: string, profile?: string) =>
+    fetchJSON<{ ok: boolean }>(
+      `/api/cron/jobs/${id}/pause${profileQuery(profile)}`,
+      { method: "POST" },
+    ),
+  resumeCronJob: (id: string, profile?: string) =>
+    fetchJSON<{ ok: boolean }>(
+      `/api/cron/jobs/${id}/resume${profileQuery(profile)}`,
+      { method: "POST" },
+    ),
+  triggerCronJob: (id: string, profile?: string) =>
+    fetchJSON<{ ok: boolean }>(
+      `/api/cron/jobs/${id}/trigger${profileQuery(profile)}`,
+      { method: "POST" },
+    ),
+  deleteCronJob: (id: string, profile?: string) =>
+    fetchJSON<{ ok: boolean }>(
+      `/api/cron/jobs/${id}${profileQuery(profile)}`,
+      { method: "DELETE" },
+    ),
 
   // Profiles (minimal)
   getProfiles: () =>
