@@ -56,6 +56,8 @@ _HERMES_CORE_TOOLS = [
     "execute_code", "delegate_task",
     # Cronjob management
     "cronjob",
+    # Nudge scheduling (agent self-reminders)
+    "schedule_nudge", "list_nudges", "cancel_nudge",
     # Cross-platform messaging (gated on gateway running via check_fn)
     "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
@@ -137,7 +139,13 @@ TOOLSETS = {
         "tools": ["cronjob"],
         "includes": []
     },
-    
+
+    "nudge": {
+        "description": "Nudge scheduling tools - schedule wake-up reminders for the agent that persist across gateway restarts",
+        "tools": ["schedule_nudge", "list_nudges", "cancel_nudge"],
+        "includes": []
+    },
+
     "messaging": {
         "description": "Cross-platform messaging: send messages to Telegram, Discord, Slack, SMS, etc.",
         "tools": ["send_message"],
