@@ -931,14 +931,26 @@ def _tui_need_npm_install(root: Path) -> bool:
     return False
 
 
+def _tui_ink_bundle_exists(root: Path) -> bool:
+    return (root / "node_modules" / "@hermes" / "ink" / "dist" / "entry-exports.js").is_file()
+
+
+def _tui_runtime_ready(root: Path) -> bool:
+    return (
+        (root / "dist" / "entry.js").exists()
+        and not _tui_need_npm_install(root)
+        and _tui_ink_bundle_exists(root)
+    )
+
+
 def _find_bundled_tui(tui_dir: Path) -> Optional[Path]:
     """Directory whose dist/entry.js we should run: HERMES_TUI_DIR first, else repo ui-tui."""
     env = os.environ.get("HERMES_TUI_DIR")
     if env:
         p = Path(env)
-        if (p / "dist" / "entry.js").exists() and not _tui_need_npm_install(p):
+        if _tui_runtime_ready(p):
             return p
-    if (tui_dir / "dist" / "entry.js").exists() and not _tui_need_npm_install(tui_dir):
+    if _tui_runtime_ready(tui_dir):
         return tui_dir
     return None
 
@@ -949,8 +961,10 @@ def _tui_build_needed(tui_dir: Path) -> bool:
     entry = tui_dir / "dist" / "entry.js"
     if not entry.exists():
         return True
+    if _hermes_ink_bundle_stale(tui_dir):
+        return True
     dist_m = entry.stat().st_mtime
-    skip = frozenset({"node_modules", "dist"})
+    skip = frozenset({"node_modules", "dist", "packages"})
     for dirpath, dirnames, filenames in os.walk(tui_dir, topdown=True):
         dirnames[:] = [d for d in dirnames if d not in skip]
         for fn in filenames:
@@ -971,7 +985,7 @@ def _tui_build_needed(tui_dir: Path) -> bool:
 
 def _hermes_ink_bundle_stale(tui_dir: Path) -> bool:
     ink_root = tui_dir / "packages" / "hermes-ink"
-    bundle = ink_root / "dist" / "ink-bundle.js"
+    bundle = ink_root / "dist" / "entry-exports.js"
     if not bundle.exists():
         return True
     bm = bundle.stat().st_mtime
@@ -1065,7 +1079,7 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
         ext_dir = os.environ.get("HERMES_TUI_DIR")
         if ext_dir:
             p = Path(ext_dir)
-            if (p / "dist" / "entry.js").exists() and not _tui_need_npm_install(p):
+            if _tui_runtime_ready(p):
                 node = _node_bin("node")
                 return [node, str(p / "dist" / "entry.js")], p
 

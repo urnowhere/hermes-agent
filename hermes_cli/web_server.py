@@ -2949,6 +2949,17 @@ def _resolve_chat_argv(
 
     if resume:
         env["HERMES_TUI_RESUME"] = resume
+    else:
+        # Auto-resume the most recent TUI session when none was explicitly
+        # requested (e.g. user navigated away from /chat and came back).
+        try:
+            from hermes_cli.main import _resolve_last_session
+
+            last = _resolve_last_session(source="tui")
+            if last:
+                env["HERMES_TUI_RESUME"] = last
+        except Exception:
+            pass
 
     if sidecar_url:
         env["HERMES_TUI_SIDECAR_URL"] = sidecar_url
