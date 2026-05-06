@@ -109,6 +109,14 @@ class TestBlueBubblesHelpers:
         adapter = _make_adapter(monkeypatch)
         assert adapter.format_message("[click here](http://example.com)") == "click here"
 
+    def test_log_redaction_masks_webhook_password(self, monkeypatch):
+        from gateway.platforms.bluebubbles import _redact
+
+        redacted = _redact("http://localhost:8645/bluebubbles-webhook?password=abc123&x=1")
+        assert "abc123" not in redacted
+        assert "password=[REDACTED]" in redacted
+        assert "&x=1" in redacted
+
     def test_init_normalizes_webhook_path(self, monkeypatch):
         adapter = _make_adapter(monkeypatch, webhook_path="bluebubbles-webhook")
         assert adapter.webhook_path == "/bluebubbles-webhook"
@@ -267,6 +275,114 @@ class TestBlueBubblesWebhookParsing:
         payload = {"message": {"text": "hello"}}
         record = adapter._extract_payload_record(payload)
         assert record["text"] == "hello"
+
+    def test_inbound_dedupe_key_uses_message_guid_and_chat_guid(self, monkeypatch):
+        adapter = _make_adapter(monkeypatch)
+        payload = {"chatGuid": "iMessage;-;user@example.com"}
+        record = {"guid": "msg-guid-1", "text": "hello"}
+
+        assert (
+            adapter._inbound_dedupe_key(payload, record)
+            == "iMessage;-;user@example.com:msg-guid-1"
+        )
+
+    def test_inbound_dedupe_key_uses_nested_chat_guid(self, monkeypatch):
+        adapter = _make_adapter(monkeypatch)
+        payload = {}
+        record = {
+            "messageGuid": "msg-guid-2",
+            "chats": [{"guid": "iMessage;-;nested@example.com"}],
+        }
+
+        assert (
+            adapter._inbound_dedupe_key(payload, record)
+            == "iMessage;-;nested@example.com:msg-guid-2"
+        )
+
+    def test_mark_inbound_seen_drops_duplicate_guid(self, monkeypatch, tmp_path):
+        adapter = _make_adapter(monkeypatch)
+        adapter._inbound_seen_path = tmp_path / "seen.json"
+        key = "iMessage;-;user@example.com:msg-guid-3"
+
+        assert adapter._mark_inbound_seen(key) is True
+        assert adapter._mark_inbound_seen(key) is False
+
+    def test_mark_inbound_seen_persists_across_adapter_restart(self, monkeypatch, tmp_path):
+        path = tmp_path / "seen.json"
+        first = _make_adapter(monkeypatch)
+        first._inbound_seen_path = path
+        key = "iMessage;-;user@example.com:msg-guid-4"
+        assert first._mark_inbound_seen(key) is True
+        assert "user@example.com" not in path.read_text()
+        assert "msg-guid-4" not in path.read_text()
+
+        second = _make_adapter(monkeypatch)
+        second._inbound_seen_path = path
+        second._load_inbound_seen()
+        assert second._mark_inbound_seen(key) is False
+
+    def test_load_inbound_seen_ignores_legacy_raw_keys(self, monkeypatch, tmp_path):
+        import json
+        import time
+
+        path = tmp_path / "seen.json"
+        path.write_text(json.dumps({"iMessage;-;user@example.com:msg-guid-legacy": time.time()}))
+        adapter = _make_adapter(monkeypatch)
+        adapter._inbound_seen_path = path
+
+        adapter._load_inbound_seen()
+
+        assert adapter._inbound_seen == {}
+
+    @pytest.mark.asyncio
+    async def test_invalid_payload_does_not_poison_inbound_dedupe(self, monkeypatch, tmp_path):
+        import asyncio
+        import json
+
+        adapter = _make_adapter(monkeypatch)
+        adapter._inbound_seen_path = tmp_path / "seen.json"
+        handled = []
+
+        async def fake_handle_message(event):
+            handled.append(event)
+
+        adapter.handle_message = fake_handle_message
+
+        class FakeRequest:
+            def __init__(self, payload):
+                self.query = {"password": adapter.password}
+                self.headers = {}
+                self._payload = payload
+
+            async def read(self):
+                return json.dumps(self._payload).encode("utf-8")
+
+        invalid_payload = {
+            "type": "new-message",
+            "data": {
+                "guid": "msg-guid-5",
+                "chatGuid": "iMessage;-;user@example.com",
+                "handle": {"address": "user@example.com"},
+            },
+        }
+        invalid_response = await adapter._handle_webhook(FakeRequest(invalid_payload))
+        assert invalid_response.status == 400
+
+        valid_payload = {
+            "type": "new-message",
+            "data": {
+                "guid": "msg-guid-5",
+                "text": "hello after update",
+                "chatGuid": "iMessage;-;user@example.com",
+                "handle": {"address": "user@example.com"},
+            },
+        }
+        valid_response = await adapter._handle_webhook(FakeRequest(valid_payload))
+        await asyncio.sleep(0)
+
+        assert valid_response.status == 200
+        assert len(handled) == 1
+        assert handled[0].text == "hello after update"
 
 
 class TestBlueBubblesGuidResolution:
@@ -515,6 +631,24 @@ class TestBlueBubblesWebhookRegistration:
         assert len(result) == 1
         assert result[0]["id"] == 1
 
+    def test_find_registered_webhooks_matches_localhost_aliases(self, monkeypatch):
+        import asyncio
+        adapter = _make_adapter(monkeypatch)
+        target = "http://localhost:8645/bluebubbles-webhook"
+        adapter.client = self._mock_client(
+            get_response={"status": 200, "data": [
+                {"id": 1, "url": "http://127.0.0.1:8645/bluebubbles-webhook"},
+                {"id": 2, "url": "http://localhost:8645/bluebubbles-webhook"},
+                {"id": 3, "url": "http://localhost:8645/other"},
+            ]}
+        )
+
+        result = asyncio.get_event_loop().run_until_complete(
+            adapter._find_registered_webhooks(target)
+        )
+
+        assert [item["id"] for item in result] == [1, 2]
+
     def test_find_registered_webhooks_empty_when_none(self, monkeypatch):
         import asyncio
         adapter = _make_adapter(monkeypatch)
@@ -594,6 +728,39 @@ class TestBlueBubblesWebhookRegistration:
         )
         assert ok is True
         assert not post_called, "Should reuse existing, not POST again"
+
+    def test_register_keeps_exact_canonical_webhook_when_alias_first(self, monkeypatch):
+        """If BB returns 127.0.0.1 before localhost, keep localhost and remove alias."""
+        import asyncio
+        adapter = _make_adapter(monkeypatch)
+        canonical = adapter._webhook_register_url
+        alias = canonical.replace("localhost", "127.0.0.1")
+        deleted_urls = []
+
+        adapter.client = self._mock_client(
+            get_response={"status": 200, "data": [
+                {"id": 101, "url": alias, "events": ["new-message", "updated-message"]},
+                {"id": 102, "url": canonical, "events": ["new-message", "updated-message"]},
+            ]},
+        )
+
+        async def mock_delete(url, *args, **kwargs):
+            deleted_urls.append(url)
+            class R:
+                status_code = 200
+                def raise_for_status(self):
+                    pass
+            return R()
+
+        adapter.client.delete = mock_delete
+
+        ok = asyncio.get_event_loop().run_until_complete(
+            adapter._register_webhook()
+        )
+
+        assert ok is True
+        assert len(deleted_urls) == 1
+        assert "/api/v1/webhook/101" in deleted_urls[0]
 
     def test_register_returns_false_without_client(self, monkeypatch):
         import asyncio

@@ -9,14 +9,18 @@ downloading from PR #4588 (YuhangLin).
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
+import time
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
+
+from hermes_constants import get_hermes_home
 
 import httpx
 
@@ -59,10 +63,12 @@ _MESSAGE_EVENTS = {"new-message", "message", "updated-message"}
 # Log redaction patterns
 _PHONE_RE = re.compile(r"\+?\d{7,15}")
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
+_PASSWORD_QUERY_RE = re.compile(r"([?&]password=)[^&\s]+", re.IGNORECASE)
 
 
 def _redact(text: str) -> str:
-    """Redact phone numbers and emails from log output."""
+    """Redact sensitive addresses and webhook auth material from log output."""
+    text = _PASSWORD_QUERY_RE.sub(r"\1[REDACTED]", text)
     text = _PHONE_RE.sub("[REDACTED]", text)
     text = _EMAIL_RE.sub("[REDACTED]", text)
     return text
@@ -129,6 +135,11 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         self._private_api_enabled: Optional[bool] = None
         self._helper_connected: bool = False
         self._guid_cache: Dict[str, str] = {}
+        self._inbound_seen: Dict[str, float] = {}
+        self._inbound_seen_ttl = float(extra.get("inbound_dedupe_ttl_seconds", 3600))
+        self._inbound_seen_max = int(extra.get("inbound_dedupe_max", 2048))
+        self._inbound_seen_path = get_hermes_home() / ".bluebubbles_inbound_seen.json"
+        self._load_inbound_seen()
 
     # ------------------------------------------------------------------
     # API helpers
@@ -243,15 +254,40 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         return base
 
     async def _find_registered_webhooks(self, url: str) -> list:
-        """Return list of BB webhook entries matching *url*."""
+        """Return list of BB webhook entries matching *url* or local-host aliases."""
         try:
             res = await self._api_get("/api/v1/webhook")
             data = res.get("data")
             if isinstance(data, list):
-                return [wh for wh in data if wh.get("url") == url]
+                return [
+                    wh for wh in data
+                    if self._webhook_urls_equivalent(wh.get("url"), url)
+                ]
         except Exception:
             pass
         return []
+
+    @staticmethod
+    def _webhook_urls_equivalent(left: Optional[str], right: Optional[str]) -> bool:
+        """Treat localhost/127.0.0.1/0.0.0.0 webhook URLs as the same endpoint."""
+        if not left or not right:
+            return False
+        if left == right:
+            return True
+
+        def _normalize(raw: str) -> str:
+            parts = urlsplit(raw)
+            host = (parts.hostname or "").lower()
+            if host in {"127.0.0.1", "0.0.0.0", "localhost", "::1"}:
+                host = "localhost"
+            netloc = host
+            if parts.port:
+                netloc = f"{netloc}:{parts.port}"
+            # Query contains the webhook auth password; preserve it for exact
+            # endpoint matching but never log this normalized value directly.
+            return urlunsplit((parts.scheme.lower(), netloc, parts.path, parts.query, ""))
+
+        return _normalize(left) == _normalize(right)
 
     async def _register_webhook(self) -> bool:
         """Register this webhook URL with the BlueBubbles server.
@@ -265,11 +301,37 @@ class BlueBubblesAdapter(BasePlatformAdapter):
 
         webhook_url = self._webhook_register_url
 
-        # Crash resilience — reuse an existing registration if present
+        # Crash resilience — reuse an existing registration if present.  Also
+        # clean up duplicate local-host aliases left by older versions (e.g.
+        # both localhost and 127.0.0.1 registered), because each registration
+        # generates a separate inbound webhook for the same iMessage.
         existing = await self._find_registered_webhooks(webhook_url)
         if existing:
+            # Prefer keeping the exact canonical URL this adapter now computes
+            # (normally localhost). BlueBubbles returns registrations in server
+            # order, so blindly keeping existing[0] can preserve 127.0.0.1 and
+            # let localhost/127 aliases keep reappearing across restarts.
+            exact_matches = [wh for wh in existing if wh.get("url") == webhook_url]
+            keep = exact_matches[0] if exact_matches else existing[0]
+            keep_id = keep.get("id")
+            for duplicate in existing:
+                wh_id = duplicate.get("id")
+                if not wh_id or wh_id == keep_id:
+                    continue
+                try:
+                    res = await self.client.delete(
+                        self._api_url(f"/api/v1/webhook/{wh_id}")
+                    )
+                    res.raise_for_status()
+                    logger.info("[bluebubbles] removed duplicate webhook registration id=%s", wh_id)
+                except Exception as exc:
+                    logger.debug(
+                        "[bluebubbles] failed removing duplicate webhook id=%s: %s",
+                        wh_id,
+                        _redact(str(exc)),
+                    )
             logger.info(
-                "[bluebubbles] webhook already registered: %s", webhook_url
+                "[bluebubbles] webhook already registered: %s", _redact(webhook_url)
             )
             return True
 
@@ -284,20 +346,20 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             if 200 <= status < 300:
                 logger.info(
                     "[bluebubbles] webhook registered with server: %s",
-                    webhook_url,
+                    _redact(webhook_url),
                 )
                 return True
             else:
                 logger.warning(
                     "[bluebubbles] webhook registration returned status %s: %s",
                     status,
-                    res.get("message"),
+                    _redact(str(res.get("message"))),
                 )
                 return False
         except Exception as exc:
             logger.warning(
                 "[bluebubbles] failed to register webhook with server: %s",
-                exc,
+                _redact(str(exc)),
             )
             return False
 
@@ -324,12 +386,12 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                     removed = True
             if removed:
                 logger.info(
-                    "[bluebubbles] webhook unregistered: %s", webhook_url
+                    "[bluebubbles] webhook unregistered: %s", _redact(webhook_url)
                 )
         except Exception as exc:
             logger.debug(
                 "[bluebubbles] failed to unregister webhook (non-critical): %s",
-                exc,
+                _redact(str(exc)),
             )
         return removed
 
@@ -765,6 +827,93 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                 return candidate.strip()
         return None
 
+    def _load_inbound_seen(self) -> None:
+        """Load recently processed inbound message IDs for retry/restart dedupe."""
+        try:
+            data = json.loads(self._inbound_seen_path.read_text())
+            if isinstance(data, dict):
+                self._inbound_seen = {
+                    str(k).lower(): float(v)
+                    for k, v in data.items()
+                    if (
+                        isinstance(k, str)
+                        and len(k) == 64
+                        and all(ch in "0123456789abcdef" for ch in k.lower())
+                        and isinstance(v, (int, float))
+                    )
+                }
+                self._prune_inbound_seen(save=False)
+        except Exception:
+            self._inbound_seen = {}
+
+    def _save_inbound_seen(self) -> None:
+        try:
+            tmp = self._inbound_seen_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._inbound_seen, sort_keys=True))
+            tmp.replace(self._inbound_seen_path)
+        except Exception:
+            pass
+
+    def _prune_inbound_seen(self, *, save: bool = True) -> None:
+        now = time.time()
+        ttl = max(self._inbound_seen_ttl, 1.0)
+        self._inbound_seen = {
+            key: ts
+            for key, ts in self._inbound_seen.items()
+            if now - float(ts) <= ttl
+        }
+        if len(self._inbound_seen) > self._inbound_seen_max:
+            keep = sorted(self._inbound_seen.items(), key=lambda item: item[1])[-self._inbound_seen_max:]
+            self._inbound_seen = dict(keep)
+        if save:
+            self._save_inbound_seen()
+
+    def _inbound_dedupe_key(self, payload: Dict[str, Any], record: Dict[str, Any]) -> Optional[str]:
+        """Return a stable key for one BlueBubbles inbound message.
+
+        BlueBubbles can emit both ``new-message`` and ``updated-message`` for the
+        same iMessage GUID, and webhook callers may retry after gateway restarts.
+        Treat the message GUID as authoritative so one user message produces at
+        most one agent run across retries/restarts.
+        """
+        msg_guid = self._value(
+            record.get("guid"),
+            record.get("messageGuid"),
+            record.get("message_guid"),
+            record.get("id"),
+        )
+        if not msg_guid:
+            return None
+        chat_guid = self._value(
+            record.get("chatGuid"),
+            payload.get("chatGuid"),
+            record.get("chat_guid"),
+            payload.get("chat_guid"),
+        )
+        if not chat_guid:
+            chats = record.get("chats") or []
+            if chats and isinstance(chats[0], dict):
+                chat_guid = self._value(chats[0].get("guid"), chats[0].get("chatGuid"))
+        return f"{chat_guid or 'unknown-chat'}:{msg_guid}"
+
+    @staticmethod
+    def _inbound_seen_storage_key(dedupe_key: str) -> str:
+        """Hash dedupe keys before persistence to avoid storing chat PII."""
+        return hashlib.sha256(dedupe_key.encode("utf-8")).hexdigest()
+
+    def _mark_inbound_seen(self, dedupe_key: Optional[str]) -> bool:
+        """Return False for a duplicate inbound key; True after recording new key."""
+        if not dedupe_key:
+            return True
+        storage_key = self._inbound_seen_storage_key(dedupe_key)
+        self._prune_inbound_seen(save=False)
+        if storage_key in self._inbound_seen:
+            logger.info("[bluebubbles] duplicate inbound message ignored: %s", _redact(dedupe_key))
+            return False
+        self._inbound_seen[storage_key] = time.time()
+        self._prune_inbound_seen(save=True)
+        return True
+
     async def _handle_webhook(self, request):
         from aiohttp import web
 
@@ -818,6 +967,8 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             **_TAPBACK_REMOVED,
         }:
             return web.Response(text="ok")
+
+        dedupe_key = self._inbound_dedupe_key(payload, record)
 
         text = (
             self._value(
@@ -897,6 +1048,9 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             chat_identifier = sender
         if not sender or not (chat_guid or chat_identifier) or not text:
             return web.json_response({"error": "missing message fields"}, status=400)
+
+        if not self._mark_inbound_seen(dedupe_key):
+            return web.Response(text="ok")
 
         session_chat_id = chat_guid or chat_identifier
         is_group = bool(record.get("isGroup")) or (";+;" in (chat_guid or ""))
