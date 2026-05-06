@@ -944,6 +944,7 @@ class AIAgent:
         interim_assistant_callback: callable = None,
         tool_gen_callback: callable = None,
         status_callback: callable = None,
+        usage_callback: callable = None,
         max_tokens: int = None,
         reasoning_config: Dict[str, Any] = None,
         service_tier: str = None,
@@ -1217,8 +1218,10 @@ class AIAgent:
         # Store toolset filtering options
         self.enabled_toolsets = enabled_toolsets
         self.disabled_toolsets = disabled_toolsets
+        self.usage_callback = usage_callback
         
         # Model response configuration
+        self.usage_callback = usage_callback
         self.max_tokens = max_tokens  # None = use model default
         self.reasoning_config = reasoning_config  # None = use default (medium for OpenRouter)
         self.service_tier = service_tier
@@ -2129,6 +2132,8 @@ class AIAgent:
         self.session_prompt_tokens = 0
         self.session_completion_tokens = 0
         self.session_total_tokens = 0
+        self.current_turn_prompt_tokens = 0
+        self.current_turn_completion_tokens = 0
         self.session_api_calls = 0
         self.session_input_tokens = 0
         self.session_output_tokens = 0
@@ -6962,6 +6967,7 @@ class AIAgent:
             role = "assistant"
             reasoning_parts: list = []
             usage_obj = None
+            accumulated_content = ""
             for chunk in stream:
                 last_chunk_time["t"] = time.time()
                 self._touch_activity("receiving stream response")
@@ -6973,8 +6979,13 @@ class AIAgent:
                     if hasattr(chunk, "model") and chunk.model:
                         model_name = chunk.model
                     # Usage comes in the final chunk with empty choices
+                    if hasattr(chunk, "model") and chunk.model:
+                        model_name = chunk.model
+                    
                     if hasattr(chunk, "usage") and chunk.usage:
                         usage_obj = chunk.usage
+                        if self.usage_callback:
+                            self.usage_callback(usage_obj)
                     continue
 
                 delta = chunk.choices[0].delta
@@ -6991,6 +7002,14 @@ class AIAgent:
                 # Accumulate text content — fire callback only when no tool calls
                 if delta and delta.content:
                     content_parts.append(delta.content)
+                    accumulated_content += delta.content
+                    if self.usage_callback:
+                        from agent.model_metadata import estimate_tokens_rough
+                        est = estimate_tokens_rough(accumulated_content)
+
+                        self.usage_callback({"completion_tokens": est})
+                        self.current_turn_completion_tokens = est
+
                     if not tool_calls_acc:
                         _fire_first_delta()
                         self._fire_stream_delta(delta.content)
@@ -7086,6 +7105,15 @@ class AIAgent:
                 # Usage in the final chunk
                 if hasattr(chunk, "usage") and chunk.usage:
                     usage_obj = chunk.usage
+                    if self.usage_callback:
+                        self.usage_callback(usage_obj)
+                    
+                    # FIX: Update session totals so the Standard CLI status bar reflects usage immediately
+                    # without waiting for session compression.
+                    self.session_prompt_tokens += getattr(usage_obj, "prompt_tokens", 0) or 0
+                    self.session_completion_tokens += getattr(usage_obj, "completion_tokens", 0) or 0
+                    self.session_total_tokens += getattr(usage_obj, "total_tokens", 0) or 0
+                    self.session_api_calls += 1
 
             # Build mock response matching non-streaming shape
             full_content = "".join(content_parts) or None
@@ -9373,6 +9401,8 @@ class AIAgent:
         )
         self.context_compressor.last_prompt_tokens = _compressed_est
         self.context_compressor.last_completion_tokens = 0
+        self.current_turn_prompt_tokens = _compressed_est
+        self.current_turn_completion_tokens = 0
 
         # Clear the file-read dedup cache.  After compression the original
         # read content is summarised away — if the model re-reads the same
@@ -14094,6 +14124,8 @@ class AIAgent:
             "completion_tokens": self.session_completion_tokens,
             "total_tokens": self.session_total_tokens,
             "last_prompt_tokens": getattr(self.context_compressor, "last_prompt_tokens", 0) or 0,
+            "current_turn_prompt_tokens": self.current_turn_prompt_tokens,
+            "current_turn_completion_tokens": self.current_turn_completion_tokens,
             "estimated_cost_usd": self.session_estimated_cost_usd,
             "cost_status": self.session_cost_status,
             "cost_source": self.session_cost_source,

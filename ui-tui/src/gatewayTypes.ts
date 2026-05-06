@@ -514,10 +514,11 @@ export type GatewayEvent =
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.tool' }
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.progress' }
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.complete' }
-  | { payload: { rendered?: string; text?: string }; session_id?: string; type: 'message.delta' }
+  | { payload?: { rendered?: string; text?: string; usage?: Usage }; session_id?: string; type: 'message.delta' }
   | {
       payload?: { reasoning?: string; rendered?: string; text?: string; usage?: Usage }
       session_id?: string
       type: 'message.complete'
     }
   | { payload?: { message?: string }; session_id?: string; type: 'error' }
+  | { payload?: { usage?: Usage }; session_id?: string; type: 'usage.delta' }

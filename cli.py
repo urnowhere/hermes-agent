@@ -2651,13 +2651,18 @@ class HermesCLI:
 
         compressor = getattr(agent, "context_compressor", None)
         if compressor:
-            context_tokens = getattr(compressor, "last_prompt_tokens", 0) or 0
+            # LIVE WINDOW LOGIC: Prompt (start of turn) + Generated (this turn)
+            current_window = (
+                getattr(agent, "current_turn_prompt_tokens", 0) or 0
+            ) + (
+                getattr(agent, "current_turn_completion_tokens", 0) or 0
+            )
             context_length = getattr(compressor, "context_length", 0) or 0
-            snapshot["context_tokens"] = context_tokens
+            snapshot["context_tokens"] = current_window
             snapshot["context_length"] = context_length or None
             snapshot["compressions"] = getattr(compressor, "compression_count", 0) or 0
             if context_length:
-                snapshot["context_percent"] = max(0, min(100, round((context_tokens / context_length) * 100)))
+                snapshot["context_percent"] = max(0, min(100, round((current_window / context_length) * 100)))
 
         return snapshot
 
