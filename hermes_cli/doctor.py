@@ -1090,7 +1090,8 @@ def run_doctor(args):
     print()
     print(color("◆ API Connectivity", Colors.CYAN, Colors.BOLD))
     
-    openrouter_key = os.getenv("OPENROUTER_API_KEY")
+    from hermes_cli.config import get_env_value as _get_env_value
+    openrouter_key = _get_env_value("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY")
     if openrouter_key:
         print("  Checking OpenRouter API...", end="", flush=True)
         try:
@@ -1188,7 +1189,7 @@ def run_doctor(args):
     for _pname, _env_vars, _default_url, _base_env, _supports_health_check in _apikey_providers:
         _key = ""
         for _ev in _env_vars:
-            _key = os.getenv(_ev, "")
+            _key = _get_env_value(_ev) or os.getenv(_ev, "")
             if _key:
                 break
         if _key:
@@ -1200,7 +1201,7 @@ def run_doctor(args):
             print(f"  Checking {_pname} API...", end="", flush=True)
             try:
                 import httpx
-                _base = os.getenv(_base_env, "") if _base_env else ""
+                _base = (_get_env_value(_base_env) or os.getenv(_base_env, "")) if _base_env else ""
                 # Auto-detect Kimi Code keys (sk-kimi-) → api.kimi.com/coding/v1
                 # (OpenAI-compat surface, which exposes /models for health check).
                 if not _base and _key.startswith("sk-kimi-"):
