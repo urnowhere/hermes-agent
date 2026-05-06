@@ -6714,7 +6714,29 @@ def _finalize_update_output(state):
             pass
 
 
-def _cmd_update_check():
+def _print_update_commit_log(git_cmd, cwd, rev_range, label):
+    """Print a concise --oneline commit log for *rev_range*.
+
+    Non-fatal: if git is slow or offline we skip the log rather than
+    block the update flow.
+    """
+    try:
+        result = subprocess.run(
+            git_cmd + ["log", rev_range, "--oneline"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            print(f"  {label}:")
+            for line in result.stdout.strip().splitlines():
+                print(f"    {line}")
+    except Exception:
+        pass  # Log visibility is a convenience, not a requirement
+
+
+def _cmd_update_check(show_commits: bool = False):
     """Implement ``hermes update --check``: fetch and report without installing."""
     git_dir = PROJECT_ROOT / ".git"
     if not git_dir.exists():
@@ -6773,7 +6795,12 @@ def _cmd_update_check():
         print("✓ Already up to date.")
     else:
         commits_word = "commit" if behind == 1 else "commits"
-        print(f"⚕ Update available: {behind} {commits_word} behind {compare_branch}.")
+        print(f"⚕ Update available: {behind} {commits_word} behind origin/main.")
+        if show_commits:
+            _print_update_commit_log(
+                git_cmd, PROJECT_ROOT, "HEAD..origin/main",
+                "Pending commits",
+            )
         from hermes_cli.config import recommended_update_command
 
         print(f"  Run '{recommended_update_command()}' to install.")
@@ -6978,7 +7005,7 @@ def cmd_update(args):
         return
 
     if getattr(args, "check", False):
-        _cmd_update_check()
+        _cmd_update_check(show_commits=getattr(args, "show_commits", False))
         return
 
     gateway_mode = getattr(args, "gateway", False)
@@ -6988,12 +7015,16 @@ def cmd_update(args):
     # _install_hangup_protection for rationale.
     _update_io_state = _install_hangup_protection(gateway_mode=gateway_mode)
     try:
-        _cmd_update_impl(args, gateway_mode=gateway_mode)
+        _cmd_update_impl(
+            args,
+            gateway_mode=gateway_mode,
+            show_commits=getattr(args, "show_commits", False),
+        )
     finally:
         _finalize_update_output(_update_io_state)
 
 
-def _cmd_update_impl(args, gateway_mode: bool):
+def _cmd_update_impl(args, gateway_mode: bool, show_commits: bool = False):
     """Body of ``cmd_update`` — kept separate so the wrapper can always
     restore stdio even on ``sys.exit``."""
     # In gateway mode, use file-based IPC for prompts instead of stdin
@@ -7161,6 +7192,11 @@ def _cmd_update_impl(args, gateway_mode: bool):
             return
 
         print(f"→ Found {commit_count} new commit(s)")
+        if show_commits:
+            _print_update_commit_log(
+                git_cmd, PROJECT_ROOT, f"HEAD..origin/{branch}",
+                "Pending commits",
+            )
 
         # Snapshot critical state (state.db, config, pairing JSONs, etc.)
         # before pulling so a user can recover if something goes wrong.
@@ -7278,6 +7314,11 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
         print()
         print("✓ Code updated!")
+        if show_commits:
+            _print_update_commit_log(
+                git_cmd, PROJECT_ROOT, "HEAD@{1}..HEAD",
+                "Commits included in this update",
+            )
 
         # After git pull, source files on disk are newer than cached Python
         # modules in this process.  Reload hermes_constants so that any lazy
@@ -10440,6 +10481,12 @@ Examples:
         action="store_true",
         default=False,
         help="Assume yes for interactive prompts (config migration, stash restore). API-key entry is skipped; run 'hermes config migrate' separately for those.",
+    )
+    update_parser.add_argument(
+        "--show-commits",
+        action="store_true",
+        default=False,
+        help="Show the commit log for pending or pulled changes",
     )
     update_parser.set_defaults(func=cmd_update)
 
