@@ -7062,7 +7062,9 @@ class AIAgent:
                         if extra is None and hasattr(tc_delta, "model_extra"):
                             extra = (tc_delta.model_extra or {}).get("extra_content")
                         if extra is not None:
-                            if hasattr(extra, "model_dump"):
+                            if isinstance(extra, dict):
+                                pass  # already serializable
+                            elif hasattr(extra, "model_dump"):
                                 extra = extra.model_dump()
                             entry["extra_content"] = extra
                         # Fire once per tool when the full name is available
@@ -8948,7 +8950,9 @@ class AIAgent:
                 # thinking models reject the request with a 400 error.
                 extra = getattr(tool_call, "extra_content", None)
                 if extra is not None:
-                    if hasattr(extra, "model_dump"):
+                    if isinstance(extra, dict):
+                        pass  # already serializable
+                    elif hasattr(extra, "model_dump"):
                         extra = extra.model_dump()
                     tc_dict["extra_content"] = extra
                 tool_calls.append(tc_dict)

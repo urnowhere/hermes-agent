@@ -1522,6 +1522,19 @@ class TestBuildAssistantMessage:
             "google": {"thought_signature": "abc123"}
         }
 
+    def test_tool_call_extra_content_dict_passthrough(self, agent):
+        """When extra_content is already a plain dict, it must pass through
+        without calling model_dump() (fixes #19968 — MiniMax streaming crash)."""
+        tc = _mock_tool_call(
+            name="search", arguments='{"q":"test"}', call_id="c_dict"
+        )
+        tc.extra_content = {"minimax": {"trace_id": "abc"}}
+        msg = _mock_assistant_msg(content="", tool_calls=[tc])
+        result = agent._build_assistant_message(msg, "tool_calls")
+        assert result["tool_calls"][0]["extra_content"] == {
+            "minimax": {"trace_id": "abc"}
+        }
+
     def test_tool_call_without_extra_content(self, agent):
         """Standard tool calls (no thinking model) should not have extra_content."""
         tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c3")
