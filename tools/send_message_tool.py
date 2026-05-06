@@ -245,6 +245,19 @@ def _handle_send(args):
     media_files, cleaned_message = BasePlatformAdapter.extract_media(message)
     mirror_text = cleaned_message.strip() or _describe_media_for_mirror(media_files)
 
+    # If no thread_id was supplied in the target string, fall back to the
+    # current session's thread_id so replies stay in the originating topic/
+    # thread. Voice messages already do this via the gateway adapter path;
+    # text/media/file sends were missing this step (issue #20104).
+    if thread_id is None and not target_ref:
+        try:
+            from gateway.session_context import get_session_env
+            _session_thread = get_session_env("HERMES_SESSION_THREAD_ID", "").strip()
+            if _session_thread:
+                thread_id = _session_thread
+        except Exception:
+            pass
+
     used_home_channel = False
     if not chat_id:
         home = config.get_home_channel(platform)
