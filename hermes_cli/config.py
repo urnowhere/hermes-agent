@@ -388,7 +388,7 @@ DEFAULT_CONFIG = {
     "providers": {},
     "fallback_providers": [],
     "credential_pool_strategies": {},
-    "toolsets": ["hermes-cli"],
+    "toolsets": ["hermes-lite"],
     "agent": {
         "max_turns": 90,
         # Inactivity timeout for gateway agent execution (seconds).
@@ -422,6 +422,10 @@ DEFAULT_CONFIG = {
         # (force on/off for all models), or a list of model-name substrings
         # to match (e.g. ["gpt", "codex", "gemini", "qwen"]).
         "tool_use_enforcement": "auto",
+        # Default preset used for CLI sessions when platform_toolsets.cli is
+        # not explicitly configured. Set "hermes-cli" for the full historical
+        # tool schema.
+        "default_cli_toolset": "hermes-lite",
         # Staged inactivity warning: send a warning to the user at this
         # threshold before escalating to a full timeout.  The warning fires
         # once per run and does not interrupt the agent.  0 = disable warning.

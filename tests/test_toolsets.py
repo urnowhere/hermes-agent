@@ -163,6 +163,17 @@ class TestGetToolsetInfo:
     def test_unknown_returns_none(self):
         assert get_toolset_info("nonexistent") is None
 
+    def test_hermes_lite_is_leaner_than_full_cli(self):
+        lite = set(resolve_toolset("hermes-lite"))
+        full = set(resolve_toolset("hermes-cli"))
+
+        assert lite
+        assert lite < full
+        assert {"web_search", "terminal", "read_file", "patch", "memory", "session_search"}.issubset(lite)
+        assert "browser_navigate" not in lite
+        assert "image_generate" not in lite
+        assert "send_message" not in lite
+
 
 class TestCreateCustomToolset:
     def test_runtime_creation(self):

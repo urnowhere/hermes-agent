@@ -67,6 +67,18 @@ _HERMES_CORE_TOOLS = [
     "kanban_comment", "kanban_create", "kanban_link",
 ]
 
+# Smaller default profile for users who want the agent to start with a low
+# schema footprint. Heavier capabilities remain opt-in via individual toolsets.
+_HERMES_LITE_TOOLSETS = [
+    "search",
+    "terminal",
+    "file",
+    "skills",
+    "todo",
+    "memory",
+    "session_search",
+]
+
 
 # Core toolset definitions
 # These can include individual tools or reference other toolsets
@@ -292,6 +304,15 @@ TOOLSETS = {
         "description": "Safe toolkit without terminal access",
         "tools": [],
         "includes": ["web", "vision", "image_gen"]
+    },
+
+    "hermes-lite": {
+        "description": (
+            "Lean interactive profile: search, terminal/processes, files, "
+            "skills, todo, memory, and session search"
+        ),
+        "tools": [],
+        "includes": _HERMES_LITE_TOOLSETS,
     },
     
     # ==========================================================================

@@ -532,6 +532,12 @@ skills:
 # Agent Behavior
 # =============================================================================
 agent:
+  # Default preset used for CLI sessions when platform_toolsets.cli is not set.
+  # Use "hermes-lite" for a smaller schema with search, terminal, files,
+  # skills, todo, memory, and session search. Set "hermes-cli" for the full
+  # historical default.
+  # default_cli_toolset: "hermes-lite"
+
   # Maximum tool-calling iterations per conversation
   # Higher = more room for complex tasks, but costs more tokens
   # Recommended: 20-30 for focused tasks, 50-100 for open exploration
@@ -607,8 +613,12 @@ agent:
 #
 #   # Use presets (same as defaults):
 #   platform_toolsets:
-#     cli: [hermes-cli]
+#     cli: [hermes-lite]
 #     telegram: [hermes-telegram]
+#
+#   # Lean CLI preset:
+#   platform_toolsets:
+#     cli: [hermes-lite]
 #
 #   # Custom: give Telegram only web + terminal + file + planning:
 #   platform_toolsets:
@@ -623,7 +633,7 @@ agent:
 #     discord: [web, vision, skills, todo]
 #
 # If not set, defaults are:
-#   cli:           hermes-cli            (everything + cronjob management)
+#   cli:           hermes-lite           (search, terminal, file, skills, todo, memory, session_search)
 #   telegram:      hermes-telegram       (terminal, file, web, vision, image, tts, browser, skills, todo, cronjob, messaging)
 #   discord:       hermes-discord        (same as telegram)
 #   whatsapp:      hermes-whatsapp       (same as telegram)
@@ -634,7 +644,7 @@ agent:
 #   teams:            hermes-teams            (same as telegram)
 #
 platform_toolsets:
-  cli: [hermes-cli]
+  cli: [hermes-lite]
   telegram: [hermes-telegram]
   discord: [hermes-discord]
   whatsapp: [hermes-whatsapp]
@@ -683,6 +693,8 @@ platform_toolsets:
 #   rl           - rl_list_environments, rl_start_training, etc. (requires TINKER_API_KEY)
 #
 # PRESETS (curated bundles):
+#   hermes-lite      - Lean CLI profile: search, terminal, file, skills, todo,
+#                      memory, session_search
 #   hermes-cli       - All of the above except rl + send_message
 #   hermes-telegram  - terminal, file, web, vision, image_gen, tts, browser,
 #                      skills, todo, cronjob, send_message
