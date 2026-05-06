@@ -1,6 +1,7 @@
 """Tests for the hermes_cli models module."""
 
 from unittest.mock import patch, MagicMock
+import httpx
 
 from hermes_cli.models import (
     OPENROUTER_MODELS, fetch_openrouter_models, model_ids, detect_provider_for_model,
@@ -60,18 +61,21 @@ class TestOpenRouterModels:
 
 class TestFetchOpenRouterModels:
     def test_live_fetch_recomputes_free_tags(self, monkeypatch):
-        class _Resp:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
-            def read(self):
-                return b'{"data":[{"id":"anthropic/claude-opus-4.6","pricing":{"prompt":"0.000015","completion":"0.000075"}},{"id":"qwen/qwen3.6-plus","pricing":{"prompt":"0.000000325","completion":"0.00000195"}},{"id":"nvidia/nemotron-3-super-120b-a12b:free","pricing":{"prompt":"0","completion":"0"}}]}'
+        payload = {"data": [
+            {"id": "anthropic/claude-opus-4.6", "pricing": {"prompt": "0.000015", "completion": "0.000075"}},
+            {"id": "qwen/qwen3.6-plus", "pricing": {"prompt": "0.000000325", "completion": "0.00000195"}},
+            {"id": "nvidia/nemotron-3-super-120b-a12b:free", "pricing": {"prompt": "0", "completion": "0"}},
+        ]}
+        resp = MagicMock(spec=httpx.Response)
+        resp.json.return_value = payload
+        resp.raise_for_status.return_value = None
 
         monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache", None)
-        with patch("hermes_cli.models.urllib.request.urlopen", return_value=_Resp()):
+        with patch("hermes_cli.models.retryable_get", return_value=resp),              patch("hermes_cli.model_catalog.get_curated_openrouter_models", return_value=[
+                 ("anthropic/claude-opus-4.6", ""),
+                 ("qwen/qwen3.6-plus", ""),
+                 ("nvidia/nemotron-3-super-120b-a12b:free", ""),
+             ]):
             models = fetch_openrouter_models(force_refresh=True)
 
         assert models == [
@@ -82,7 +86,7 @@ class TestFetchOpenRouterModels:
 
     def test_falls_back_to_static_snapshot_on_fetch_failure(self, monkeypatch):
         monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache", None)
-        with patch("hermes_cli.models.urllib.request.urlopen", side_effect=OSError("boom")):
+        with patch("hermes_cli.models.retryable_get", side_effect=OSError("boom")),              patch("hermes_cli.model_catalog.get_curated_openrouter_models", return_value=None):
             models = fetch_openrouter_models(force_refresh=True)
 
         assert models == OPENROUTER_MODELS
@@ -94,27 +98,14 @@ class TestFetchOpenRouterModels:
         immediate runtime failures when the user selects it. Ported from
         Kilo-Org/kilocode#9068.
         """
-        class _Resp:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
-            def read(self):
-                # opus-4.6 advertises tools → kept
-                # nano-image has explicit supported_parameters that OMITS tools → dropped
-                # qwen3.6-plus advertises tools → kept
-                return (
-                    b'{"data":['
-                    b'{"id":"anthropic/claude-opus-4.6","pricing":{"prompt":"0.000015","completion":"0.000075"},'
-                    b'"supported_parameters":["temperature","tools","tool_choice"]},'
-                    b'{"id":"google/gemini-3-pro-image-preview","pricing":{"prompt":"0.00001","completion":"0.00003"},'
-                    b'"supported_parameters":["temperature","response_format"]},'
-                    b'{"id":"qwen/qwen3.6-plus","pricing":{"prompt":"0.000000325","completion":"0.00000195"},'
-                    b'"supported_parameters":["tools","temperature"]}'
-                    b']}'
-                )
+        payload = {"data": [
+            {"id": "anthropic/claude-opus-4.6", "pricing": {"prompt": "0.000015", "completion": "0.000075"}, "supported_parameters": ["temperature", "tools", "tool_choice"]},
+            {"id": "google/gemini-3-pro-image-preview", "pricing": {"prompt": "0.00001", "completion": "0.00003"}, "supported_parameters": ["temperature", "response_format"]},
+            {"id": "qwen/qwen3.6-plus", "pricing": {"prompt": "0.000000325", "completion": "0.00000195"}, "supported_parameters": ["tools", "temperature"]},
+        ]}
+        resp = MagicMock(spec=httpx.Response)
+        resp.json.return_value = payload
+        resp.raise_for_status.return_value = None
 
         # Include the image-only id in the curated list so it has a chance to be surfaced.
         monkeypatch.setattr(
@@ -127,7 +118,11 @@ class TestFetchOpenRouterModels:
             ],
         )
         monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache", None)
-        with patch("hermes_cli.models.urllib.request.urlopen", return_value=_Resp()):
+        with patch("hermes_cli.models.retryable_get", return_value=resp),              patch("hermes_cli.model_catalog.get_curated_openrouter_models", return_value=[
+                 ("anthropic/claude-opus-4.6", ""),
+                 ("google/gemini-3-pro-image-preview", ""),
+                 ("qwen/qwen3.6-plus", ""),
+             ]):
             models = fetch_openrouter_models(force_refresh=True)
 
         ids = [mid for mid, _ in models]
