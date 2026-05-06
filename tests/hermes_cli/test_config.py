@@ -488,6 +488,133 @@ class TestCustomProviderCompatibility:
         # custom_providers removed by migration — runtime reads via compat layer
         assert "custom_providers" not in raw
 
+    def test_v11_upgrade_preserves_optional_fields(self, tmp_path):
+        """v11→v12 must carry all `_normalize_custom_provider_entry` fields forward.
+
+        Without this, configs with per-model context_length overrides, env-var-
+        sourced API keys, or explicit timeout / rate-limit settings silently
+        lose them on upgrade — runtime then falls back to the 128K default for
+        every custom-provider model regardless of what the user configured.
+        """
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "_config_version": 11,
+                    "model": {"default": "gpt-5-mini", "provider": "openai-direct"},
+                    "custom_providers": [
+                        {
+                            "name": "OpenAI Direct",
+                            "base_url": "https://api.openai.com/v1",
+                            "api_key": "test-key",
+                            "api_mode": "codex_responses",
+                            "model": "gpt-5-mini",
+                            # Optional fields the original migration silently
+                            "models": {
+                                "gpt-5-mini": {"context_length": 400000},
+                                "gpt-5-codex": {"context_length": 1050000},
+                            },
+                            "context_length": 200000,
+                            "key_env": "OPENAI_DIRECT_KEY",
+                            "rate_limit_delay": 0.5,
+                            "request_timeout_seconds": 60,
+                            "stale_timeout_seconds": 300,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            migrate_config(interactive=False, quiet=True)
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+        entry = raw["providers"]["openai-direct"]
+        assert entry["models"] == {
+            "gpt-5-mini": {"context_length": 400000},
+            "gpt-5-codex": {"context_length": 1050000},
+        }
+        assert entry["context_length"] == 200000
+        assert entry["key_env"] == "OPENAI_DIRECT_KEY"
+        assert entry["rate_limit_delay"] == 0.5
+        assert entry["request_timeout_seconds"] == 60
+        assert entry["stale_timeout_seconds"] == 300
+
+    def test_v11_upgrade_normalises_api_key_env_alias(self, tmp_path):
+        """`api_key_env` is a documented alias for `key_env` (azure-foundry
+        guide).  The migration must normalise to the canonical name so the
+        runtime normaliser doesn't have to keep the alias logic in sync."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "_config_version": 11,
+                    "custom_providers": [
+                        {
+                            "name": "Azure Foundry",
+                            "base_url": "https://example.cognitiveservices.azure.com/openai/v1",
+                            "api_key_env": "AZURE_FOUNDRY_API_KEY",
+                            "model": "gpt-5",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            migrate_config(interactive=False, quiet=True)
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+        entry = raw["providers"]["azure-foundry"]
+        assert entry["key_env"] == "AZURE_FOUNDRY_API_KEY"
+        # ``api_key_env`` itself should not appear under the new dict shape —
+        # canonical name only.
+        assert "api_key_env" not in entry
+
+    def test_v11_upgrade_skips_empty_or_invalid_optional_fields(self, tmp_path):
+        """Optional fields with empty / zero / wrong-type values must not be
+        copied — they would either confuse the runtime normaliser or display
+        as user-meaningful overrides when they are not."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "_config_version": 11,
+                    "custom_providers": [
+                        {
+                            "name": "Sparse",
+                            "base_url": "https://example.com/v1",
+                            "model": "x",
+                            "models": {},  # empty -> drop
+                            "context_length": 0,  # zero -> drop
+                            "key_env": "",  # empty -> drop
+                            "rate_limit_delay": -1,  # negative -> drop
+                            "request_timeout_seconds": 0,  # zero -> drop
+                            "stale_timeout_seconds": "not-a-number",  # wrong type -> drop
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            migrate_config(interactive=False, quiet=True)
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+        entry = raw["providers"]["sparse"]
+        for dropped_key in (
+            "models",
+            "context_length",
+            "key_env",
+            "rate_limit_delay",
+            "request_timeout_seconds",
+            "stale_timeout_seconds",
+        ):
+            assert dropped_key not in entry, f"{dropped_key} unexpectedly preserved"
+
     def test_providers_dict_resolves_at_runtime(self, tmp_path):
         """After migration deleted custom_providers, get_compatible_custom_providers
         still finds entries from the providers dict."""

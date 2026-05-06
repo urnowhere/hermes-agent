@@ -3217,6 +3217,46 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                 if entry.get("api_mode"):
                     new_entry["transport"] = entry["api_mode"]
 
+                # Preserve the remaining fields ``_normalize_custom_provider_entry``
+                # recognises so the migration is lossless.  Without these, hand-edited
+                # configs that declared per-model context windows, env-var-sourced
+                # API keys, or custom timeout / rate-limit settings would silently
+                # lose them on upgrade.  Most commonly this surfaces as runtime
+                # falling back to the 128K default context length for every
+                # custom-provider model, even though the user had explicit
+                # ``models.<m>.context_length`` overrides in the legacy shape.
+                models = entry.get("models")
+                if isinstance(models, dict) and models:
+                    new_entry["models"] = models
+                elif isinstance(models, list) and models:
+                    # Hand-edited configs sometimes write ``models`` as a flat
+                    # list of model ids; the runtime normaliser converts this
+                    # to the dict shape.  Preserve as-is here.
+                    new_entry["models"] = models
+
+                provider_context_length = entry.get("context_length")
+                if isinstance(provider_context_length, int) and provider_context_length > 0:
+                    new_entry["context_length"] = provider_context_length
+
+                # ``api_key_env`` is a documented alias for ``key_env`` (see
+                # website/docs/guides/azure-foundry.md).  Normalise to the
+                # canonical name on the way out.
+                key_env = entry.get("key_env") or entry.get("api_key_env")
+                if isinstance(key_env, str) and key_env.strip():
+                    new_entry["key_env"] = key_env.strip()
+
+                rate_limit_delay = entry.get("rate_limit_delay")
+                if isinstance(rate_limit_delay, (int, float)) and rate_limit_delay >= 0:
+                    new_entry["rate_limit_delay"] = rate_limit_delay
+
+                request_timeout_seconds = entry.get("request_timeout_seconds")
+                if isinstance(request_timeout_seconds, int) and request_timeout_seconds > 0:
+                    new_entry["request_timeout_seconds"] = request_timeout_seconds
+
+                stale_timeout_seconds = entry.get("stale_timeout_seconds")
+                if isinstance(stale_timeout_seconds, int) and stale_timeout_seconds > 0:
+                    new_entry["stale_timeout_seconds"] = stale_timeout_seconds
+
                 providers_dict[key] = new_entry
                 migrated_count += 1
 
