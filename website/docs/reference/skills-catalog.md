@@ -195,6 +195,12 @@ If a skill is missing from this list but present in the repo, the catalog is reg
 | [`test-driven-development`](/docs/user-guide/skills/bundled/software-development/software-development-test-driven-development) | TDD: enforce RED-GREEN-REFACTOR, tests before code. | `software-development/test-driven-development` |
 | [`writing-plans`](/docs/user-guide/skills/bundled/software-development/software-development-writing-plans) | Write implementation plans: bite-sized tasks, paths, code. | `software-development/writing-plans` |
 
+## web3
+
+| Skill | Description | Path |
+|-------|-------------|------|
+| [`evm-readonly-jsonrpc`](/docs/user-guide/skills/bundled/web3/web3-evm-readonly-jsonrpc) | Safe, whitelist-gated read-only Ethereum-compatible JSON-RPC (`urllib` helpers; no txs). | `web3/evm-readonly-jsonrpc` |
+
 ## yuanbao
 
 | Skill | Description | Path |
