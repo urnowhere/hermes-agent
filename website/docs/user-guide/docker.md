@@ -271,6 +271,34 @@ The entrypoint script (`docker/entrypoint.sh`) bootstraps the data volume on fir
 - Optionally launches `hermes dashboard` as a background side-process when `HERMES_DASHBOARD=1` (see [Running the dashboard](#running-the-dashboard))
 - Then runs `hermes` with whatever arguments you pass
 
+## Image variants
+
+Hermes publishes two Docker image variants:
+
+| Image | Purpose |
+|------|----------|
+| `nousresearch/hermes-agent:latest` | Lean/default image. This is the current official image and stays focused on the core Hermes runtime. |
+| `nousresearch/hermes-agent:complete-latest` | Lean image plus extra global npm CLIs and lightweight bundled-skill Python packages. |
+
+The `complete` image adds these extra packages on top of `latest`:
+
+| Type | Packages |
+|------|----------|
+| npm | `claude`, `gemini`, `codex`, `opencode` |
+| Python | `pygount`, `jupyterlab`, `youtube-transcript-api`, `markitdown[pptx]`, `Pillow`, `python-docx`, `pyfiglet` |
+
+The `complete` image is intentionally narrow. It does **not** add:
+
+- extra system packages beyond the current image
+- Docker / GitHub / vendor binary additions
+- heavy ML, OCR, or LaTeX stacks
+- `pptxgenjs` in this pass, because the bundled PowerPoint skill documents it as a Node module workflow rather than a clear CLI requirement
+
+Release tags follow the same split:
+
+- `nousresearch/hermes-agent:latest` and `nousresearch/hermes-agent:<tag>` for the lean image
+- `nousresearch/hermes-agent:complete-latest` and `nousresearch/hermes-agent:complete-<tag>` for the constrained complete image
+
 ## Upgrading
 
 Pull the latest image and recreate the container. Your data directory is untouched.
