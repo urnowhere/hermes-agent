@@ -960,7 +960,11 @@ def _tui_build_needed(tui_dir: Path) -> bool:
 
 def _hermes_ink_bundle_stale(tui_dir: Path) -> bool:
     ink_root = tui_dir / "packages" / "hermes-ink"
-    bundle = ink_root / "dist" / "ink-bundle.js"
+    # packages/hermes-ink's build script bundles src/entry-exports.ts to
+    # dist/entry-exports.js.  This must match package.json/index.js; otherwise
+    # the dashboard thinks the TUI is stale forever and runs npm build inside
+    # the /api/pty WebSocket handshake.
+    bundle = ink_root / "dist" / "entry-exports.js"
     if not bundle.exists():
         return True
     bm = bundle.stat().st_mtime
