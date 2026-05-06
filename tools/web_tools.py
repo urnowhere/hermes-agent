@@ -17,6 +17,7 @@ Backend compatibility:
 - Firecrawl: https://docs.firecrawl.dev/introduction (search, extract, crawl; direct or derived firecrawl-gateway.<domain> for Nous Subscribers)
 - Parallel: https://docs.parallel.ai (search, extract)
 - Tavily: https://tavily.com (search, extract, crawl)
+- DuckDuckGo: https://api.duckduckgo.com (free, no key)
 
 LLM Processing:
 - Uses OpenRouter API with Gemini 3 Flash Preview for intelligent content extraction
@@ -126,7 +127,7 @@ def _get_backend() -> str:
     keys manually without running setup.
     """
     configured = (_load_web_config().get("backend") or "").lower().strip()
-    if configured in ("parallel", "firecrawl", "tavily", "exa"):
+    if configured in ("parallel", "firecrawl", "tavily", "exa", "searxng", "ddg"):
         return configured
 
     # Fallback for manual / legacy config — pick the highest-priority
@@ -137,6 +138,8 @@ def _get_backend() -> str:
         ("parallel", _has_env("PARALLEL_API_KEY")),
         ("tavily", _has_env("TAVILY_API_KEY")),
         ("exa", _has_env("EXA_API_KEY")),
+        ("searxng", _has_env("SEARXNG_API_URL")),
+        ("ddg", True),  # DuckDuckGo - free, no API key needed
     )
     for backend, available in backend_candidates:
         if available:
@@ -155,6 +158,10 @@ def _is_backend_available(backend: str) -> bool:
         return check_firecrawl_api_key()
     if backend == "tavily":
         return _has_env("TAVILY_API_KEY")
+    if backend == "searxng":
+        return _has_env("SEARXNG_API_URL")
+    if backend == "ddg":
+        return True  # DuckDuckGo - free, always available
     return False
 
 # ─── Firecrawl Client ────────────────────────────────────────────────────────
@@ -227,6 +234,8 @@ def _web_requires_env() -> list[str]:
         "TAVILY_API_KEY",
         "FIRECRAWL_API_KEY",
         "FIRECRAWL_API_URL",
+        "SEARXNG_API_URL",
+        "DDG_API_KEY",  # optional, DuckDuckGo is free
     ]
     if managed_nous_tools_enabled():
         requires.extend(
@@ -399,6 +408,99 @@ def _normalize_tavily_documents(response: dict, fallback_url: str = "") -> List[
             "metadata": {"sourceURL": url_str},
         })
     return documents
+
+
+# ─── DuckDuckGo Search Client (free, no API key) ──────────────────────────────
+
+def _ddg_request(query: str, count: int = 5) -> dict:
+    """Send a GET request to the DuckDuckGo Instant Answer API.
+
+    Uses the free JSON API at api.duckduckgo.com — no API key required.
+    Good for quick, privacy-friendly searches.
+    """
+    url = "https://api.duckduckgo.com/"
+    params = {
+        "q": query,
+        "format": "json",
+        "no_redirect": 1,
+        "no_html": 1,
+        "skip_disambig": 1,
+    }
+    logger.info("DuckDuckGo search request: '%s' (count: %d)", query, count)
+    response = httpx.get(url, params=params, timeout=30)
+    response.raise_for_status()
+    return response.json()
+
+
+def _normalize_ddg_results(response: dict) -> dict:
+    """Normalize DuckDuckGo Instant Answer API response to standard web search format.
+
+    The API returns {AbstractText, AbstractURL, RelatedTopics, ...}.
+    We extract web results from RelatedTopics (which contain DDP links).
+    """
+    web_results = []
+    position = 1
+
+    # Add abstract as first result if available
+    abstract_text = response.get("AbstractText", "")
+    abstract_url = response.get("AbstractURL", "")
+    if abstract_text and abstract_url:
+        web_results.append({
+            "title": response.get("Heading", ""),
+            "url": abstract_url,
+            "description": abstract_text,
+            "position": position,
+        })
+        position += 1
+
+    # Add related topics (DDP entries = real web results)
+    for topic in response.get("RelatedTopics", [])[:count]:
+        if not topic.get("Text") or not topic.get("FirstURL"):
+            continue
+        # Skip internal DDG entries (no Text or Text is a one-liner)
+        web_results.append({
+            "title": topic.get("Text", "").split(" - ")[0] if " - " in topic.get("Text", "") else topic.get("Text", ""),
+            "url": topic.get("FirstURL", ""),
+            "description": topic.get("Text", ""),
+            "position": position,
+        })
+        position += 1
+        if len(web_results) >= count:
+            break
+
+    return {"success": True, "data": {"web": web_results}}
+
+
+# ─── Searxng Client ───────────────────────────────────────────────────────────
+
+_SEARXNG_BASE_URL = os.getenv("SEARXNG_API_URL", "http://localhost:8888").rstrip("/")
+
+
+def _searxng_search(query: str, limit: int = 5) -> dict:
+    """Search using a self-hosted Searxng instance.
+
+    API: GET http://localhost:8888/search?q=<query>&format=json
+    Requires SEARXNG_API_URL environment variable.
+    """
+    from tools.interrupt import is_interrupted
+    if is_interrupted():
+        return {"error": "Interrupted", "success": False}
+
+    url = f"{_SEARXNG_BASE_URL}/search"
+    logger.info("Searxng search: '%s' (limit=%d, base=%s)", query, limit, _SEARXNG_BASE_URL)
+    response = httpx.get(url, params={"q": query, "format": "json", "limit": limit}, timeout=30)
+    response.raise_for_status()
+    data = response.json()
+
+    web_results = []
+    for i, result in enumerate(data.get("results", []) or []):
+        web_results.append({
+            "title": result.get("title", ""),
+            "url": result.get("url", ""),
+            "description": result.get("content", ""),
+            "position": i + 1,
+        })
+    return {"success": True, "data": {"web": web_results}}
 
 
 def _to_plain_object(value: Any) -> Any:
@@ -1158,6 +1260,25 @@ def web_search_tool(query: str, limit: int = 5) -> str:
                 "include_images": False,
             })
             response_data = _normalize_tavily_search_results(raw)
+            debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
+            result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
+            debug_call_data["final_response_size"] = len(result_json)
+            _debug.log_call("web_search_tool", debug_call_data)
+            _debug.save()
+            return result_json
+
+        if backend == "searxng":
+            response_data = _searxng_search(query, limit)
+            debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
+            result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
+            debug_call_data["final_response_size"] = len(result_json)
+            _debug.log_call("web_search_tool", debug_call_data)
+            _debug.save()
+            return result_json
+
+        if backend == "ddg":
+            raw = _ddg_request(query, limit)
+            response_data = _normalize_ddg_results(raw)
             debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
             result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
             debug_call_data["final_response_size"] = len(result_json)
