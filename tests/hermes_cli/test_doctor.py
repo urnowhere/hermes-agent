@@ -706,6 +706,141 @@ def test_run_doctor_opencode_go_skips_invalid_models_probe(monkeypatch, tmp_path
     assert not any("opencode" in url.lower() and "models" in url.lower() for url, _, _ in calls)
 
 
+class TestDoctorWalCheckpointTruncate:
+    """Regression: `hermes doctor --fix` was using PRAGMA wal_checkpoint(PASSIVE),
+    which flushes WAL pages into the main database but does not truncate the
+    WAL file itself when other readers (e.g. the gateway process) hold it
+    open. As a result, --fix would report "WAL checkpoint performed" while
+    leaving state.db-wal at its original size on disk — a confusing no-op
+    in the most common deployment (gateway running 24/7 via systemd-linger).
+
+    The fix is to use PRAGMA wal_checkpoint(TRUNCATE) with a busy_timeout,
+    which waits for readers to release locks and then truncates the WAL.
+    """
+
+    @staticmethod
+    def _populate_wal(db_path):
+        """Open a SQLite DB in WAL mode, disable auto-checkpoint, and write
+        ~60 MB of data. Returns an open connection (the caller is responsible
+        for closing it AFTER the assertions, so the WAL file is not flushed
+        prematurely by SQLite's automatic clean-shutdown checkpoint).
+        """
+        import sqlite3
+
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA journal_mode = WAL")
+        # Disable auto-checkpoint so the WAL accumulates; otherwise SQLite
+        # checkpoints at every 1000 pages by default.
+        conn.execute("PRAGMA wal_autocheckpoint = 0")
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, blob TEXT)")
+        payload = "x" * 1024  # ~1 KB rows
+        conn.executemany(
+            "INSERT INTO t (blob) VALUES (?)",
+            [(payload,) for _ in range(60_000)],
+        )
+        conn.commit()
+        return conn
+
+    def test_truncate_shrinks_wal_file(self, tmp_path):
+        """End-to-end: simulate a fat WAL with an open reader (mimicking the
+        gateway process) and confirm TRUNCATE shrinks the WAL file on disk.
+        """
+        import sqlite3
+
+        db_path = tmp_path / "state.db"
+        wal_path = tmp_path / "state.db-wal"
+
+        # Hold the writer open so the WAL stays on disk; SQLite would
+        # otherwise checkpoint on the last connection close.
+        writer = self._populate_wal(db_path)
+        try:
+            assert wal_path.exists(), "test setup failed: WAL file was not created"
+            size_before = wal_path.stat().st_size
+            assert size_before > 50 * 1024 * 1024, (
+                f"test setup failed: WAL is only {size_before} bytes, "
+                "expected >50 MB to exercise doctor's fix branch"
+            )
+
+            # Run the same sequence doctor uses on --fix.
+            conn = sqlite3.connect(str(db_path))
+            conn.execute("PRAGMA busy_timeout = 5000")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.close()
+
+            size_after = wal_path.stat().st_size if wal_path.exists() else 0
+        finally:
+            writer.close()
+
+        assert size_after < size_before, (
+            f"WAL did not shrink: before={size_before}, after={size_after}. "
+            "TRUNCATE checkpoint did not free space."
+        )
+        # TRUNCATE typically takes the WAL all the way to 0 bytes when the
+        # checkpoint succeeds. Even with a few pending pages, the new size
+        # should be drastically smaller — at least 10× reduction.
+        assert size_after < size_before // 10, (
+            f"WAL only shrank from {size_before} to {size_after} bytes; "
+            "expected at least 10× reduction with TRUNCATE."
+        )
+
+    def test_passive_does_not_shrink_wal_with_open_reader(self, tmp_path):
+        """Pin the regression: PASSIVE checkpoint flushes pages but does NOT
+        truncate the WAL file while a reader holds it open. This test
+        documents the exact failure mode the fix addresses.
+        """
+        import sqlite3
+
+        db_path = tmp_path / "state.db"
+        wal_path = tmp_path / "state.db-wal"
+
+        writer = self._populate_wal(db_path)
+        try:
+            size_before = wal_path.stat().st_size
+            assert size_before > 50 * 1024 * 1024
+
+            # PASSIVE — what doctor used to do
+            conn = sqlite3.connect(str(db_path))
+            conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            conn.close()
+
+            size_after_passive = wal_path.stat().st_size
+
+            # PASSIVE leaves the WAL on disk at its original size while the
+            # writer is still open — this is the bug.
+            assert size_after_passive == size_before, (
+                f"Expected PASSIVE to leave WAL unchanged on disk "
+                f"(documented sqlite behavior with open reader), but it "
+                f"shrank from {size_before} to {size_after_passive}. "
+                f"This invalidates the regression test fixture."
+            )
+        finally:
+            writer.close()
+
+    def test_doctor_source_uses_truncate_not_passive(self):
+        """Static check: ensure the doctor source still uses TRUNCATE.
+        Cheap guard against a future regression silently swapping it back
+        to PASSIVE during a refactor.
+        """
+        import inspect
+
+        from hermes_cli import doctor as doctor_mod
+
+        source = inspect.getsource(doctor_mod)
+        # Find the WAL-checkpoint section.
+        assert "wal_checkpoint(TRUNCATE)" in source, (
+            "doctor.py must use PRAGMA wal_checkpoint(TRUNCATE) so that "
+            "--fix actually shrinks the WAL file when the gateway holds "
+            "it open. PASSIVE silently no-ops in that case."
+        )
+        assert "wal_checkpoint(PASSIVE)" not in source, (
+            "doctor.py should no longer use PRAGMA wal_checkpoint(PASSIVE) "
+            "for the --fix path; it does not truncate the WAL while readers "
+            "hold it open. Use TRUNCATE with busy_timeout instead."
+        )
+        assert "busy_timeout" in source, (
+            "doctor.py should set PRAGMA busy_timeout before TRUNCATE so "
+            "the checkpoint waits for concurrent readers to release locks."
+        )
 class TestGitHubTokenCheck:
     """Tests for GitHub token / gh auth detection in doctor."""
 

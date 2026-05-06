@@ -800,7 +800,16 @@ def run_doctor(args):
                 if should_fix:
                     import sqlite3
                     conn = sqlite3.connect(str(state_db_path))
-                    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                    # PASSIVE flushes the WAL into the main db but cannot
+                    # truncate the WAL file while other readers (e.g. the
+                    # gateway process) hold it open. TRUNCATE attempts the
+                    # checkpoint and then truncates the WAL file even when
+                    # readers are present, by waiting up to busy_timeout
+                    # for them to release locks. Without TRUNCATE, --fix
+                    # silently no-ops in the common case where the gateway
+                    # is running.
+                    conn.execute("PRAGMA busy_timeout = 5000")
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                     conn.close()
                     new_size = wal_path.stat().st_size if wal_path.exists() else 0
                     check_ok(f"WAL checkpoint performed ({wal_size // 1024}K → {new_size // 1024}K)")
