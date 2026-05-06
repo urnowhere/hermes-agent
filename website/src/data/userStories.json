@@ -33,6 +33,17 @@
     "size": "md"
   },
   {
+    "id": "guglielmo-eightsleep-cron",
+    "source": "x",
+    "author": "@_guglielmo",
+    "url": "https://x.com/_guglielmo/status/2048636541547999649",
+    "date": "2026-04-27",
+    "category": "integrations",
+    "headline": "Hermes controls my EightSleep for free",
+    "quote": "My Hermes agent now controls my EightSleep for free. Eight Sleep charges $200/year for their Autopilot, which mainly sets different temperatures throughout the night. I taught Hermes how to use the Eight Sleep MCP and now it has cron jobs to control my sleep temperatures for free. Next up: pull temperature data from Apple HomePods to know baseline room temp.",
+    "size": "md"
+  },
+  {
     "id": "gkisokay-autobuild",
     "source": "x",
     "author": "@gkisokay",
