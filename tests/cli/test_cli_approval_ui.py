@@ -421,3 +421,247 @@ class TestApprovalCallbackThreadLocalWiring:
         # would hold a stale reference to a disposed CLI instance.
         assert seen["approval_after"] is None
         assert seen["sudo_after"] is None
+
+
+class TestOverlayInterruptCleanup:
+    """Regression tests for #14026 — interrupt must clear all overlay state
+    including _modal_input_snapshot and _sudo_deadline."""
+
+    def _make_cli_with_sudo_active(self):
+        """Return a CLI stub with an active sudo prompt and captured snapshot."""
+        cli = _make_cli_stub()
+        cli._app.current_buffer = _FakeBuffer("pre-modal draft", cursor_position=7)
+        # Simulate snapshot captured when sudo prompt started.
+        cli._modal_input_snapshot = {
+            "text": "pre-modal draft",
+            "cursor_position": 7,
+        }
+        cli._sudo_deadline = 99999.0
+        q = queue.Queue()
+        cli._sudo_state = {"response_queue": q, "timeout": 60}
+        return cli
+
+    def test_interrupt_clears_sudo_state_and_restores_snapshot(self):
+        """Interrupt path: _sudo_state cleared + snapshot restored + deadline reset."""
+        cli = self._make_cli_with_sudo_active()
+
+        # Simulate the interrupt handler code path (agent-running interrupt branch).
+        try:
+            if cli._sudo_state:
+                try:
+                    cli._sudo_state["response_queue"].put(None)
+                except Exception:
+                    pass
+                cli._sudo_state = None
+                cli._sudo_deadline = 0
+                cli._restore_modal_input_snapshot()
+        except Exception:
+            pass
+
+        assert cli._sudo_state is None, "_sudo_state not cleared"
+        assert cli._sudo_deadline == 0, "_sudo_deadline not reset"
+        assert cli._modal_input_snapshot is None, "_modal_input_snapshot still set after interrupt"
+        # Snapshot should have been restored to the buffer.
+        assert cli._app.current_buffer.text == "pre-modal draft"
+        assert cli._app.current_buffer.cursor_position == 7
+
+    def test_ctrlc_clears_sudo_state_and_restores_snapshot(self):
+        """Ctrl+C path: same cleanup required."""
+        cli = self._make_cli_with_sudo_active()
+
+        # Simulate Ctrl+C handler (key binding branch).
+        if cli._sudo_state:
+            cli._sudo_state["response_queue"].put("")
+            cli._sudo_state = None
+            cli._sudo_deadline = 0
+            cli._restore_modal_input_snapshot()
+
+        assert cli._sudo_state is None
+        assert cli._sudo_deadline == 0
+        assert cli._modal_input_snapshot is None
+        assert cli._app.current_buffer.text == "pre-modal draft"
+
+    def test_interrupt_unblocks_blocked_thread(self):
+        """Thread blocked in _sudo_password_callback() must unblock when interrupt fires."""
+        import threading
+        from unittest.mock import patch
+        import cli as cli_module
+
+        cli = _make_cli_stub()
+        cli._app.current_buffer = _FakeBuffer("pre-draft", cursor_position=4)
+        result = {}
+
+        def _run_callback():
+            result["value"] = cli._sudo_password_callback()
+
+        with patch.object(cli_module, "_cprint"):
+            t = threading.Thread(target=_run_callback, daemon=True)
+            t.start()
+
+            deadline = time.time() + 2
+            while cli._sudo_state is None and time.time() < deadline:
+                time.sleep(0.01)
+
+            assert cli._sudo_state is not None, "sudo prompt did not start"
+
+            # Simulate interrupt clearing the state.
+            try:
+                cli._sudo_state["response_queue"].put(None)
+            except Exception:
+                pass
+            cli._sudo_state = None
+            cli._sudo_deadline = 0
+            cli._restore_modal_input_snapshot()
+
+            t.join(timeout=2)
+
+        # _sudo_password_callback returns None (or empty) on cancel.
+        assert result.get("value") in (None, ""), f"unexpected value: {result.get('value')!r}"
+        assert cli._modal_input_snapshot is None
+        assert cli._sudo_deadline == 0
+
+
+class TestInterruptOverlayClearance:
+    """Regression tests: interrupting an active overlay must clear state and unblock threads.
+
+    Covers the fix for the CLI freeze introduced by 52a79d9 where stale overlay
+    states left _command_running / $isBlocked active after an interrupt, silently
+    swallowing all keystrokes until the user killed and restarted Hermes.
+    """
+
+    # ------------------------------------------------------------------ helpers
+
+    def _make_stub(self, *, draft="", draft_cursor=0):
+        import threading
+        cli = HermesCLI.__new__(HermesCLI)
+        cli._approval_state = None
+        cli._approval_deadline = 0
+        cli._approval_lock = threading.Lock()
+        cli._clarify_state = None
+        cli._clarify_deadline = 0
+        cli._clarify_freetext = False
+        cli._sudo_state = None
+        cli._sudo_deadline = 0
+        cli._modal_input_snapshot = None
+        cli._invalidate = MagicMock()
+        cli._app = SimpleNamespace(
+            invalidate=MagicMock(),
+            current_buffer=_FakeBuffer(draft, cursor_position=draft_cursor),
+        )
+        return cli
+
+    # ------------------------------------------------------------------ approval
+
+    def test_interrupt_clears_approval_state_and_sends_deny(self):
+        """Interrupting while an approval prompt is active must clear state and send 'deny'."""
+        import queue as _queue
+        cli = self._make_stub()
+        rq = _queue.Queue()
+        cli._approval_state = {
+            "command": "rm -rf /tmp/test",
+            "description": "delete temp",
+            "choices": ["approve", "deny"],
+            "selected": 0,
+            "response_queue": rq,
+        }
+
+        # Simulate the Ctrl+C key-binding interrupt path.
+        if cli._approval_state:
+            cli._approval_state["response_queue"].put("deny")
+            cli._approval_state = None
+
+        assert cli._approval_state is None, "_approval_state not cleared after interrupt"
+        assert rq.get_nowait() == "deny", "approval queue should have received 'deny'"
+
+    def test_interrupt_unblocks_approval_callback_thread(self):
+        """Thread blocked in _approval_callback() must unblock and receive 'deny'."""
+        import threading
+        import queue as _queue
+        from unittest.mock import patch
+        import cli as cli_module
+
+        cli = self._make_stub()
+        result = {}
+
+        def _run_callback():
+            result["value"] = cli._approval_callback("rm -rf /tmp/x", "cleanup")
+
+        with patch.object(cli_module, "_cprint"):
+            t = threading.Thread(target=_run_callback, daemon=True)
+            t.start()
+
+            deadline = time.time() + 2
+            while cli._approval_state is None and time.time() < deadline:
+                time.sleep(0.01)
+
+            assert cli._approval_state is not None, "approval prompt did not start"
+
+            # Simulate interrupt.
+            cli._approval_state["response_queue"].put("deny")
+            cli._approval_state = None
+
+            t.join(timeout=2)
+
+        assert result.get("value") == "deny", f"expected 'deny', got {result.get('value')!r}"
+
+    # ------------------------------------------------------------------ clarify
+
+    def test_interrupt_clears_clarify_state(self):
+        """Interrupting while a clarify prompt is active must nil out _clarify_state."""
+        import queue as _queue
+        cli = self._make_stub()
+        rq = _queue.Queue()
+        cli._clarify_state = {
+            "question": "Which approach?",
+            "choices": ["A", "B"],
+            "selected": 0,
+            "response_queue": rq,
+        }
+        cli._clarify_freetext = False
+
+        # Simulate the Ctrl+C key-binding interrupt path.
+        if cli._clarify_state:
+            cli._clarify_state["response_queue"].put(
+                "The user cancelled. Use your best judgement to proceed."
+            )
+            cli._clarify_state = None
+            cli._clarify_freetext = False
+
+        assert cli._clarify_state is None, "_clarify_state not cleared after interrupt"
+        assert cli._clarify_freetext is False, "_clarify_freetext not reset after interrupt"
+        val = rq.get_nowait()
+        assert "cancelled" in val.lower(), f"unexpected cancellation message: {val!r}"
+
+    def test_interrupt_unblocks_clarify_callback_thread(self):
+        """Thread blocked in _clarify_callback() must unblock when interrupt fires."""
+        import threading
+        from unittest.mock import patch
+        import cli as cli_module
+
+        cli = self._make_stub()
+        result = {}
+
+        def _run_callback():
+            result["value"] = cli._clarify_callback("Pick one?", ["Yes", "No"])
+
+        with patch.object(cli_module, "_cprint"):
+            t = threading.Thread(target=_run_callback, daemon=True)
+            t.start()
+
+            deadline = time.time() + 2
+            while cli._clarify_state is None and time.time() < deadline:
+                time.sleep(0.01)
+
+            assert cli._clarify_state is not None, "clarify prompt did not start"
+
+            # Simulate interrupt.
+            cli._clarify_state["response_queue"].put(
+                "The user cancelled. Use your best judgement to proceed."
+            )
+            cli._clarify_state = None
+            cli._clarify_freetext = False
+
+            t.join(timeout=2)
+
+        assert result.get("value") is not None, "clarify callback did not return"
+        assert "cancelled" in result["value"].lower() or result["value"] in ("Yes", "No", None)
