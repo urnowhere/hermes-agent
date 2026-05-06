@@ -1110,7 +1110,13 @@ def list_authenticated_providers(
             return
         url = ""
         if getattr(pcfg, "base_url_env_var", ""):
-            url = os.environ.get(pcfg.base_url_env_var, "") or ""
+            # Prefer ~/.hermes/.env over os.environ for parity with how the
+            # rest of Hermes resolves provider base URLs (issue #18757).
+            try:
+                from hermes_cli.config import get_env_value
+                url = (get_env_value(pcfg.base_url_env_var) or "")
+            except Exception:
+                url = os.environ.get(pcfg.base_url_env_var, "") or ""
         if not url:
             url = getattr(pcfg, "inference_base_url", "") or ""
         normed = _norm_url(url)

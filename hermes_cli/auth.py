@@ -41,7 +41,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import httpx
 import yaml
 
-from hermes_cli.config import get_hermes_home, get_config_path, read_raw_config
+from hermes_cli.config import get_hermes_home, get_config_path, read_raw_config, get_env_value
 from hermes_constants import OPENROUTER_BASE_URL
 from utils import atomic_replace, atomic_yaml_write, is_truthy_value
 
@@ -3682,7 +3682,9 @@ def get_api_key_provider_status(provider_id: str) -> Dict[str, Any]:
 
     env_url = ""
     if pconfig.base_url_env_var:
-        env_url = os.getenv(pconfig.base_url_env_var, "").strip()
+        # Use get_env_value so ~/.hermes/.env is consulted, matching
+        # how the API key itself is resolved. See issue #18757.
+        env_url = (get_env_value(pconfig.base_url_env_var) or "").strip()
 
     if provider_id in ("kimi-coding", "kimi-coding-cn"):
         base_url = _resolve_kimi_base_url(api_key, pconfig.inference_base_url, env_url)
@@ -3714,7 +3716,12 @@ def get_external_process_provider_status(provider_id: str) -> Dict[str, Any]:
     )
     raw_args = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
     args = shlex.split(raw_args) if raw_args else ["--acp", "--stdio"]
-    base_url = os.getenv(pconfig.base_url_env_var, "").strip() if pconfig.base_url_env_var else ""
+    # ~/.hermes/.env should win over a stale shell export — see issue #18757.
+    base_url = (
+        (get_env_value(pconfig.base_url_env_var) or "").strip()
+        if pconfig.base_url_env_var
+        else ""
+    )
     if not base_url:
         base_url = pconfig.inference_base_url
 
@@ -3786,7 +3793,10 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
 
     env_url = ""
     if pconfig.base_url_env_var:
-        env_url = os.getenv(pconfig.base_url_env_var, "").strip()
+        # Read from ~/.hermes/.env as well as os.environ so providers with
+        # a custom base URL stored only in the dotenv file (e.g. Xiaomi) are
+        # routed to the right endpoint. See issue #18757.
+        env_url = (get_env_value(pconfig.base_url_env_var) or "").strip()
 
     if provider_id in ("kimi-coding", "kimi-coding-cn"):
         base_url = _resolve_kimi_base_url(api_key, pconfig.inference_base_url, env_url)
@@ -3815,7 +3825,12 @@ def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str,
             code="invalid_provider",
         )
 
-    base_url = os.getenv(pconfig.base_url_env_var, "").strip() if pconfig.base_url_env_var else ""
+    # Honour ~/.hermes/.env for the base URL — see issue #18757.
+    base_url = (
+        (get_env_value(pconfig.base_url_env_var) or "").strip()
+        if pconfig.base_url_env_var
+        else ""
+    )
     if not base_url:
         base_url = pconfig.inference_base_url
 

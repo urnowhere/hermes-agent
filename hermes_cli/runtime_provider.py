@@ -844,7 +844,11 @@ def _resolve_explicit_runtime(
     if pconfig and pconfig.auth_type == "api_key":
         env_url = ""
         if pconfig.base_url_env_var:
-            env_url = os.getenv(pconfig.base_url_env_var, "").strip().rstrip("/")
+            # Read ~/.hermes/.env in addition to the process environment so
+            # custom base URLs stored only in the dotenv file (e.g. Xiaomi)
+            # are honoured here too. See issue #18757.
+            from hermes_cli.config import get_env_value
+            env_url = (get_env_value(pconfig.base_url_env_var) or "").strip().rstrip("/")
 
         base_url = explicit_base_url
         if not base_url:
