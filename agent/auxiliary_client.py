@@ -2469,6 +2469,8 @@ def resolve_provider_client(
         # built-in provider name but targets a user-specified endpoint.
         if explicit_base_url:
             base_url = _to_openai_base_url(explicit_base_url.strip().rstrip("/"))
+        if explicit_api_key:
+            api_key = explicit_api_key
 
         default_model = _get_aux_model_for_provider(provider)
         final_model = _normalize_resolved_model(model or default_model, provider)
@@ -3238,7 +3240,27 @@ def _resolve_task_provider_model(
             # (e.g. OPENROUTER_API_KEY) instead of locking into "custom".
             return cfg_provider, resolved_model, cfg_base_url, None, resolved_api_mode
         if cfg_provider and cfg_provider != "auto":
-            return cfg_provider, resolved_model, None, None, resolved_api_mode
+            # Inherit base_url / api_key from providers.<name> when not
+            # explicitly set on the auxiliary task itself (#17737).
+            prov_base_url = None
+            prov_api_key = None
+            try:
+                from hermes_cli.config import load_config as _load_cfg
+                _pcfg = (_load_cfg() or {}).get('providers', {})
+                _pentry = _pcfg.get(cfg_provider, {}) if isinstance(_pcfg, dict) else {}
+                if isinstance(_pentry, dict):
+                    prov_base_url = (
+                        str(_pentry.get('base_url') or _pentry.get('api') or _pentry.get('url') or '').strip() or None
+                    )
+                    prov_api_key = str(_pentry.get('api_key', '')).strip() or None
+                    if not prov_api_key:
+                        _kenv = str(_pentry.get('key_env', '')).strip()
+                        if _kenv:
+                            import os as _os
+                            prov_api_key = _os.getenv(_kenv, '').strip() or None
+            except Exception:
+                pass
+            return cfg_provider, resolved_model, prov_base_url, prov_api_key, resolved_api_mode
 
         return "auto", resolved_model, None, None, resolved_api_mode
 
