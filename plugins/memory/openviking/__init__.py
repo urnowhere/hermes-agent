@@ -9,10 +9,10 @@ lifecycle instead of read-only search endpoints.
 
 Config via environment variables (profile-scoped via each profile's .env):
   OPENVIKING_ENDPOINT  — Server URL (default: http://127.0.0.1:1933)
-  OPENVIKING_API_KEY   — API key (required for authenticated servers)
-  OPENVIKING_ACCOUNT   — Tenant account (default: default)
-  OPENVIKING_USER      — Tenant user (default: default)
-  OPENVIKING_AGENT   — Tenant agent (default: hermes)
+  OPENVIKING_API_KEY   — API key (required for remote servers)
+  OPENVIKING_ACCOUNT   — account_id (only used with root_api_key access)
+  OPENVIKING_USER      — user_id (only used with root_api_key access)
+  OPENVIKING_AGENT     — Tenant agent (default: hermes)
 
 Capabilities:
   - Automatic memory extraction on session commit (6 categories)
@@ -84,8 +84,8 @@ class _VikingClient:
                  account: str = "", user: str = "", agent: str = ""):
         self._endpoint = endpoint.rstrip("/")
         self._api_key = api_key
-        self._account = account or os.environ.get("OPENVIKING_ACCOUNT", "default")
-        self._user = user or os.environ.get("OPENVIKING_USER", "default")
+        self._account = account or os.environ.get("OPENVIKING_ACCOUNT", "")
+        self._user = user or os.environ.get("OPENVIKING_USER", "")
         self._agent = agent or os.environ.get("OPENVIKING_AGENT", "hermes")
         self._httpx = _get_httpx()
         if self._httpx is None:
@@ -94,12 +94,15 @@ class _VikingClient:
     def _headers(self) -> dict:
         h = {
             "Content-Type": "application/json",
-            "X-OpenViking-Account": self._account,
-            "X-OpenViking-User": self._user,
             "X-OpenViking-Agent": self._agent,
         }
+        if self._account:
+            h["X-OpenViking-Account"] = self._account
+        if self._user:
+            h["X-OpenViking-User"] = self._user
         if self._api_key:
             h["X-API-Key"] = self._api_key
+            h["Authorization"] = "Bearer " + self._api_key
         return h
 
     def _url(self, path: str) -> str:
@@ -123,7 +126,7 @@ class _VikingClient:
     def health(self) -> bool:
         try:
             resp = self._httpx.get(
-                self._url("/health"), timeout=3.0
+                self._url("/health"), headers=self._headers(), timeout=3.0
             )
             return resp.status_code == 200
         except Exception:
@@ -291,19 +294,19 @@ class OpenVikingMemoryProvider(MemoryProvider):
             },
             {
                 "key": "account",
-                "description": "OpenViking tenant account ID ([default], used when local mode, OPENVIKING_API_KEY is empty)",
-                "default": "default",
+                "description": "account_id (only used in root_api_key access), default empty",
+                "default": "",
                 "env_var": "OPENVIKING_ACCOUNT",
             },
             {
                 "key": "user",
-                "description": "OpenViking user ID within the account ([default], used when local mode, OPENVIKING_API_KEY is empty)",
-                "default": "default",
+                "description": "user_id (only used in root_api_key access), default empty",
+                "default": "",
                 "env_var": "OPENVIKING_USER",
             },
             {
                 "key": "agent",
-                "description": "OpenViking agent ID within the account ([hermes], useful in multi-agent mode)",
+                "description": "optional agent_id, default: [hermes]",
                 "default": "hermes",
                 "env_var": "OPENVIKING_AGENT",
             },
@@ -312,8 +315,8 @@ class OpenVikingMemoryProvider(MemoryProvider):
     def initialize(self, session_id: str, **kwargs) -> None:
         self._endpoint = os.environ.get("OPENVIKING_ENDPOINT", _DEFAULT_ENDPOINT)
         self._api_key = os.environ.get("OPENVIKING_API_KEY", "")
-        self._account = os.environ.get("OPENVIKING_ACCOUNT", "default")
-        self._user = os.environ.get("OPENVIKING_USER", "default")
+        self._account = os.environ.get("OPENVIKING_ACCOUNT", "")
+        self._user = os.environ.get("OPENVIKING_USER", "")
         self._agent = os.environ.get("OPENVIKING_AGENT", "hermes")
         self._session_id = session_id
         self._turn_count = 0

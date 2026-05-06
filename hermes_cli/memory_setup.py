@@ -326,9 +326,10 @@ def cmd_setup(args) -> None:
                 val = _prompt(desc, default=str(effective_default) if effective_default else None)
                 if val:
                     provider_config[key] = val
-                    # Also write to .env if this field has an env_var
-                    if env_var and env_var not in env_writes:
-                        env_writes[env_var] = val
+                # Also write to .env if this field has an env_var. Write empty
+                # values too, so blank optional fields clear stale .env values.
+                if env_var and env_var not in env_writes:
+                    env_writes[env_var] = val
 
     # Write activation key to config.yaml
     config["memory"]["provider"] = name
@@ -342,7 +343,7 @@ def cmd_setup(args) -> None:
         except Exception as e:
             print(f"  Failed to write provider config: {e}")
 
-    # Write secrets to .env
+    # Write env values to .env
     if env_writes:
         _write_env_vars(env_path, env_writes)
 
