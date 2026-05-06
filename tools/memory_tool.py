@@ -475,7 +475,10 @@ def memory_tool(
     Returns JSON string with results.
     """
     if store is None:
-        return tool_error("Memory is not available. It may be disabled in config or this environment.", success=False)
+        return tool_error(
+            "Built-in memory (MEMORY.md/USER.md) is not available in this environment. "
+            "Use hindsight_retain to store facts and hindsight_recall to search long-term memory.",
+            success=False)
 
     if target not in ("memory", "user"):
         return tool_error(f"Invalid target '{target}'. Use 'memory' or 'user'.", success=False)

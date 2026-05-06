@@ -960,6 +960,7 @@ class AIAgent:
         skip_context_files: bool = False,
         load_soul_identity: bool = False,
         skip_memory: bool = False,
+        skip_memory_provider: bool = None,
         session_db=None,
         parent_session_id: str = None,
         iteration_budget: "IterationBudget" = None,
@@ -1756,8 +1757,12 @@ class AIAgent:
 
         # Memory provider plugin (external — one at a time, alongside built-in)
         # Reads memory.provider from config to select which plugin to activate.
+        # skip_memory_provider defaults to skip_memory for backward compat,
+        # but can be set independently (e.g. cron skips built-in memory to protect
+        # MEMORY.md/USER.md, but still allows the Hindsight provider).
+        _skip_provider = skip_memory if skip_memory_provider is None else skip_memory_provider
         self._memory_manager = None
-        if not skip_memory:
+        if not _skip_provider:
             try:
                 _mem_provider_name = mem_config.get("provider", "") if mem_config else ""
 
