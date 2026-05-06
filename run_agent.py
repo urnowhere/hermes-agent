@@ -9047,7 +9047,15 @@ class AIAgent:
         # This must happen before the unconditional empty-string fallback so
         # genuine reasoning content is not overwritten (#15812 regression in
         # PR #15478).
-        if isinstance(normalized_reasoning, str) and normalized_reasoning:
+        #
+        # Gate on needs_thinking_pad (DeepSeek/Kimi only).  Qwen-on-vLLM and
+        # other custom providers forbid re-feeding reasoning_content from
+        # prior turns (Qwen multi-turn spec) — causes context balloon and
+        # thinking-mode death loops.  OpenRouter, Anthropic, and OpenAI
+        # maintain reasoning continuity via the separate reasoning_details
+        # field, so dropping the promotion here is safe for them; only
+        # DeepSeek/Kimi rely on this path for genuine content.
+        if needs_thinking_pad and isinstance(normalized_reasoning, str) and normalized_reasoning:
             api_msg["reasoning_content"] = normalized_reasoning
             return
 
@@ -11107,6 +11115,8 @@ class AIAgent:
 
                 # For ALL assistant messages, pass reasoning back to the API
                 # This ensures multi-turn reasoning context is preserved
+                # (Qwen-on-vLLM is excluded inside the helper — see
+                # _copy_reasoning_content_for_api step 3.)
                 self._copy_reasoning_content_for_api(msg, api_msg)
 
                 # Remove 'reasoning' field - it's for trajectory storage only
