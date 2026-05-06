@@ -1480,6 +1480,19 @@ def _get_custom_base_url() -> str:
     return ""
 
 
+def _get_custom_model_id() -> str:
+    """Get the configured model id from config.yaml for the custom provider."""
+    try:
+        from hermes_cli.config import load_config
+        config = load_config()
+        model_cfg = config.get("model", {})
+        if isinstance(model_cfg, dict):
+            return str(model_cfg.get("default", "")).strip()
+    except Exception:
+        pass
+    return ""
+
+
 def curated_models_for_provider(
     provider: Optional[str],
     *,
@@ -1494,6 +1507,13 @@ def curated_models_for_provider(
     normalized = normalize_provider(provider)
     if normalized == "openrouter":
         return fetch_openrouter_models(force_refresh=force_refresh)
+
+    # Custom provider: return the configured model from config.yaml
+    if normalized == "custom":
+        custom_model = _get_custom_model_id()
+        if custom_model:
+            return [(custom_model, "")]
+        return []
 
     # Try live API first (Codex, Nous, etc. all support /models)
     live = provider_model_ids(normalized)

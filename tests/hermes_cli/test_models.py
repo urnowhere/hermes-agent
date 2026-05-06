@@ -6,6 +6,7 @@ from hermes_cli.models import (
     OPENROUTER_MODELS, fetch_openrouter_models, model_ids, detect_provider_for_model,
     is_nous_free_tier, partition_nous_models_by_tier,
     check_nous_free_tier, _FREE_TIER_CACHE_TTL,
+    curated_models_for_provider, _get_custom_model_id,
 )
 import hermes_cli.models as _models_mod
 
@@ -615,3 +616,50 @@ class TestNousRecommendedModels:
             patch("hermes_cli.models.check_nous_free_tier", side_effect=RuntimeError("boom")),
         ):
             assert get_nous_recommended_aux_model(vision=False) == "paid-model"
+
+
+class TestGetCustomModelId:
+    """Tests for _get_custom_model_id — reads the configured model from config.yaml."""
+
+    def test_returns_model_from_config(self):
+        with patch("hermes_cli.config.load_config", return_value={
+            "model": {"default": "xiaomi/mimo-v2.5"}
+        }):
+            assert _get_custom_model_id() == "xiaomi/mimo-v2.5"
+
+    def test_returns_empty_when_no_model_section(self):
+        with patch("hermes_cli.config.load_config", return_value={}):
+            assert _get_custom_model_id() == ""
+
+    def test_returns_empty_when_model_is_not_dict(self):
+        with patch("hermes_cli.config.load_config", return_value={"model": "not-a-dict"}):
+            assert _get_custom_model_id() == ""
+
+    def test_returns_empty_on_load_error(self):
+        with patch("hermes_cli.config.load_config", side_effect=RuntimeError("boom")):
+            assert _get_custom_model_id() == ""
+
+
+class TestCuratedModelsForProviderCustom:
+    """Tests for curated_models_for_provider with the custom provider."""
+
+    def test_custom_provider_returns_configured_model(self):
+        with patch("hermes_cli.models._get_custom_model_id", return_value="xiaomi/mimo-v2.5"):
+            models = curated_models_for_provider("custom")
+        assert models == [("xiaomi/mimo-v2.5", "")]
+
+    def test_custom_provider_returns_empty_when_no_model_configured(self):
+        with patch("hermes_cli.models._get_custom_model_id", return_value=""):
+            models = curated_models_for_provider("custom")
+        assert models == []
+
+    def test_custom_provider_is_case_insensitive(self):
+        with patch("hermes_cli.models._get_custom_model_id", return_value="test-model"):
+            models = curated_models_for_provider("CUSTOM")
+        assert models == [("test-model", "")]
+
+    def test_openrouter_still_uses_live_catalog(self):
+        """Custom provider changes must not affect OpenRouter."""
+        with patch("hermes_cli.models.fetch_openrouter_models", return_value=[("test/model", "recommended")]):
+            models = curated_models_for_provider("openrouter")
+        assert models == [("test/model", "recommended")]
