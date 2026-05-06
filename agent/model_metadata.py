@@ -191,6 +191,13 @@ DEFAULT_CONTEXT_LENGTHS = {
     # MiniMax — official docs: 204,800 context for all models
     # https://platform.minimax.io/docs/api-reference/text-anthropic-api
     "minimax": 204800,
+    # LongCat — official docs: 256K context for Flash-Chat/Flash-Thinking/Flash-Lite,
+    # 128K for Flash-Omni. Since LongCat doesn't expose a /models endpoint,
+    # we use the conservative 256K for the default LongCat-Flash-Lite.
+    "longcat-flash-lite": 256000,
+    "longcat-flash-chat": 256000,
+    "longcat-flash-thinking": 256000,
+    "longcat-omni": 128000,
     # GLM
     "glm": 202752,
     # xAI Grok — xAI /v1/models does not return context_length metadata,
@@ -316,6 +323,7 @@ _URL_TO_PROVIDER: Dict[str, str] = {
     "api.gmi-serving.com": "gmi",
     "tokenhub.tencentmaas.com": "tencent-tokenhub",
     "ollama.com": "ollama-cloud",
+    "api.longcat.chat": "longcat",
 }
 
 # Auto-extend with hostnames derived from provider profiles.

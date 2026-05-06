@@ -7637,6 +7637,7 @@ class GatewayRunner:
                     current_model = model_cfg.get("default", "")
                     current_provider = model_cfg.get("provider", current_provider)
                     current_base_url = model_cfg.get("base_url", "")
+                    current_api_key = model_cfg.get("api_key", "") or ""
                 user_provs = cfg.get("providers")
                 try:
                     from hermes_cli.config import get_compatible_custom_providers
@@ -7898,6 +7899,8 @@ class GatewayRunner:
                 model_cfg["provider"] = result.target_provider
                 if result.base_url:
                     model_cfg["base_url"] = result.base_url
+                if result.api_key:
+                    model_cfg["api_key"] = result.api_key
                 from hermes_cli.config import save_config
                 save_config(cfg)
             except Exception as e:

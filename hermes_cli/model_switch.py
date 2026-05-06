@@ -897,6 +897,10 @@ def switch_model(
             if not api_key:
                 api_key = "no-key-required"
 
+    # --- Determine api_mode if not already set (must happen before validation) ---
+    if not api_mode:
+        api_mode = determine_api_mode(target_provider, base_url)
+
     # --- Normalize model name for target provider ---
     new_model = normalize_model_for_provider(new_model, target_provider)
 
