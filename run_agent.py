@@ -960,6 +960,7 @@ class AIAgent:
         skip_context_files: bool = False,
         load_soul_identity: bool = False,
         skip_memory: bool = False,
+        skip_memory_provider: bool = None,
         session_db=None,
         parent_session_id: str = None,
         iteration_budget: "IterationBudget" = None,
@@ -1753,7 +1754,10 @@ class AIAgent:
         # Memory provider plugin (external — one at a time, alongside built-in)
         # Reads memory.provider from config to select which plugin to activate.
         self._memory_manager = None
-        if not skip_memory:
+        if skip_memory_provider is None:
+            skip_memory_provider = skip_memory
+        mem_config = _agent_cfg.get("memory", {}) if _agent_cfg else {}
+        if not skip_memory_provider:
             try:
                 _mem_provider_name = mem_config.get("provider", "") if mem_config else ""
 
