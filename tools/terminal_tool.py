@@ -1020,6 +1020,8 @@ def _get_env_config() -> Dict[str, Any]:
         default_cwd = "~"
     elif env_type == "vercel_sandbox":
         default_cwd = _VERCEL_SANDBOX_DEFAULT_CWD
+    elif env_type == "blaxel":
+        default_cwd = "/blaxel"
     else:
         default_cwd = "/root"
 
@@ -1041,7 +1043,7 @@ def _get_env_config() -> Dict[str, Any]:
         ):
             host_cwd = candidate
             cwd = "/workspace"
-    elif env_type in ("modal", "docker", "singularity", "daytona", "vercel_sandbox") and cwd:
+    elif env_type in ("modal", "docker", "singularity", "daytona", "vercel_sandbox", "blaxel") and cwd:
         # Host paths and relative paths that won't work inside containers
         is_host_path = any(cwd.startswith(p) for p in host_prefixes)
         is_relative = not os.path.isabs(cwd)  # e.g. "." or "src/"
@@ -1060,6 +1062,8 @@ def _get_env_config() -> Dict[str, Any]:
         "modal_image": os.getenv("TERMINAL_MODAL_IMAGE", default_image),
         "daytona_image": os.getenv("TERMINAL_DAYTONA_IMAGE", default_image),
         "vercel_runtime": os.getenv("TERMINAL_VERCEL_RUNTIME", "").strip(),
+        "blaxel_image": os.getenv("TERMINAL_BLAXEL_IMAGE", "blaxel/base-image:latest"),
+        "blaxel_ttl": os.getenv("TERMINAL_BLAXEL_TTL", "24h"),
         "cwd": cwd,
         "host_cwd": host_cwd,
         "docker_mount_cwd_to_workspace": mount_docker_cwd,
@@ -1228,6 +1232,16 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
             task_id=task_id,
         )
 
+    elif env_type == "blaxel":
+        # Lazy import so blaxel SDK is only required when backend is selected.
+        from tools.environments.blaxel import BlaxelEnvironment as _BlaxelEnvironment
+        return _BlaxelEnvironment(
+            image=image, cwd=cwd, timeout=timeout,
+            cpu=int(cpu), memory=memory, disk=disk,
+            persistent_filesystem=persistent, task_id=task_id,
+            ttl=cc.get("blaxel_ttl") or "24h",
+        )
+
     elif env_type == "ssh":
         if not ssh_config or not ssh_config.get("host") or not ssh_config.get("user"):
             raise ValueError("SSH environment requires ssh_host and ssh_user to be configured")
@@ -1243,7 +1257,8 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
     else:
         raise ValueError(
             f"Unknown environment type: {env_type}. Use 'local', 'docker', "
-            f"'singularity', 'modal', 'daytona', 'vercel_sandbox', or 'ssh'"
+            f"'singularity', 'modal', 'daytona', 'vercel_sandbox', 'blaxel', "
+            f"or 'ssh'"
         )
 
 
@@ -1702,6 +1717,8 @@ def terminal_tool(
             image = overrides.get("modal_image") or config["modal_image"]
         elif env_type == "daytona":
             image = overrides.get("daytona_image") or config["daytona_image"]
+        elif env_type == "blaxel":
+            image = overrides.get("blaxel_image") or config["blaxel_image"]
         else:
             image = ""
 
@@ -1778,7 +1795,7 @@ def terminal_tool(
                             }
 
                         container_config = None
-                        if env_type in ("docker", "singularity", "modal", "daytona", "vercel_sandbox"):
+                        if env_type in ("docker", "singularity", "modal", "daytona", "vercel_sandbox", "blaxel"):
                             container_config = {
                                 "container_cpu": config.get("container_cpu", 1),
                                 "container_memory": config.get("container_memory", 5120),
@@ -1786,6 +1803,7 @@ def terminal_tool(
                                 "container_persistent": config.get("container_persistent", True),
                                 "modal_mode": config.get("modal_mode", "auto"),
                                 "vercel_runtime": config.get("vercel_runtime", ""),
+                                "blaxel_ttl": config.get("blaxel_ttl", "24h"),
                                 "docker_volumes": config.get("docker_volumes", []),
                                 "docker_mount_cwd_to_workspace": config.get("docker_mount_cwd_to_workspace", False),
                                 "docker_forward_env": config.get("docker_forward_env", []),
