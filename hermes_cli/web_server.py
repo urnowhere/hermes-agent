@@ -2906,8 +2906,18 @@ def _ws_client_is_allowed(ws: "WebSocket") -> bool:
 
     Allows loopback always; allows any IP when bound to all-interfaces
     (--insecure mode, guarded by session token auth).
+
+    When the dashboard is explicitly bound to loopback, also allow the
+    connection regardless of ``ws.client``.  Uvicorn's ProxyHeadersMiddleware
+    may rewrite ``ws.client`` from ``X-Forwarded-For`` on requests that arrive
+    through a local trusted proxy such as cloudflared, so the reported client
+    can be a browser/edge IP even though the only TCP peer capable of reaching
+    the origin is localhost.
     """
     if _is_public_bind():
+        return True
+    bound_host = getattr(app.state, "bound_host", "")
+    if bound_host in _LOOPBACK_HOSTS:
         return True
     client_host = ws.client.host if ws.client else ""
     if not client_host:
