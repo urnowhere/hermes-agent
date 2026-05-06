@@ -1497,6 +1497,9 @@ class HindsightMemoryProvider(MemoryProvider):
                     context=context,
                     tags=args.get("tags"),
                 )
+                # aretain() does not accept retain_async — only aretain_batch()
+                # does.  Strip it to prevent TypeError (#14550).
+                retain_kwargs.pop("retain_async", None)
                 logger.debug("Tool hindsight_retain: bank=%s, content_len=%d, context=%s",
                              self._bank_id, len(content), context)
                 self._run_hindsight_operation(lambda client: client.aretain(**retain_kwargs))
