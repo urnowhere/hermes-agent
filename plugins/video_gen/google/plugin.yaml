@@ -1,0 +1,7 @@
+name: video_gen-google
+version: 1.0.0
+description: "Video generation via Google Veo (2.0, 3.0 fast/standard, 3.1 family). Registers a `video_generate` tool. Saves MP4 to $HERMES_HOME/cache/videos/."
+author: ItachiDevv
+kind: standalone
+requires_env:
+  - GEMINI_API_KEY
