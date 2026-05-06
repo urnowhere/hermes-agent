@@ -1272,7 +1272,7 @@ class SessionStore:
                     codex_message_items=message.get("codex_message_items") if message.get("role") == "assistant" else None,
                 )
             except Exception as e:
-                logger.debug("Session DB operation failed: %s", e)
+                logger.warning("Session DB append failed: %s", e)
         
         # Also write legacy JSONL (keeps existing tooling working during transition)
         transcript_path = self.get_transcript_path(session_id)
