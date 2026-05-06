@@ -49,8 +49,9 @@ import subprocess
 import tempfile
 import threading
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Any, Optional
+from typing import Callable, Dict, Any, Optional, List
 from urllib.parse import urljoin
 
 from hermes_constants import display_hermes_home
@@ -253,6 +254,205 @@ def _resolve_max_text_length(
             return DEFAULT_COMMAND_TTS_MAX_TEXT_LENGTH
 
     return FALLBACK_MAX_TEXT_LENGTH
+
+
+@dataclass(frozen=True)
+class AudioDeliveryProfile:
+    """Destination-platform constraints for generated TTS audio."""
+
+    platform: str
+    max_file_bytes: int
+    preferred_format: str = "mp3"
+    max_audio_seconds: Optional[int] = None
+    safety_ratio: float = 0.85
+
+    @property
+    def target_file_bytes(self) -> int:
+        """Conservative per-file target below the platform hard limit."""
+        return max(1, int(self.max_file_bytes * self.safety_ratio))
+
+
+_PLATFORM_AUDIO_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    # Discord's public non-Nitro attachment limit is 10 MB. Guild/API limits can
+    # vary, but 10 MB is the safest default for bots and DMs.
+    "discord": {
+        "max_file_bytes": 10 * 1024 * 1024,
+        "preferred_format": "ogg",
+        "max_audio_seconds": 20 * 60,
+        "safety_ratio": 0.85,
+    },
+    # Telegram Bot API documents sendVoice/sendAudio uploads up to 50 MB.
+    "telegram": {
+        "max_file_bytes": 50 * 1024 * 1024,
+        "preferred_format": "ogg",
+        "max_audio_seconds": None,
+        "safety_ratio": 0.85,
+    },
+    # Conservative generic fallback for platforms without an explicit profile.
+    "default": {
+        "max_file_bytes": 10 * 1024 * 1024,
+        "preferred_format": "mp3",
+        "max_audio_seconds": None,
+        "safety_ratio": 0.85,
+    },
+}
+
+
+def _resolve_audio_delivery_profile(
+    platform: Optional[str],
+    tts_config: Optional[Dict[str, Any]] = None,
+) -> AudioDeliveryProfile:
+    """Return destination upload constraints for TTS audio delivery.
+
+    Users may override values under ``tts.delivery_profiles.<platform>``.
+    """
+    key = (platform or "default").lower().strip() or "default"
+    defaults = dict(_PLATFORM_AUDIO_DEFAULTS.get(key) or _PLATFORM_AUDIO_DEFAULTS["default"])
+    cfg = tts_config or {}
+    overrides = (cfg.get("delivery_profiles") or {}).get(key, {})
+    if isinstance(overrides, dict):
+        defaults.update({k: v for k, v in overrides.items() if v is not None})
+    max_file_bytes = defaults.get("max_file_bytes")
+    if not isinstance(max_file_bytes, int) or max_file_bytes <= 0:
+        max_file_bytes = _PLATFORM_AUDIO_DEFAULTS["default"]["max_file_bytes"]
+    safety_ratio = defaults.get("safety_ratio", 0.85)
+    if not isinstance(safety_ratio, (int, float)) or safety_ratio <= 0 or safety_ratio > 1:
+        safety_ratio = 0.85
+    max_audio_seconds = defaults.get("max_audio_seconds")
+    if not isinstance(max_audio_seconds, int) or max_audio_seconds <= 0:
+        max_audio_seconds = None
+    return AudioDeliveryProfile(
+        platform=key,
+        max_file_bytes=max_file_bytes,
+        preferred_format=str(defaults.get("preferred_format") or "mp3"),
+        max_audio_seconds=max_audio_seconds,
+        safety_ratio=float(safety_ratio),
+    )
+
+
+def _split_oversized_sentence(sentence: str, max_chars: int) -> List[str]:
+    """Split a single over-limit sentence on word boundaries."""
+    words = sentence.split()
+    chunks: List[str] = []
+    current = ""
+    for word in words:
+        if len(word) > max_chars:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.extend(word[i:i + max_chars] for i in range(0, len(word), max_chars))
+            continue
+        candidate = f"{current} {word}".strip()
+        if current and len(candidate) > max_chars:
+            chunks.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _split_text_for_tts(text: str, max_chars: int) -> List[str]:
+    """Split text into prosody-aware chunks under a provider input cap.
+
+    The splitter prefers paragraph/sentence boundaries and only falls back to
+    word-boundary splits for pathological over-long sentences. It never drops
+    text; joining the returned chunks with spaces reconstructs normalized input.
+    """
+    if max_chars <= 0:
+        max_chars = FALLBACK_MAX_TEXT_LENGTH
+    normalized = " ".join((text or "").split())
+    if not normalized:
+        return []
+    if len(normalized) <= max_chars:
+        return [normalized]
+
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?;:,])\s+", normalized) if s.strip()]
+    expanded: List[str] = []
+    for sentence in sentences:
+        if len(sentence) <= max_chars:
+            expanded.append(sentence)
+        else:
+            expanded.extend(_split_oversized_sentence(sentence, max_chars))
+
+    chunks: List[str] = []
+    current = ""
+    for sentence in expanded:
+        candidate = f"{current} {sentence}".strip()
+        if current and len(candidate) > max_chars:
+            chunks.append(current)
+            current = sentence
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _pack_audio_files_for_delivery(
+    audio_paths: List[str],
+    profile: AudioDeliveryProfile,
+) -> List[List[str]]:
+    """Group audio files so each upload stays within platform limits.
+
+    The target uses ``profile.target_file_bytes`` as a safety margin, but a
+    single chunk larger than target is still emitted alone if it is below the
+    hard limit so callers can decide whether to resplit or attempt delivery.
+    """
+    groups: List[List[str]] = []
+    current: List[str] = []
+    current_size = 0
+    target = profile.target_file_bytes
+    for path in audio_paths:
+        size = Path(path).stat().st_size
+        if current and current_size + size > target:
+            groups.append(current)
+            current = []
+            current_size = 0
+        current.append(path)
+        current_size += size
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _concat_audio_files(audio_paths: List[str], output_path: str) -> str:
+    """Concatenate audio files, using ffmpeg when available.
+
+    The binary fallback is intentionally last-resort; ffmpeg is preferred for
+    container correctness across MP3/OGG/WAV.
+    """
+    if not audio_paths:
+        raise ValueError("No audio chunks to concatenate")
+    if len(audio_paths) == 1:
+        if os.path.abspath(audio_paths[0]) != os.path.abspath(output_path):
+            shutil.copyfile(audio_paths[0], output_path)
+        return output_path
+    if _has_ffmpeg():
+        list_path = str(Path(output_path).with_suffix(Path(output_path).suffix + ".concat.txt"))
+        try:
+            with open(list_path, "w", encoding="utf-8") as f:
+                for p in audio_paths:
+                    f.write(f"file {shlex.quote(os.path.abspath(p))}\n")
+            result = subprocess.run(
+                ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", output_path],
+                capture_output=True,
+                timeout=120,
+            )
+            if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                return output_path
+            logger.warning("ffmpeg audio concat failed: %s", result.stderr.decode(errors="ignore")[:500])
+        finally:
+            try:
+                os.unlink(list_path)
+            except OSError:
+                pass
+    with open(output_path, "wb") as out:
+        for p in audio_paths:
+            with open(p, "rb") as src:
+                shutil.copyfileobj(src, out)
+    return output_path
 
 
 # ===========================================================================
@@ -1538,18 +1738,9 @@ def text_to_speech_tool(
     Convert text to speech audio.
 
     Reads provider/voice config from ~/.hermes/config.yaml (tts: section).
-    The model sends text; the user configures voice and provider.
-
-    On messaging platforms, the returned MEDIA:<path> tag is intercepted
-    by the send pipeline and delivered as a native voice message.
-    In CLI mode, the file is saved to ~/voice-memos/.
-
-    Args:
-        text: The text to convert to speech.
-        output_path: Optional custom save path. Defaults to ~/voice-memos/<timestamp>.mp3
-
-    Returns:
-        str: JSON result with success, file_path, and optionally MEDIA tag.
+    Long input is split into provider-safe chunks instead of silently truncated.
+    Generated audio chunks are packed against destination platform upload limits
+    and concatenated when possible.
     """
     if not text or not text.strip():
         return tool_error("Text is required", success=False)
@@ -1563,23 +1754,12 @@ def text_to_speech_tool(
     # OpenAI handler.
     command_provider_config = _resolve_command_provider_config(provider, tts_config)
 
-    # Truncate very long text with a warning. The cap is per-provider
-    # (OpenAI 4096, xAI 15k, MiniMax 10k, ElevenLabs model-aware, etc.).
-    max_len = _resolve_max_text_length(provider, tts_config)
-    if len(text) > max_len:
-        logger.warning(
-            "TTS text too long for provider %s (%d chars), truncating to %d",
-            provider, len(text), max_len,
-        )
-        text = text[:max_len]
-
-    # Detect platform from gateway env var to choose the best output format.
-    # Telegram voice bubbles require Opus (.ogg); OpenAI and ElevenLabs can
-    # produce Opus natively (no ffmpeg needed).  Edge TTS always outputs MP3
-    # and needs ffmpeg for conversion.
+    # Detect platform from gateway env var to choose the best output format and
+    # delivery packing limits.
     from gateway.session_context import get_session_env
     platform = get_session_env("HERMES_SESSION_PLATFORM", "").lower()
     want_opus = (platform == "telegram")
+    delivery_profile = _resolve_audio_delivery_profile(platform, tts_config)
 
     # Determine output path
     if output_path:
@@ -1609,169 +1789,222 @@ def text_to_speech_tool(
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_str = str(file_path)
 
-    try:
-        # Generate audio with the configured provider
+    max_len = _resolve_max_text_length(provider, tts_config)
+    chunks = _split_text_for_tts(text, max_len)
+    if not chunks:
+        return tool_error("Text is required", success=False)
+    if len(chunks) > 1:
+        logger.info(
+            "TTS text for provider %s split into %d chunks (input=%d chars, cap=%d)",
+            provider, len(chunks), len(text), max_len,
+        )
+
+    def _chunk_path(index: int) -> str:
+        if len(chunks) == 1:
+            return file_str
+        path = Path(file_str)
+        return str(path.with_name(f"{path.stem}.chunk{index + 1:03d}{path.suffix}"))
+
+    def _generate_one(chunk_text: str, out_path: str) -> str:
+        # Generate audio with the configured provider.
         if command_provider_config is not None:
             logger.info(
                 "Generating speech with command TTS provider '%s'...", provider,
             )
-            file_str = _generate_command_tts(
-                text, file_str, provider, command_provider_config, tts_config,
+            return _generate_command_tts(
+                chunk_text, out_path, provider, command_provider_config, tts_config,
             )
 
-        elif provider == "elevenlabs":
+        if provider == "elevenlabs":
             try:
                 _import_elevenlabs()
             except ImportError:
-                return json.dumps({
-                    "success": False,
-                    "error": "ElevenLabs provider selected but 'elevenlabs' package not installed. Run: pip install elevenlabs"
-                }, ensure_ascii=False)
+                raise RuntimeError(
+                    "ElevenLabs provider selected but 'elevenlabs' package not installed. Run: pip install elevenlabs"
+                )
             logger.info("Generating speech with ElevenLabs...")
-            _generate_elevenlabs(text, file_str, tts_config)
+            _generate_elevenlabs(chunk_text, out_path, tts_config)
+            return out_path
 
-        elif provider == "openai":
+        if provider == "openai":
             try:
                 _import_openai_client()
             except ImportError:
-                return json.dumps({
-                    "success": False,
-                    "error": "OpenAI provider selected but 'openai' package not installed."
-                }, ensure_ascii=False)
+                raise RuntimeError("OpenAI provider selected but 'openai' package not installed.")
             logger.info("Generating speech with OpenAI TTS...")
-            _generate_openai_tts(text, file_str, tts_config)
+            _generate_openai_tts(chunk_text, out_path, tts_config)
+            return out_path
 
-        elif provider == "minimax":
+        if provider == "minimax":
             logger.info("Generating speech with MiniMax TTS...")
-            _generate_minimax_tts(text, file_str, tts_config)
+            _generate_minimax_tts(chunk_text, out_path, tts_config)
+            return out_path
 
-        elif provider == "xai":
+        if provider == "xai":
             logger.info("Generating speech with xAI TTS...")
-            _generate_xai_tts(text, file_str, tts_config)
+            _generate_xai_tts(chunk_text, out_path, tts_config)
+            return out_path
 
-        elif provider == "mistral":
+        if provider == "mistral":
             try:
                 _import_mistral_client()
             except ImportError:
-                return json.dumps({
-                    "success": False,
-                    "error": "Mistral provider selected but 'mistralai' package not installed. "
-                             "Run: pip install 'hermes-agent[mistral]'"
-                }, ensure_ascii=False)
+                raise RuntimeError(
+                    "Mistral provider selected but 'mistralai' package not installed. "
+                    "Run: pip install 'hermes-agent[mistral]'"
+                )
             logger.info("Generating speech with Mistral Voxtral TTS...")
-            _generate_mistral_tts(text, file_str, tts_config)
+            _generate_mistral_tts(chunk_text, out_path, tts_config)
+            return out_path
 
-        elif provider == "gemini":
+        if provider == "gemini":
             logger.info("Generating speech with Google Gemini TTS...")
-            _generate_gemini_tts(text, file_str, tts_config)
+            _generate_gemini_tts(chunk_text, out_path, tts_config)
+            return out_path
 
-        elif provider == "neutts":
+        if provider == "neutts":
             if not _check_neutts_available():
-                return json.dumps({
-                    "success": False,
-                    "error": "NeuTTS provider selected but neutts is not installed. "
-                             "Run hermes setup and choose NeuTTS, or install espeak-ng and run python -m pip install -U neutts[all]."
-                }, ensure_ascii=False)
+                raise RuntimeError(
+                    "NeuTTS provider selected but neutts is not installed. "
+                    "Run hermes setup and choose NeuTTS, or install espeak-ng and run python -m pip install -U neutts[all]."
+                )
             logger.info("Generating speech with NeuTTS (local)...")
-            _generate_neutts(text, file_str, tts_config)
+            _generate_neutts(chunk_text, out_path, tts_config)
+            return out_path
 
-        elif provider == "kittentts":
+        if provider == "kittentts":
             try:
                 _import_kittentts()
             except ImportError:
-                return json.dumps({
-                    "success": False,
-                    "error": "KittenTTS provider selected but 'kittentts' package not installed. "
-                             "Run 'hermes setup tts' and choose KittenTTS, or install manually: "
-                             "pip install https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl"
-                }, ensure_ascii=False)
+                raise RuntimeError(
+                    "KittenTTS provider selected but 'kittentts' package not installed. "
+                    "Run 'hermes setup tts' and choose KittenTTS, or install manually: "
+                    "pip install https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl"
+                )
             logger.info("Generating speech with KittenTTS (local, ~25MB)...")
-            _generate_kittentts(text, file_str, tts_config)
+            _generate_kittentts(chunk_text, out_path, tts_config)
+            return out_path
 
-        elif provider == "piper":
+        if provider == "piper":
             try:
                 _import_piper()
             except ImportError:
-                return json.dumps({
-                    "success": False,
-                    "error": "Piper provider selected but 'piper-tts' package not installed. "
-                             "Run 'hermes tools' and select Piper under TTS, or install manually: "
-                             "pip install piper-tts",
-                }, ensure_ascii=False)
+                raise RuntimeError(
+                    "Piper provider selected but 'piper-tts' package not installed. "
+                    "Run 'hermes tools' and select Piper under TTS, or install manually: "
+                    "pip install piper-tts"
+                )
             logger.info("Generating speech with Piper (local)...")
-            _generate_piper_tts(text, file_str, tts_config)
+            _generate_piper_tts(chunk_text, out_path, tts_config)
+            return out_path
 
-        else:
-            # Default: Edge TTS (free), with NeuTTS as local fallback
-            edge_available = True
+        # Default: Edge TTS (free), with NeuTTS as local fallback.
+        edge_available = True
+        try:
+            _import_edge_tts()
+        except ImportError:
+            edge_available = False
+
+        if edge_available:
+            logger.info("Generating speech with Edge TTS...")
             try:
-                _import_edge_tts()
-            except ImportError:
-                edge_available = False
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    pool.submit(
+                        lambda: asyncio.run(_generate_edge_tts(chunk_text, out_path, tts_config))
+                    ).result(timeout=60)
+            except RuntimeError:
+                asyncio.run(_generate_edge_tts(chunk_text, out_path, tts_config))
+            return out_path
 
-            if edge_available:
-                logger.info("Generating speech with Edge TTS...")
-                try:
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                        pool.submit(
-                            lambda: asyncio.run(_generate_edge_tts(text, file_str, tts_config))
-                        ).result(timeout=60)
-                except RuntimeError:
-                    asyncio.run(_generate_edge_tts(text, file_str, tts_config))
-            elif _check_neutts_available():
-                logger.info("Edge TTS not available, falling back to NeuTTS (local)...")
-                provider = "neutts"
-                _generate_neutts(text, file_str, tts_config)
-            else:
+        if _check_neutts_available():
+            logger.info("Edge TTS not available, falling back to NeuTTS (local)...")
+            _generate_neutts(chunk_text, out_path, tts_config)
+            return out_path
+
+        raise RuntimeError(
+            "No TTS provider available. Install edge-tts (pip install edge-tts) "
+            "or set up NeuTTS for local synthesis."
+        )
+
+    generated_paths: List[str] = []
+    final_paths: List[str] = []
+    try:
+        for i, chunk in enumerate(chunks):
+            generated = _generate_one(chunk, _chunk_path(i))
+            if not os.path.exists(generated) or os.path.getsize(generated) == 0:
                 return json.dumps({
                     "success": False,
-                    "error": "No TTS provider available. Install edge-tts (pip install edge-tts) "
-                             "or set up NeuTTS for local synthesis."
+                    "error": f"TTS generation produced no output (provider: {provider})"
                 }, ensure_ascii=False)
+            generated_paths.append(generated)
 
-        # Check the file was actually created
-        if not os.path.exists(file_str) or os.path.getsize(file_str) == 0:
-            return json.dumps({
-                "success": False,
-                "error": f"TTS generation produced no output (provider: {provider})"
-            }, ensure_ascii=False)
+        # Pack generated chunk audio against the platform profile before
+        # concatenating. Most responses become one file; very large responses
+        # become multiple MEDIA attachments instead of a doomed oversize upload.
+        groups = _pack_audio_files_for_delivery(generated_paths, delivery_profile)
+        for idx, group in enumerate(groups):
+            if len(groups) == 1:
+                out = file_str
+            else:
+                path = Path(file_str)
+                out = str(path.with_name(f"{path.stem}.part{idx + 1:02d}{path.suffix}"))
+            final_paths.append(_concat_audio_files(group, out))
 
-        # Try Opus conversion for Telegram compatibility
-        # Edge TTS outputs MP3, NeuTTS/KittenTTS output WAV — all need ffmpeg conversion
         voice_compatible = False
-        if command_provider_config is not None:
-            # Command providers are documents by default. Voice-bubble
-            # delivery only kicks in when the user explicitly opts in
-            # via ``voice_compatible: true`` in their provider config.
-            if _is_command_tts_voice_compatible(command_provider_config):
-                if not file_str.endswith(".ogg"):
-                    opus_path = _convert_to_opus(file_str)
-                    if opus_path:
-                        file_str = opus_path
-                voice_compatible = file_str.endswith(".ogg")
-        elif provider in ("edge", "neutts", "minimax", "xai", "kittentts", "piper") and not file_str.endswith(".ogg"):
-            opus_path = _convert_to_opus(file_str)
-            if opus_path:
-                file_str = opus_path
-                voice_compatible = True
-        elif provider in ("elevenlabs", "openai", "mistral", "gemini"):
-            voice_compatible = file_str.endswith(".ogg")
+        converted_paths: List[str] = []
+        for path in final_paths:
+            converted = path
+            if command_provider_config is not None:
+                # Command providers are documents by default. Voice-bubble
+                # delivery only kicks in when the user explicitly opts in
+                # via ``voice_compatible: true`` in their provider config.
+                if _is_command_tts_voice_compatible(command_provider_config):
+                    if not converted.endswith(".ogg"):
+                        opus_path = _convert_to_opus(converted)
+                        if opus_path:
+                            converted = opus_path
+                    voice_compatible = converted.endswith(".ogg")
+            elif provider in ("edge", "neutts", "minimax", "xai", "kittentts", "piper") and not converted.endswith(".ogg"):
+                opus_path = _convert_to_opus(converted)
+                if opus_path:
+                    converted = opus_path
+                    voice_compatible = True
+            elif provider in ("elevenlabs", "openai", "mistral", "gemini"):
+                voice_compatible = converted.endswith(".ogg")
+            converted_paths.append(converted)
 
-        file_size = os.path.getsize(file_str)
-        logger.info("TTS audio saved: %s (%s bytes, provider: %s)", file_str, f"{file_size:,}", provider)
+        final_paths = converted_paths
+        file_str = final_paths[0]
 
-        # Build response with MEDIA tag for platform delivery
-        media_tag = f"MEDIA:{file_str}"
+        for path in final_paths:
+            file_size = os.path.getsize(path)
+            if file_size > delivery_profile.max_file_bytes:
+                logger.warning(
+                    "TTS audio file exceeds %s delivery limit: %s (%d > %d bytes)",
+                    delivery_profile.platform, path, file_size, delivery_profile.max_file_bytes,
+                )
+            logger.info("TTS audio saved: %s (%s bytes, provider: %s)", path, f"{file_size:,}", provider)
+
+        media_tags = [f"MEDIA:{p}" for p in final_paths]
+        media_tag = "\n".join(media_tags)
         if voice_compatible:
-            media_tag = f"[[audio_as_voice]]\n{media_tag}"
+            media_tag = "[[audio_as_voice]]\n" + media_tag
 
         return json.dumps({
             "success": True,
             "file_path": file_str,
+            "file_paths": final_paths,
             "media_tag": media_tag,
             "provider": provider,
             "voice_compatible": voice_compatible,
+            "chunk_count": len(chunks),
+            "delivery_file_count": len(final_paths),
+            "delivery_profile": {
+                "platform": delivery_profile.platform,
+                "max_file_bytes": delivery_profile.max_file_bytes,
+                "target_file_bytes": delivery_profile.target_file_bytes,
+            },
         }, ensure_ascii=False)
 
     except ValueError as e:
@@ -1789,6 +2022,14 @@ def text_to_speech_tool(
         error_msg = f"TTS generation failed ({provider}): {e}"
         logger.error("%s", error_msg, exc_info=True)
         return tool_error(error_msg, success=False)
+    finally:
+        # Clean intermediate chunk files after the final delivery files are built.
+        for p in generated_paths:
+            if p not in final_paths and os.path.abspath(p) != os.path.abspath(file_str):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
 
 
 # ===========================================================================

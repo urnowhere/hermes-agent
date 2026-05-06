@@ -118,22 +118,18 @@ class TestResolveMaxTextLength:
         assert expected.issubset(PROVIDER_MAX_TEXT_LENGTH.keys())
 
 
-class TestTextToSpeechToolTruncation:
-    """End-to-end: verify the resolver actually drives the text_to_speech_tool
-    truncation path rather than the old 4000-char global."""
+class TestTextToSpeechToolChunking:
+    """End-to-end: verify provider caps drive chunking instead of truncation."""
 
-    def test_openai_truncates_at_4096_not_4000(self, tmp_path, monkeypatch, caplog):
-        import logging
-        caplog.set_level(logging.WARNING, logger="tools.tts_tool")
-
-        # 5000 chars -- over OpenAI's 4096 limit but under xAI's 15k
+    def test_openai_chunks_at_4096_not_old_4000_or_truncate(self, tmp_path, monkeypatch):
+        # 5000 chars -- over OpenAI's 4096 limit but under xAI's 15k.
         text = "A" * 5000
-        captured_text = {}
+        captured_texts = []
 
         def fake_openai(t, out, cfg):
-            captured_text["text"] = t
+            captured_texts.append(t)
             with open(out, "wb") as f:
-                f.write(b"\x00")
+                f.write(t.encode())
             return out
 
         monkeypatch.setattr("tools.tts_tool._generate_openai_tts", fake_openai)
@@ -145,10 +141,9 @@ class TestTextToSpeechToolTruncation:
         result = json.loads(text_to_speech_tool(text=text, output_path=out))
 
         assert result["success"] is True
-        # Should be truncated to 4096, not the old 4000
-        assert len(captured_text["text"]) == 4096
-        # And the warning should mention the provider
-        assert any("openai" in rec.message.lower() for rec in caplog.records)
+        assert result["chunk_count"] == 2
+        assert [len(t) for t in captured_texts] == [4096, 904]
+        assert "".join(captured_texts) == text
 
     def test_xai_accepts_much_longer_input(self, tmp_path, monkeypatch):
         # 12000 chars -- over old global 4000, under xAI's 15000
@@ -173,15 +168,15 @@ class TestTextToSpeechToolTruncation:
         # xAI should accept the full 12000 chars
         assert len(captured_text["text"]) == 12000
 
-    def test_user_override_is_respected(self, tmp_path, monkeypatch):
-        # User says "cap openai at 100 chars" -- we must honor it
+    def test_user_override_is_respected_as_chunk_cap(self, tmp_path, monkeypatch):
+        # User says "cap openai at 100 chars" -- every synthesized chunk must honor it.
         text = "C" * 500
-        captured_text = {}
+        captured_texts = []
 
         def fake_openai(t, out, cfg):
-            captured_text["text"] = t
+            captured_texts.append(t)
             with open(out, "wb") as f:
-                f.write(b"\x00")
+                f.write(t.encode())
             return out
 
         monkeypatch.setattr("tools.tts_tool._generate_openai_tts", fake_openai)
@@ -194,4 +189,6 @@ class TestTextToSpeechToolTruncation:
         result = json.loads(text_to_speech_tool(text=text, output_path=out))
 
         assert result["success"] is True
-        assert len(captured_text["text"]) == 100
+        assert result["chunk_count"] == 5
+        assert all(len(t) <= 100 for t in captured_texts)
+        assert "".join(captured_texts) == text

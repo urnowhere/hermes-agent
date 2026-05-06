@@ -2793,7 +2793,7 @@ class BasePlatformAdapter(ABC):
                 # Gated via ``_should_auto_tts_for_chat``: fires when the chat has
                 # an explicit ``/voice on|tts`` opt-in OR when ``voice.auto_tts`` is
                 # True globally and no ``/voice off`` has been issued.
-                _tts_path = None
+                _tts_paths = []
                 if (self._should_auto_tts_for_chat(event.source.chat_id)
                         and event.message_type == MessageType.VOICE
                         and text_content
@@ -2802,19 +2802,22 @@ class BasePlatformAdapter(ABC):
                         from tools.tts_tool import text_to_speech_tool, check_tts_requirements
                         if check_tts_requirements():
                             import json as _json
-                            speech_text = re.sub(r'[*_`#\[\]()]', '', text_content)[:4000].strip()
+                            speech_text = re.sub(r'[*_`#\[\]()]', '', text_content).strip()
                             if not speech_text:
                                 raise ValueError("Empty text after markdown cleanup")
                             tts_result_str = await asyncio.to_thread(
                                 text_to_speech_tool, text=speech_text
                             )
                             tts_data = _json.loads(tts_result_str)
-                            _tts_path = tts_data.get("file_path")
+                            _tts_paths = tts_data.get("file_paths") or [tts_data.get("file_path")]
+                            _tts_paths = [p for p in _tts_paths if p]
                     except Exception as tts_err:
                         logger.warning("[%s] Auto-TTS failed: %s", self.name, tts_err)
 
                 # Play TTS audio before text (voice-first experience)
-                if _tts_path and Path(_tts_path).exists():
+                for _tts_path in _tts_paths:
+                    if not (_tts_path and Path(_tts_path).exists()):
+                        continue
                     try:
                         await self.play_tts(
                             chat_id=event.source.chat_id,

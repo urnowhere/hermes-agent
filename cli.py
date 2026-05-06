@@ -8736,7 +8736,7 @@ class HermesCLI:
             from tools.voice_mode import play_audio_file
 
             # Strip markdown and non-speech content for cleaner TTS
-            tts_text = text[:4000] if len(text) > 4000 else text
+            tts_text = text
             tts_text = re.sub(r'```[\s\S]*?```', ' ', tts_text)   # fenced code blocks
             tts_text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', tts_text)  # [text](url) -> text
             tts_text = re.sub(r'https?://\S+', '', tts_text)      # URLs

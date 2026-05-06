@@ -669,7 +669,7 @@ def speak_text(text: str) -> None:
     try:
         from tools.tts_tool import text_to_speech_tool
 
-        tts_text = text[:4000] if len(text) > 4000 else text
+        tts_text = text
         tts_text = re.sub(r'```[\s\S]*?```', ' ', tts_text)             # fenced code blocks
         tts_text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', tts_text)    # [text](url) → text
         tts_text = re.sub(r'https?://\S+', '', tts_text)                # bare URLs
