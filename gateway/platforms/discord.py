@@ -772,6 +772,36 @@ class DiscordAdapter(BasePlatformAdapter):
                         guild_id,
                     )
 
+            @self._client.event
+            async def on_thread_create(thread):
+                """Auto-join new forum/text threads in free-response or allowed channels.
+
+                Discord bots don't receive on_message for threads they haven't
+                joined.  This ensures the bot participates in new forum posts
+                so free_response_channels works for ForumChannel parents.
+                """
+                if not thread.parent_id:
+                    return
+                parent_id = str(thread.parent_id)
+                free_channels = adapter_self._discord_free_response_channels()
+                allowed_raw = os.getenv("DISCORD_ALLOWED_CHANNELS", "")
+                allowed_channels = {ch.strip() for ch in allowed_raw.split(",") if ch.strip()} if allowed_raw else set()
+
+                should_join = (
+                    "*" in free_channels
+                    or parent_id in free_channels
+                    or "*" in allowed_channels
+                    or parent_id in allowed_channels
+                )
+                if not should_join:
+                    return
+                try:
+                    await thread.join()
+                    adapter_self._threads.mark(str(thread.id))
+                    logger.debug("[%s] Auto-joined thread %s (parent %s)", adapter_self.name, thread.id, parent_id)
+                except Exception as e:
+                    logger.debug("[%s] Failed to auto-join thread %s: %s", adapter_self.name, thread.id, e)
+
             # Register slash commands
             if self._slash_commands:
                 self._register_slash_commands()
