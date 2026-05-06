@@ -4924,7 +4924,8 @@ class AIAgent:
         #   3. Persistent memory (frozen snapshot)
         #   4. Skills guidance (if skills tools are loaded)
         #   5. Context files (AGENTS.md, .cursorrules — SOUL.md excluded here when used as identity)
-        #   6. Current date & time (frozen at build time)
+        #   6. Session start time (frozen at build time; current time is
+        #      injected per-turn into the user message via pre_llm_call)
         #   7. Platform-specific formatting hint
 
         # Try SOUL.md as primary identity unless the caller explicitly skipped it.
@@ -5053,9 +5054,12 @@ class AIAgent:
             if context_files_prompt:
                 prompt_parts.append(context_files_prompt)
 
-        from hermes_time import now as _hermes_now
+        from hermes_time import now as _hermes_now, get_timezone_name
         now = _hermes_now()
-        timestamp_line = f"Conversation started: {now.strftime('%A, %B %d, %Y %I:%M %p')}"
+        _tz_name = get_timezone_name()
+        timestamp_line = f"Session started: {now.strftime('%A, %B %d, %Y %I:%M %p')}"
+        if _tz_name:
+            timestamp_line += f" ({_tz_name})"
         if self.pass_session_id and self.session_id:
             timestamp_line += f"\nSession ID: {self.session_id}"
         if self.model:
@@ -10385,7 +10389,16 @@ class AIAgent:
             "Please provide a final response summarizing what you've found and accomplished so far, "
             "without calling any more tools."
         )
-        messages.append({"role": "user", "content": summary_request})
+        # Append current time to the summary request so the agent has an
+        # accurate sense of "now" even in this recovery path (mirrors the
+        # per-turn time injection in run_conversation's main loop).
+        _time_prefix = ""
+        try:
+            from hermes_time import format_current_time_context
+            _time_prefix = format_current_time_context() + "\n\n"
+        except Exception:
+            pass
+        messages.append({"role": "user", "content": _time_prefix + summary_request})
 
         try:
             # Build API messages, stripping internal-only fields
@@ -10903,6 +10916,23 @@ class AIAgent:
                 _plugin_user_context = "\n\n".join(_ctx_parts)
         except Exception as exc:
             logger.warning("pre_llm_call hook failed: %s", exc)
+
+        # ── Built-in current-time injection ──
+        # The system prompt contains the *session start* time (frozen for
+        # cache stability).  To prevent the agent from treating a stale
+        # timestamp as "now", we inject the actual current time into the
+        # user message on every turn — same mechanism that plugins use,
+        # so the system prompt cache prefix is preserved.
+        try:
+            from hermes_time import format_current_time_context
+            _time_block = format_current_time_context()
+            _plugin_user_context = (
+                f"{_time_block}\n\n{_plugin_user_context}"
+                if _plugin_user_context
+                else _time_block
+            )
+        except Exception:
+            pass  # non-critical; agent can fall back to ``date`` command
 
         # Main conversation loop
         api_call_count = 0
