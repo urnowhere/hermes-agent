@@ -25,9 +25,13 @@ from hermes_cli.auth import (
     resolve_gemini_oauth_runtime_credentials,
     resolve_api_key_provider_credentials,
     resolve_external_process_provider_credentials,
+    resolve_near_ai_runtime_credentials,
+    resolve_redpill_runtime_credentials,
+    resolve_venice_runtime_credentials,
     has_usable_secret,
 )
-from hermes_cli.config import get_compatible_custom_providers, load_config
+from hermes_cli.attestation import verify_attestation as _verify_attestation
+from hermes_cli.config import get_compatible_custom_providers, get_attestation_config, load_config
 from hermes_constants import OPENROUTER_BASE_URL
 from utils import base_url_host_matches, base_url_hostname
 
@@ -196,6 +200,7 @@ def _resolve_runtime_from_pool_entry(
     base_url = (getattr(entry, "runtime_base_url", None) or getattr(entry, "base_url", None) or "").rstrip("/")
     api_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
     api_mode = "chat_completions"
+    e2ee_config: Optional[Dict[str, Any]] = None
     if provider == "openai-codex":
         api_mode = "codex_responses"
         base_url = base_url or DEFAULT_CODEX_BASE_URL
@@ -218,6 +223,69 @@ def _resolve_runtime_from_pool_entry(
         api_mode = "codex_responses"
     elif provider == "nous":
         api_mode = "chat_completions"
+    elif provider == "near-ai":
+        api_mode = "chat_completions"
+        if not base_url:
+            creds = resolve_near_ai_runtime_credentials()
+            base_url = creds.get("base_url", "").rstrip("/")
+            if not api_key:
+                api_key = creds.get("api_key", "")
+        att_config = get_attestation_config("near-ai")
+        if att_config.get("enabled"):
+            att_creds = {"api_key": api_key, "base_url": base_url, "model": str(model_cfg.get("default") or "openai/gpt-oss-120b")}
+            report = _verify_attestation("near-ai", att_creds, att_config)
+            if not report.valid and att_config.get("strict"):
+                raise RuntimeError(f"TEE attestation failed: {report.error}")
+            if not report.valid:
+                logger.warning("TEE attestation warning: %s", report.error)
+            elif report.signing_public_key:
+                e2ee_config = {
+                    "signing_public_key": report.signing_public_key,
+                    "signing_algo": report.signing_algo,
+                }
+    elif provider == "redpill":
+        api_mode = "chat_completions"
+        if not base_url:
+            creds = resolve_redpill_runtime_credentials()
+            base_url = creds.get("base_url", "").rstrip("/")
+            if not api_key:
+                api_key = creds.get("api_key", "")
+        att_config = get_attestation_config("redpill")
+        if att_config.get("enabled"):
+            model_name = str(model_cfg.get("default") or "")
+            att_creds = {"api_key": api_key, "base_url": base_url, "model": model_name}
+            report = _verify_attestation("redpill", att_creds, att_config)
+            if not report.valid and att_config.get("strict"):
+                raise RuntimeError(f"TEE attestation failed: {report.error}")
+            if not report.valid:
+                logger.warning("TEE attestation warning: %s", report.error)
+            elif report.signing_public_key:
+                e2ee_config = {
+                    "signing_public_key": report.signing_public_key,
+                    "signing_algo": report.signing_algo,
+                }
+    elif provider == "venice":
+        api_mode = "chat_completions"
+        if not base_url:
+            creds = resolve_venice_runtime_credentials()
+            base_url = creds.get("base_url", "").rstrip("/")
+            if not api_key:
+                api_key = creds.get("api_key", "")
+        att_config = get_attestation_config("venice")
+        if att_config.get("enabled"):
+            model_name = str(model_cfg.get("default") or "")
+            att_creds = {"api_key": api_key, "base_url": base_url, "model": model_name}
+            report = _verify_attestation("venice", att_creds, att_config)
+            if not report.valid and att_config.get("strict"):
+                raise RuntimeError(f"TEE attestation failed: {report.error}")
+            if not report.valid:
+                logger.warning("TEE attestation warning: %s", report.error)
+            elif report.signing_public_key:
+                e2ee_config = {
+                    "signing_public_key": report.signing_public_key,
+                    "signing_algo": report.signing_algo,
+                    "variant": "venice",
+                }
     elif provider == "copilot":
         api_mode = _copilot_runtime_api_mode(model_cfg, getattr(entry, "runtime_api_key", ""))
         base_url = base_url or PROVIDER_REGISTRY["copilot"].inference_base_url
@@ -293,6 +361,7 @@ def _resolve_runtime_from_pool_entry(
         "source": getattr(entry, "source", "pool"),
         "credential_pool": pool,
         "requested_provider": requested_provider,
+        "e2ee": e2ee_config,
     }
 
 
@@ -958,6 +1027,8 @@ def resolve_runtime_provider(
         explicit_base_url=explicit_base_url,
     )
     model_cfg = _get_model_config()
+    if target_model:
+        model_cfg = {**model_cfg, "default": target_model}
     explicit_runtime = _resolve_explicit_runtime(
         provider=provider,
         requested_provider=requested_provider,
