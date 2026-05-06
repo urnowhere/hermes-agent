@@ -1274,6 +1274,67 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         return compress_start < compress_end
 
     # ------------------------------------------------------------------
+    # Static fallback summary helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _truncate_fallback_line(text: str, limit: int = 240) -> str:
+        """Return a single safe line for deterministic fallback summaries."""
+        text = re.sub(r"\s+", " ", str(text or "")).strip()
+        if len(text) > limit:
+            text = text[: limit - 3].rstrip() + "..."
+        return redact_sensitive_text(text)
+
+    def _build_static_fallback_summary(
+        self,
+        turns_to_summarize: List[Dict[str, Any]],
+        *,
+        n_dropped: int,
+    ) -> str:
+        """Build a deterministic continuity marker when LLM summarization fails.
+
+        This is intentionally not a full summary, but it preserves the highest
+        value breadcrumbs from the dropped region: recent user asks and recent
+        assistant actions. That keeps continuity survivable when both the
+        pre-compression memory flush and the summary model are unavailable.
+        """
+        recent_user: list[str] = []
+        recent_assistant: list[str] = []
+        for msg in turns_to_summarize:
+            role = msg.get("role")
+            content = msg.get("content")
+            if content is None and msg.get("tool_calls"):
+                names = []
+                for tc in msg.get("tool_calls") or []:
+                    if isinstance(tc, dict):
+                        names.append(tc.get("function", {}).get("name") or tc.get("name") or "tool")
+                    else:
+                        fn = getattr(tc, "function", None)
+                        names.append(getattr(fn, "name", None) or getattr(tc, "name", None) or "tool")
+                content = "Called tool(s): " + ", ".join(names)
+            if role == "user" and content:
+                recent_user.append(self._truncate_fallback_line(content))
+            elif role == "assistant" and content:
+                recent_assistant.append(self._truncate_fallback_line(content))
+
+        lines = [
+            f"{SUMMARY_PREFIX}",
+            f"Summary generation was unavailable. {n_dropped} message(s) were removed to free context space but could not be summarized.",
+            "The removed messages contained earlier work in this session. Continue based on the recent messages below, the current task list if present, and the current state of any files or resources.",
+        ]
+        if recent_user:
+            lines.append("")
+            lines.append("Recent dropped user messages, newest last:")
+            for item in recent_user[-5:]:
+                lines.append(f"- {item}")
+        if recent_assistant:
+            lines.append("")
+            lines.append("Recent dropped assistant actions/notes, newest last:")
+            for item in recent_assistant[-5:]:
+                lines.append(f"- {item}")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
     # Main compression entry point
     # ------------------------------------------------------------------
 
@@ -1392,12 +1453,9 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             n_dropped = compress_end - compress_start
             self._last_summary_dropped_count = n_dropped
             self._last_summary_fallback_used = True
-            summary = (
-                f"{SUMMARY_PREFIX}\n"
-                f"Summary generation was unavailable. {n_dropped} message(s) were "
-                f"removed to free context space but could not be summarized. The removed "
-                f"messages contained earlier work in this session. Continue based on the "
-                f"recent messages below and the current state of any files or resources."
+            summary = self._build_static_fallback_summary(
+                turns_to_summarize,
+                n_dropped=n_dropped,
             )
 
         _merge_summary_into_tail = False

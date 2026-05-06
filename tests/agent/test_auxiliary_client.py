@@ -1208,6 +1208,35 @@ class TestKimiTemperatureOmitted:
         assert "temperature" not in kwargs
 
 
+class TestCodexResponsesAuxiliaryCompatibility:
+    def test_codex_auxiliary_kwargs_omit_temperature(self):
+        from agent.auxiliary_client import _build_call_kwargs
+
+        kwargs = _build_call_kwargs(
+            provider="openai-codex",
+            model="gpt-5.5",
+            messages=[{"role": "user", "content": "remember this"}],
+            temperature=0.3,
+            max_tokens=5120,
+            base_url="https://chatgpt.com/backend-api/codex",
+        )
+
+        assert "temperature" not in kwargs
+
+    def test_codex_responses_input_converts_tool_role_to_user_transcript(self):
+        from agent.auxiliary_client import _responses_input_message_from_chat
+
+        converted = _responses_input_message_from_chat({
+            "role": "tool",
+            "tool_call_id": "call_123",
+            "content": "{\"ok\": true}",
+        })
+
+        assert converted["role"] == "user"
+        assert "Tool result: call_123" in converted["content"]
+        assert "ok" in converted["content"]
+
+
 # ---------------------------------------------------------------------------
 # async_call_llm payment / connection fallback (#7512 bug 2)
 # ---------------------------------------------------------------------------

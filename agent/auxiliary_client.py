@@ -561,6 +561,34 @@ def _convert_content_for_responses(content: Any) -> Any:
     return converted or ""
 
 
+def _responses_input_message_from_chat(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Convert one chat message into a valid Responses API input message.
+
+    Codex Responses accepts only assistant/system/developer/user roles in input.
+    Chat transcripts can contain ``tool`` messages after function execution;
+    auxiliary tasks such as memory flushing replay the transcript and otherwise
+    400 with ``Invalid value: 'tool'``. Preserve those tool results as user-side
+    transcript text instead of sending an unsupported role.
+    """
+    role = msg.get("role", "user")
+    content = msg.get("content") or ""
+
+    if role == "system":
+        return None
+
+    if role == "tool":
+        label = msg.get("name") or msg.get("tool_name") or msg.get("tool_call_id") or "tool"
+        role = "user"
+        content = f"[Tool result: {label}]\n{content}"
+    elif role not in {"assistant", "developer", "user"}:
+        role = "user"
+
+    return {
+        "role": role,
+        "content": _convert_content_for_responses(content),
+    }
+
+
 class _CodexCompletionsAdapter:
     """Drop-in shim that accepts chat.completions.create() kwargs and
     routes them through the Codex Responses streaming API."""
@@ -583,11 +611,10 @@ class _CodexCompletionsAdapter:
             content = msg.get("content") or ""
             if role == "system":
                 instructions = content if isinstance(content, str) else str(content)
-            else:
-                input_msgs.append({
-                    "role": role,
-                    "content": _convert_content_for_responses(content),
-                })
+                continue
+            converted_msg = _responses_input_message_from_chat(msg)
+            if converted_msg is not None:
+                input_msgs.append(converted_msg)
 
         resp_kwargs: Dict[str, Any] = {
             "model": model,
@@ -3386,6 +3413,13 @@ def _build_call_kwargs(
         from agent.anthropic_adapter import _forbids_sampling_params
         if _forbids_sampling_params(model):
             temperature = None
+
+    # ChatGPT Codex backend is Responses-only and rejects sampling params.
+    # Auxiliary callers often pass a harmless chat-completions default like
+    # temperature=0.3, but Codex returns HTTP 400: Unsupported parameter.
+    codex_base = (base_url or "").lower()
+    if provider == "openai-codex" or "chatgpt.com/backend-api/codex" in codex_base:
+        temperature = None
 
     if temperature is not None:
         kwargs["temperature"] = temperature

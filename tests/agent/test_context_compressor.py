@@ -501,6 +501,10 @@ class TestSummaryFailureTrackingForGatewayWarning:
             isinstance(m.get("content"), str) and "Summary generation was unavailable" in m["content"]
             for m in result
         )
+        combined = "\n".join(str(m.get("content", "")) for m in result)
+        assert "Recent dropped user messages" in combined
+        assert "msg 3" in combined
+        assert "Recent dropped assistant actions/notes" in combined
 
     def test_compress_clears_fallback_flag_on_subsequent_success(self):
         mock_response = MagicMock()

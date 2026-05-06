@@ -4082,10 +4082,16 @@ class AIAgent:
         """Extract a human-readable one-liner from an API error.
 
         Handles Cloudflare HTML error pages (502, 503, etc.) by pulling the
-        <title> tag instead of dumping raw HTML.  Falls back to a truncated
-        str(error) for everything else.
+        <title> tag instead of dumping raw HTML. Recognizes Codex OAuth expiry
+        payloads so the operator gets a plain-English diagnosis instead of a raw
+        Python-ish dict blob. Falls back to a truncated str(error) for everything
+        else.
         """
         raw = str(error)
+        lowered = raw.lower()
+
+        if "token_expired" in lowered or "provided authentication token is expired" in lowered:
+            return "Codex token expired — Provided authentication token is expired. Please sign in again."
 
         # Cloudflare / proxy HTML pages: grab the <title> for a clean summary
         if "<!DOCTYPE" in raw or "<html" in raw:
@@ -4123,6 +4129,34 @@ class AIAgent:
         if len(key) <= 12:
             return "***"
         return f"{key[:8]}...{key[-4:]}"
+
+    def _auth_recovery_hint(
+        self,
+        *,
+        provider: str,
+        status_code: int | None,
+        summarized_error: str,
+    ) -> str | None:
+        """Return a short operator-facing recovery hint for auth failures."""
+        provider = (provider or "").strip().lower()
+        summary = (summarized_error or "").strip()
+        lowered = summary.lower()
+
+        if provider == "openai-codex" and status_code == 401:
+            if "token expired" in lowered or "sign in again" in lowered or "token_expired" in lowered:
+                return (
+                    "Codex auth expired. Run `hermes login --provider openai-codex`, "
+                    "then `hermes gateway restart`."
+                )
+            return (
+                "Codex auth was rejected. Run `hermes login --provider openai-codex`, "
+                "then `hermes gateway restart`."
+            )
+
+        if status_code in (401, 403):
+            return "Provider auth was rejected. Re-authenticate or refresh the API key, then retry."
+
+        return None
 
     def _clean_error_message(self, error_msg: str) -> str:
         """
@@ -12897,11 +12931,14 @@ class AIAgent:
                         self._vprint(f"{self.log_prefix}   🌐 Endpoint: {_base}", force=True)
                         # Actionable guidance for common auth errors
                         if classified.is_auth or classified.reason == FailoverReason.billing:
-                            if _provider == "openai-codex" and status_code == 401:
-                                self._vprint(f"{self.log_prefix}   💡 Codex OAuth token was rejected (HTTP 401). Your token may have been", force=True)
-                                self._vprint(f"{self.log_prefix}      refreshed by another client (Codex CLI, VS Code). To fix:", force=True)
-                                self._vprint(f"{self.log_prefix}      1. Run `codex` in your terminal to generate fresh tokens.", force=True)
-                                self._vprint(f"{self.log_prefix}      2. Then run `hermes auth` to re-authenticate.", force=True)
+                            auth_hint = self._auth_recovery_hint(
+                                provider=_provider,
+                                status_code=status_code,
+                                summarized_error=self._summarize_api_error(api_error),
+                            )
+                            if auth_hint:
+                                self._emit_status(f"💡 {auth_hint}")
+                                self._vprint(f"{self.log_prefix}   💡 {auth_hint}", force=True)
                             else:
                                 self._vprint(f"{self.log_prefix}   💡 Your API key was rejected by the provider. Check:", force=True)
                                 self._vprint(f"{self.log_prefix}      • Is the key valid? Run: hermes setup", force=True)
