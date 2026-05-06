@@ -566,6 +566,13 @@ def create_job(
         "origin": origin,  # Tracks where job was created for "origin" delivery
         "enabled_toolsets": normalized_toolsets,
         "workdir": normalized_workdir,
+        # Retry configuration — optional dict set at job creation/update time.
+        # Schema: {max_attempts, backoff_seconds, backoff_multiplier, backoff_max_seconds}
+        "retry_config": None,
+        # Retry state — set when the job is in an active retry cycle.
+        # Schema: {attempt, original_next_run}
+        # Cleared on success or when all retry attempts are exhausted.
+        "retry_state": None,
     }
 
     jobs = load_jobs()
@@ -700,13 +707,41 @@ def remove_job(job_id: str) -> bool:
     return False
 
 
+def _compute_retry_backoff(retry_config: Dict[str, Any], attempt: int) -> int:
+    """Compute the backoff delay in seconds for a retry attempt.
+
+    Uses exponential backoff with optional cap:
+        delay = min(backoff_seconds * (backoff_multiplier ** attempt), backoff_max_seconds)
+
+    Args:
+        retry_config: Dict with keys: backoff_seconds, backoff_multiplier, backoff_max_seconds
+        attempt: Zero-based attempt index (0 = first retry)
+
+    Returns:
+        Delay in seconds (always >= 1).
+    """
+    base = float(retry_config.get("backoff_seconds", 60))
+    multiplier = float(retry_config.get("backoff_multiplier", 2.0))
+    max_seconds = retry_config.get("backoff_max_seconds")
+
+    delay = base * (multiplier ** attempt)
+    if max_seconds is not None:
+        delay = min(delay, float(max_seconds))
+    return max(1, int(delay))
+
+
 def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                  delivery_error: Optional[str] = None):
     """
     Mark a job as having been run.
-    
+
     Updates last_run_at, last_status, increments completed count,
     computes next_run_at, and auto-deletes if repeat limit reached.
+
+    When a job has ``retry_config`` set and the run failed, the job is
+    scheduled for a retry using exponential backoff.  ``retry_state`` tracks
+    the current attempt number and the original ``next_run_at`` so the normal
+    schedule can be restored once the retry cycle ends.
 
     ``delivery_error`` is tracked separately from the agent error — a job
     can succeed (agent produced output) but fail delivery (platform down).
@@ -721,11 +756,62 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                 job["last_error"] = error if not success else None
                 # Track delivery failures separately — cleared on successful delivery
                 job["last_delivery_error"] = delivery_error
-                
-                # Increment completed count
-                if job.get("repeat"):
+
+                # ------------------------------------------------------------------
+                # Retry logic: only for failures on jobs with retry_config set.
+                # ------------------------------------------------------------------
+                retry_config = job.get("retry_config")
+                if not success and retry_config:
+                    max_attempts = int(retry_config.get("max_attempts", 3))
+                    retry_state = job.get("retry_state") or {}
+                    attempt = int(retry_state.get("attempt", 0))
+
+                    if attempt < max_attempts:
+                        # Preserve the original next_run_at on the first retry so
+                        # we can restore it after the retry cycle completes.
+                        original_next_run = retry_state.get("original_next_run") or job.get("next_run_at")
+                        delay_seconds = _compute_retry_backoff(retry_config, attempt)
+                        retry_at = (_hermes_now() + timedelta(seconds=delay_seconds)).isoformat()
+
+                        job["retry_state"] = {
+                            "attempt": attempt + 1,
+                            "original_next_run": original_next_run,
+                        }
+                        job["next_run_at"] = retry_at
+                        if job.get("state") != "paused":
+                            job["state"] = "scheduled"
+
+                        logger.info(
+                            "Job '%s': retry %d/%d scheduled in %ds at %s",
+                            job.get("name", job["id"]),
+                            attempt + 1,
+                            max_attempts,
+                            delay_seconds,
+                            retry_at,
+                        )
+                        save_jobs(jobs)
+                        return
+                    else:
+                        # All retry attempts exhausted — clear retry state and
+                        # fall through to normal next-run computation below.
+                        logger.warning(
+                            "Job '%s': all %d retry attempts exhausted",
+                            job.get("name", job["id"]),
+                            max_attempts,
+                        )
+                        job["retry_state"] = None
+
+                # On success (or after exhausting retries), clear retry state.
+                if success and job.get("retry_state"):
+                    job["retry_state"] = None
+
+                # Increment completed count only on success — failed runs
+                # (including exhausted retries) must not consume the repeat
+                # budget, otherwise a repeat=1 job with retry_config could
+                # be deleted after all retries fail without ever succeeding.
+                if success and job.get("repeat"):
                     job["repeat"]["completed"] = job["repeat"].get("completed", 0) + 1
-                    
+
                     # Check if we've hit the repeat limit
                     times = job["repeat"].get("times")
                     completed = job["repeat"]["completed"]
@@ -734,7 +820,7 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                         jobs.pop(i)
                         save_jobs(jobs)
                         return
-                
+
                 # Compute next run
                 job["next_run_at"] = compute_next_run(job["schedule"], now)
 
@@ -783,6 +869,11 @@ def advance_next_run(job_id: str) -> bool:
 
     One-shot jobs are left unchanged so they can still retry on restart.
 
+    CRITICAL: When a job is in an active retry cycle (``retry_state`` is set),
+    ``next_run_at`` already holds the backoff-computed retry time.  Advancing
+    it here would overwrite that time and break retry semantics — so we skip
+    the advance for jobs in retry state.
+
     Returns True if next_run_at was advanced, False otherwise.
     """
     with _jobs_file_lock:
@@ -791,6 +882,15 @@ def advance_next_run(job_id: str) -> bool:
             if job["id"] == job_id:
                 kind = job.get("schedule", {}).get("kind")
                 if kind not in ("cron", "interval"):
+                    return False
+                # Skip advance when the job is in a retry cycle — the backoff
+                # time set by mark_job_run must not be overwritten.
+                if job.get("retry_state") is not None:
+                    logger.debug(
+                        "advance_next_run: skipping job '%s' — in retry state (attempt %s)",
+                        job.get("name", job["id"]),
+                        job["retry_state"].get("attempt"),
+                    )
                     return False
                 now = _hermes_now().isoformat()
                 new_next = compute_next_run(job["schedule"], now)

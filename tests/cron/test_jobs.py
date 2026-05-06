@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from cron.jobs import _hermes_now
+
 from cron.jobs import (
     parse_duration,
     parse_schedule,
@@ -24,6 +26,7 @@ from cron.jobs import (
     advance_next_run,
     get_due_jobs,
     save_job_output,
+    _compute_retry_backoff,
 )
 
 
@@ -846,3 +849,300 @@ class TestSaveJobOutput:
         assert output_file.exists()
         assert output_file.read_text() == "# Results\nEverything ok."
         assert "test123" in str(output_file)
+
+
+# =========================================================================
+# Retry-on-failure feature (F1)
+# =========================================================================
+
+class TestComputeRetryBackoff:
+    """Unit tests for the exponential backoff helper."""
+
+    def test_first_attempt_uses_base(self):
+        cfg = {"backoff_seconds": 60, "backoff_multiplier": 2.0}
+        assert _compute_retry_backoff(cfg, 0) == 60
+
+    def test_second_attempt_doubles(self):
+        cfg = {"backoff_seconds": 60, "backoff_multiplier": 2.0}
+        assert _compute_retry_backoff(cfg, 1) == 120
+
+    def test_third_attempt_quadruples(self):
+        cfg = {"backoff_seconds": 60, "backoff_multiplier": 2.0}
+        assert _compute_retry_backoff(cfg, 2) == 240
+
+    def test_cap_respected(self):
+        cfg = {"backoff_seconds": 60, "backoff_multiplier": 2.0, "backoff_max_seconds": 100}
+        # attempt=2 → 60*4=240, capped at 100
+        assert _compute_retry_backoff(cfg, 2) == 100
+
+    def test_cap_not_applied_when_below_max(self):
+        cfg = {"backoff_seconds": 30, "backoff_multiplier": 2.0, "backoff_max_seconds": 300}
+        # attempt=0 → 30, well below 300
+        assert _compute_retry_backoff(cfg, 0) == 30
+
+    def test_minimum_delay_is_one(self):
+        cfg = {"backoff_seconds": 0, "backoff_multiplier": 0}
+        assert _compute_retry_backoff(cfg, 0) >= 1
+
+    def test_no_cap_key_means_unlimited(self):
+        cfg = {"backoff_seconds": 60, "backoff_multiplier": 3.0}
+        # attempt=5 → 60 * 3^5 = 14580
+        assert _compute_retry_backoff(cfg, 5) == 14580
+
+
+class TestRetryOnFailure:
+    """Integration tests for retry_config / retry_state in mark_job_run."""
+
+    def _make_retry_config(self, max_attempts=3, backoff_seconds=60,
+                           backoff_multiplier=2.0, backoff_max_seconds=None):
+        cfg = {
+            "max_attempts": max_attempts,
+            "backoff_seconds": backoff_seconds,
+            "backoff_multiplier": backoff_multiplier,
+        }
+        if backoff_max_seconds is not None:
+            cfg["backoff_max_seconds"] = backoff_max_seconds
+        return cfg
+
+    def _inject_retry_config(self, job_id, retry_config):
+        """Directly patch retry_config into a persisted job."""
+        jobs = load_jobs()
+        for j in jobs:
+            if j["id"] == job_id:
+                j["retry_config"] = retry_config
+        save_jobs(jobs)
+
+    def test_no_retry_config_no_change(self, tmp_cron_dir):
+        """Without retry_config, failures behave exactly as before."""
+        job = create_job(prompt="Fail", schedule="every 1h")
+        original_next = get_job(job["id"])["next_run_at"]
+        mark_job_run(job["id"], success=False, error="timeout")
+        updated = get_job(job["id"])
+        assert updated["last_status"] == "error"
+        assert updated["retry_state"] is None
+        # next_run_at should advance normally (not a backoff time)
+        assert updated["next_run_at"] != original_next or updated["next_run_at"] is not None
+
+    def test_first_failure_schedules_retry(self, tmp_cron_dir):
+        """First failure with retry_config sets retry_state and backoff next_run_at."""
+        job = create_job(prompt="Flaky", schedule="every 1h")
+        self._inject_retry_config(job["id"], self._make_retry_config(
+            max_attempts=3, backoff_seconds=60, backoff_multiplier=2.0
+        ))
+
+        before = _hermes_now()
+        mark_job_run(job["id"], success=False, error="transient error")
+        after = _hermes_now()
+
+        updated = get_job(job["id"])
+        assert updated["last_status"] == "error"
+        assert updated["retry_state"] is not None
+        assert updated["retry_state"]["attempt"] == 1
+        assert updated["retry_state"]["original_next_run"] is not None
+
+        # next_run_at should be ~60s in the future (backoff_seconds for attempt 0)
+        retry_dt = datetime.fromisoformat(updated["next_run_at"])
+        if retry_dt.tzinfo is None:
+            retry_dt = retry_dt.astimezone()
+        expected_low = before + timedelta(seconds=55)
+        expected_high = after + timedelta(seconds=70)
+        assert expected_low <= retry_dt <= expected_high, (
+            f"retry_at={retry_dt} not in [{expected_low}, {expected_high}]"
+        )
+
+    def test_second_failure_doubles_backoff(self, tmp_cron_dir):
+        """Second failure doubles the backoff delay."""
+        job = create_job(prompt="Flaky", schedule="every 1h")
+        self._inject_retry_config(job["id"], self._make_retry_config(
+            max_attempts=3, backoff_seconds=60, backoff_multiplier=2.0
+        ))
+
+        # First failure
+        mark_job_run(job["id"], success=False, error="error 1")
+        # Second failure
+        before = _hermes_now()
+        mark_job_run(job["id"], success=False, error="error 2")
+        after = _hermes_now()
+
+        updated = get_job(job["id"])
+        assert updated["retry_state"]["attempt"] == 2
+
+        # Backoff for attempt=1 → 60 * 2^1 = 120s
+        retry_dt = datetime.fromisoformat(updated["next_run_at"])
+        if retry_dt.tzinfo is None:
+            retry_dt = retry_dt.astimezone()
+        expected_low = before + timedelta(seconds=115)
+        expected_high = after + timedelta(seconds=130)
+        assert expected_low <= retry_dt <= expected_high, (
+            f"retry_at={retry_dt} not in [{expected_low}, {expected_high}]"
+        )
+
+    def test_success_on_second_attempt_clears_retry_state(self, tmp_cron_dir):
+        """Success during a retry cycle clears retry_state and restores normal schedule."""
+        job = create_job(prompt="Flaky", schedule="every 1h")
+        self._inject_retry_config(job["id"], self._make_retry_config(
+            max_attempts=3, backoff_seconds=60, backoff_multiplier=2.0
+        ))
+
+        # First failure — enters retry cycle
+        mark_job_run(job["id"], success=False, error="transient")
+        assert get_job(job["id"])["retry_state"] is not None
+
+        # Second run succeeds — retry_state must be cleared
+        mark_job_run(job["id"], success=True)
+        updated = get_job(job["id"])
+        assert updated["retry_state"] is None
+        assert updated["last_status"] == "ok"
+        # next_run_at should be a normal schedule time (not a backoff time)
+        assert updated["next_run_at"] is not None
+
+    def test_exhausted_retries_clears_retry_state(self, tmp_cron_dir):
+        """After all retry attempts are used, retry_state is cleared and normal schedule resumes.
+
+        max_attempts=2 means 2 retry attempts are allowed after the initial failure.
+        So the sequence is: failure → retry 1 → retry 2 → exhausted.
+        """
+        job = create_job(prompt="Always fails", schedule="every 1h")
+        self._inject_retry_config(job["id"], self._make_retry_config(
+            max_attempts=2, backoff_seconds=60, backoff_multiplier=2.0
+        ))
+
+        # Initial failure → schedules retry 1
+        mark_job_run(job["id"], success=False, error="err 1")
+        assert get_job(job["id"])["retry_state"]["attempt"] == 1
+
+        # Retry 1 fails → schedules retry 2
+        mark_job_run(job["id"], success=False, error="err 2")
+        assert get_job(job["id"])["retry_state"]["attempt"] == 2
+
+        # Retry 2 fails → all max_attempts exhausted, retry_state cleared
+        mark_job_run(job["id"], success=False, error="err 3")
+        updated = get_job(job["id"])
+        assert updated["retry_state"] is None
+        assert updated["last_status"] == "error"
+        # next_run_at should be a normal schedule time (not a backoff time)
+        assert updated["next_run_at"] is not None
+
+    def test_failed_runs_do_not_consume_repeat_budget(self, tmp_cron_dir):
+        """Failed runs (including exhausted retries) must not count toward the
+        repeat limit — only successful completions should consume it.
+
+        Without this, a repeat=1 one-shot job with retry_config would be
+        deleted after all retries fail without ever succeeding.
+        """
+        # Create a one-shot job (repeat=1 by default for once schedules)
+        job = create_job(prompt="One-shot with retries", schedule="1h")
+        assert job["repeat"]["times"] == 1
+        self._inject_retry_config(job["id"], self._make_retry_config(
+            max_attempts=2, backoff_seconds=60, backoff_multiplier=2.0
+        ))
+
+        # Initial failure → retry 1
+        mark_job_run(job["id"], success=False, error="err 1")
+        assert get_job(job["id"]) is not None, "job deleted after first failure — should not be"
+        assert get_job(job["id"])["repeat"]["completed"] == 0
+
+        # Retry 1 fails → retry 2
+        mark_job_run(job["id"], success=False, error="err 2")
+        assert get_job(job["id"]) is not None, "job deleted after second failure — should not be"
+        assert get_job(job["id"])["repeat"]["completed"] == 0
+
+        # Retry 2 fails → exhausted, no more retries, but job must still exist
+        mark_job_run(job["id"], success=False, error="err 3")
+        updated = get_job(job["id"])
+        assert updated is not None, (
+            "job was deleted after exhausted retries — failed runs must not "
+            "consume the repeat budget"
+        )
+        assert updated["repeat"]["completed"] == 0, (
+            "completed count should be 0 — failures must not increment it"
+        )
+        assert updated["retry_state"] is None
+
+    def test_backoff_cap_respected(self, tmp_cron_dir):
+        """backoff_max_seconds caps the computed delay."""
+        job = create_job(prompt="Capped backoff", schedule="every 1h")
+        self._inject_retry_config(job["id"], self._make_retry_config(
+            max_attempts=5, backoff_seconds=60, backoff_multiplier=4.0,
+            backoff_max_seconds=90
+        ))
+
+        # First failure: attempt=0 → 60*4^0=60s (below cap)
+        before = _hermes_now()
+        mark_job_run(job["id"], success=False, error="err")
+        after = _hermes_now()
+
+        updated = get_job(job["id"])
+        retry_dt = datetime.fromisoformat(updated["next_run_at"])
+        if retry_dt.tzinfo is None:
+            retry_dt = retry_dt.astimezone()
+        # Should be ~60s, well within cap
+        assert retry_dt <= after + timedelta(seconds=65)
+
+        # Second failure: attempt=1 → 60*4^1=240s, capped at 90s
+        before2 = _hermes_now()
+        mark_job_run(job["id"], success=False, error="err")
+        after2 = _hermes_now()
+
+        updated2 = get_job(job["id"])
+        retry_dt2 = datetime.fromisoformat(updated2["next_run_at"])
+        if retry_dt2.tzinfo is None:
+            retry_dt2 = retry_dt2.astimezone()
+        # Should be ~90s (capped), not 240s
+        assert retry_dt2 <= after2 + timedelta(seconds=95), (
+            f"Backoff cap not respected: retry_dt={retry_dt2}, expected <= {after2 + timedelta(seconds=95)}"
+        )
+
+
+class TestAdvanceNextRunRetryGuard:
+    """advance_next_run() must be skipped when the job is in a retry state."""
+
+    def test_skipped_when_in_retry_state(self, tmp_cron_dir):
+        """advance_next_run returns False and does not modify next_run_at for retry jobs."""
+        job = create_job(prompt="Retrying", schedule="every 1h")
+
+        # Manually inject retry_state and a backoff next_run_at
+        backoff_time = (_hermes_now() + timedelta(seconds=60)).isoformat()
+        jobs = load_jobs()
+        jobs[0]["retry_state"] = {"attempt": 1, "original_next_run": jobs[0]["next_run_at"]}
+        jobs[0]["next_run_at"] = backoff_time
+        save_jobs(jobs)
+
+        result = advance_next_run(job["id"])
+        assert result is False, "advance_next_run should return False when job is in retry state"
+
+        updated = get_job(job["id"])
+        assert updated["next_run_at"] == backoff_time, (
+            "advance_next_run must not overwrite the backoff-set next_run_at"
+        )
+
+    def test_advances_normally_when_not_in_retry_state(self, tmp_cron_dir):
+        """advance_next_run advances normally when retry_state is None."""
+        job = create_job(prompt="Normal", schedule="every 1h")
+
+        # Force next_run_at to 5 minutes ago
+        jobs = load_jobs()
+        jobs[0]["next_run_at"] = (_hermes_now() - timedelta(minutes=5)).isoformat()
+        jobs[0]["retry_state"] = None
+        save_jobs(jobs)
+
+        result = advance_next_run(job["id"])
+        assert result is True
+
+        updated = get_job(job["id"])
+        from cron.jobs import _ensure_aware
+        new_next_dt = _ensure_aware(datetime.fromisoformat(updated["next_run_at"]))
+        assert new_next_dt > _hermes_now()
+
+    def test_retry_state_absent_key_treated_as_none(self, tmp_cron_dir):
+        """Jobs without a retry_state key (legacy records) advance normally."""
+        job = create_job(prompt="Legacy", schedule="every 1h")
+
+        # Simulate a legacy record with no retry_state key at all
+        jobs = load_jobs()
+        jobs[0].pop("retry_state", None)
+        jobs[0]["next_run_at"] = (_hermes_now() - timedelta(minutes=5)).isoformat()
+        save_jobs(jobs)
+
+        result = advance_next_run(job["id"])
+        assert result is True
