@@ -1049,6 +1049,15 @@ def merge_pending_message_event(
     the last queued fragment.
     """
     existing = pending_messages.get(session_key)
+
+    # Guard: never let an internal (synthetic) event overwrite or merge
+    # into a pending user message.  The user's words must stay intact
+    # and first in the pending slot.  Internal events that arrive while
+    # a user message is already pending should be routed to
+    # _pending_internal_messages by the caller instead.
+    if existing and not getattr(existing, 'internal', False) and getattr(event, 'internal', False):
+        return
+
     if existing:
         existing_is_photo = getattr(existing, "message_type", None) == MessageType.PHOTO
         incoming_is_photo = event.message_type == MessageType.PHOTO
@@ -1246,6 +1255,12 @@ class BasePlatformAdapter(ABC):
         self._post_delivery_callbacks: Dict[str, Any] = {}
         self._expected_cancelled_tasks: set[asyncio.Task] = set()
         self._busy_session_handler: Optional[Callable[[MessageEvent, str], Awaitable[bool]]] = None
+        # Internal synthetic events (background process completions, watch
+        # notifications) that arrive while a session is active are parked here
+        # instead of going through the busy-input interrupt/steer/queue path.
+        # They are drained after the user's pending message is processed so
+        # they never compete with or overwrite a real user message.
+        self._pending_internal_messages: Dict[str, List[MessageEvent]] = {}
         # Auto-TTS on voice input: ``_auto_tts_default`` is the global default
         # (``voice.auto_tts`` in config.yaml, pushed by GatewayRunner on connect).
         # Per-chat overrides live in two sets populated from ``_voice_mode``:
@@ -2355,6 +2370,7 @@ class BasePlatformAdapter(ABC):
         )
         self._active_sessions.pop(session_key, None)
         self._pending_messages.pop(session_key, None)
+        self._pending_internal_messages.pop(session_key, None)
         self._session_tasks.pop(session_key, None)
         return True
 
@@ -2437,6 +2453,7 @@ class BasePlatformAdapter(ABC):
                 )
         if discard_pending:
             self._pending_messages.pop(session_key, None)
+            self._pending_internal_messages.pop(session_key, None)
         if release_guard:
             self._release_session_guard(session_key)
 
@@ -2629,6 +2646,20 @@ class BasePlatformAdapter(ABC):
                             )
                 except Exception as e:
                     logger.error("[%s] Command '/%s' dispatch failed: %s", self.name, cmd, e, exc_info=True)
+                return
+
+            # Internal synthetic events (background process completions,
+            # watch notifications) must NOT interrupt a running agent or
+            # compete with user messages for the pending slot.  Instead,
+            # they park in _pending_internal_messages and are drained
+            # after the user's pending message is fully processed on the
+            # next turn.
+            if getattr(event, 'internal', False):
+                self._pending_internal_messages.setdefault(session_key, []).append(event)
+                logger.debug(
+                    "[%s] Parking internal event for session %s (active run in progress)",
+                    self.name, session_key,
+                )
                 return
 
             if self._busy_session_handler is not None:
@@ -3005,6 +3036,33 @@ class BasePlatformAdapter(ABC):
                     # Tests stub create_task() with non-hashable sentinels; tolerate.
                     pass
                 return  # Drain task owns the session now.
+
+            # Drain any internal synthetic events (background process
+            # completions, watch notifications) that were parked while
+            # a session was active.  These run as follow-up turns after
+            # the user's message has been fully processed.  Only drain
+            # when there is no pending user message queued — if one is
+            # queued, it will be processed first (by the block above)
+            # and the drain will happen on its next pass through here.
+            _parked = self._pending_internal_messages.pop(session_key, None)
+            if _parked:
+                for _int_event in _parked:
+                    logger.debug(
+                        "[%s] Draining parked internal event for session %s",
+                        self.name, session_key,
+                    )
+                    drain_task = asyncio.create_task(
+                        self._process_message_background(_int_event, session_key)
+                    )
+                    self._session_tasks[session_key] = drain_task
+                    try:
+                        self._background_tasks.add(drain_task)
+                        drain_task.add_done_callback(self._background_tasks.discard)
+                    except TypeError:
+                        pass
+                    # Only one internal drain per turn to avoid stacking
+                    # tasks; the rest will drain on subsequent passes.
+                    break
                 
         except asyncio.CancelledError:
             current_task = asyncio.current_task()
