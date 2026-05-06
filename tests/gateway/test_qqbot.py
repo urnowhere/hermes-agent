@@ -626,3 +626,189 @@ class TestWaitForReconnection:
         assert not result.success
         assert result.retryable is True
         assert "Not connected" in result.error
+
+
+# ---------------------------------------------------------------------------
+# InlineKeyboard / approval / slash-confirm
+# ---------------------------------------------------------------------------
+
+class TestQQAdapterKeyboard:
+    """Tests for InlineKeyboard button construction and interaction handling."""
+
+    def _make_adapter(self, **extra):
+        from gateway.platforms.qqbot import QQAdapter
+        adapter = QQAdapter(_make_config(markdown_support=True, **extra))
+        adapter._http_client = mock.MagicMock()
+        return adapter
+
+    # -- Keyboard button construction --
+
+    def test_build_keyboard_button_structure(self):
+        from gateway.platforms.qqbot.constants import KEYBOARD_ACTION_TYPE
+        adapter = self._make_adapter(app_id="a", client_secret="b")
+        btn = adapter._build_keyboard_button("Click me", "cb:data", 0)
+        assert btn["render_data"]["label"] == "Click me"
+        assert btn["render_data"]["style"] == 0
+        assert btn["action"]["type"] == KEYBOARD_ACTION_TYPE
+        assert btn["action"]["data"] == "cb:data"
+
+    def test_build_keyboard_rows_structure(self):
+        adapter = self._make_adapter(app_id="a", client_secret="b")
+        row1 = [adapter._build_keyboard_button("A", "a")]
+        row2 = [adapter._build_keyboard_button("B", "b"), adapter._build_keyboard_button("C", "c")]
+        kb = adapter._build_keyboard_rows([row1, row2])
+        assert len(kb["rows"]) == 2
+        assert len(kb["rows"][0]["buttons"]) == 1
+        assert len(kb["rows"][1]["buttons"]) == 2
+
+    # -- send_exec_approval --
+
+    @pytest.mark.asyncio
+    async def test_send_exec_approval_returns_not_connected(self):
+        """send_exec_approval returns error when not connected."""
+        from gateway.platforms.qqbot import QQAdapter
+        adapter = QQAdapter(_make_config(markdown_support=True, app_id="a", client_secret="b"))
+        # _http_client is None (not connected)
+        result = await adapter.send_exec_approval("chat1", "rm -rf /", "session_key")
+        assert not result.success
+        assert "Not connected" in result.error
+
+    @pytest.mark.asyncio
+    async def test_send_exec_approval_returns_not_supported_without_markdown(self):
+        """send_exec_approval fails gracefully when markdown is disabled."""
+        from gateway.platforms.qqbot import QQAdapter
+        adapter = QQAdapter(_make_config(markdown_support=False, app_id="a", client_secret="b"))
+        adapter._http_client = mock.MagicMock()
+        result = await adapter.send_exec_approval("chat1", "rm -rf /", "session_key")
+        assert not result.success
+        assert "markdown_support" in result.error
+
+    @pytest.mark.asyncio
+    async def test_send_exec_approval_stores_approval_state(self):
+        """send_exec_approval stores state for later callback resolution."""
+        adapter = self._make_adapter(app_id="a", client_secret="b")
+
+        async def fake_keyboard_send(*args, **kwargs):
+            from gateway.platforms.base import SendResult
+            return SendResult(success=True, message_id="msg_approval_1")
+
+        adapter._send_keyboard_message = fake_keyboard_send
+        adapter._guess_chat_type = lambda x: "c2c"
+
+        result = await adapter.send_exec_approval("chat1", "rm -rf /", "sess_key_1")
+        assert result.success
+        # Verify approval state was stored
+        assert len(adapter._approval_state) == 1
+        state = list(adapter._approval_state.values())[0]
+        assert state["session_key"] == "sess_key_1"
+        assert state["chat_id"] == "chat1"
+
+    # -- send_slash_confirm --
+
+    @pytest.mark.asyncio
+    async def test_send_slash_confirm_returns_not_connected(self):
+        """send_slash_confirm returns error when not connected."""
+        from gateway.platforms.qqbot import QQAdapter
+        adapter = QQAdapter(_make_config(markdown_support=True, app_id="a", client_secret="b"))
+        result = await adapter.send_slash_confirm("chat1", "Title", "msg", "sess", "cid1")
+        assert not result.success
+        assert "Not connected" in result.error
+
+    @pytest.mark.asyncio
+    async def test_send_slash_confirm_stores_state(self):
+        """send_slash_confirm stores confirm_id → session_key mapping."""
+        adapter = self._make_adapter(app_id="a", client_secret="b")
+
+        async def fake_keyboard_send(*args, **kwargs):
+            from gateway.platforms.base import SendResult
+            return SendResult(success=True, message_id="msg_confirm_1")
+
+        adapter._send_keyboard_message = fake_keyboard_send
+
+        result = await adapter.send_slash_confirm(
+            "chat1", "Confirm?", "Please confirm", "sess_key_2", "confirm_42",
+        )
+        assert result.success
+        assert adapter._slash_confirm_state.get("confirm_42") == "sess_key_2"
+
+    # -- Interaction callback parsing --
+
+    @pytest.mark.asyncio
+    async def test_on_interaction_parses_approval_callback(self):
+        """_on_interaction routes approval button clicks correctly."""
+        adapter = self._make_adapter(app_id="a", client_secret="b")
+        approval_id = next(adapter._approval_counter)
+        adapter._approval_state[approval_id] = {
+            "session_key": "sess_1",
+            "message_id": "msg_1",
+            "chat_id": "chat_1",
+        }
+
+        resolved = []
+
+        async def fake_resolve(session_key, choice):
+            resolved.append((session_key, choice))
+            return "✅ Approved"
+
+        async def fake_send(chat_id, text, metadata=None):
+            pass
+
+        with mock.patch("tools.approval.resolve_gateway_approval", fake_resolve):
+            adapter.send = fake_send
+            await adapter._on_interaction({
+                "id": "interaction_1",
+                "data": {
+                    "resolved": {
+                        "button_data": f"hermes:approval:approve_once:{approval_id}",
+                    },
+                },
+            })
+
+        assert len(resolved) == 1
+        assert resolved[0] == ("sess_1", "once")
+
+    @pytest.mark.asyncio
+    async def test_on_interaction_ignores_unknown_callback(self):
+        """_on_interaction ignores callbacks with unrecognized format."""
+        adapter = self._make_adapter(app_id="a", client_secret="b")
+        # Should not raise
+        await adapter._on_interaction({
+            "id": "interaction_2",
+            "data": {"resolved": {"button_data": "unknown:format"}},
+        })
+
+    @pytest.mark.asyncio
+    async def test_on_interaction_ignores_empty_data(self):
+        """_on_interaction ignores events without button_data."""
+        adapter = self._make_adapter(app_id="a", client_secret="b")
+        # Should not raise
+        await adapter._on_interaction({
+            "id": "interaction_3",
+            "data": {},
+        })
+        await adapter._on_interaction("not a dict")
+
+    @pytest.mark.asyncio
+    async def test_on_interaction_parses_slash_confirm_callback(self):
+        """_on_interaction routes slash_confirm button clicks correctly."""
+        adapter = self._make_adapter(app_id="a", client_secret="b")
+        adapter._slash_confirm_state["confirm_99"] = "sess_sc"
+
+        resolved = []
+
+        async def fake_sc_resolve(session_key, confirm_id, choice):
+            resolved.append((session_key, confirm_id, choice))
+            return None
+
+        with mock.patch("tools.slash_confirm.resolve", fake_sc_resolve):
+            await adapter._on_interaction({
+                "id": "interaction_sc",
+                "data": {
+                    "resolved": {
+                        "button_data": "hermes:slash_confirm:once:confirm_99",
+                    },
+                },
+            })
+
+        assert len(resolved) == 1
+        assert resolved[0] == ("sess_sc", "confirm_99", "once")
