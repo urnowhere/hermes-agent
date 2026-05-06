@@ -7,7 +7,23 @@ from unittest.mock import patch
 import pytest
 
 import hermes_constants
-from hermes_constants import get_default_hermes_root, is_container
+from hermes_constants import get_default_hermes_root, get_hermes_home_mode, is_container
+
+
+class TestGetHermesHomeMode:
+    """Tests for HERMES_HOME_MODE parsing."""
+
+    def test_default_mode(self, monkeypatch):
+        monkeypatch.delenv("HERMES_HOME_MODE", raising=False)
+        assert get_hermes_home_mode() == 0o700
+
+    def test_custom_octal_mode(self, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME_MODE", "0750")
+        assert get_hermes_home_mode() == 0o750
+
+    def test_invalid_mode_falls_back(self, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME_MODE", "not-octal")
+        assert get_hermes_home_mode() == 0o700
 
 
 class TestGetDefaultHermesRoot:

@@ -68,6 +68,19 @@ def get_hermes_home() -> Path:
     return Path.home() / ".hermes"
 
 
+def get_hermes_home_mode(default: int = 0o700) -> int:
+    """Return the directory mode configured for Hermes-owned state dirs.
+
+    ``HERMES_HOME_MODE`` is an octal chmod value such as ``0701``. Invalid
+    values fall back to ``default``.
+    """
+    try:
+        mode_str = os.environ.get("HERMES_HOME_MODE", "").strip()
+        return int(mode_str, 8) if mode_str else default
+    except ValueError:
+        return default
+
+
 def get_default_hermes_root() -> Path:
     """Return the root Hermes directory for profile-level operations.
 

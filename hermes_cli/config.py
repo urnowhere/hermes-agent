@@ -240,7 +240,7 @@ def get_container_exec_info() -> Optional[dict]:
 # =============================================================================
 
 # Re-export from hermes_constants — canonical definition lives there.
-from hermes_constants import get_hermes_home  # noqa: F811,E402
+from hermes_constants import get_hermes_home, get_hermes_home_mode  # noqa: F811,E402
 from utils import atomic_replace
 
 def get_config_path() -> Path:
@@ -270,11 +270,7 @@ def _secure_dir(path):
     """
     if is_managed():
         return
-    try:
-        mode_str = os.environ.get("HERMES_HOME_MODE", "").strip()
-        mode = int(mode_str, 8) if mode_str else 0o700
-    except ValueError:
-        mode = 0o700
+    mode = get_hermes_home_mode()
     try:
         os.chmod(path, mode)
     except (OSError, NotImplementedError):

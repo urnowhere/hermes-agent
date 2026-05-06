@@ -40,6 +40,21 @@ class TestCronFilePermissions(unittest.TestCase):
             self.assertEqual(cron_mode, 0o700)
             self.assertEqual(output_mode, 0o700)
 
+    def test_ensure_dirs_honors_hermes_home_mode(self):
+        cron_dir = Path(self.tmpdir) / "cron"
+        output_dir = cron_dir / "output"
+
+        with patch.dict(os.environ, {"HERMES_HOME_MODE": "0701"}), \
+             patch("cron.jobs.CRON_DIR", cron_dir), \
+             patch("cron.jobs.OUTPUT_DIR", output_dir):
+            from cron.jobs import ensure_dirs
+            ensure_dirs()
+
+            cron_mode = stat.S_IMODE(os.stat(cron_dir).st_mode)
+            output_mode = stat.S_IMODE(os.stat(output_dir).st_mode)
+            self.assertEqual(cron_mode, 0o701)
+            self.assertEqual(output_mode, 0o701)
+
     @patch("cron.jobs.CRON_DIR")
     @patch("cron.jobs.OUTPUT_DIR")
     @patch("cron.jobs.JOBS_FILE")
@@ -73,6 +88,23 @@ class TestCronFilePermissions(unittest.TestCase):
             job_dir = output_dir / "test-job"
             dir_mode = stat.S_IMODE(os.stat(job_dir).st_mode)
             self.assertEqual(dir_mode, 0o700)
+
+    def test_save_job_output_honors_hermes_home_mode_for_job_dir(self):
+        output_dir = Path(self.tmpdir) / "output"
+        with patch.dict(os.environ, {"HERMES_HOME_MODE": "0750"}), \
+             patch("cron.jobs.OUTPUT_DIR", output_dir), \
+             patch("cron.jobs.CRON_DIR", Path(self.tmpdir)), \
+             patch("cron.jobs.ensure_dirs"):
+            output_dir.mkdir(parents=True, exist_ok=True)
+            from cron.jobs import save_job_output
+            output_file = save_job_output("test-job", "test output content")
+
+            file_mode = stat.S_IMODE(os.stat(output_file).st_mode)
+            self.assertEqual(file_mode, 0o600)
+
+            job_dir = output_dir / "test-job"
+            dir_mode = stat.S_IMODE(os.stat(job_dir).st_mode)
+            self.assertEqual(dir_mode, 0o750)
 
 
 class TestConfigFilePermissions(unittest.TestCase):

@@ -15,7 +15,7 @@ import re
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from hermes_constants import get_hermes_home
+from hermes_constants import get_hermes_home, get_hermes_home_mode
 from typing import Optional, Dict, List, Any, Union
 
 logger = logging.getLogger(__name__)
@@ -72,9 +72,9 @@ def _apply_skill_fields(job: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _secure_dir(path: Path):
-    """Set directory to owner-only access (0700). No-op on Windows."""
+    """Set cron directories to the configured Hermes home mode."""
     try:
-        os.chmod(path, 0o700)
+        os.chmod(path, get_hermes_home_mode())
     except (OSError, NotImplementedError):
         pass  # Windows or other platforms where chmod is not supported
 
