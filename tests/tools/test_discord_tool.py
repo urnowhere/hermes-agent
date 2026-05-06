@@ -183,6 +183,16 @@ class TestDiscordServerValidation:
         assert "user_id" in result["error"]
         assert "role_id" in result["error"]
 
+    @patch("tools.discord_tool._discord_request")
+    def test_missing_required_content(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        result = json.loads(discord_admin_handler(
+            action="edit_message", channel_id="11", message_id="500",
+        ))
+        assert "error" in result
+        assert "content" in result["error"]
+        mock_req.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Action: list_guilds
@@ -428,6 +438,50 @@ class TestPinUnpin:
 
 
 # ---------------------------------------------------------------------------
+# Actions: edit_message / delete_message
+# ---------------------------------------------------------------------------
+
+class TestEditDeleteMessage:
+    @patch("tools.discord_tool._discord_request")
+    def test_edit_message(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = {
+            "id": "500",
+            "content": "Updated announcement",
+            "edited_timestamp": "2024-01-01T00:01:00Z",
+        }
+        result = json.loads(discord_admin_handler(
+            action="edit_message",
+            channel_id="11",
+            message_id="500",
+            content="Updated announcement",
+        ))
+        assert result["success"] is True
+        assert result["message_id"] == "500"
+        assert result["content"] == "Updated announcement"
+        assert result["edited_timestamp"] == "2024-01-01T00:01:00Z"
+        mock_req.assert_called_once_with(
+            "PATCH",
+            "/channels/11/messages/500",
+            "test-token",
+            body={"content": "Updated announcement"},
+        )
+
+    @patch("tools.discord_tool._discord_request")
+    def test_delete_message(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = None
+        result = json.loads(discord_admin_handler(
+            action="delete_message", channel_id="11", message_id="500",
+        ))
+        assert result["success"] is True
+        assert result["message_id"] == "500"
+        mock_req.assert_called_once_with(
+            "DELETE", "/channels/11/messages/500", "test-token",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Action: create_thread
 # ---------------------------------------------------------------------------
 
@@ -539,12 +593,34 @@ class TestRegistration:
         assert entry.check_fn is not None
         assert entry.requires_env == ["DISCORD_BOT_TOKEN"]
 
+    @patch("tools.discord_tool._discord_request")
+    def test_registry_handler_passes_content(self, mock_req, monkeypatch):
+        from tools.registry import registry
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = {"id": "500", "content": "Updated via registry"}
+        result = json.loads(registry._tools["discord_admin"].handler({
+            "action": "edit_message",
+            "channel_id": "11",
+            "message_id": "500",
+            "content": "Updated via registry",
+        }))
+        assert result["success"] is True
+        assert result["content"] == "Updated via registry"
+        mock_req.assert_called_once_with(
+            "PATCH",
+            "/channels/11/messages/500",
+            "test-token",
+            body={"content": "Updated via registry"},
+        )
+
     def test_core_schema_actions(self):
         """Core static schema should list only core actions."""
         from tools.registry import registry
         entry = registry._tools["discord"]
         actions = set(entry.schema["parameters"]["properties"]["action"]["enum"])
         assert actions == {"fetch_messages", "search_members", "create_thread"}
+        assert "edit_message" not in actions
+        assert "delete_message" not in actions
 
     def test_admin_schema_actions(self):
         """Admin static schema should list only admin actions."""
@@ -553,6 +629,8 @@ class TestRegistration:
         actions = set(entry.schema["parameters"]["properties"]["action"]["enum"])
         expected_admin = set(_ACTIONS.keys()) - {"fetch_messages", "search_members", "create_thread"}
         assert actions == expected_admin
+        assert "edit_message" in actions
+        assert "delete_message" in actions
 
     def test_all_actions_covered(self):
         """Core + admin actions should cover all known actions."""
@@ -566,6 +644,8 @@ class TestRegistration:
         assert props["limit"]["minimum"] == 1
         assert props["limit"]["maximum"] == 100
         assert props["auto_archive_duration"]["enum"] == [60, 1440, 4320, 10080]
+        assert props["content"]["type"] == "string"
+        assert "edit_message" in props["content"]["description"]
 
     def test_core_schema_description(self):
         """Core schema description should mention core actions."""
@@ -586,6 +666,8 @@ class TestRegistration:
         desc = entry.schema["description"]
         assert "list_guilds()" in desc
         assert "add_role(guild_id, user_id, role_id)" in desc
+        assert "edit_message(channel_id, message_id, content)" in desc
+        assert "delete_message(channel_id, message_id)" in desc
         # Core actions should NOT be in admin description
         assert "fetch_messages(" not in desc
         assert "create_thread(" not in desc
@@ -1032,6 +1114,12 @@ class Test403Enrichment:
         msg = _enrich_403("add_role", '{"message":"Missing Permissions"}')
         assert "MANAGE_ROLES" in msg
         assert "Missing Permissions" in msg  # Raw body preserved
+
+    def test_enrich_message_admin_actions(self):
+        edit_msg = _enrich_403("edit_message", '{"message":"Missing Access"}')
+        delete_msg = _enrich_403("delete_message", '{"message":"Missing Permissions"}')
+        assert "only edit messages it authored" in edit_msg
+        assert "MANAGE_MESSAGES" in delete_msg
 
     def test_enrich_unknown_action_includes_body(self):
         msg = _enrich_403("some_new_action", '{"message":"weird"}')
