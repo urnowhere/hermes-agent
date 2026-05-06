@@ -2228,9 +2228,14 @@ def _is_remote_session() -> bool:
 
 def _read_codex_tokens(*, _lock: bool = True) -> Dict[str, Any]:
     """Read Codex OAuth tokens from Hermes auth store (~/.hermes/auth.json).
-    
+
     Returns dict with 'tokens' (access_token, refresh_token) and 'last_refresh'.
     Raises AuthError if no Codex tokens are stored.
+
+    Hermes may store Codex OAuth credentials in either the legacy
+    providers.openai-codex slot or the newer credential_pool.openai-codex
+    slot.  The pool fallback keeps legacy readers working for credentials
+    added through `hermes auth add openai-codex --type oauth`.
     """
     if _lock:
         with _auth_store_lock():
@@ -2238,6 +2243,32 @@ def _read_codex_tokens(*, _lock: bool = True) -> Dict[str, Any]:
     else:
         auth_store = _load_auth_store()
     state = _load_provider_state(auth_store, "openai-codex")
+    if not state:
+        pool = auth_store.get("credential_pool")
+        if not isinstance(pool, dict):
+            pool = {}
+        entries = pool.get("openai-codex")
+        if not isinstance(entries, list):
+            entries = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("auth_type") != "oauth":
+                continue
+            access_token = entry.get("access_token")
+            if not isinstance(access_token, str) or not access_token.strip():
+                continue
+            state = {
+                "tokens": {
+                    "access_token": access_token,
+                    "refresh_token": entry.get("refresh_token"),
+                    "id_token": entry.get("id_token"),
+                    "account_id": entry.get("account_id"),
+                },
+                "last_refresh": entry.get("last_refresh"),
+                "base_url": entry.get("base_url"),
+            }
+            break
     if not state:
         raise AuthError(
             "No Codex credentials stored. Run `hermes auth` to authenticate.",
@@ -2480,6 +2511,7 @@ def resolve_codex_runtime_credentials(
 
     base_url = (
         os.getenv("HERMES_CODEX_BASE_URL", "").strip().rstrip("/")
+        or str(data.get("base_url") or "").strip().rstrip("/")
         or DEFAULT_CODEX_BASE_URL
     )
 
