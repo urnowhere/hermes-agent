@@ -12115,12 +12115,34 @@ class HermesCLI:
 
         # Validate stdin before launching prompt_toolkit — on macOS with
         # uv-managed Python, fd 0 can be invalid or unregisterable with the
-        # asyncio selector, causing "KeyError: '0 is not registered'" (#6393).
+        # asyncio selector, causing "KeyError: '0 is not registered'" (#6393)
+        # or OSError [Errno 22] Invalid argument from kqueue.
         try:
             os.fstat(0)
         except OSError:
             print(
                 "Error: stdin (fd 0) is not available.\n"
+                "This can happen with certain Python installations (e.g. uv-managed cPython on macOS).\n"
+                "Try reinstalling Python via pyenv or Homebrew, then re-run: hermes setup"
+            )
+            _run_cleanup()
+            self._print_exit_summary()
+            return
+
+        # Probe the selector to catch EINVAL before prompt_toolkit tries to
+        # register fd 0.  fstat() alone is insufficient — the selector can
+        # reject the fd even when fstat succeeds (kqueue EINVAL on macOS).
+        try:
+            import selectors as _sel
+            _s = _sel.DefaultSelector()
+            try:
+                _s.register(0, _sel.EVENT_READ)
+                _s.unregister(0)
+            finally:
+                _s.close()
+        except (KeyError, OSError) as _probe_err:
+            print(
+                f"Error: stdin is not usable by the async selector ({_probe_err}).\n"
                 "This can happen with certain Python installations (e.g. uv-managed cPython on macOS).\n"
                 "Try reinstalling Python via pyenv or Homebrew, then re-run: hermes setup"
             )
@@ -12146,7 +12168,14 @@ class HermesCLI:
             # and I/O errors from broken stdout during interrupt (#13710).
             if isinstance(_stdin_err, OSError) and getattr(_stdin_err, "errno", None) == errno.EIO:
                 pass  # suppress broken-stdout I/O errors on interrupt (#13710)
-            elif "is not registered" in str(_stdin_err) or "Bad file descriptor" in str(_stdin_err):
+            elif isinstance(_stdin_err, OSError) and getattr(_stdin_err, "errno", None) == errno.EINVAL:
+                # kqueue EINVAL on macOS with uv-managed cPython
+                print(
+                    f"\nError: stdin is not usable ({_stdin_err}).\n"
+                    "This can happen with certain Python installations (e.g. uv-managed cPython on macOS).\n"
+                    "Try reinstalling Python via pyenv or Homebrew, then re-run: hermes setup"
+                )
+            elif "is not registered" in str(_stdin_err) or "Bad file descriptor" in str(_stdin_err) or "Invalid argument" in str(_stdin_err):
                 print(
                     f"\nError: stdin is not usable ({_stdin_err}).\n"
                     "This can happen with certain Python installations (e.g. uv-managed cPython on macOS).\n"
