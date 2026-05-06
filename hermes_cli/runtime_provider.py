@@ -32,6 +32,28 @@ from hermes_constants import OPENROUTER_BASE_URL
 from utils import base_url_host_matches, base_url_hostname
 
 
+def _env_get(env: Optional[Dict[str, Any]], key: str, default: str = "") -> str:
+    if env is None:
+        return os.getenv(key, default)
+    value = env.get(key, default)
+    return "" if value is None else str(value)
+
+
+def _resolve_api_key_credentials(provider: str, env: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if env is None:
+        return resolve_api_key_provider_credentials(provider)
+    return resolve_api_key_provider_credentials(provider, env=env)
+
+
+def _get_named_custom_provider_for_env(
+    requested_provider: str,
+    env: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    if env is None:
+        return _get_named_custom_provider(requested_provider)
+    return _get_named_custom_provider(requested_provider, env=env)
+
+
 def _normalize_custom_provider_name(value: str) -> str:
     return value.strip().lower().replace(" ", "-")
 
@@ -296,7 +318,11 @@ def _resolve_runtime_from_pool_entry(
     }
 
 
-def resolve_requested_provider(requested: Optional[str] = None) -> str:
+def resolve_requested_provider(
+    requested: Optional[str] = None,
+    *,
+    env: Optional[Dict[str, Any]] = None,
+) -> str:
     """Resolve provider request from explicit arg, config, then env."""
     if requested and requested.strip():
         return requested.strip().lower()
@@ -308,7 +334,7 @@ def resolve_requested_provider(requested: Optional[str] = None) -> str:
 
     # Prefer the persisted config selection over any stale shell/.env
     # provider override so chat uses the endpoint the user last saved.
-    env_provider = os.getenv("HERMES_INFERENCE_PROVIDER", "").strip().lower()
+    env_provider = _env_get(env, "HERMES_INFERENCE_PROVIDER").strip().lower()
     if env_provider:
         return env_provider
 
@@ -346,7 +372,11 @@ def _try_resolve_from_custom_pool(
         return None
 
 
-def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, Any]]:
+def _get_named_custom_provider(
+    requested_provider: str,
+    *,
+    env: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
     requested_norm = _normalize_custom_provider_name(requested_provider or "")
     if not requested_norm or requested_norm == "custom":
         return None
@@ -358,7 +388,7 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
         return None
     if not requested_norm.startswith("custom:"):
         try:
-            canonical = auth_mod.resolve_provider(requested_norm)
+            canonical = auth_mod.resolve_provider(requested_norm, env=env)
         except AuthError:
             pass
         else:
@@ -385,7 +415,7 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
             name_norm = _normalize_custom_provider_name(ep_name)
             # Resolve the API key from the env var name stored in key_env
             key_env = str(entry.get("key_env", "") or "").strip()
-            resolved_api_key = os.getenv(key_env, "").strip() if key_env else ""
+            resolved_api_key = _env_get(env, key_env).strip() if key_env else ""
             # Fall back to inline api_key when key_env is absent or unresolvable
             if not resolved_api_key:
                 resolved_api_key = str(entry.get("api_key", "") or "").strip()
@@ -484,6 +514,7 @@ def _resolve_named_custom_runtime(
     requested_provider: str,
     explicit_api_key: Optional[str] = None,
     explicit_base_url: Optional[str] = None,
+    env: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     # Bare `provider="custom"` with an explicit base_url (e.g. propagated
     # from a `model_aliases:` direct-alias resolution) — build a runtime
@@ -493,8 +524,8 @@ def _resolve_named_custom_runtime(
         base_url = explicit_base_url.strip().rstrip("/")
         api_key_candidates = [
             (explicit_api_key or "").strip(),
-            os.getenv("OPENAI_API_KEY", "").strip(),
-            os.getenv("OPENROUTER_API_KEY", "").strip(),
+            _env_get(env, "OPENAI_API_KEY").strip(),
+            _env_get(env, "OPENROUTER_API_KEY").strip(),
         ]
         api_key = next(
             (c for c in api_key_candidates if has_usable_secret(c)),
@@ -509,7 +540,7 @@ def _resolve_named_custom_runtime(
             "requested_provider": requested_provider,
         }
 
-    custom_provider = _get_named_custom_provider(requested_provider)
+    custom_provider = _get_named_custom_provider_for_env(requested_provider, env)
     if not custom_provider:
         return None
 
@@ -533,9 +564,9 @@ def _resolve_named_custom_runtime(
     api_key_candidates = [
         (explicit_api_key or "").strip(),
         str(custom_provider.get("api_key", "") or "").strip(),
-        os.getenv(str(custom_provider.get("key_env", "") or "").strip(), "").strip(),
-        os.getenv("OPENAI_API_KEY", "").strip(),
-        os.getenv("OPENROUTER_API_KEY", "").strip(),
+        _env_get(env, str(custom_provider.get("key_env", "") or "").strip()).strip(),
+        _env_get(env, "OPENAI_API_KEY").strip(),
+        _env_get(env, "OPENROUTER_API_KEY").strip(),
     ]
     api_key = next((candidate for candidate in api_key_candidates if has_usable_secret(candidate)), "")
 
@@ -560,6 +591,7 @@ def _resolve_openrouter_runtime(
     requested_provider: str,
     explicit_api_key: Optional[str] = None,
     explicit_base_url: Optional[str] = None,
+    env: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     model_cfg = _get_model_config()
     cfg_base_url = model_cfg.get("base_url") if isinstance(model_cfg.get("base_url"), str) else ""
@@ -573,8 +605,8 @@ def _resolve_openrouter_runtime(
     requested_norm = (requested_provider or "").strip().lower()
     cfg_provider = cfg_provider.strip().lower()
 
-    env_openrouter_base_url = os.getenv("OPENROUTER_BASE_URL", "").strip()
-    env_custom_base_url = os.getenv("CUSTOM_BASE_URL", "").strip()
+    env_openrouter_base_url = _env_get(env, "OPENROUTER_BASE_URL").strip()
+    env_custom_base_url = _env_get(env, "CUSTOM_BASE_URL").strip()
 
     # Use config base_url when available and the provider context matches.
     # OPENAI_BASE_URL env var is no longer consulted — config.yaml is
@@ -606,8 +638,8 @@ def _resolve_openrouter_runtime(
     if _is_openrouter_url:
         api_key_candidates = [
             explicit_api_key,
-            os.getenv("OPENROUTER_API_KEY"),
-            os.getenv("OPENAI_API_KEY"),
+            _env_get(env, "OPENROUTER_API_KEY"),
+            _env_get(env, "OPENAI_API_KEY"),
         ]
     else:
         # Custom endpoint: use api_key from config when using config base_url (#1760).
@@ -621,9 +653,9 @@ def _resolve_openrouter_runtime(
         api_key_candidates = [
             explicit_api_key,
             (cfg_api_key if use_config_base_url else ""),
-            (os.getenv("OLLAMA_API_KEY") if _is_ollama_url else ""),
-            os.getenv("OPENAI_API_KEY"),
-            os.getenv("OPENROUTER_API_KEY"),
+            (_env_get(env, "OLLAMA_API_KEY") if _is_ollama_url else ""),
+            _env_get(env, "OPENAI_API_KEY"),
+            _env_get(env, "OPENROUTER_API_KEY"),
         ]
     api_key = next(
         (str(candidate or "").strip() for candidate in api_key_candidates if has_usable_secret(candidate)),
@@ -667,6 +699,7 @@ def _resolve_azure_foundry_runtime(
     explicit_api_key: Optional[str] = None,
     explicit_base_url: Optional[str] = None,
     target_model: Optional[str] = None,
+    env: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Resolve an Azure Foundry runtime entry.
 
@@ -703,7 +736,7 @@ def _resolve_azure_foundry_runtime(
         if inferred:
             cfg_api_mode = inferred
 
-    env_base_url = os.getenv("AZURE_FOUNDRY_BASE_URL", "").strip().rstrip("/")
+    env_base_url = _env_get(env, "AZURE_FOUNDRY_BASE_URL").strip().rstrip("/")
     base_url = explicit_base_url_clean or cfg_base_url or env_base_url
     if not base_url:
         raise AuthError(
@@ -712,14 +745,14 @@ def _resolve_azure_foundry_runtime(
         )
 
     api_key = explicit_api_key
-    if not api_key:
+    if not api_key and env is None:
         try:
             from hermes_cli.config import get_env_value
             api_key = get_env_value("AZURE_FOUNDRY_API_KEY") or ""
         except Exception:
             api_key = ""
     if not api_key:
-        api_key = os.getenv("AZURE_FOUNDRY_API_KEY", "").strip()
+        api_key = _env_get(env, "AZURE_FOUNDRY_API_KEY").strip()
     if not api_key:
         raise AuthError(
             "Azure Foundry requires an API key. Set AZURE_FOUNDRY_API_KEY in "
@@ -749,6 +782,7 @@ def _resolve_explicit_runtime(
     model_cfg: Dict[str, Any],
     explicit_api_key: Optional[str] = None,
     explicit_base_url: Optional[str] = None,
+    env: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     explicit_api_key = str(explicit_api_key or "").strip()
     explicit_base_url = str(explicit_base_url or "").strip().rstrip("/")
@@ -763,9 +797,15 @@ def _resolve_explicit_runtime(
         base_url = explicit_base_url or cfg_base_url or "https://api.anthropic.com"
         api_key = explicit_api_key
         if not api_key:
-            from agent.anthropic_adapter import resolve_anthropic_token
-
-            api_key = resolve_anthropic_token()
+            if env is None:
+                from agent.anthropic_adapter import resolve_anthropic_token
+                api_key = resolve_anthropic_token()
+            else:
+                api_key = (
+                    _env_get(env, "ANTHROPIC_API_KEY").strip()
+                    or _env_get(env, "ANTHROPIC_TOKEN").strip()
+                    or _env_get(env, "CLAUDE_CODE_OAUTH_TOKEN").strip()
+                )
             if not api_key:
                 raise AuthError(
                     "No Anthropic credentials found. Set ANTHROPIC_TOKEN or ANTHROPIC_API_KEY, "
@@ -838,25 +878,26 @@ def _resolve_explicit_runtime(
             model_cfg=model_cfg,
             explicit_api_key=explicit_api_key,
             explicit_base_url=explicit_base_url,
+            env=env,
         )
 
     pconfig = PROVIDER_REGISTRY.get(provider)
     if pconfig and pconfig.auth_type == "api_key":
         env_url = ""
         if pconfig.base_url_env_var:
-            env_url = os.getenv(pconfig.base_url_env_var, "").strip().rstrip("/")
+            env_url = _env_get(env, pconfig.base_url_env_var).strip().rstrip("/")
 
         base_url = explicit_base_url
         if not base_url:
             if provider in ("kimi-coding", "kimi-coding-cn"):
-                creds = resolve_api_key_provider_credentials(provider)
+                creds = _resolve_api_key_credentials(provider, env)
                 base_url = creds.get("base_url", "").rstrip("/")
             else:
                 base_url = env_url or pconfig.inference_base_url
 
         api_key = explicit_api_key
         if not api_key:
-            creds = resolve_api_key_provider_credentials(provider)
+            creds = _resolve_api_key_credentials(provider, env)
             api_key = creds.get("api_key", "")
             if not base_url:
                 base_url = creds.get("base_url", "").rstrip("/")
@@ -895,6 +936,7 @@ def resolve_runtime_provider(
     explicit_api_key: Optional[str] = None,
     explicit_base_url: Optional[str] = None,
     target_model: Optional[str] = None,
+    env: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Resolve runtime provider credentials for agent execution.
 
@@ -906,7 +948,7 @@ def resolve_runtime_provider(
     persisted default. Other callers can leave it None to preserve existing
     behavior (api_mode derived from config).
     """
-    requested_provider = resolve_requested_provider(requested)
+    requested_provider = resolve_requested_provider(requested, env=env)
 
     # Azure Anthropic short-circuit: when explicitly targeting an Azure endpoint
     # with provider="anthropic", bypass _resolve_named_custom_runtime (which would
@@ -916,8 +958,8 @@ def resolve_runtime_provider(
     if requested_provider == "anthropic" and "azure.com" in _eff_base:
         _azure_key = (
             (explicit_api_key or "").strip()
-            or os.getenv("AZURE_ANTHROPIC_KEY", "").strip()
-            or os.getenv("ANTHROPIC_API_KEY", "").strip()
+            or _env_get(env, "AZURE_ANTHROPIC_KEY").strip()
+            or _env_get(env, "ANTHROPIC_API_KEY").strip()
         )
         return {
             "provider": "anthropic",
@@ -940,6 +982,7 @@ def resolve_runtime_provider(
             explicit_api_key=explicit_api_key,
             explicit_base_url=explicit_base_url,
             target_model=target_model,
+            env=env,
         )
         return azure_runtime
 
@@ -947,6 +990,7 @@ def resolve_runtime_provider(
         requested_provider=requested_provider,
         explicit_api_key=explicit_api_key,
         explicit_base_url=explicit_base_url,
+        env=env,
     )
     if custom_runtime:
         custom_runtime["requested_provider"] = requested_provider
@@ -956,6 +1000,7 @@ def resolve_runtime_provider(
         requested_provider,
         explicit_api_key=explicit_api_key,
         explicit_base_url=explicit_base_url,
+        env=env,
     )
     model_cfg = _get_model_config()
     explicit_runtime = _resolve_explicit_runtime(
@@ -964,6 +1009,7 @@ def resolve_runtime_provider(
         model_cfg=model_cfg,
         explicit_api_key=explicit_api_key,
         explicit_base_url=explicit_base_url,
+        env=env,
     )
     if explicit_runtime:
         return explicit_runtime
@@ -972,8 +1018,8 @@ def resolve_runtime_provider(
     if provider == "openrouter":
         cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
         cfg_base_url = str(model_cfg.get("base_url") or "").strip()
-        env_openai_base_url = os.getenv("OPENAI_BASE_URL", "").strip()
-        env_openrouter_base_url = os.getenv("OPENROUTER_BASE_URL", "").strip()
+        env_openai_base_url = _env_get(env, "OPENAI_BASE_URL").strip()
+        env_openrouter_base_url = _env_get(env, "OPENROUTER_BASE_URL").strip()
         has_custom_endpoint = bool(
             explicit_base_url
             or env_openai_base_url
@@ -1121,7 +1167,7 @@ def resolve_runtime_provider(
                         "falling through to next provider.")
 
     if provider == "copilot-acp":
-        creds = resolve_external_process_provider_credentials(provider)
+        creds = resolve_external_process_provider_credentials(provider, env=env)
         return {
             "provider": "copilot-acp",
             "api_mode": "chat_completions",
@@ -1164,7 +1210,7 @@ def resolve_runtime_provider(
             for hint_key in ("key_env", "api_key_env"):
                 env_var = str(model_cfg.get(hint_key) or "").strip()
                 if env_var:
-                    token = os.getenv(env_var, "").strip()
+                    token = _env_get(env, env_var).strip()
                     if token:
                         break
             # Next: an inline api_key on the model config (useful in multi-profile
@@ -1174,8 +1220,8 @@ def resolve_runtime_provider(
             # Finally fall back to the historical fixed names.
             if not token:
                 token = (
-                    os.getenv("AZURE_ANTHROPIC_KEY", "").strip()
-                    or os.getenv("ANTHROPIC_API_KEY", "").strip()
+                    _env_get(env, "AZURE_ANTHROPIC_KEY").strip()
+                    or _env_get(env, "ANTHROPIC_API_KEY").strip()
                 )
             if not token:
                 raise AuthError(
@@ -1184,8 +1230,15 @@ def resolve_runtime_provider(
                     "config.yaml model section at a custom env var."
                 )
         else:
-            from agent.anthropic_adapter import resolve_anthropic_token
-            token = resolve_anthropic_token()
+            if env is None:
+                from agent.anthropic_adapter import resolve_anthropic_token
+                token = resolve_anthropic_token()
+            else:
+                token = (
+                    _env_get(env, "ANTHROPIC_API_KEY").strip()
+                    or _env_get(env, "ANTHROPIC_TOKEN").strip()
+                    or _env_get(env, "CLAUDE_CODE_OAUTH_TOKEN").strip()
+                )
             if not token:
                 raise AuthError(
                     "No Anthropic credentials found. Set ANTHROPIC_TOKEN or ANTHROPIC_API_KEY, "
@@ -1273,7 +1326,7 @@ def resolve_runtime_provider(
     # API-key providers (z.ai/GLM, Kimi, MiniMax, MiniMax-CN)
     pconfig = PROVIDER_REGISTRY.get(provider)
     if pconfig and pconfig.auth_type == "api_key":
-        creds = resolve_api_key_provider_credentials(provider)
+        creds = _resolve_api_key_credentials(provider, env)
         # Honour model.base_url from config.yaml when the configured provider
         # matches this provider — mirrors the Anthropic path above.  Without
         # this, users who set model.base_url to e.g. api.minimaxi.com/anthropic
@@ -1329,6 +1382,7 @@ def resolve_runtime_provider(
         requested_provider=requested_provider,
         explicit_api_key=explicit_api_key,
         explicit_base_url=explicit_base_url,
+        env=env,
     )
     runtime["requested_provider"] = requested_provider
     return runtime

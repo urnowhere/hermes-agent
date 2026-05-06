@@ -12,6 +12,7 @@ import hashlib
 import logging
 import os
 import json
+import re
 import threading
 import uuid
 from pathlib import Path
@@ -20,6 +21,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
+_PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
 def _now() -> datetime:
@@ -64,6 +66,7 @@ from .whatsapp_identity import (
     canonical_whatsapp_identifier,
     normalize_whatsapp_identifier,  # noqa: F401 - re-exported for gateway.session callers
 )
+from hermes_constants import get_hermes_home
 from utils import atomic_replace
 
 
@@ -91,6 +94,8 @@ class SessionSource:
     guild_id: Optional[str] = None  # Discord guild / Slack workspace / Matrix server scope
     parent_chat_id: Optional[str] = None  # Parent channel when chat_id refers to a thread
     message_id: Optional[str] = None  # ID of the triggering message (for pin/reply/react)
+    agent_profile: Optional[str] = None  # Logical Hermes profile for routed gateway messages.
+    agent_hermes_home: Optional[str] = None  # Optional explicit HERMES_HOME for that profile.
     
     @property
     def description(self) -> str:
@@ -134,6 +139,10 @@ class SessionSource:
             d["parent_chat_id"] = self.parent_chat_id
         if self.message_id:
             d["message_id"] = self.message_id
+        if self.agent_profile:
+            d["agent_profile"] = self.agent_profile
+        if self.agent_hermes_home:
+            d["agent_hermes_home"] = self.agent_hermes_home
         return d
 
     @classmethod
@@ -152,6 +161,8 @@ class SessionSource:
             guild_id=data.get("guild_id"),
             parent_chat_id=data.get("parent_chat_id"),
             message_id=data.get("message_id"),
+            agent_profile=data.get("agent_profile"),
+            agent_hermes_home=data.get("agent_hermes_home"),
         )
     
 
@@ -595,6 +606,7 @@ def build_session_key(
     source: SessionSource,
     group_sessions_per_user: bool = True,
     thread_sessions_per_user: bool = False,
+    profile: Optional[str] = None,
 ) -> str:
     """Build a deterministic session key from a message source.
 
@@ -619,6 +631,15 @@ def build_session_key(
         shared session per chat.
       - Without identifiers, messages fall back to one session per platform/chat_type.
     """
+    resolved_profile = str(profile or getattr(source, "agent_profile", None) or "").strip()
+    if resolved_profile and resolved_profile != "default" and not _PROFILE_ID_RE.match(resolved_profile):
+        logger.warning("Ignoring invalid agent profile for session key: %r", resolved_profile)
+        resolved_profile = ""
+    prefix = (
+        "agent:main"
+        if not resolved_profile or resolved_profile == "default"
+        else f"agent:{resolved_profile}"
+    )
     platform = source.platform.value
     if source.chat_type == "dm":
         dm_chat_id = source.chat_id
@@ -627,11 +648,11 @@ def build_session_key(
 
         if dm_chat_id:
             if source.thread_id:
-                return f"agent:main:{platform}:dm:{dm_chat_id}:{source.thread_id}"
-            return f"agent:main:{platform}:dm:{dm_chat_id}"
+                return f"{prefix}:{platform}:dm:{dm_chat_id}:{source.thread_id}"
+            return f"{prefix}:{platform}:dm:{dm_chat_id}"
         if source.thread_id:
-            return f"agent:main:{platform}:dm:{source.thread_id}"
-        return f"agent:main:{platform}:dm"
+            return f"{prefix}:{platform}:dm:{source.thread_id}"
+        return f"{prefix}:{platform}:dm"
 
     participant_id = source.user_id_alt or source.user_id
     if participant_id and source.platform == Platform.WHATSAPP:
@@ -639,7 +660,7 @@ def build_session_key(
         # single group member gets two isolated per-user sessions when the
         # bridge reshuffles alias forms.
         participant_id = canonical_whatsapp_identifier(str(participant_id)) or participant_id
-    key_parts = ["agent:main", platform, source.chat_type]
+    key_parts = [prefix, platform, source.chat_type]
 
     if source.chat_id:
         key_parts.append(source.chat_id)
@@ -680,7 +701,10 @@ class SessionStore:
         self._db = None
         try:
             from hermes_state import SessionDB
-            self._db = SessionDB()
+            # Resolve the DB path at SessionStore construction time.  The
+            # hermes_state.DEFAULT_DB_PATH constant is evaluated at import time,
+            # so passing an explicit path is required for context-routed profiles.
+            self._db = SessionDB(db_path=get_hermes_home() / "state.db")
         except Exception as e:
             print(f"[gateway] Warning: SQLite session store unavailable, falling back to JSONL: {e}")
     
@@ -741,6 +765,7 @@ class SessionStore:
             source,
             group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
             thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
+            profile=getattr(source, "agent_profile", None),
         )
     
     def _is_session_expired(self, entry: SessionEntry) -> bool:

@@ -765,6 +765,10 @@ def load_gateway_config() -> GatewayConfig:
                         bridged["channel_prompts"] = {str(k): v for k, v in channel_prompts.items()}
                     else:
                         bridged["channel_prompts"] = channel_prompts
+                if "topic_profiles" in platform_cfg:
+                    bridged["topic_profiles"] = platform_cfg["topic_profiles"]
+                if "topic_profiles_safe_root" in platform_cfg:
+                    bridged["topic_profiles_safe_root"] = platform_cfg["topic_profiles_safe_root"]
                 enabled_was_explicit = "enabled" in platform_cfg
                 if not bridged and not enabled_was_explicit:
                     continue
@@ -1078,6 +1082,15 @@ def _validate_gateway_config(config: "GatewayConfig") -> None:
                     platform.value, env_name, token.strip()[:6] + "...",
                 )
                 pconfig.enabled = False
+
+    telegram_cfg = config.platforms.get(Platform.TELEGRAM)
+    if telegram_cfg and telegram_cfg.extra.get("topic_profiles"):
+        from gateway.platforms.base import normalize_topic_profile_routes
+
+        telegram_cfg.extra["topic_profiles"] = normalize_topic_profile_routes(
+            telegram_cfg.extra,
+            hermes_home=get_hermes_home(),
+        )
 
 
 def _apply_env_overrides(config: GatewayConfig) -> None:

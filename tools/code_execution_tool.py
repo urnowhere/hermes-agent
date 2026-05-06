@@ -469,28 +469,31 @@ def _get_or_create_env(task_id: str):
         _active_environments, _env_lock, _create_environment,
         _get_env_config, _last_activity, _start_cleanup_thread,
         _creation_locks, _creation_locks_lock, _task_env_overrides,
+        EnvCacheKey,
+        _environment_cache_key,
         _resolve_container_task_id,
     )
 
     effective_task_id = _resolve_container_task_id(task_id)
+    cache_key: EnvCacheKey = _environment_cache_key(task_id)
 
     # Fast path: environment already exists
     with _env_lock:
-        if effective_task_id in _active_environments:
-            _last_activity[effective_task_id] = time.time()
-            return _active_environments[effective_task_id], _get_env_config()["env_type"]
+        if cache_key in _active_environments:
+            _last_activity[cache_key] = time.time()
+            return _active_environments[cache_key], _get_env_config()["env_type"]
 
     # Slow path: create environment (same pattern as file_tools._get_file_ops)
     with _creation_locks_lock:
-        if effective_task_id not in _creation_locks:
-            _creation_locks[effective_task_id] = threading.Lock()
-        task_lock = _creation_locks[effective_task_id]
+        if cache_key not in _creation_locks:
+            _creation_locks[cache_key] = threading.Lock()
+        task_lock = _creation_locks[cache_key]
 
     with task_lock:
         with _env_lock:
-            if effective_task_id in _active_environments:
-                _last_activity[effective_task_id] = time.time()
-                return _active_environments[effective_task_id], _get_env_config()["env_type"]
+            if cache_key in _active_environments:
+                _last_activity[cache_key] = time.time()
+                return _active_environments[cache_key], _get_env_config()["env_type"]
 
         config = _get_env_config()
         env_type = config["env_type"]
@@ -552,8 +555,8 @@ def _get_or_create_env(task_id: str):
         )
 
         with _env_lock:
-            _active_environments[effective_task_id] = env
-            _last_activity[effective_task_id] = time.time()
+            _active_environments[cache_key] = env
+            _last_activity[cache_key] = time.time()
 
         _start_cleanup_thread()
         logger.info("%s environment ready for execute_code task %s",
@@ -1074,9 +1077,11 @@ def execute_code(
             child_env["TZ"] = _tz_name
         child_env.pop("HERMES_TIMEZONE", None)
 
-        # Per-profile HOME isolation: redirect system tool configs into
-        # {HERMES_HOME}/home/ when that directory exists.
-        from hermes_constants import get_subprocess_home
+        # Per-profile HOME/HERMES_HOME isolation: redirect system tool configs into
+        # {HERMES_HOME}/home/ when that directory exists and ensure child scripts
+        # see the active ContextVar-scoped HERMES_HOME.
+        from hermes_constants import get_hermes_home, get_subprocess_home
+        child_env["HERMES_HOME"] = str(get_hermes_home())
         _profile_home = get_subprocess_home()
         if _profile_home:
             child_env["HOME"] = _profile_home

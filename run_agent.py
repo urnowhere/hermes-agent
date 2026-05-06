@@ -964,6 +964,7 @@ class AIAgent:
         parent_session_id: str = None,
         iteration_budget: "IterationBudget" = None,
         fallback_model: Dict[str, Any] = None,
+        runtime_env: Dict[str, Any] = None,
         credential_pool=None,
         checkpoints_enabled: bool = False,
         checkpoint_max_snapshots: int = 20,
@@ -1046,6 +1047,7 @@ class AIAgent:
         self.load_soul_identity = load_soul_identity
         self.pass_session_id = pass_session_id
         self._credential_pool = credential_pool
+        self._runtime_env = dict(runtime_env or {}) if runtime_env is not None else None
         self.log_prefix_chars = log_prefix_chars
         self.log_prefix = f"{log_prefix} " if log_prefix else ""
         # Store effective base URL for feature detection (prompt caching, reasoning, etc.)
@@ -1280,7 +1282,7 @@ class AIAgent:
         # both live under ~/.hermes/logs/.  Idempotent, so gateway mode
         # (which creates a new AIAgent per message) won't duplicate handlers.
         from hermes_logging import setup_logging, setup_verbose_logging
-        setup_logging(hermes_home=_hermes_home)
+        setup_logging(hermes_home=get_hermes_home())
 
         if self.verbose_logging:
             setup_verbose_logging()
@@ -1700,10 +1702,12 @@ class AIAgent:
         self._parent_session_id = parent_session_id
         self._last_flushed_db_idx = 0  # tracks DB-write cursor to prevent duplicate writes
         self._session_db_created = False  # DB row deferred to run_conversation()
+        self._system_prompt_identity_fingerprint = self._system_prompt_identity_digest()
         self._session_init_model_config = {
             "max_iterations": self.max_iterations,
             "reasoning_config": reasoning_config,
             "max_tokens": max_tokens,
+            "system_prompt_identity_digest": self._system_prompt_identity_fingerprint,
         }
         
         # In-memory todo list for task planning (one per agent/session)
@@ -2225,6 +2229,47 @@ class AIAgent:
                 "anthropic_base_url": self._anthropic_base_url,
                 "is_anthropic_oauth": self._is_anthropic_oauth,
             })
+
+    @staticmethod
+    def _system_prompt_identity_digest() -> str:
+        """Fingerprint identity files that affect persisted system prompt reuse."""
+        home = get_hermes_home()
+        soul_path = home / "SOUL.md"
+        h = hashlib.sha256()
+        h.update(str(home).encode("utf-8", errors="ignore"))
+        h.update(b"\0")
+        try:
+            if soul_path.is_file():
+                h.update(b"SOUL.md\0present\0")
+                h.update(soul_path.read_bytes())
+            else:
+                h.update(b"SOUL.md\0missing")
+        except Exception as exc:
+            h.update(f"SOUL.md\0error\0{type(exc).__name__}".encode())
+        return h.hexdigest()[:16]
+
+    def _stored_system_prompt_identity_matches(self, session_row: Optional[Dict[str, Any]]) -> bool:
+        """Return whether a stored prompt snapshot matches current identity."""
+        if not session_row:
+            return False
+        try:
+            cfg_raw = session_row.get("model_config") or ""
+            cfg = json.loads(cfg_raw) if isinstance(cfg_raw, str) and cfg_raw else {}
+        except Exception:
+            cfg = {}
+        stored = cfg.get("system_prompt_identity_digest") if isinstance(cfg, dict) else None
+        current = getattr(self, "_system_prompt_identity_fingerprint", None)
+        return bool(stored and current and stored == current)
+
+    def _persist_current_system_prompt_identity(self) -> None:
+        """Persist current identity digest in the session's model_config metadata."""
+        if not self._session_db:
+            return
+        try:
+            if hasattr(self._session_db, "update_model_config"):
+                self._session_db.update_model_config(self.session_id, self._session_init_model_config)
+        except Exception as exc:
+            logger.debug("Session DB update_model_config failed: %s", exc)
 
     def _ensure_db_session(self) -> None:
         """Create session DB row on first use. Disables _session_db on failure."""
@@ -7674,12 +7719,46 @@ class AIAgent:
             if not fb_api_key_hint:
                 fb_key_env = (fb.get("key_env") or "").strip()
                 if fb_key_env:
-                    fb_api_key_hint = os.getenv(fb_key_env, "").strip() or None
+                    if self._runtime_env is None:
+                        fb_api_key_hint = os.getenv(fb_key_env, "").strip() or None
+                    else:
+                        fb_api_key_hint = str(self._runtime_env.get(fb_key_env, "")).strip() or None
             # For Ollama Cloud endpoints, pull OLLAMA_API_KEY from env
             # when no explicit key is in the fallback config. Host match
             # (not substring) — see GHSA-76xc-57q6-vm5m.
             if fb_base_url_hint and base_url_host_matches(fb_base_url_hint, "ollama.com") and not fb_api_key_hint:
-                fb_api_key_hint = os.getenv("OLLAMA_API_KEY") or None
+                if self._runtime_env is None:
+                    fb_api_key_hint = os.getenv("OLLAMA_API_KEY") or None
+                else:
+                    fb_api_key_hint = str(self._runtime_env.get("OLLAMA_API_KEY", "")).strip() or None
+            if self._runtime_env is not None and not fb_api_key_hint:
+                fb_env_candidates = []
+                if fb_provider == "openrouter":
+                    fb_env_candidates = ["OPENROUTER_API_KEY", "OPENAI_API_KEY"]
+                elif fb_provider == "custom":
+                    fb_env_candidates = ["OPENAI_API_KEY", "OPENROUTER_API_KEY"]
+                else:
+                    try:
+                        from hermes_cli.auth import PROVIDER_REGISTRY
+                        pconfig = PROVIDER_REGISTRY.get(fb_provider)
+                        fb_env_candidates = list(getattr(pconfig, "api_key_env_vars", ()) or [])
+                    except Exception:
+                        fb_env_candidates = []
+                for env_name in fb_env_candidates:
+                    fb_api_key_hint = str(self._runtime_env.get(env_name, "")).strip() or None
+                    if fb_api_key_hint:
+                        break
+            if self._runtime_env is not None and not fb_api_key_hint:
+                fb_host = base_url_hostname(fb_base_url_hint or "")
+                if fb_host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
+                    fb_api_key_hint = "no-key-required"
+                else:
+                    logging.warning(
+                        "Skipping fallback provider %s for routed profile: no profile-scoped "
+                        "api_key/key_env was configured",
+                        fb_provider,
+                    )
+                    return self._try_activate_fallback()
             fb_client, _resolved_fb_model = resolve_provider_client(
                 fb_provider, model=fb_model, raw_codex=True,
                 explicit_base_url=fb_base_url_hint,
@@ -10764,7 +10843,7 @@ class AIAgent:
             if conversation_history and self._session_db:
                 try:
                     session_row = self._session_db.get_session(self.session_id)
-                    if session_row:
+                    if session_row and self._stored_system_prompt_identity_matches(session_row):
                         stored_prompt = session_row.get("system_prompt") or None
                 except Exception:
                     pass  # Fall through to build fresh
@@ -10795,6 +10874,7 @@ class AIAgent:
                 if self._session_db:
                     try:
                         self._session_db.update_system_prompt(self.session_id, self._cached_system_prompt)
+                        self._persist_current_system_prompt_identity()
                     except Exception as e:
                         logger.debug("Session DB update_system_prompt failed: %s", e)
 

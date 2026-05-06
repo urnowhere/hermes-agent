@@ -6,7 +6,7 @@ import os
 import sys
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 from utils import atomic_replace
 
 
@@ -79,6 +79,54 @@ def _sanitize_loaded_credentials() -> None:
             ".env file in a plain-text editor).",
             file=sys.stderr,
         )
+
+
+def _sanitize_env_mapping_credentials(values: dict[str, str]) -> dict[str, str]:
+    """Return a copy with non-ASCII credential characters stripped in memory."""
+    cleaned_values = dict(values)
+    for key, value in list(cleaned_values.items()):
+        if not any(key.endswith(suffix) for suffix in _CREDENTIAL_SUFFIXES):
+            continue
+        try:
+            value.encode("ascii")
+            continue
+        except UnicodeEncodeError:
+            pass
+        cleaned = value.encode("ascii", errors="ignore").decode("ascii")
+        cleaned_values[key] = cleaned
+        if key in _WARNED_KEYS:
+            continue
+        _WARNED_KEYS.add(key)
+        stripped = len(value) - len(cleaned)
+        detail = _format_offending_chars(value) or "non-printable"
+        print(
+            f"  Warning: {key} contained {stripped} non-ASCII character"
+            f"{'s' if stripped != 1 else ''} ({detail}) — stripped in memory so "
+            f"the key can be sent as an HTTP header.",
+            file=sys.stderr,
+        )
+    return cleaned_values
+
+
+def read_hermes_dotenv_values(
+    *,
+    hermes_home: str | os.PathLike | None = None,
+) -> dict[str, str]:
+    """Read a Hermes .env file without mutating ``os.environ``."""
+    home_path = Path(hermes_home or os.getenv("HERMES_HOME", Path.home() / ".hermes"))
+    env_path = home_path / ".env"
+    if not env_path.exists():
+        return {}
+    try:
+        values = dotenv_values(dotenv_path=env_path, encoding="utf-8")
+    except UnicodeDecodeError:
+        values = dotenv_values(dotenv_path=env_path, encoding="latin-1")
+    parsed = {
+        str(key): str(value)
+        for key, value in values.items()
+        if key is not None and value is not None
+    }
+    return _sanitize_env_mapping_credentials(parsed)
 
 
 def _load_dotenv_with_fallback(path: Path, *, override: bool) -> None:

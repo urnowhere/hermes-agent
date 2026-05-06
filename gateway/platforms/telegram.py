@@ -1217,6 +1217,9 @@ class TelegramAdapter(BasePlatformAdapter):
             
             message_ids = []
             thread_id = self._metadata_thread_id(metadata)
+            disable_thread_fallback = bool(
+                isinstance(metadata, dict) and metadata.get("disable_thread_fallback")
+            )
             
             try:
                 from telegram.error import NetworkError as _NetErr
@@ -1274,6 +1277,12 @@ class TelegramAdapter(BasePlatformAdapter):
                         # specific cases instead of blindly retrying.
                         if _BadReq and isinstance(send_err, _BadReq):
                             if self._is_thread_not_found_error(send_err) and effective_thread_id is not None:
+                                if disable_thread_fallback:
+                                    logger.warning(
+                                        "[%s] Thread %s not found for routed profile; not retrying in main chat",
+                                        self.name, effective_thread_id,
+                                    )
+                                    raise
                                 # Thread doesn't exist — retry without
                                 # message_thread_id so the message still
                                 # reaches the chat.
@@ -3590,14 +3599,21 @@ class TelegramAdapter(BasePlatformAdapter):
             reply_to_id = str(message.reply_to_message.message_id)
             reply_to_text = message.reply_to_message.text or message.reply_to_message.caption or None
 
-        # Per-channel/topic ephemeral prompt
-        from gateway.platforms.base import resolve_channel_prompt
+        # Per-channel/topic ephemeral prompt and optional profile routing.
+        from gateway.platforms.base import resolve_channel_prompt, resolve_topic_profile
         _chat_id_str = str(chat.id)
         _channel_prompt = resolve_channel_prompt(
             self.config.extra,
             thread_id_str or _chat_id_str,
             _chat_id_str if thread_id_str else None,
         )
+        _topic_profile = resolve_topic_profile(self.config.extra, _chat_id_str, thread_id_str)
+        _agent_profile = (_topic_profile or {}).get("profile")
+        _agent_hermes_home = (_topic_profile or {}).get("profile_home")
+        if _agent_profile:
+            source.agent_profile = _agent_profile
+        if _agent_hermes_home:
+            source.agent_hermes_home = _agent_hermes_home
 
         return MessageEvent(
             text=message.text or "",
@@ -3610,6 +3626,8 @@ class TelegramAdapter(BasePlatformAdapter):
             reply_to_text=reply_to_text,
             auto_skill=topic_skill,
             channel_prompt=_channel_prompt,
+            agent_profile=_agent_profile,
+            agent_hermes_home=_agent_hermes_home,
             timestamp=message.date,
         )
 
