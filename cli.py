@@ -8965,6 +8965,20 @@ class HermesCLI:
         # Open-ended questions skip straight to freetext input
         self._clarify_freetext = is_open_ended
 
+        # ── Fire on_clarify hook so plugins can observe / inject responses ──
+        try:
+            from hermes_cli.plugins import invoke_hook
+            invoke_hook(
+                "on_clarify",
+                question=question,
+                choices=choices,
+                session_id=getattr(self, 'session_id', '') or getattr(getattr(self, 'agent', None), 'session_id', ''),
+                response_queue=response_queue,
+                timeout=timeout,
+            )
+        except Exception:
+            pass
+
         # Trigger prompt_toolkit repaint from this (non-main) thread
         self._invalidate()
 
@@ -8982,6 +8996,23 @@ class HermesCLI:
             try:
                 result = response_queue.get(timeout=1)
                 self._clarify_deadline = 0
+                # ── Fire on_clarify_response hook (keyboard response) ──
+                try:
+                    from hermes_cli.plugins import invoke_hook
+                    invoke_hook(
+                        "on_clarify_response",
+                        question=question,
+                        choices=choices,
+                        response=result,
+                        source="keyboard",
+                        session_id=getattr(self, 'session_id', '') or getattr(getattr(self, 'agent', None), 'session_id', ''),
+                    )
+                except Exception:
+                    pass
+                # Clear clarify UI state and repaint so the prompt disappears
+                self._clarify_state = None
+                self._clarify_freetext = False
+                self._invalidate()
                 return result
             except queue.Empty:
                 remaining = self._clarify_deadline - _time.monotonic()
