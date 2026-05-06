@@ -1,0 +1,3 @@
+name: claude_memory_layer
+description: Privacy-safe project context prefetch from claude-memory-layer mem-context-pack MCP tool.
+version: 0.1.0

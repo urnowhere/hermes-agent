@@ -8984,6 +8984,7 @@ class GatewayRunner:
                     chat_name=source.chat_name,
                     chat_type=source.chat_type,
                     thread_id=source.thread_id,
+                    chat_topic=source.chat_topic,
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
                 )
@@ -13397,6 +13398,7 @@ class GatewayRunner:
                     chat_name=source.chat_name,
                     chat_type=source.chat_type,
                     thread_id=source.thread_id,
+                    chat_topic=source.chat_topic,
                     gateway_session_key=session_key,
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
