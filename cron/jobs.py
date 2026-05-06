@@ -338,16 +338,41 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
 # Job CRUD Operations
 # =============================================================================
 
+def _warn_non_dict_origins(jobs: List[Dict[str, Any]]) -> None:
+    """Emit a warning for any job whose ``origin`` field is a non-null, non-dict value.
+
+    Such values are silently treated as "no origin" by ``_resolve_origin`` in
+    the scheduler (see cron/scheduler.py), but they are almost always the result
+    of a hand-edit or migration script that wrote a free-form string (e.g. a
+    phase tag like ``"phase-a.5"``) instead of an origin dict.  Emitting the
+    warning at load time surfaces the problem before the first tick rather than
+    leaving the operator to discover it from a run-time error log (#20725).
+    """
+    for job in jobs:
+        origin = job.get("origin")
+        if origin is not None and not isinstance(origin, dict):
+            logger.warning(
+                "Job '%s' (id=%s) has a non-dict 'origin' field (%r); "
+                "it will be treated as missing.  Update the job's origin to a "
+                "dict with 'platform' and 'chat_id' keys, or set it to null.",
+                job.get("name", "?"),
+                job.get("id", "?"),
+                origin,
+            )
+
+
 def load_jobs() -> List[Dict[str, Any]]:
     """Load all jobs from storage."""
     ensure_dirs()
     if not JOBS_FILE.exists():
         return []
-    
+
     try:
         with open(JOBS_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            return data.get("jobs", [])
+            jobs = data.get("jobs", [])
+            _warn_non_dict_origins(jobs)
+            return jobs
     except json.JSONDecodeError:
         # Retry with strict=False to handle bare control chars in string values
         try:
@@ -358,6 +383,7 @@ def load_jobs() -> List[Dict[str, Any]]:
                     # Auto-repair: rewrite with proper escaping
                     save_jobs(jobs)
                     logger.warning("Auto-repaired jobs.json (had invalid control characters)")
+                _warn_non_dict_origins(jobs)
                 return jobs
         except Exception as e:
             logger.error("Failed to auto-repair jobs.json: %s", e)

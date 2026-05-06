@@ -846,3 +846,106 @@ class TestSaveJobOutput:
         assert output_file.exists()
         assert output_file.read_text() == "# Results\nEverything ok."
         assert "test123" in str(output_file)
+
+
+class TestLoadJobsNonDictOriginWarning:
+    """Regression guard for #20725.
+
+    ``load_jobs()`` must emit a logger.warning for every job whose ``origin``
+    field is a non-null, non-dict value (e.g. a provenance string written by a
+    migration script).  The warning lets operators discover the bad field before
+    the scheduler tick instead of finding it only in the run-time error log.
+
+    The scheduler's ``_resolve_origin`` already silently treats non-dict values
+    as missing (no crash), so no data is lost — the warning is purely
+    informational.
+    """
+
+    def _write_jobs(self, path, jobs):
+        import json as _json
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_json.dumps({"jobs": jobs}), encoding="utf-8")
+
+    def test_string_origin_emits_warning(self, tmp_cron_dir, caplog):
+        import logging
+        jobs_file = tmp_cron_dir / "cron" / "jobs.json"
+        self._write_jobs(jobs_file, [
+            {
+                "id": "abc123",
+                "name": "Phase job",
+                "origin": "phase-a.5",
+                "prompt": "...",
+                "enabled": True,
+                "schedule": {"kind": "interval", "interval_minutes": 60},
+                "deliver": "local",
+            }
+        ])
+        with caplog.at_level(logging.WARNING, logger="cron.jobs"):
+            load_jobs()
+        assert any(
+            "non-dict" in r.message and "phase-a.5" in r.message
+            for r in caplog.records
+        ), f"Expected non-dict origin warning, got: {[r.message for r in caplog.records]}"
+
+    @pytest.mark.parametrize("bad_origin", [
+        "some-tag-string",
+        123,
+        ["telegram", "12345"],
+        42.0,
+    ])
+    def test_various_non_dict_origins_emit_warning(self, tmp_cron_dir, caplog, bad_origin):
+        import logging
+        jobs_file = tmp_cron_dir / "cron" / "jobs.json"
+        self._write_jobs(jobs_file, [
+            {
+                "id": "xyz999",
+                "name": "Bad origin job",
+                "origin": bad_origin,
+                "prompt": "...",
+                "enabled": True,
+                "schedule": {"kind": "interval", "interval_minutes": 30},
+                "deliver": "local",
+            }
+        ])
+        with caplog.at_level(logging.WARNING, logger="cron.jobs"):
+            load_jobs()
+        assert any("non-dict" in r.message for r in caplog.records), (
+            f"Expected non-dict origin warning for origin={bad_origin!r}, "
+            f"got: {[r.message for r in caplog.records]}"
+        )
+
+    def test_null_origin_does_not_warn(self, tmp_cron_dir, caplog):
+        import logging
+        jobs_file = tmp_cron_dir / "cron" / "jobs.json"
+        self._write_jobs(jobs_file, [
+            {
+                "id": "ok001",
+                "name": "No origin job",
+                "origin": None,
+                "prompt": "...",
+                "enabled": True,
+                "schedule": {"kind": "interval", "interval_minutes": 60},
+                "deliver": "local",
+            }
+        ])
+        with caplog.at_level(logging.WARNING, logger="cron.jobs"):
+            load_jobs()
+        assert not any("non-dict" in r.message for r in caplog.records)
+
+    def test_dict_origin_does_not_warn(self, tmp_cron_dir, caplog):
+        import logging
+        jobs_file = tmp_cron_dir / "cron" / "jobs.json"
+        self._write_jobs(jobs_file, [
+            {
+                "id": "ok002",
+                "name": "Good origin job",
+                "origin": {"platform": "telegram", "chat_id": "12345"},
+                "prompt": "...",
+                "enabled": True,
+                "schedule": {"kind": "interval", "interval_minutes": 60},
+                "deliver": "origin",
+            }
+        ])
+        with caplog.at_level(logging.WARNING, logger="cron.jobs"):
+            load_jobs()
+        assert not any("non-dict" in r.message for r in caplog.records)
