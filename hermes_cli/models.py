@@ -2267,6 +2267,9 @@ def get_copilot_model_context(model_id: str, api_key: Optional[str] = None) -> O
         # Cache is fresh but model not in it — don't re-fetch
         return None
 
+    if not api_key:
+        api_key = _resolve_copilot_catalog_api_key()
+
     # Fetch and populate cache
     catalog = fetch_github_model_catalog(api_key=api_key)
     if not catalog:
