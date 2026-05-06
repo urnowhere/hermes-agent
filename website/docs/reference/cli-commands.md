@@ -916,6 +916,46 @@ Manage MCP (Model Context Protocol) server configurations and run Hermes as an M
 
 See [MCP Config Reference](./mcp-config-reference.md), [Use MCP with Hermes](../guides/use-mcp-with-hermes.md), and [MCP Server Mode](../user-guide/features/mcp.md#running-hermes-as-an-mcp-server).
 
+## `hermes teams-pipeline`
+
+```bash
+hermes teams-pipeline <subcommand>
+```
+
+Operator commands for the Microsoft Teams meeting pipeline.
+
+| Subcommand | Description |
+|------------|-------------|
+| `list` | List recent pipeline jobs from the durable store. |
+| `show <job_id>` | Show one stored job as JSON. |
+| `run <job_id>` | Replay a stored job through the real pipeline runtime. |
+| `fetch --meeting-id <id>` | Dry-run Graph artifact resolution for a meeting. |
+| `subscriptions` | List live Microsoft Graph subscriptions visible to the configured app. |
+| `subscribe --resource ... --notification-url ...` | Create a Microsoft Graph change-notification subscription. |
+| `renew-subscription <subscription_id>` | Extend a Microsoft Graph subscription expiration time. |
+| `delete-subscription <subscription_id>` | Delete a Microsoft Graph subscription. |
+| `maintain-subscriptions` | Sync remote Graph subscriptions into the durable store and renew those nearing expiry. |
+| `token-health` | Inspect app-only Graph token cache and optionally force a refresh. |
+| `validate` | Validate local Teams pipeline config and optionally sync remote Graph subscriptions into the durable store. |
+
+Examples:
+
+```bash
+hermes teams-pipeline list
+hermes teams-pipeline list --status failed
+hermes teams-pipeline show teams-job-123456
+hermes teams-pipeline run teams-job-123456
+hermes teams-pipeline fetch --meeting-id MSpY2...
+hermes teams-pipeline subscriptions
+hermes teams-pipeline subscribe --resource communications/onlineMeetings/getAllTranscripts --notification-url https://example.com/webhooks/msgraph
+hermes teams-pipeline renew-subscription 01234567-89ab-cdef-0123-456789abcdef
+hermes teams-pipeline maintain-subscriptions --dry-run
+hermes teams-pipeline maintain-subscriptions --renew-within-hours 12 --extend-hours 48
+hermes teams-pipeline token-health --force-refresh
+hermes teams-pipeline validate
+hermes teams-pipeline validate --skip-remote
+```
+
 ## `hermes plugins`
 
 ```bash

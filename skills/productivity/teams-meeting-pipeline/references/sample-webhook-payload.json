@@ -1,0 +1,15 @@
+{
+  "value": [
+    {
+      "id": "notif-1",
+      "subscriptionId": "sub-1",
+      "changeType": "updated",
+      "resource": "communications/onlineMeetings/meeting-123",
+      "clientState": "replace-with-random-secret",
+      "resourceData": {
+        "id": "meeting-123",
+        "tenantId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+      }
+    }
+  ]
+}

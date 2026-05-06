@@ -1197,7 +1197,16 @@ class GatewayRunner:
             return
 
         connected = self.config.get_connected_platforms()
-        messaging_platforms = [p for p in connected if p not in {Platform.LOCAL, Platform.API_SERVER, Platform.WEBHOOK}]
+        messaging_platforms = [
+            p
+            for p in connected
+            if p not in {
+                Platform.LOCAL,
+                Platform.API_SERVER,
+                Platform.WEBHOOK,
+                Platform.MSGRAPH_WEBHOOK,
+            }
+        ]
         if not messaging_platforms:
             return
 
@@ -1230,6 +1239,261 @@ class GatewayRunner:
             "This is fine if the model already emits host-visible paths, but MEDIA file delivery can fail "
             "for container-local paths like '/workspace/...' or '/output/...'."
         )
+
+    def _warn_if_msgraph_subscriptions_are_stale(self) -> None:
+        """Surface stale/missing Teams pipeline subscription state at startup."""
+        platform_config = self.config.platforms.get(Platform.MSGRAPH_WEBHOOK)
+        if not platform_config or not platform_config.enabled:
+            return
+
+        try:
+            from tools.teams_pipeline_store import (
+                TeamsPipelineStore,
+                resolve_teams_pipeline_store_path,
+            )
+
+            store_path = str(
+                resolve_teams_pipeline_store_path(platform_extra=platform_config.extra or {})
+            )
+            store = TeamsPipelineStore(store_path)
+            subscriptions = list(store.list_subscriptions().values())
+        except Exception as exc:
+            logger.warning(
+                "MSGraph webhook startup check could not read subscription store %s: %s",
+                store_path,
+                exc,
+            )
+            return
+
+        if not subscriptions:
+            logger.warning(
+                "MSGraph webhook is enabled but no stored Graph subscriptions were found in %s. "
+                "Create or sync subscriptions with 'hermes teams-pipeline subscribe ...' "
+                "or 'hermes teams-pipeline validate'.",
+                store_path,
+            )
+            return
+
+        now = datetime.now().astimezone()
+        expiring_soon = 0
+        expired = 0
+        missing_remote = 0
+
+        for subscription in subscriptions:
+            if str(subscription.get("status") or "").strip().lower() == "missing_remote":
+                missing_remote += 1
+            expires_raw = subscription.get("expiration_datetime") or subscription.get("expirationDateTime")
+            if not expires_raw:
+                continue
+            try:
+                expires_text = str(expires_raw).strip()
+                if expires_text.endswith("Z"):
+                    expires_text = f"{expires_text[:-1]}+00:00"
+                expires_at = datetime.fromisoformat(expires_text)
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.astimezone()
+            except Exception:
+                continue
+            delta_seconds = (expires_at - now).total_seconds()
+            if delta_seconds < 0:
+                expired += 1
+            elif delta_seconds <= 24 * 3600:
+                expiring_soon += 1
+
+        if expired:
+            logger.warning(
+                "MSGraph webhook startup check found %d expired subscription(s) in %s. "
+                "Run 'hermes teams-pipeline maintain-subscriptions' or recreate the missing subscriptions.",
+                expired,
+                store_path,
+            )
+        if expiring_soon:
+            logger.warning(
+                "MSGraph webhook startup check found %d subscription(s) expiring within 24 hours in %s. "
+                "Run 'hermes teams-pipeline maintain-subscriptions' before notifications stop.",
+                expiring_soon,
+                store_path,
+            )
+        if missing_remote:
+            logger.warning(
+                "MSGraph webhook startup check found %d locally tracked subscription(s) marked missing_remote in %s. "
+                "Run 'hermes teams-pipeline validate' to resync with Microsoft Graph.",
+                missing_remote,
+                store_path,
+            )
+
+    def _has_connected_msgraph_webhook_adapter(self) -> bool:
+        adapter = self.adapters.get(Platform.MSGRAPH_WEBHOOK)
+        return bool(adapter and getattr(adapter, "is_connected", False))
+
+    def _msgraph_subscription_maintenance_settings(self) -> Optional[Dict[str, Any]]:
+        """Return periodic maintenance settings when MSGraph webhook is enabled."""
+        platform_config = self.config.platforms.get(Platform.MSGRAPH_WEBHOOK)
+        if not platform_config or not platform_config.enabled:
+            return None
+
+        extra = platform_config.extra or {}
+
+        def _boolish(value: Any, default: bool) -> bool:
+            if value is None:
+                return default
+            return is_truthy_value(value, default=default)
+
+        enabled = _boolish(
+            extra.get("auto_renew_enabled", os.getenv("MSGRAPH_AUTO_RENEW_ENABLED")),
+            True,
+        )
+        if not enabled:
+            return None
+
+        def _intish(value: Any, default: int, minimum: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, parsed)
+
+        from tools.teams_pipeline_store import resolve_teams_pipeline_store_path
+
+        return {
+            "store_path": str(resolve_teams_pipeline_store_path(platform_extra=extra)),
+            "renew_within_hours": _intish(
+                extra.get("renew_within_hours", os.getenv("MSGRAPH_RENEW_WITHIN_HOURS")),
+                24,
+                1,
+            ),
+            "extend_hours": _intish(
+                extra.get("extend_hours", os.getenv("MSGRAPH_RENEW_EXTEND_HOURS")),
+                24,
+                1,
+            ),
+            "interval_seconds": _intish(
+                extra.get("maintenance_interval_seconds", os.getenv("MSGRAPH_MAINTENANCE_INTERVAL_SECONDS")),
+                1800,
+                30,
+            ),
+            "initial_delay_seconds": _intish(
+                extra.get("maintenance_initial_delay_seconds", os.getenv("MSGRAPH_MAINTENANCE_INITIAL_DELAY_SECONDS")),
+                30,
+                0,
+            ),
+        }
+
+    async def _run_msgraph_subscription_maintenance_once(self) -> None:
+        """Execute one Graph subscription maintenance pass and log the outcome."""
+        settings = self._msgraph_subscription_maintenance_settings()
+        if not settings:
+            return
+        if not self._has_connected_msgraph_webhook_adapter():
+            logger.debug(
+                "Skipping MSGraph subscription maintenance because the msgraph_webhook adapter is not connected."
+            )
+            return
+        try:
+            from tools.microsoft_graph_subscription_tools import maintain_graph_subscriptions
+
+            result = await maintain_graph_subscriptions(settings)
+            logger.info(
+                "MSGraph subscription maintenance: remote=%d synced=%d candidates=%d renewed=%d dry_run=%s",
+                int(result.get("remote_subscription_count", 0) or 0),
+                int(result.get("synced_subscription_count", 0) or 0),
+                int(result.get("candidate_count", 0) or 0),
+                int(result.get("renewed_count", 0) or 0),
+                bool(result.get("dry_run", False)),
+            )
+            if result.get("candidate_count") and not result.get("renewed_count") and not result.get("dry_run", False):
+                logger.warning(
+                    "MSGraph subscription maintenance found %d renewal candidate(s) but renewed none.",
+                    int(result.get("candidate_count", 0) or 0),
+                )
+        except Exception as exc:
+            logger.warning("MSGraph subscription maintenance failed: %s", exc)
+
+    async def _msgraph_subscription_maintenance_watcher(self) -> None:
+        """Periodically sync and renew Microsoft Graph subscriptions."""
+        settings = self._msgraph_subscription_maintenance_settings()
+        if not settings:
+            return
+
+        initial_delay = int(settings.get("initial_delay_seconds", 30) or 0)
+        interval = int(settings.get("interval_seconds", 1800) or 1800)
+        if initial_delay:
+            await asyncio.sleep(initial_delay)
+
+        while self._running:
+            await self._run_msgraph_subscription_maintenance_once()
+            for _ in range(interval):
+                if not self._running:
+                    return
+                await asyncio.sleep(1)
+
+    def _preflight_platform_issue(
+        self,
+        platform: Platform,
+        platform_config: PlatformConfig,
+    ) -> Optional[str]:
+        """Return a non-retryable config error for platform startup, if any."""
+        if platform == Platform.MSGRAPH_WEBHOOK:
+            missing = [
+                key
+                for key in ("MSGRAPH_TENANT_ID", "MSGRAPH_CLIENT_ID", "MSGRAPH_CLIENT_SECRET")
+                if not os.getenv(key, "").strip()
+            ]
+            if missing:
+                return (
+                    "Microsoft Graph webhook requires app-only credentials: missing "
+                    + ", ".join(missing)
+                )
+
+        if platform == Platform.TEAMS:
+            extra = platform_config.extra or {}
+            delivery_mode = str(
+                extra.get("delivery_mode") or os.getenv("TEAMS_DELIVERY_MODE", "")
+            ).strip().lower()
+            if not delivery_mode:
+                return "Teams delivery is enabled but TEAMS_DELIVERY_MODE is not set."
+
+            if delivery_mode == "incoming_webhook":
+                webhook_url = str(
+                    extra.get("incoming_webhook_url")
+                    or os.getenv("TEAMS_INCOMING_WEBHOOK_URL", "")
+                ).strip()
+                if not webhook_url:
+                    return (
+                        "Teams incoming-webhook delivery requires TEAMS_INCOMING_WEBHOOK_URL."
+                    )
+            elif delivery_mode == "graph":
+                missing = []
+                access_token = str(
+                    platform_config.token
+                    or extra.get("access_token")
+                    or os.getenv("TEAMS_GRAPH_ACCESS_TOKEN", "")
+                ).strip()
+                if not access_token:
+                    missing.append("TEAMS_GRAPH_ACCESS_TOKEN")
+                team_id = str(extra.get("team_id") or os.getenv("TEAMS_TEAM_ID", "")).strip()
+                if not team_id:
+                    missing.append("TEAMS_TEAM_ID")
+                channel_id = str(
+                    extra.get("channel_id")
+                    or extra.get("chat_id")
+                    or os.getenv("TEAMS_CHANNEL_ID", "")
+                    or os.getenv("TEAMS_HOME_CHANNEL", "")
+                ).strip()
+                if not channel_id and platform_config.home_channel is None:
+                    missing.append("TEAMS_CHANNEL_ID")
+                if missing:
+                    return (
+                        "Teams Graph delivery is missing required settings: "
+                        + ", ".join(missing)
+                    )
+            else:
+                return (
+                    "Unsupported Teams delivery mode "
+                    f"'{delivery_mode}'. Expected 'incoming_webhook' or 'graph'."
+                )
+
+        return None
 
 
 
@@ -2921,6 +3185,11 @@ class GatewayRunner:
         except Exception as e:
             logger.debug("Stuck-loop detection failed: %s", e)
 
+        try:
+            self._warn_if_msgraph_subscriptions_are_stale()
+        except Exception as e:
+            logger.debug("MSGraph subscription freshness check failed: %s", e)
+
         connected_count = 0
         enabled_platform_count = 0
         startup_nonretryable_errors: list[str] = []
@@ -2931,6 +3200,18 @@ class GatewayRunner:
             if not platform_config.enabled:
                 continue
             enabled_platform_count += 1
+
+            preflight_issue = self._preflight_platform_issue(platform, platform_config)
+            if preflight_issue:
+                logger.error("✗ %s configuration error: %s", platform.value, preflight_issue)
+                self._update_platform_runtime_status(
+                    platform.value,
+                    platform_state="fatal",
+                    error_code="config_validation_failed",
+                    error_message=preflight_issue,
+                )
+                startup_nonretryable_errors.append(f"{platform.value}: {preflight_issue}")
+                continue
             
             adapter = self._create_adapter(platform, platform_config)
             if not adapter:
@@ -3158,7 +3439,21 @@ class GatewayRunner:
                 len(self._failed_platforms),
                 ", ".join(p.value for p in self._failed_platforms),
             )
-        asyncio.create_task(self._platform_reconnect_watcher())
+        _reconnect_task = asyncio.create_task(self._platform_reconnect_watcher())
+        self._background_tasks.add(_reconnect_task)
+        _reconnect_task.add_done_callback(self._background_tasks.discard)
+
+        _maintenance_settings = self._msgraph_subscription_maintenance_settings()
+        if _maintenance_settings:
+            logger.info(
+                "Starting MSGraph subscription maintenance watcher (interval=%ss renew_within=%sh extend=%sh)",
+                _maintenance_settings["interval_seconds"],
+                _maintenance_settings["renew_within_hours"],
+                _maintenance_settings["extend_hours"],
+            )
+            _maintenance_task = asyncio.create_task(self._msgraph_subscription_maintenance_watcher())
+            self._background_tasks.add(_maintenance_task)
+            _maintenance_task.add_done_callback(self._background_tasks.discard)
 
         logger.info("Press Ctrl+C to stop")
         
@@ -4335,6 +4630,25 @@ class GatewayRunner:
             adapter.gateway_runner = self  # For cross-platform delivery
             return adapter
 
+        elif platform == Platform.MSGRAPH_WEBHOOK:
+            from gateway.platforms.msgraph_webhook import (
+                MSGraphWebhookAdapter,
+                check_msgraph_webhook_requirements,
+            )
+            if not check_msgraph_webhook_requirements():
+                logger.warning("MSGraph webhook: aiohttp not installed")
+                return None
+            adapter = MSGraphWebhookAdapter(config)
+            adapter.gateway_runner = self
+            return adapter
+
+        elif platform == Platform.TEAMS:
+            from gateway.platforms.teams import TeamsAdapter, check_teams_requirements
+            if not check_teams_requirements():
+                logger.warning("Teams: missing HTTP client requirements")
+                return None
+            return TeamsAdapter(config)
+
         elif platform == Platform.BLUEBUBBLES:
             from gateway.platforms.bluebubbles import BlueBubblesAdapter, check_bluebubbles_requirements
             if not check_bluebubbles_requirements():
@@ -4373,7 +4687,11 @@ class GatewayRunner:
         # connection, so HA events are always authorized.
         # Webhook events are authenticated via HMAC signature validation in
         # the adapter itself — no user allowlist applies.
-        if source.platform in (Platform.HOMEASSISTANT, Platform.WEBHOOK):
+        if source.platform in (
+            Platform.HOMEASSISTANT,
+            Platform.WEBHOOK,
+            Platform.MSGRAPH_WEBHOOK,
+        ):
             return True
 
         user_id = source.user_id
@@ -6360,7 +6678,13 @@ class GatewayRunner:
         
         # One-time prompt if no home channel is set for this platform
         # Skip for webhooks - they deliver directly to configured targets (github_comment, etc.)
-        if not history and source.platform and source.platform != Platform.LOCAL and source.platform != Platform.WEBHOOK:
+        if (
+            not history
+            and source.platform
+            and source.platform != Platform.LOCAL
+            and source.platform != Platform.WEBHOOK
+            and source.platform != Platform.MSGRAPH_WEBHOOK
+        ):
             platform_name = source.platform.value
             env_key = _home_target_env_var(platform_name)
             if not os.getenv(env_key):
@@ -12822,12 +13146,17 @@ class GatewayRunner:
         # Disable tool progress for webhooks - they don't support message editing,
         # so each progress line would be sent as a separate message.
         from gateway.config import Platform
-        tool_progress_enabled = progress_mode != "off" and source.platform != Platform.WEBHOOK
+        tool_progress_enabled = (
+            progress_mode != "off"
+            and source.platform != Platform.WEBHOOK
+            and source.platform != Platform.MSGRAPH_WEBHOOK
+        )
         # Natural assistant status messages are intentionally independent from
         # tool progress and token streaming. Users can keep tool_progress quiet
         # in chat platforms while opting into concise mid-turn updates.
         interim_assistant_messages_enabled = (
             source.platform != Platform.WEBHOOK
+            and source.platform != Platform.MSGRAPH_WEBHOOK
             and is_truthy_value(
                 display_config.get("interim_assistant_messages"),
                 default=True,

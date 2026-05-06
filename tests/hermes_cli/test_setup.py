@@ -614,6 +614,109 @@ def test_offer_launch_chat_falls_back_to_module(monkeypatch):
 
     assert exec_calls == [(sys.executable, [sys.executable, "-m", "hermes_cli.main", "chat"])]
 
+def test_setup_teams_meeting_pipeline_can_abort_reconfigure(monkeypatch):
+    from hermes_cli import setup as setup_mod
+
+    env = {
+        "MSGRAPH_TENANT_ID": "tenant-1",
+        "MSGRAPH_CLIENT_ID": "",
+        "MSGRAPH_WEBHOOK_ENABLED": "",
+        "TEAMS_INCOMING_WEBHOOK_URL": "",
+        "TEAMS_GRAPH_ACCESS_TOKEN": "",
+        "TEAMS_TEAM_ID": "",
+    }
+    saved = {}
+
+    monkeypatch.setattr(setup_mod, "get_env_value", lambda key: env.get(key, ""))
+    monkeypatch.setattr(setup_mod, "prompt_yes_no", lambda question, default=False: False)
+    monkeypatch.setattr(
+        setup_mod,
+        "prompt",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("prompt should not be called")),
+    )
+    monkeypatch.setattr(
+        setup_mod,
+        "prompt_choice",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("prompt_choice should not be called")),
+    )
+    monkeypatch.setattr(setup_mod, "save_env_value", lambda key, value: saved.__setitem__(key, value))
+
+    setup_mod._setup_teams_meeting_pipeline()
+    assert saved == {}
+
+
+def test_setup_teams_meeting_pipeline_incoming_webhook_flow(monkeypatch):
+    from hermes_cli import setup as setup_mod
+
+    env = {
+        "MSGRAPH_TENANT_ID": "",
+        "MSGRAPH_CLIENT_ID": "",
+        "MSGRAPH_CLIENT_SECRET": "",
+        "MSGRAPH_WEBHOOK_ENABLED": "",
+        "MSGRAPH_WEBHOOK_PORT": "",
+        "MSGRAPH_WEBHOOK_CLIENT_STATE": "",
+        "TEAMS_INCOMING_WEBHOOK_URL": "",
+        "TEAMS_CHANNEL_ID": "",
+        "TEAMS_HOME_CHANNEL": "",
+        "NOTION_API_KEY": "",
+        "LINEAR_API_KEY": "",
+    }
+    saved = {}
+    prompt_values = iter(
+        [
+            "tenant-1",
+            "client-1",
+            "secret-1",
+            "8646",
+            "client-state-1",
+            "https://example.com/teams-webhook",
+            "19:channel-123",
+            "notion-secret",
+        ]
+    )
+
+    def fake_get_env_value(key):
+        return saved.get(key, env.get(key, ""))
+
+    def fake_prompt(_message, *_args, **_kwargs):
+        return next(prompt_values)
+
+    def fake_prompt_yes_no(question, default=False):
+        if question == "Enable the dedicated Microsoft Graph webhook listener?":
+            return True
+        if question == "Store a Notion API key now?":
+            return True
+        if question == "Store a Linear API key now?":
+            return False
+        raise AssertionError(f"Unexpected prompt_yes_no call: {question}")
+
+    def fake_prompt_choice(question, choices, default=0):
+        assert question == "Select Teams delivery mode"
+        assert choices[0] == "Incoming webhook (recommended)"
+        return 0
+
+    monkeypatch.setattr(setup_mod, "get_env_value", fake_get_env_value)
+    monkeypatch.setattr(setup_mod, "prompt", fake_prompt)
+    monkeypatch.setattr(setup_mod, "prompt_yes_no", fake_prompt_yes_no)
+    monkeypatch.setattr(setup_mod, "prompt_choice", fake_prompt_choice)
+    monkeypatch.setattr(setup_mod, "save_env_value", lambda key, value: saved.__setitem__(key, value))
+
+    setup_mod._setup_teams_meeting_pipeline()
+
+    assert saved["MSGRAPH_TENANT_ID"] == "tenant-1"
+    assert saved["MSGRAPH_CLIENT_ID"] == "client-1"
+    assert saved["MSGRAPH_CLIENT_SECRET"] == "secret-1"
+    assert saved["MSGRAPH_WEBHOOK_ENABLED"] == "true"
+    assert saved["MSGRAPH_WEBHOOK_PORT"] == "8646"
+    assert saved["MSGRAPH_WEBHOOK_CLIENT_STATE"] == "client-state-1"
+    assert saved["TEAMS_ENABLED"] == "true"
+    assert saved["TEAMS_DELIVERY_MODE"] == "incoming_webhook"
+    assert saved["TEAMS_INCOMING_WEBHOOK_URL"] == "https://example.com/teams-webhook"
+    assert saved["TEAMS_CHANNEL_ID"] == "19:channel-123"
+    assert saved["TEAMS_HOME_CHANNEL"] == "19:channel-123"
+    assert saved["NOTION_API_KEY"] == "notion-secret"
+    assert "LINEAR_API_KEY" not in saved
+
 
 def test_setup_slack_saves_home_channel(monkeypatch):
     """_setup_slack() saves SLACK_HOME_CHANNEL when the user provides one."""

@@ -2359,7 +2359,168 @@ def _setup_webhooks():
     print_info("   https://hermes-agent.nousresearch.com/docs/user-guide/messaging/webhooks/#configuring-routes")
     print()
     print_info("   Open config in your editor:  hermes config edit")
-    print_info("   Open config in your editor:  hermes config edit")
+
+
+def _setup_teams_meeting_pipeline():
+    """Configure Microsoft Teams meeting pipeline credentials and defaults."""
+    print_header("Microsoft Teams Meeting Pipeline")
+
+    graph_configured = bool(
+        get_env_value("MSGRAPH_TENANT_ID")
+        or get_env_value("MSGRAPH_CLIENT_ID")
+        or get_env_value("MSGRAPH_CLIENT_SECRET")
+    )
+    webhook_enabled = bool(get_env_value("MSGRAPH_WEBHOOK_ENABLED"))
+    teams_delivery = bool(
+        get_env_value("TEAMS_INCOMING_WEBHOOK_URL")
+        or (get_env_value("TEAMS_GRAPH_ACCESS_TOKEN") and get_env_value("TEAMS_TEAM_ID"))
+    )
+
+    if graph_configured or webhook_enabled or teams_delivery:
+        print_info("Teams meeting pipeline: partially configured")
+        if not prompt_yes_no("Reconfigure Teams meeting pipeline?", False):
+            return
+
+    print_info("Use this when you want Hermes to process completed Microsoft Teams meetings:")
+    print_info("  Teams end → Graph notification → transcript/recording fetch → summary → Notion/Linear/Teams")
+    print()
+    print_warning("This setup configures Microsoft Graph credentials and delivery defaults.")
+    print_warning("You still need to create the Azure app registration and Graph subscription.")
+    print_info("Docs will be available under user-guide/messaging/teams-meetings.md.")
+    print()
+
+    print_info("Step 1: Microsoft Graph app-only credentials")
+    print_info("Required Azure app permissions typically include OnlineMeetings.Read.All,")
+    print_info("CallRecords.Read.All, and the transcript/recording scopes your tenant uses.")
+    tenant_id = prompt("Azure tenant ID", get_env_value("MSGRAPH_TENANT_ID") or "")
+    if tenant_id:
+        save_env_value("MSGRAPH_TENANT_ID", tenant_id)
+    client_id = prompt("Azure client ID", get_env_value("MSGRAPH_CLIENT_ID") or "")
+    if client_id:
+        save_env_value("MSGRAPH_CLIENT_ID", client_id)
+    client_secret = prompt(
+        "Azure client secret",
+        password=True,
+    )
+    if client_secret:
+        save_env_value("MSGRAPH_CLIENT_SECRET", client_secret)
+    if tenant_id or client_id or client_secret:
+        print_success("Microsoft Graph credentials saved")
+
+    print()
+    print_info("Step 2: Graph webhook listener")
+    if prompt_yes_no(
+        "Enable the dedicated Microsoft Graph webhook listener?",
+        webhook_enabled or True,
+    ):
+        save_env_value("MSGRAPH_WEBHOOK_ENABLED", "true")
+        webhook_port = prompt(
+            "Webhook port",
+            get_env_value("MSGRAPH_WEBHOOK_PORT") or "8646",
+        )
+        if webhook_port:
+            save_env_value("MSGRAPH_WEBHOOK_PORT", webhook_port)
+        client_state = prompt(
+            "Webhook clientState secret",
+            get_env_value("MSGRAPH_WEBHOOK_CLIENT_STATE") or "",
+        )
+        if client_state:
+            save_env_value("MSGRAPH_WEBHOOK_CLIENT_STATE", client_state)
+        print_success("Microsoft Graph webhook listener configured")
+
+    print()
+    print_info("Step 3: Teams summary delivery")
+    delivery_choice = prompt_choice(
+        "Select Teams delivery mode",
+        [
+            "Incoming webhook (recommended)",
+            "Graph channel posting with delegated bearer token",
+            "Skip Teams delivery for now",
+        ],
+        default=0 if get_env_value("TEAMS_INCOMING_WEBHOOK_URL") else 2,
+    )
+    if delivery_choice == 0:
+        save_env_value("TEAMS_ENABLED", "true")
+        save_env_value("TEAMS_DELIVERY_MODE", "incoming_webhook")
+        webhook_url = prompt(
+            "Teams incoming webhook URL",
+            get_env_value("TEAMS_INCOMING_WEBHOOK_URL") or "",
+        )
+        if webhook_url:
+            save_env_value("TEAMS_INCOMING_WEBHOOK_URL", webhook_url)
+        channel_id = prompt(
+            "Default Teams channel ID (optional but recommended)",
+            get_env_value("TEAMS_CHANNEL_ID") or get_env_value("TEAMS_HOME_CHANNEL") or "",
+        )
+        if channel_id:
+            save_env_value("TEAMS_CHANNEL_ID", channel_id)
+            save_env_value("TEAMS_HOME_CHANNEL", channel_id)
+        print_success("Teams incoming-webhook delivery configured")
+    elif delivery_choice == 1:
+        save_env_value("TEAMS_ENABLED", "true")
+        save_env_value("TEAMS_DELIVERY_MODE", "graph")
+        graph_token = prompt(
+            "Delegated Graph bearer token for channel posting",
+            password=True,
+        )
+        if graph_token:
+            save_env_value("TEAMS_GRAPH_ACCESS_TOKEN", graph_token)
+        team_id = prompt("Teams team ID", get_env_value("TEAMS_TEAM_ID") or "")
+        if team_id:
+            save_env_value("TEAMS_TEAM_ID", team_id)
+        channel_id = prompt(
+            "Teams channel ID",
+            get_env_value("TEAMS_CHANNEL_ID") or get_env_value("TEAMS_HOME_CHANNEL") or "",
+        )
+        if channel_id:
+            save_env_value("TEAMS_CHANNEL_ID", channel_id)
+            save_env_value("TEAMS_HOME_CHANNEL", channel_id)
+        print_success("Teams Graph delivery configured")
+
+    print()
+    print_info("Step 4: Optional sink credentials")
+    if prompt_yes_no("Store a Notion API key now?", bool(get_env_value("NOTION_API_KEY"))):
+        notion_api_key = prompt("Notion API key", password=True)
+        if notion_api_key:
+            save_env_value("NOTION_API_KEY", notion_api_key)
+            print_success("Notion API key saved")
+    if prompt_yes_no("Store a Linear API key now?", bool(get_env_value("LINEAR_API_KEY"))):
+        linear_api_key = prompt("Linear API key", password=True)
+        if linear_api_key:
+            save_env_value("LINEAR_API_KEY", linear_api_key)
+            print_success("Linear API key saved")
+
+    print()
+    print_info("Next steps:")
+    print_info("  1. Start or restart the gateway: hermes gateway")
+    print_info("  2. Create the Graph subscription with 'hermes teams-pipeline subscribe ...'")
+    print_info("  3. Validate local config and sync subscriptions: hermes teams-pipeline validate")
+    print_info("  4. Renew or inspect expiring subscriptions: hermes teams-pipeline maintain-subscriptions --dry-run")
+    print_info("  5. Review sample config/env in the Teams meeting pipeline docs")
+    print_info("  6. Dry-run artifact fetch with the Teams pipeline operator tools")
+
+
+# Platform registry for the gateway checklist
+_GATEWAY_PLATFORMS = [
+    ("Telegram", "TELEGRAM_BOT_TOKEN", _setup_telegram),
+    ("Discord", "DISCORD_BOT_TOKEN", _setup_discord),
+    ("Slack", "SLACK_BOT_TOKEN", _setup_slack),
+    ("Signal", "SIGNAL_HTTP_URL", _setup_signal),
+    ("Email", "EMAIL_ADDRESS", _setup_email),
+    ("SMS (Twilio)", "TWILIO_ACCOUNT_SID", _setup_sms),
+    ("Matrix", "MATRIX_ACCESS_TOKEN", _setup_matrix),
+    ("Mattermost", "MATTERMOST_TOKEN", _setup_mattermost),
+    ("WhatsApp", "WHATSAPP_ENABLED", _setup_whatsapp),
+    ("DingTalk", "DINGTALK_CLIENT_ID", _setup_dingtalk),
+    ("Feishu / Lark", "FEISHU_APP_ID", _setup_feishu),
+    ("WeCom (Enterprise WeChat)", "WECOM_BOT_ID", _setup_wecom),
+    ("WeCom Callback (Self-Built App)", "WECOM_CALLBACK_CORP_ID", _setup_wecom_callback),
+    ("Weixin (WeChat)", "WEIXIN_ACCOUNT_ID", _setup_weixin),
+    ("BlueBubbles (iMessage)", "BLUEBUBBLES_SERVER_URL", _setup_bluebubbles),
+    ("QQ Bot", "QQ_APP_ID", _setup_qqbot),
+    ("Webhooks (GitHub, GitLab, etc.)", "WEBHOOK_ENABLED", _setup_webhooks),
+    ("Microsoft Teams Meeting Pipeline", "MSGRAPH_WEBHOOK_ENABLED", _setup_teams_meeting_pipeline),
+]
 
 
 def setup_gateway(config: dict):
@@ -2429,6 +2590,10 @@ def setup_gateway(config: dict):
             get_env_value("QQBOT_HOME_CHANNEL") or get_env_value("QQ_HOME_CHANNEL")
         ):
             missing_home.append("QQBot")
+        if get_env_value("TEAMS_ENABLED") and not (
+            get_env_value("TEAMS_HOME_CHANNEL") or get_env_value("TEAMS_CHANNEL_ID")
+        ):
+            missing_home.append("Teams")
 
         if missing_home:
             print()

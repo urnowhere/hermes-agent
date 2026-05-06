@@ -1,0 +1,22 @@
+platforms:
+  msgraph_webhook:
+    enabled: true
+    extra:
+      host: "0.0.0.0"
+      port: 8646
+      client_state: "replace-with-random-secret"
+      accepted_resources:
+        - "communications/onlineMeetings"
+
+  teams:
+    enabled: true
+    extra:
+      delivery_mode: incoming_webhook
+      incoming_webhook_url: "https://outlook.office.com/webhook/..."
+      channel_id: "19:channel-id@thread.tacv2"
+
+stt:
+  enabled: true
+
+toolsets:
+  - microsoft_graph

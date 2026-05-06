@@ -383,6 +383,24 @@ For cloud sandbox backends, persistence is filesystem-oriented. `TERMINAL_LIFETI
 | `WEBHOOK_ENABLED` | Enable the webhook platform adapter (`true`/`false`) |
 | `WEBHOOK_PORT` | HTTP server port for receiving webhooks (default: `8644`) |
 | `WEBHOOK_SECRET` | Global HMAC secret for webhook signature validation (used as fallback when routes don't specify their own) |
+| `MSGRAPH_TENANT_ID` | Azure tenant ID for Microsoft Graph app credentials |
+| `MSGRAPH_CLIENT_ID` | Azure client ID for Microsoft Graph app credentials |
+| `MSGRAPH_CLIENT_SECRET` | Azure client secret for Microsoft Graph app credentials |
+| `MSGRAPH_SCOPE` | Override the Graph OAuth scope (default: `https://graph.microsoft.com/.default`) |
+| `MSGRAPH_AUTHORITY_URL` | Override the Azure authority URL (default: `https://login.microsoftonline.com`) |
+| `MSGRAPH_WEBHOOK_ENABLED` | Enable the dedicated Microsoft Graph webhook listener for Teams meeting notifications (`true`/`false`) |
+| `MSGRAPH_WEBHOOK_PORT` | HTTP server port for Graph notifications (default: `8646`) |
+| `MSGRAPH_WEBHOOK_CLIENT_STATE` | Expected `clientState` value for Graph notification validation |
+| `MSGRAPH_WEBHOOK_STORE_PATH` | Override the Teams pipeline durable store path |
+| `MSGRAPH_WEBHOOK_ACCEPTED_RESOURCES` | Comma-separated Graph resource prefixes accepted by the Teams webhook adapter |
+| `TEAMS_ENABLED` | Enable outbound Teams summary delivery (`true`/`false`) |
+| `TEAMS_DELIVERY_MODE` | Teams outbound delivery mode: `incoming_webhook` or `graph` |
+| `TEAMS_INCOMING_WEBHOOK_URL` | Teams incoming webhook URL for channel delivery |
+| `TEAMS_GRAPH_ACCESS_TOKEN` | Delegated bearer token for Teams Graph channel posting |
+| `TEAMS_TEAM_ID` | Default Teams team ID for Graph delivery |
+| `TEAMS_CHANNEL_ID` | Default Teams channel ID for Graph or webhook delivery |
+| `TEAMS_HOME_CHANNEL` | Default Teams target for proactive delivery |
+| `TEAMS_HOME_CHANNEL_NAME` | Display name for the Teams home channel |
 | `API_SERVER_ENABLED` | Enable the OpenAI-compatible API server (`true`/`false`). Runs alongside other platforms. |
 | `API_SERVER_KEY` | Bearer token for API server authentication. Enforced for non-loopback binding. |
 | `API_SERVER_CORS_ORIGINS` | Comma-separated browser origins allowed to call the API server directly (for example `http://localhost:3000,http://127.0.0.1:3000`). Default: disabled. |

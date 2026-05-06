@@ -101,13 +101,15 @@ class Platform(Enum):
     DINGTALK = "dingtalk"
     API_SERVER = "api_server"
     WEBHOOK = "webhook"
+    MSGRAPH_WEBHOOK = "msgraph_webhook"
+    TEAMS = "teams"
     FEISHU = "feishu"
+    YUANBAO = "yuanbao"
     WECOM = "wecom"
     WECOM_CALLBACK = "wecom_callback"
     WEIXIN = "weixin"
     BLUEBUBBLES = "bluebubbles"
     QQBOT = "qqbot"
-    YUANBAO = "yuanbao"
     @classmethod
     def _missing_(cls, value):
         """Accept unknown platform names only for known plugin adapters.
@@ -178,6 +180,9 @@ class Platform(Enum):
 # Snapshot of built-in platform values before any dynamic _missing_ lookups.
 # Used to distinguish real platforms from arbitrary strings.
 _BUILTIN_PLATFORM_VALUES = frozenset(m.value for m in Platform.__members__.values())
+
+
+_BUILTIN_PLATFORM_VALUES = frozenset(platform.value for platform in Platform)
 
 
 @dataclass
@@ -451,6 +456,65 @@ class GatewayConfig:
             if not config.enabled:
                 continue
             if self._is_platform_connected(platform, config):
+                connected.append(platform)
+            # WhatsApp uses enabled flag only (bridge handles auth)
+            elif platform == Platform.WHATSAPP:
+                connected.append(platform)
+            # Signal uses extra dict for config (http_url + account)
+            elif platform == Platform.SIGNAL and config.extra.get("http_url"):
+                connected.append(platform)
+            # Email uses extra dict for config (address + imap_host + smtp_host)
+            elif platform == Platform.EMAIL and config.extra.get("address"):
+                connected.append(platform)
+            # SMS uses api_key (Twilio auth token) — SID checked via env
+            elif platform == Platform.SMS and os.getenv("TWILIO_ACCOUNT_SID"):
+                connected.append(platform)
+            # API Server uses enabled flag only (no token needed)
+            elif platform == Platform.API_SERVER:
+                connected.append(platform)
+            # Webhook uses enabled flag only (secrets are per-route)
+            elif platform == Platform.WEBHOOK:
+                connected.append(platform)
+            # Microsoft Graph webhook uses enabled flag only
+            elif platform == Platform.MSGRAPH_WEBHOOK:
+                connected.append(platform)
+            # Teams outbound delivery can use webhook-only or explicit Graph token mode
+            elif platform == Platform.TEAMS and (
+                config.extra.get("incoming_webhook_url")
+                or (
+                    config.extra.get("team_id")
+                    and (
+                        config.home_channel is not None
+                        or config.extra.get("channel_id")
+                        or config.extra.get("chat_id")
+                    )
+                    and (config.token or config.extra.get("access_token"))
+                )
+            ):
+                connected.append(platform)
+            # Feishu uses extra dict for app credentials
+            elif platform == Platform.FEISHU and config.extra.get("app_id"):
+                connected.append(platform)
+            # WeCom bot mode uses extra dict for bot credentials
+            elif platform == Platform.WECOM and config.extra.get("bot_id"):
+                connected.append(platform)
+            # WeCom callback mode uses corp_id or apps list
+            elif platform == Platform.WECOM_CALLBACK and (
+                config.extra.get("corp_id") or config.extra.get("apps")
+            ):
+                connected.append(platform)
+            # BlueBubbles uses extra dict for local server config
+            elif platform == Platform.BLUEBUBBLES and config.extra.get("server_url") and config.extra.get("password"):
+                connected.append(platform)
+            # QQBot uses extra dict for app credentials
+            elif platform == Platform.QQBOT and config.extra.get("app_id") and config.extra.get("client_secret"):
+                connected.append(platform)
+            # DingTalk uses client_id/client_secret from config.extra or env vars
+            elif platform == Platform.DINGTALK and (
+                config.extra.get("client_id") or os.getenv("DINGTALK_CLIENT_ID")
+            ) and (
+                config.extra.get("client_secret") or os.getenv("DINGTALK_CLIENT_SECRET")
+            ):
                 connected.append(platform)
         return connected
 
@@ -1358,6 +1422,61 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
                 pass
         if webhook_secret:
             config.platforms[Platform.WEBHOOK].extra["secret"] = webhook_secret
+
+    # Microsoft Graph webhook platform
+    msgraph_webhook_enabled = os.getenv("MSGRAPH_WEBHOOK_ENABLED", "").lower() in ("true", "1", "yes")
+    msgraph_webhook_port = os.getenv("MSGRAPH_WEBHOOK_PORT")
+    msgraph_webhook_client_state = os.getenv("MSGRAPH_WEBHOOK_CLIENT_STATE", "")
+    msgraph_webhook_store_path = os.getenv("MSGRAPH_WEBHOOK_STORE_PATH", "")
+    msgraph_webhook_resources = os.getenv("MSGRAPH_WEBHOOK_ACCEPTED_RESOURCES", "")
+    if msgraph_webhook_enabled:
+        if Platform.MSGRAPH_WEBHOOK not in config.platforms:
+            config.platforms[Platform.MSGRAPH_WEBHOOK] = PlatformConfig()
+        config.platforms[Platform.MSGRAPH_WEBHOOK].enabled = True
+        if msgraph_webhook_port:
+            try:
+                config.platforms[Platform.MSGRAPH_WEBHOOK].extra["port"] = int(msgraph_webhook_port)
+            except ValueError:
+                pass
+        if msgraph_webhook_client_state:
+            config.platforms[Platform.MSGRAPH_WEBHOOK].extra["client_state"] = msgraph_webhook_client_state
+        if msgraph_webhook_store_path:
+            config.platforms[Platform.MSGRAPH_WEBHOOK].extra["store_path"] = msgraph_webhook_store_path
+        if msgraph_webhook_resources:
+            resources = [
+                value.strip() for value in msgraph_webhook_resources.split(",") if value.strip()
+            ]
+            if resources:
+                config.platforms[Platform.MSGRAPH_WEBHOOK].extra["accepted_resources"] = resources
+
+    # Teams outbound delivery
+    teams_enabled = os.getenv("TEAMS_ENABLED", "").lower() in ("true", "1", "yes")
+    teams_webhook_url = os.getenv("TEAMS_INCOMING_WEBHOOK_URL", "")
+    teams_graph_token = os.getenv("TEAMS_GRAPH_ACCESS_TOKEN", "")
+    teams_team_id = os.getenv("TEAMS_TEAM_ID", "")
+    teams_channel_id = os.getenv("TEAMS_CHANNEL_ID", "")
+    teams_delivery_mode = os.getenv("TEAMS_DELIVERY_MODE", "")
+    if teams_enabled or teams_webhook_url or (teams_graph_token and teams_team_id and teams_channel_id):
+        if Platform.TEAMS not in config.platforms:
+            config.platforms[Platform.TEAMS] = PlatformConfig()
+        config.platforms[Platform.TEAMS].enabled = True
+        if teams_graph_token:
+            config.platforms[Platform.TEAMS].token = teams_graph_token
+        if teams_delivery_mode:
+            config.platforms[Platform.TEAMS].extra["delivery_mode"] = teams_delivery_mode
+        if teams_webhook_url:
+            config.platforms[Platform.TEAMS].extra["incoming_webhook_url"] = teams_webhook_url
+        if teams_team_id:
+            config.platforms[Platform.TEAMS].extra["team_id"] = teams_team_id
+        if teams_channel_id:
+            config.platforms[Platform.TEAMS].extra["channel_id"] = teams_channel_id
+        teams_home = os.getenv("TEAMS_HOME_CHANNEL")
+        if teams_home or teams_channel_id:
+            config.platforms[Platform.TEAMS].home_channel = HomeChannel(
+                platform=Platform.TEAMS,
+                chat_id=teams_home or teams_channel_id,
+                name=os.getenv("TEAMS_HOME_CHANNEL_NAME", "Home"),
+            )
 
     # DingTalk
     dingtalk_client_id = os.getenv("DINGTALK_CLIENT_ID")

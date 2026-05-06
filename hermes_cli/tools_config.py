@@ -74,6 +74,7 @@ CONFIGURABLE_TOOLSETS = [
     ("discord",         "💬 Discord (read/participate)", "fetch messages, search members, create thread"),
     ("discord_admin",   "🛡️  Discord Server Admin",    "list channels/roles, pin, assign roles"),
     ("yuanbao",          "🤖 Yuanbao",                  "group info, member queries, DM"),
+    ("microsoft_graph", "🪟 Microsoft Graph",           "subscriptions, Teams pipeline ops, and token health"),
 ]
 
 # Toolsets that are OFF by default for new installs.

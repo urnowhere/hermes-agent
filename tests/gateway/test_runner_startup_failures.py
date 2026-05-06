@@ -1,3 +1,7 @@
+import asyncio
+import logging
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from unittest.mock import AsyncMock
 
@@ -5,6 +9,7 @@ from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter
 from gateway.run import GatewayRunner
 from gateway.status import read_runtime_status
+from tools.teams_pipeline_store import TeamsPipelineStore
 
 
 class _RetryableFailureAdapter(BasePlatformAdapter):
@@ -63,7 +68,25 @@ class _SuccessfulAdapter(BasePlatformAdapter):
         return {"id": chat_id}
 
 
-@pytest.mark.asyncio
+class _SuccessfulMSGraphAdapter(BasePlatformAdapter):
+    def __init__(self):
+        super().__init__(PlatformConfig(enabled=True), Platform.MSGRAPH_WEBHOOK)
+
+    async def connect(self) -> bool:
+        self._mark_connected()
+        return True
+
+    async def disconnect(self) -> None:
+        self._mark_disconnected()
+
+    async def send(self, chat_id, content, reply_to=None, metadata=None):
+        raise NotImplementedError
+
+    async def get_chat_info(self, chat_id):
+        return {"id": chat_id}
+
+
+@pytest.mark.anyio
 async def test_runner_returns_failure_for_retryable_startup_errors(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     config = GatewayConfig(
@@ -87,7 +110,7 @@ async def test_runner_returns_failure_for_retryable_startup_errors(monkeypatch, 
     assert state["platforms"]["telegram"]["error_code"] == "telegram_connect_error"
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_runner_allows_cron_only_mode_when_no_platforms_are_enabled(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     config = GatewayConfig(
@@ -107,7 +130,7 @@ async def test_runner_allows_cron_only_mode_when_no_platforms_are_enabled(monkey
     assert state["gateway_state"] == "running"
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_runner_records_connected_platform_state_on_success(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     config = GatewayConfig(
@@ -132,7 +155,245 @@ async def test_runner_records_connected_platform_state_on_success(monkeypatch, t
     assert state["platforms"]["discord"]["error_message"] is None
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
+async def test_runner_fails_fast_when_msgraph_webhook_missing_graph_credentials(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    for key in ("MSGRAPH_TENANT_ID", "MSGRAPH_CLIENT_ID", "MSGRAPH_CLIENT_SECRET"):
+        monkeypatch.delenv(key, raising=False)
+
+    config = GatewayConfig(
+        platforms={
+            Platform.MSGRAPH_WEBHOOK: PlatformConfig(enabled=True, extra={})
+        },
+        sessions_dir=tmp_path / "sessions",
+    )
+    runner = GatewayRunner(config)
+
+    ok = await runner.start()
+
+    assert ok is True
+    assert runner.should_exit_cleanly is True
+    state = read_runtime_status()
+    assert state["gateway_state"] == "startup_failed"
+    assert "missing MSGRAPH_TENANT_ID" in state["exit_reason"]
+    assert state["platforms"]["msgraph_webhook"]["state"] == "fatal"
+    assert state["platforms"]["msgraph_webhook"]["error_code"] == "config_validation_failed"
+
+
+@pytest.mark.anyio
+async def test_runner_fails_fast_when_teams_incoming_webhook_missing_url(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("TEAMS_INCOMING_WEBHOOK_URL", raising=False)
+    monkeypatch.setenv("TEAMS_DELIVERY_MODE", "incoming_webhook")
+
+    config = GatewayConfig(
+        platforms={
+            Platform.TEAMS: PlatformConfig(
+                enabled=True,
+                extra={"delivery_mode": "incoming_webhook"},
+            )
+        },
+        sessions_dir=tmp_path / "sessions",
+    )
+    runner = GatewayRunner(config)
+
+    ok = await runner.start()
+
+    assert ok is True
+    assert runner.should_exit_cleanly is True
+    state = read_runtime_status()
+    assert state["gateway_state"] == "startup_failed"
+    assert "TEAMS_INCOMING_WEBHOOK_URL" in state["exit_reason"]
+    assert state["platforms"]["teams"]["state"] == "fatal"
+    assert state["platforms"]["teams"]["error_code"] == "config_validation_failed"
+
+
+@pytest.mark.anyio
+async def test_runner_warns_when_msgraph_subscription_store_is_empty(monkeypatch, tmp_path, caplog):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("MSGRAPH_TENANT_ID", "tenant")
+    monkeypatch.setenv("MSGRAPH_CLIENT_ID", "client")
+    monkeypatch.setenv("MSGRAPH_CLIENT_SECRET", "secret")
+
+    store_path = tmp_path / "teams_pipeline_store.json"
+    config = GatewayConfig(
+        platforms={
+            Platform.MSGRAPH_WEBHOOK: PlatformConfig(
+                enabled=True,
+                extra={"store_path": str(store_path)},
+            )
+        },
+        sessions_dir=tmp_path / "sessions",
+    )
+    runner = GatewayRunner(config)
+    monkeypatch.setattr(runner, "_create_adapter", lambda platform, platform_config: _SuccessfulMSGraphAdapter())
+    monkeypatch.setattr(runner.hooks, "discover_and_load", lambda: None)
+    monkeypatch.setattr(runner.hooks, "emit", AsyncMock())
+
+    with caplog.at_level(logging.WARNING):
+        ok = await runner.start()
+
+    assert ok is True
+    assert "no stored Graph subscriptions were found" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_runner_warns_when_msgraph_subscriptions_are_expiring(monkeypatch, tmp_path, caplog):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("MSGRAPH_TENANT_ID", "tenant")
+    monkeypatch.setenv("MSGRAPH_CLIENT_ID", "client")
+    monkeypatch.setenv("MSGRAPH_CLIENT_SECRET", "secret")
+
+    store_path = tmp_path / "teams_pipeline_store.json"
+    store = TeamsPipelineStore(store_path)
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    store.upsert_subscription(
+        "sub-1",
+        {
+            "subscription_id": "sub-1",
+            "resource": "communications/onlineMeetings/getAllTranscripts",
+            "change_type": "updated",
+            "notification_url": "https://example.com/webhooks/msgraph",
+            "expiration_datetime": expires_at,
+        },
+    )
+
+    config = GatewayConfig(
+        platforms={
+            Platform.MSGRAPH_WEBHOOK: PlatformConfig(
+                enabled=True,
+                extra={"store_path": str(store_path)},
+            )
+        },
+        sessions_dir=tmp_path / "sessions",
+    )
+    runner = GatewayRunner(config)
+    monkeypatch.setattr(runner, "_create_adapter", lambda platform, platform_config: _SuccessfulMSGraphAdapter())
+    monkeypatch.setattr(runner.hooks, "discover_and_load", lambda: None)
+    monkeypatch.setattr(runner.hooks, "emit", AsyncMock())
+
+    with caplog.at_level(logging.WARNING):
+        ok = await runner.start()
+
+    assert ok is True
+    assert "expiring within 24 hours" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_runner_runs_msgraph_subscription_maintenance_once(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config = GatewayConfig(
+        platforms={
+            Platform.MSGRAPH_WEBHOOK: PlatformConfig(
+                enabled=True,
+                extra={
+                    "store_path": str(tmp_path / "teams_pipeline_store.json"),
+                    "renew_within_hours": 12,
+                    "extend_hours": 36,
+                    "maintenance_interval_seconds": 60,
+                    "maintenance_initial_delay_seconds": 0,
+                },
+            )
+        },
+        sessions_dir=tmp_path / "sessions",
+    )
+    runner = GatewayRunner(config)
+    seen = {}
+
+    async def fake_maintain(settings):
+        seen.update(settings)
+        return {
+            "remote_subscription_count": 1,
+            "synced_subscription_count": 1,
+            "candidate_count": 1,
+            "renewed_count": 1,
+            "dry_run": False,
+        }
+
+    monkeypatch.setattr(
+        "tools.microsoft_graph_subscription_tools.maintain_graph_subscriptions",
+        fake_maintain,
+    )
+    runner.adapters[Platform.MSGRAPH_WEBHOOK] = _SuccessfulMSGraphAdapter()
+    runner.adapters[Platform.MSGRAPH_WEBHOOK]._mark_connected()
+
+    await runner._run_msgraph_subscription_maintenance_once()
+
+    assert seen["renew_within_hours"] == 12
+    assert seen["extend_hours"] == 36
+    assert seen["store_path"].endswith("teams_pipeline_store.json")
+
+
+@pytest.mark.anyio
+async def test_runner_skips_msgraph_subscription_maintenance_when_adapter_not_connected(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config = GatewayConfig(
+        platforms={
+            Platform.MSGRAPH_WEBHOOK: PlatformConfig(
+                enabled=True,
+                extra={"store_path": str(tmp_path / "teams_pipeline_store.json")},
+            )
+        },
+        sessions_dir=tmp_path / "sessions",
+    )
+    runner = GatewayRunner(config)
+    called = {"value": False}
+
+    async def fake_maintain(settings):
+        called["value"] = True
+        return {}
+
+    monkeypatch.setattr(
+        "tools.microsoft_graph_subscription_tools.maintain_graph_subscriptions",
+        fake_maintain,
+    )
+
+    await runner._run_msgraph_subscription_maintenance_once()
+
+    assert called["value"] is False
+
+
+@pytest.mark.anyio
+async def test_runner_start_schedules_msgraph_subscription_maintenance_watcher(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("MSGRAPH_TENANT_ID", "tenant")
+    monkeypatch.setenv("MSGRAPH_CLIENT_ID", "client")
+    monkeypatch.setenv("MSGRAPH_CLIENT_SECRET", "secret")
+
+    store_path = tmp_path / "teams_pipeline_store.json"
+    config = GatewayConfig(
+        platforms={
+            Platform.MSGRAPH_WEBHOOK: PlatformConfig(
+                enabled=True,
+                extra={
+                    "store_path": str(store_path),
+                    "maintenance_initial_delay_seconds": 0,
+                    "maintenance_interval_seconds": 60,
+                },
+            )
+        },
+        sessions_dir=tmp_path / "sessions",
+    )
+    runner = GatewayRunner(config)
+    monkeypatch.setattr(runner, "_create_adapter", lambda platform, platform_config: _SuccessfulMSGraphAdapter())
+    monkeypatch.setattr(runner.hooks, "discover_and_load", lambda: None)
+    monkeypatch.setattr(runner.hooks, "emit", AsyncMock())
+    called = {"value": False}
+
+    async def fake_watcher():
+        called["value"] = True
+
+    monkeypatch.setattr(runner, "_msgraph_subscription_maintenance_watcher", fake_watcher)
+
+    ok = await runner.start()
+    await asyncio.sleep(0)
+
+    assert ok is True
+    assert called["value"] is True
+    await runner.stop()
+
+
+@pytest.mark.anyio
 async def test_start_gateway_verbosity_imports_redacting_formatter(monkeypatch, tmp_path):
     """Verbosity != None must not crash with NameError on RedactingFormatter (#8044)."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -165,7 +426,7 @@ async def test_start_gateway_verbosity_imports_redacting_formatter(monkeypatch, 
     assert ok is True
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_start_gateway_replace_force_uses_terminate_pid(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
@@ -214,7 +475,7 @@ async def test_start_gateway_replace_force_uses_terminate_pid(monkeypatch, tmp_p
     assert calls == [(42, False), (42, True)]
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_start_gateway_replace_writes_takeover_marker_before_sigterm(
     monkeypatch, tmp_path
 ):
@@ -300,7 +561,7 @@ async def test_start_gateway_replace_writes_takeover_marker_before_sigterm(
     assert not (tmp_path / ".gateway-takeover.json").exists()
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_start_gateway_replace_clears_marker_on_permission_denied(
     monkeypatch, tmp_path
 ):

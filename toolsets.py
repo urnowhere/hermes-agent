@@ -279,6 +279,22 @@ TOOLSETS = {
         "includes": []
     },
 
+    "microsoft_graph": {
+        "description": "Microsoft Graph app-only subscription and token management tools",
+        "tools": [
+            "microsoft_graph_list_subscriptions",
+            "microsoft_graph_create_subscription",
+            "microsoft_graph_renew_subscription",
+            "microsoft_graph_delete_subscription",
+            "microsoft_graph_inspect_token_health",
+            "microsoft_graph_maintain_subscriptions",
+            "teams_pipeline_list_jobs",
+            "teams_pipeline_replay_job",
+            "teams_pipeline_dry_run_fetch",
+        ],
+        "includes": []
+    },
+
 
     # Scenario-specific toolsets
     

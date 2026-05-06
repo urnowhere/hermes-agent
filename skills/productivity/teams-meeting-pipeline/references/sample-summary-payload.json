@@ -1,0 +1,18 @@
+{
+  "meeting_ref": {
+    "meeting_id": "meeting-123"
+  },
+  "title": "Weekly Sync",
+  "summary": "Reviewed launch readiness and confirmed the rollout sequence.",
+  "key_decisions": [
+    "Ship on Tuesday."
+  ],
+  "action_items": [
+    "Ada updates the runbook."
+  ],
+  "risks": [
+    "Legal sign-off still pending."
+  ],
+  "confidence": "high",
+  "confidence_notes": "Generated from the native Teams transcript."
+}

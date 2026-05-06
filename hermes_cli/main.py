@@ -5282,6 +5282,13 @@ def cmd_kanban(args):
     return kanban_command(args)
 
 
+def cmd_teams_pipeline(args):
+    """Teams meeting pipeline operator commands."""
+    from hermes_cli.teams_pipeline import teams_pipeline_command
+
+    teams_pipeline_command(args)
+
+
 def cmd_hooks(args):
     """Shell-hook inspection and management."""
     from hermes_cli.hooks import hooks_command
@@ -9192,6 +9199,175 @@ def main():
 
     kanban_parser = _build_kanban_parser(subparsers)
     kanban_parser.set_defaults(func=cmd_kanban)
+
+    # =========================================================================
+    # teams-pipeline command
+    # =========================================================================
+    teams_pipeline_parser = subparsers.add_parser(
+        "teams-pipeline",
+        help="Inspect and operate the Microsoft Teams meeting pipeline",
+        description="List recent jobs, inspect a stored job, replay a job, or dry-run artifact fetches",
+    )
+    teams_pipeline_subparsers = teams_pipeline_parser.add_subparsers(
+        dest="teams_pipeline_action"
+    )
+
+    teams_pipeline_list = teams_pipeline_subparsers.add_parser(
+        "list", aliases=["ls"], help="List recent Teams meeting pipeline jobs"
+    )
+    teams_pipeline_list.add_argument("--status", default="", help="Filter by status")
+    teams_pipeline_list.add_argument(
+        "--limit", type=int, default=20, help="Maximum jobs to show"
+    )
+    teams_pipeline_list.add_argument(
+        "--store-path", default="", help="Override the durable store path"
+    )
+
+    teams_pipeline_show = teams_pipeline_subparsers.add_parser(
+        "show", help="Show a stored Teams pipeline job as JSON"
+    )
+    teams_pipeline_show.add_argument("job_id", help="Job ID to inspect")
+    teams_pipeline_show.add_argument(
+        "--store-path", default="", help="Override the durable store path"
+    )
+
+    teams_pipeline_run = teams_pipeline_subparsers.add_parser(
+        "run", aliases=["replay"], help="Replay a stored Teams pipeline job"
+    )
+    teams_pipeline_run.add_argument("job_id", help="Job ID to replay")
+    teams_pipeline_run.add_argument(
+        "--store-path", default="", help="Override the durable store path"
+    )
+
+    teams_pipeline_fetch = teams_pipeline_subparsers.add_parser(
+        "fetch", aliases=["test"], help="Dry-run meeting artifact resolution"
+    )
+    teams_pipeline_fetch.add_argument("--meeting-id", default="", help="Microsoft Teams meeting ID")
+    teams_pipeline_fetch.add_argument("--join-web-url", default="", help="Teams join URL")
+    teams_pipeline_fetch.add_argument("--tenant-id", default="", help="Azure tenant ID override")
+    teams_pipeline_fetch.add_argument("--call-record-id", default="", help="Optional call record ID")
+
+    teams_pipeline_subs = teams_pipeline_subparsers.add_parser(
+        "subscriptions",
+        aliases=["subs"],
+        help="List Microsoft Graph subscriptions used by the Teams pipeline",
+    )
+    teams_pipeline_subs.add_argument(
+        "--store-path", default="", help="Override the durable store path"
+    )
+
+    teams_pipeline_subscribe = teams_pipeline_subparsers.add_parser(
+        "subscribe",
+        help="Create a Microsoft Graph change-notification subscription",
+    )
+    teams_pipeline_subscribe.add_argument("--resource", required=True, help="Microsoft Graph resource path")
+    teams_pipeline_subscribe.add_argument(
+        "--notification-url",
+        required=True,
+        help="Webhook endpoint URL that Microsoft Graph should call",
+    )
+    teams_pipeline_subscribe.add_argument(
+        "--change-type",
+        default="",
+        help="Microsoft Graph changeType value",
+    )
+    teams_pipeline_subscribe.add_argument(
+        "--expiration",
+        default="",
+        help="Expiration timestamp in RFC3339/ISO8601 format",
+    )
+    teams_pipeline_subscribe.add_argument(
+        "--client-state",
+        default="",
+        help="Optional clientState secret for webhook validation",
+    )
+    teams_pipeline_subscribe.add_argument(
+        "--lifecycle-notification-url",
+        default="",
+        help="Optional lifecycle notification callback URL",
+    )
+    teams_pipeline_subscribe.add_argument(
+        "--latest-supported-tls-version",
+        default="v1_2",
+        help="TLS version hint for Graph subscription creation",
+    )
+    teams_pipeline_subscribe.add_argument(
+        "--store-path", default="", help="Override the durable store path"
+    )
+
+    teams_pipeline_renew = teams_pipeline_subparsers.add_parser(
+        "renew-subscription",
+        help="Renew an existing Microsoft Graph subscription",
+    )
+    teams_pipeline_renew.add_argument("subscription_id", help="Subscription ID to renew")
+    teams_pipeline_renew.add_argument(
+        "--expiration",
+        default="",
+        help="New expiration timestamp in RFC3339/ISO8601 format",
+    )
+    teams_pipeline_renew.add_argument(
+        "--store-path", default="", help="Override the durable store path"
+    )
+
+    teams_pipeline_delete = teams_pipeline_subparsers.add_parser(
+        "delete-subscription",
+        help="Delete an existing Microsoft Graph subscription",
+    )
+    teams_pipeline_delete.add_argument("subscription_id", help="Subscription ID to delete")
+    teams_pipeline_delete.add_argument(
+        "--store-path", default="", help="Override the durable store path"
+    )
+
+    teams_pipeline_maintain = teams_pipeline_subparsers.add_parser(
+        "maintain-subscriptions",
+        help="Sync and renew Graph subscriptions that are close to expiry",
+    )
+    teams_pipeline_maintain.add_argument(
+        "--renew-within-hours",
+        type=int,
+        default=24,
+        help="Renew subscriptions expiring within this many hours",
+    )
+    teams_pipeline_maintain.add_argument(
+        "--extend-hours",
+        type=int,
+        default=24,
+        help="Extend renewed subscriptions by this many hours",
+    )
+    teams_pipeline_maintain.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show renewal candidates without calling Microsoft Graph",
+    )
+    teams_pipeline_maintain.add_argument(
+        "--store-path", default="", help="Override the durable store path"
+    )
+
+    teams_pipeline_token = teams_pipeline_subparsers.add_parser(
+        "token-health",
+        aliases=["token"],
+        help="Inspect Microsoft Graph token health for the Teams pipeline",
+    )
+    teams_pipeline_token.add_argument(
+        "--force-refresh",
+        action="store_true",
+        help="Refresh the cached access token before printing health details",
+    )
+
+    teams_pipeline_validate = teams_pipeline_subparsers.add_parser(
+        "validate",
+        help="Validate Teams pipeline config and optionally sync remote Graph subscriptions",
+    )
+    teams_pipeline_validate.add_argument(
+        "--store-path", default="", help="Override the durable store path"
+    )
+    teams_pipeline_validate.add_argument(
+        "--skip-remote",
+        action="store_true",
+        help="Skip live Graph subscription listing and validate local config/store only",
+    )
+
+    teams_pipeline_parser.set_defaults(func=cmd_teams_pipeline)
 
     # =========================================================================
     # hooks command — shell-hook inspection and management

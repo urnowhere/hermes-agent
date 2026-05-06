@@ -1,0 +1,7 @@
+{
+  "changeType": "updated",
+  "notificationUrl": "https://your-domain.example/msgraph/webhook",
+  "resource": "communications/onlineMeetings",
+  "expirationDateTime": "2026-05-05T19:00:00Z",
+  "clientState": "replace-with-random-secret"
+}
