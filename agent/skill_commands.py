@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -25,6 +26,32 @@ _skill_commands_platform: Optional[str] = None
 # Patterns for sanitizing skill names into clean hyphen-separated slugs.
 _SKILL_INVALID_CHARS = re.compile(r"[^a-z0-9-]")
 _SKILL_MULTI_HYPHEN = re.compile(r"-{2,}")
+_PLAN_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def build_plan_path(
+    user_instruction: str = "",
+    *,
+    now: Optional[datetime] = None,
+) -> Path:
+    """Return the workspace-relative markdown path for a /plan invocation.
+
+    The slug is derived from the first line of user_instruction, normalized to
+    lowercase hyphens, capped at 8 words and 48 characters so the resulting
+    filename never exceeds NAME_MAX (255 bytes on most filesystems).
+
+    Relative paths are intentional: file tools are backend-aware and resolve
+    them against the active working directory for local, docker, ssh, modal,
+    daytona, and similar terminal backends.
+    """
+    _lines = (user_instruction or "").splitlines()
+    slug_source = _lines[0].strip() if _lines else ""
+    slug = _PLAN_SLUG_RE.sub("-", slug_source.lower()).strip("-")
+    if slug:
+        slug = "-".join(part for part in slug.split("-")[:8] if part)[:48].strip("-")
+    slug = slug or "conversation-plan"
+    timestamp = (now or datetime.now()).strftime("%Y-%m-%d_%H%M%S")
+    return Path(".hermes") / "plans" / f"{timestamp}-{slug}.md"
 
 
 def _resolve_skill_commands_platform() -> Optional[str]:
