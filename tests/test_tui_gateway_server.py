@@ -1654,3 +1654,25 @@ def test_model_options_propagates_list_exception(monkeypatch):
     assert "error" in resp
     assert resp["error"]["code"] == 5033
     assert "catalog blew up" in resp["error"]["message"]
+
+
+def test_probe_credentials_no_key_required_placeholder():
+    """_probe_credentials must NOT warn when api_key is the 'no-key-required'
+    placeholder used by local/custom providers (llama.cpp, llama-swap, etc.)."""
+    agent = types.SimpleNamespace(api_key="no-key-required", provider="custom")
+    assert server._probe_credentials(agent) == ""
+
+
+def test_probe_credentials_empty_key_warns():
+    """_probe_credentials must warn when api_key is genuinely empty."""
+    agent = types.SimpleNamespace(api_key="", provider="ollama")
+    result = server._probe_credentials(agent)
+    assert "No API key configured" in result
+    assert "ollama" in result
+
+
+def test_probe_credentials_none_key_warns():
+    """_probe_credentials must warn when api_key is None."""
+    agent = types.SimpleNamespace(api_key=None, provider="custom")
+    result = server._probe_credentials(agent)
+    assert "No API key configured" in result
