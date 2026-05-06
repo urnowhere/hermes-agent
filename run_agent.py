@@ -12938,7 +12938,12 @@ class AIAgent:
                             api_error, retry_count=retry_count, max_retries=max_retries,
                         ):
                             primary_recovery_attempted = True
-                            retry_count = 0
+                            # Do NOT reset retry_count to 0 — that causes the
+                            # attempt counter to show (1/3), (2/3), (1/3), (2/3)
+                            # instead of a monotonically increasing sequence.
+                            # Grant one extra attempt beyond max_retries so the
+                            # rebuilt client gets exactly one shot (issue #12956).
+                            max_retries += 1
                             continue
                         # Try fallback before giving up entirely
                         self._emit_status(f"⚠️ Max retries ({max_retries}) exhausted — trying fallback...")
