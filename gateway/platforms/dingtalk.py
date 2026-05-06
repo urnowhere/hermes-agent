@@ -117,9 +117,12 @@ def _env_truthy(name: str) -> bool:
 
 def build_dingtalk_http_client_kwargs() -> Dict[str, Any]:
     """Build HTTP client kwargs shared by gateway and proactive send paths."""
+    from gateway.platforms._http_client_limits import platform_httpx_limits
+
     client_kwargs: Dict[str, Any] = {
         "timeout": 30.0,
         "follow_redirects": True,
+        "limits": platform_httpx_limits(),
     }
     proxy_url = resolve_proxy_url("DINGTALK_PROXY")
     if proxy_url:
