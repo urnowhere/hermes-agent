@@ -1055,9 +1055,11 @@ def list_authenticated_providers(
 ) -> List[dict]:
     """Detect which providers have credentials and list their curated models.
 
-    Uses the curated model lists from hermes_cli/models.py (OPENROUTER_MODELS,
-    _PROVIDER_MODELS) — NOT the full models.dev catalog.  These are hand-picked
-    agentic models that work well as agent backends.
+    Uses the curated model lists from hermes_cli/models.py (_PROVIDER_MODELS)
+    and live OpenRouter API data — NOT the full models.dev catalog.
+    These are hand-picked agentic models that work well as agent backends.
+    OpenRouter models are fetched live from the API and filtered to only
+    include models with tool-calling support.
 
     Returns a list of dicts, each with:
       - slug: str — the --provider value to use
@@ -1078,8 +1080,9 @@ def list_authenticated_providers(
     )
     from hermes_cli.auth import PROVIDER_REGISTRY
     from hermes_cli.models import (
-        OPENROUTER_MODELS, _PROVIDER_MODELS,
+        _PROVIDER_MODELS,
         _MODELS_DEV_PREFERRED, _merge_with_models_dev, provider_model_ids,
+        model_ids, fetch_openrouter_models,
     )
 
     results: List[dict] = []
@@ -1160,7 +1163,7 @@ def list_authenticated_providers(
 
     # Build curated model lists keyed by hermes provider ID
     curated: dict[str, list[str]] = dict(_PROVIDER_MODELS)
-    curated["openrouter"] = [mid for mid, _ in OPENROUTER_MODELS]
+    curated["openrouter"] = model_ids(force_refresh=True)
     # "nous" shares OpenRouter's curated list if not separately defined
     if "nous" not in curated:
         curated["nous"] = curated["openrouter"]
@@ -1258,6 +1261,11 @@ def list_authenticated_providers(
             "models": top,
             "total_models": total,
             "source": "built-in",
+            "free_models": (
+                [mid for mid, tag in fetch_openrouter_models() if tag == "free"]
+                if slug == "openrouter"
+                else None
+            ),
         })
         seen_slugs.add(slug.lower())
         seen_mdev_ids.add(mdev_id)
@@ -1635,6 +1643,23 @@ def list_authenticated_providers(
                 for m in cfg_models:
                     if m and m not in groups[group_key]["models"]:
                         groups[group_key]["models"].append(m)
+
+            # Live model discovery via /models endpoint when explicitly
+            # opted in via ``fetch_models: true``. Fetch once per endpoint
+            # group (not per entry) to avoid redundant API calls.
+            if not groups[group_key].get("_fetched_live"):
+                discover = entry.get("fetch_models", False)
+                if isinstance(discover, str):
+                    discover = discover.lower() not in ("false", "no", "0")
+                if api_url and api_key and discover:
+                    try:
+                        from hermes_cli.models import fetch_api_models
+                        live_models = fetch_api_models(api_key, api_url)
+                        if live_models:
+                            groups[group_key]["models"] = live_models
+                    except Exception:
+                        pass
+                groups[group_key]["_fetched_live"] = True
 
         _section4_emitted_slugs: set = set()
         for grp in groups.values():
