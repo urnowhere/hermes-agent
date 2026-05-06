@@ -136,9 +136,9 @@ DEFAULT_KITTENTTS_VOICE = "Jasper"
 DEFAULT_PIPER_VOICE = "en_US-lessac-medium"  # balanced size/quality
 DEFAULT_OPENAI_VOICE = "alloy"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
-DEFAULT_MINIMAX_MODEL = "speech-01"
+DEFAULT_MINIMAX_MODEL = "speech-02"
 DEFAULT_MINIMAX_VOICE_ID = "female-shaonv"
-DEFAULT_MINIMAX_BASE_URL = "https://api.minimax.chat/v1/text_to_speech"
+DEFAULT_MINIMAX_BASE_URL = "https://api.minimaxi.com/v1/t2a_v2"
 DEFAULT_MISTRAL_TTS_MODEL = "voxtral-mini-tts-2603"
 DEFAULT_MISTRAL_TTS_VOICE_ID = "c69964a6-ab8b-4f8a-9465-ec0925096ec8"  # Paul - Neutral
 DEFAULT_XAI_VOICE_ID = "eve"
@@ -925,11 +925,19 @@ def _generate_xai_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -
 # ===========================================================================
 def _generate_minimax_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
     """
-    Generate audio using MiniMax TTS API (v1/text_to_speech).
+    Generate audio using the MiniMax TTS API.
 
-    The current API (api.minimax.chat/v1/text_to_speech) uses a simple payload
-    and returns raw audio bytes directly (Content-Type: audio/mpeg), unlike
-    the deprecated v1/t2a_v2 endpoint which returned JSON with hex-encoded audio.
+    The default endpoint is ``api.minimaxi.com/v1/t2a_v2`` (model
+    ``speech-02``). Users may override ``minimax.base_url`` and
+    ``minimax.model`` via ``tts_config`` to target other endpoints.
+
+    Both response shapes are handled:
+
+    - ``audio/*`` content-type → raw audio bytes written directly.
+    - JSON with hex-encoded audio in ``data.audio`` → decoded to bytes.
+
+    The legacy ``api.minimax.chat/v1/text_to_speech`` endpoint is no
+    longer reachable; see issue #20869.
 
     Args:
         text: Text to convert (max 10,000 characters).
