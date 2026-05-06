@@ -12523,10 +12523,14 @@ class GatewayRunner:
                 if _adapter:
                     _adapter_supports_edit = getattr(_adapter, "SUPPORTS_MESSAGE_EDITING", True)
                     _effective_cursor = _scfg.cursor if _adapter_supports_edit else ""
+                    _stream_metadata = dict(_thread_metadata or {})
                     _buffer_only = False
                     if source.platform == Platform.MATRIX:
                         _effective_cursor = ""
                         _buffer_only = True
+                    elif source.platform == Platform.WECOM:
+                        _effective_cursor = ""
+                        _stream_metadata["streaming_preview"] = True
                     # Fresh-final applies to Telegram only — other
                     # platforms either edit in place cheaply (Discord,
                     # Slack) or don't have the timestamp-on-edit
@@ -12547,7 +12551,7 @@ class GatewayRunner:
                         adapter=_adapter,
                         chat_id=source.chat_id,
                         config=_consumer_cfg,
-                        metadata=_thread_metadata,
+                        metadata=_stream_metadata or None,
                     )
             except Exception as _sc_err:
                 logger.debug("Proxy: could not set up stream consumer: %s", _sc_err)
@@ -12555,6 +12559,11 @@ class GatewayRunner:
         # Run the stream consumer task in the background
         stream_task = None
         if _stream_consumer:
+            if source.platform == Platform.WECOM:
+                try:
+                    await _stream_consumer.prime_placeholder()
+                except Exception as _prime_err:
+                    logger.debug("Proxy: could not prime WeCom placeholder: %s", _prime_err)
             stream_task = asyncio.create_task(_stream_consumer.run())
 
         # Send typing indicator
@@ -12934,6 +12943,11 @@ class GatewayRunner:
         else:
             _progress_thread_id = source.thread_id
         _progress_metadata = {"thread_id": _progress_thread_id} if _progress_thread_id else None
+        _progress_stream_metadata = dict(_progress_metadata or {})
+        if source.platform == Platform.WECOM:
+            _progress_stream_metadata["streaming_preview"] = True
+        if not _progress_stream_metadata:
+            _progress_stream_metadata = None
 
         async def send_progress_messages():
             if not progress_queue:
@@ -12957,8 +12971,12 @@ class GatewayRunner:
             progress_lines = []      # Accumulated tool lines
             progress_msg_id = None   # ID of the progress message to edit
             can_edit = True          # False once an edit fails (platform doesn't support it)
+            progress_uses_shared_stream = False
             _last_edit_ts = 0.0      # Throttle edits to avoid Telegram flood control
             _PROGRESS_EDIT_INTERVAL = 1.5  # Minimum seconds between edits
+            _progress_requires_finalize = (
+                getattr(adapter, "REQUIRES_EDIT_FINALIZE", False) is True
+            )
 
             while True:
                 try:
@@ -13003,7 +13021,23 @@ class GatewayRunner:
                         # order. Mirrors GatewayStreamConsumer.on_segment_break
                         # on the content side. (Issue: tool + content
                         # linearization regression after PR #7885.)
+                        if (
+                            can_edit
+                            and progress_lines
+                            and progress_msg_id
+                            and not progress_uses_shared_stream
+                        ):
+                            try:
+                                await adapter.edit_message(
+                                    chat_id=source.chat_id,
+                                    message_id=progress_msg_id,
+                                    content="\n".join(progress_lines),
+                                    finalize=_progress_requires_finalize,
+                                )
+                            except Exception:
+                                pass
                         progress_msg_id = None
+                        progress_uses_shared_stream = False
                         progress_lines = []
                         last_progress_msg[0] = None
                         repeat_count[0] = 0
@@ -13028,9 +13062,29 @@ class GatewayRunner:
                     if not _run_still_current():
                         return
 
+                    if (
+                        can_edit
+                        and progress_msg_id is None
+                        and source.platform == Platform.WECOM
+                    ):
+                        _sc = stream_consumer_holder[0]
+                        _shared_id = getattr(_sc, "message_id", None) if _sc else None
+                        if _shared_id and not getattr(_sc, "final_response_sent", False):
+                            progress_msg_id = _shared_id
+                            progress_uses_shared_stream = True
+
                     if can_edit and progress_msg_id is not None:
                         # Try to edit the existing progress message
                         full_text = "\n".join(progress_lines)
+                        if progress_uses_shared_stream:
+                            # WeCom shared stream: prefix with the stream
+                            # consumer's accumulated response text so tool
+                            # progress appears BELOW the response — not
+                            # overwriting it.
+                            _sc = stream_consumer_holder[0]
+                            _resp_prefix = getattr(_sc, "_accumulated", "") if _sc else ""
+                            if _resp_prefix:
+                                full_text = _resp_prefix + "\n\n" + full_text
                         result = await adapter.edit_message(
                             chat_id=source.chat_id,
                             message_id=progress_msg_id,
@@ -13047,17 +13101,27 @@ class GatewayRunner:
                                     adapter.name,
                                 )
                             can_edit = False
+                            progress_uses_shared_stream = False
                             await adapter.send(chat_id=source.chat_id, content=msg, metadata=_progress_metadata)
+                        elif progress_uses_shared_stream:
+                            _sc = stream_consumer_holder[0]
+                            if _sc is not None:
+                                _sc.note_external_edit(full_text)
                     else:
                         if can_edit:
                             # First tool: send all accumulated text as new message
                             full_text = "\n".join(progress_lines)
-                            result = await adapter.send(chat_id=source.chat_id, content=full_text, metadata=_progress_metadata)
+                            result = await adapter.send(
+                                chat_id=source.chat_id,
+                                content=full_text,
+                                metadata=_progress_stream_metadata,
+                            )
                         else:
                             # Editing unsupported: send just this line
                             result = await adapter.send(chat_id=source.chat_id, content=msg, metadata=_progress_metadata)
                         if result.success and result.message_id:
                             progress_msg_id = result.message_id
+                            progress_uses_shared_stream = False
 
                     _last_edit_ts = time.monotonic()
 
@@ -13081,17 +13145,24 @@ class GatewayRunner:
                                 # Content-bubble marker during drain: close off
                                 # the current progress bubble and start a fresh
                                 # one for any tool lines that arrived after.
-                                if can_edit and progress_lines and progress_msg_id:
+                                if (
+                                    can_edit
+                                    and progress_lines
+                                    and progress_msg_id
+                                    and not progress_uses_shared_stream
+                                ):
                                     _pending_text = "\n".join(progress_lines)
                                     try:
                                         await adapter.edit_message(
                                             chat_id=source.chat_id,
                                             message_id=progress_msg_id,
                                             content=_pending_text,
+                                            finalize=_progress_requires_finalize,
                                         )
                                     except Exception:
                                         pass
                                 progress_msg_id = None
+                                progress_uses_shared_stream = False
                                 progress_lines = []
                                 last_progress_msg[0] = None
                                 repeat_count[0] = 0
@@ -13100,13 +13171,19 @@ class GatewayRunner:
                         except Exception:
                             break
                     # Final edit with all remaining tools (only if editing works)
-                    if can_edit and progress_lines and progress_msg_id:
+                    if (
+                        can_edit
+                        and progress_lines
+                        and progress_msg_id
+                        and not progress_uses_shared_stream
+                    ):
                         full_text = "\n".join(progress_lines)
                         try:
                             await adapter.edit_message(
                                 chat_id=source.chat_id,
                                 message_id=progress_msg_id,
                                 content=full_text,
+                                finalize=_progress_requires_finalize,
                             )
                         except Exception:
                             pass
@@ -13279,6 +13356,8 @@ class GatewayRunner:
                         if source.platform == Platform.MATRIX:
                             _effective_cursor = ""
                             _buffer_only = True
+                        elif source.platform == Platform.WECOM:
+                            _effective_cursor = ""
                         # Fresh-final applies to Telegram only — other
                         # platforms either edit in place cheaply or don't
                         # have the edit-timestamp-stays-stale problem.
@@ -13291,15 +13370,19 @@ class GatewayRunner:
                         _consumer_cfg = StreamConsumerConfig(
                             edit_interval=_scfg.edit_interval,
                             buffer_threshold=_scfg.buffer_threshold,
+                            min_chunk_chars=(12 if source.platform == Platform.WECOM else 1),
                             cursor=_effective_cursor,
                             buffer_only=_buffer_only,
                             fresh_final_after_seconds=_fresh_final_secs,
                         )
+                        _stream_metadata = {"streaming_preview": True}
+                        if _progress_thread_id:
+                            _stream_metadata["thread_id"] = _progress_thread_id
                         _stream_consumer = GatewayStreamConsumer(
                             adapter=_adapter,
                             chat_id=source.chat_id,
                             config=_consumer_cfg,
-                            metadata={"thread_id": _progress_thread_id} if _progress_thread_id else None,
+                            metadata=_stream_metadata,
                             on_new_message=(
                                 (lambda: progress_queue.put(("__reset__",)))
                                 if progress_queue is not None
@@ -13309,7 +13392,25 @@ class GatewayRunner:
                         if _want_stream_deltas:
                             def _stream_delta_cb(text: str) -> None:
                                 if _run_still_current():
+                                    if text is None and source.platform == Platform.WECOM:
+                                        # WeCom: suppress segment breaks so all
+                                        # content stays in one stream bubble.
+                                        # Paragraph separation is handled by
+                                        # _stream_needs_break in run_agent.py.
+                                        return
                                     _stream_consumer.on_delta(text)
+                        if _want_stream_deltas and source.platform == Platform.WECOM:
+                            try:
+                                _prime_future = asyncio.run_coroutine_threadsafe(
+                                    _stream_consumer.prime_placeholder(),
+                                    _loop_for_step,
+                                )
+                                _prime_future.result(timeout=2.0)
+                            except Exception as _prime_err:
+                                logger.debug(
+                                    "Could not prime WeCom placeholder: %s",
+                                    _prime_err,
+                                )
                         stream_consumer_holder[0] = _stream_consumer
                 except Exception as _sc_err:
                     logger.debug("Could not set up stream consumer: %s", _sc_err)
@@ -13318,6 +13419,10 @@ class GatewayRunner:
                 if not _run_still_current():
                     return
                 if _stream_consumer is not None:
+                    if source.platform == Platform.WECOM:
+                        # WeCom: never break the stream or create commentary
+                        # bubbles — all content stays in one stream reply.
+                        return
                     if already_streamed:
                         _stream_consumer.on_segment_break()
                     else:
@@ -14490,6 +14595,22 @@ class GatewayRunner:
         # final answer.  Suppressing delivery here leaves the user staring
         # at silence.  (#10xxx — "agent stops after web search")
         _sc = stream_consumer_holder[0]
+        if (
+            isinstance(response, dict)
+            and _sc
+            and getattr(_sc, "placeholder_active", False)
+            and not response.get("failed")
+        ):
+            _final = response.get("final_response") or ""
+            if _final and _final != "(empty)":
+                try:
+                    if await _sc.replace_placeholder(_final):
+                        response["already_sent"] = True
+                except Exception as _placeholder_err:
+                    logger.debug(
+                        "Could not replace WeCom placeholder preview: %s",
+                        _placeholder_err,
+                    )
         if isinstance(response, dict) and not response.get("failed"):
             _final = response.get("final_response") or ""
             _is_empty_sentinel = not _final or _final == "(empty)"

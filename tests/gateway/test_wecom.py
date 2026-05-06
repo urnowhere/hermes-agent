@@ -36,11 +36,6 @@ class TestWeComRequirements:
 
 
 class TestWeComAdapterInit:
-    def test_declares_non_editable_message_capability(self):
-        from gateway.platforms.wecom import WeComAdapter
-
-        assert WeComAdapter.SUPPORTS_MESSAGE_EDITING is False
-
     def test_reads_config_from_extra(self):
         from gateway.platforms.wecom import WeComAdapter
 
@@ -143,6 +138,126 @@ class TestWeComReplyMode:
         # (unsupported type). Markdown renders everywhere.
         assert args[1]["msgtype"] == "markdown"
         assert args[1]["markdown"]["content"] == "hello from reply"
+
+    @pytest.mark.asyncio
+    async def test_send_uses_native_reply_stream_for_streaming_preview(self):
+        from gateway.platforms.wecom import WeComAdapter
+
+        adapter = WeComAdapter(PlatformConfig(enabled=True))
+        adapter._reply_req_ids["msg-1"] = "req-1"
+        adapter._send_reply_request = AsyncMock(
+            return_value={"headers": {"req_id": "req-1"}, "errcode": 0}
+        )
+
+        result = await adapter.send(
+            "chat-123",
+            "hello from stream",
+            reply_to="msg-1",
+            metadata={"streaming_preview": True},
+        )
+
+        assert result.success is True
+        assert result.message_id is not None
+        assert adapter._streaming_replies[result.message_id] == "req-1"
+        assert "chat-123" in adapter._streaming_active_chats
+        adapter._send_reply_request.assert_awaited_once()
+        args = adapter._send_reply_request.await_args.args
+        assert args[0] == "req-1"
+        assert args[1]["msgtype"] == "stream"
+        assert args[1]["stream"]["id"] == result.message_id
+        assert args[1]["stream"]["finish"] is False
+        assert args[1]["stream"]["content"] == "hello from stream"
+
+    @pytest.mark.asyncio
+    async def test_send_retries_with_proactive_send_when_reply_context_is_stale(self):
+        from gateway.platforms.wecom import APP_CMD_SEND, WeComAdapter
+
+        adapter = WeComAdapter(PlatformConfig(enabled=True))
+        adapter._last_chat_req_ids["chat-123"] = "stale-req"
+        adapter._reply_req_ids["msg-1"] = "stale-req"
+        adapter._send_reply_request = AsyncMock(
+            return_value={"errcode": 846609, "errmsg": "aibot websocket not subscribed"}
+        )
+        adapter._send_request = AsyncMock(
+            return_value={"headers": {"req_id": "new-req"}, "errcode": 0}
+        )
+
+        result = await adapter.send("chat-123", "hello after reconnect", reply_to="msg-1")
+
+        assert result.success is True
+        assert "chat-123" not in adapter._last_chat_req_ids
+        assert "msg-1" not in adapter._reply_req_ids
+        adapter._send_reply_request.assert_awaited_once()
+        adapter._send_request.assert_awaited_once_with(
+            APP_CMD_SEND,
+            {
+                "chatid": "chat-123",
+                "msgtype": "markdown",
+                "markdown": {"content": "hello after reconnect"},
+            },
+        )
+
+    @pytest.mark.asyncio
+    async def test_edit_message_updates_and_finalizes_native_reply_stream(self):
+        from gateway.platforms.wecom import WeComAdapter
+
+        adapter = WeComAdapter(PlatformConfig(enabled=True))
+        adapter._streaming_replies["stream-1"] = "req-1"
+        adapter._streaming_active_chats.add("chat-123")
+        adapter._send_reply_request = AsyncMock(
+            return_value={"headers": {"req_id": "req-1"}, "errcode": 0}
+        )
+
+        first = await adapter.edit_message(
+            "chat-123",
+            "stream-1",
+            "partial update",
+            finalize=False,
+        )
+        final = await adapter.edit_message(
+            "chat-123",
+            "stream-1",
+            "done",
+            finalize=True,
+        )
+
+        assert first.success is True
+        assert final.success is True
+        assert adapter._streaming_replies == {}
+        assert "chat-123" not in adapter._streaming_active_chats
+        calls = adapter._send_reply_request.await_args_list
+        assert len(calls) == 2
+        assert calls[0].args[0] == "req-1"
+        assert calls[0].args[1]["msgtype"] == "stream"
+        assert calls[0].args[1]["stream"] == {
+            "id": "stream-1",
+            "finish": False,
+            "content": "partial update",
+        }
+        assert calls[1].args[1]["stream"] == {
+            "id": "stream-1",
+            "finish": True,
+            "content": "done",
+        }
+
+    @pytest.mark.asyncio
+    async def test_edit_message_clears_streaming_state_when_reply_context_is_stale(self):
+        from gateway.platforms.wecom import WeComAdapter
+
+        adapter = WeComAdapter(PlatformConfig(enabled=True))
+        adapter._streaming_replies["stream-1"] = "req-1"
+        adapter._streaming_active_chats.add("chat-123")
+        adapter._last_chat_req_ids["chat-123"] = "req-1"
+        adapter._send_reply_request = AsyncMock(
+            return_value={"errcode": 846609, "errmsg": "aibot websocket not subscribed"}
+        )
+
+        result = await adapter.edit_message("chat-123", "stream-1", "partial update")
+
+        assert result.success is False
+        assert adapter._streaming_replies == {}
+        assert "chat-123" not in adapter._streaming_active_chats
+        assert "chat-123" not in adapter._last_chat_req_ids
 
     @pytest.mark.asyncio
     async def test_send_image_file_uses_passive_reply_media_when_reply_context_exists(self):

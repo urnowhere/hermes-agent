@@ -38,12 +38,13 @@ class ProgressCaptureAdapter(BasePlatformAdapter):
         )
         return SendResult(success=True, message_id="progress-1")
 
-    async def edit_message(self, chat_id, message_id, content) -> SendResult:
+    async def edit_message(self, chat_id, message_id, content, finalize=False) -> SendResult:
         self.edits.append(
             {
                 "chat_id": chat_id,
                 "message_id": message_id,
                 "content": content,
+                "finalize": finalize,
             }
         )
         return SendResult(success=True, message_id=message_id)
@@ -61,8 +62,50 @@ class ProgressCaptureAdapter(BasePlatformAdapter):
 class NonEditingProgressCaptureAdapter(ProgressCaptureAdapter):
     SUPPORTS_MESSAGE_EDITING = False
 
-    async def edit_message(self, chat_id, message_id, content) -> SendResult:
+    async def edit_message(self, chat_id, message_id, content, finalize=False) -> SendResult:
         raise AssertionError("non-editable adapters should not receive edit_message calls")
+
+
+class WeComProgressCaptureAdapter(ProgressCaptureAdapter):
+    REQUIRES_EDIT_FINALIZE = True
+
+    def __init__(self, platform=Platform.WECOM):
+        super().__init__(platform=platform)
+        self._active_stream_id = None
+        self._next_id = 0
+
+    def _new_id(self, prefix: str) -> str:
+        self._next_id += 1
+        return f"{prefix}-{self._next_id}"
+
+    async def send(self, chat_id, content, reply_to=None, metadata=None) -> SendResult:
+        self.sent.append(
+            {
+                "chat_id": chat_id,
+                "content": content,
+                "reply_to": reply_to,
+                "metadata": metadata,
+            }
+        )
+        if metadata and metadata.get("streaming_preview") and self._active_stream_id is None:
+            self._active_stream_id = self._new_id("stream")
+            return SendResult(success=True, message_id=self._active_stream_id)
+        return SendResult(success=True, message_id=self._new_id("plain"))
+
+    async def edit_message(self, chat_id, message_id, content, finalize=False) -> SendResult:
+        self.edits.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "content": content,
+                "finalize": finalize,
+            }
+        )
+        if message_id != self._active_stream_id:
+            return SendResult(success=False, error="No streaming reply context for this message")
+        if finalize:
+            self._active_stream_id = None
+        return SendResult(success=True, message_id=message_id)
 
 
 class FakeAgent:
@@ -118,6 +161,45 @@ class DelayedProgressAgent:
         time.sleep(0.1)
         return {
             "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
+class WeComToolProgressAgent:
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        self.tool_progress_callback("tool.started", "session_search", 'recall: "工作 项目 任务 完成"', {})
+        time.sleep(0.35)
+        self.tool_progress_callback("tool.started", "session_search", 'recall: "ace-music 归档 技能"', {})
+        time.sleep(0.35)
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
+class WeComDeltaThenToolAgent:
+    def __init__(self, **kwargs):
+        self.stream_delta_callback = kwargs.get("stream_delta_callback")
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        self.stream_delta_callback("我先帮你梳理一下方向。")
+        time.sleep(0.1)
+        self.tool_progress_callback("tool.started", "terminal", "python3 ~/.hermes/skills/openclaw-imp...", {})
+        time.sleep(0.35)
+        self.tool_progress_callback("tool.started", "terminal", "python3 ~/.hermes/skills/openclaw-imp...", {})
+        time.sleep(0.35)
+        self.stream_delta_callback(" 已经整理好了候选方向。")
+        return {
+            "final_response": "我先帮你梳理一下方向。 已经整理好了候选方向。",
+            "response_previewed": True,
             "messages": [],
             "api_calls": 1,
         }
@@ -457,6 +539,82 @@ class StreamingRefineAgent:
         }
 
 
+class NoStreamAnswerAgent:
+    def __init__(self, **kwargs):
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        time.sleep(0.05)
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
+class WeComMultiToolSegmentBreakAgent:
+    """Simulates a real multi-tool agent turn with segment break signals."""
+
+    def __init__(self, **kwargs):
+        self.stream_delta_callback = kwargs.get("stream_delta_callback")
+        self.interim_assistant_callback = kwargs.get("interim_assistant_callback")
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        # First response chunk
+        self.stream_delta_callback("找到了配置！")
+        time.sleep(0.05)
+        # Interim already-streamed before tool
+        self.interim_assistant_callback("找到了配置！", already_streamed=True)
+        # Segment break before tool execution (like run_agent.py does)
+        self.stream_delta_callback(None)
+        time.sleep(0.05)
+        # Tool execution with progress
+        self.tool_progress_callback("tool.started", "terminal", "export VAR=value", {})
+        time.sleep(0.3)
+        # Second response chunk (run_agent prepends \n\n via _stream_needs_break)
+        self.stream_delta_callback("\n\n让我看看结果。")
+        time.sleep(0.05)
+        # Another interim + segment break for second tool
+        self.interim_assistant_callback("让我看看结果。", already_streamed=True)
+        self.stream_delta_callback(None)
+        time.sleep(0.05)
+        self.tool_progress_callback("tool.started", "terminal", "wecom-cli init", {})
+        time.sleep(0.3)
+        # Final response text
+        self.stream_delta_callback("\n\n初始化完成。")
+        return {
+            "final_response": "找到了配置！\n\n让我看看结果。\n\n初始化完成。",
+            "response_previewed": True,
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
+class WeComCommentaryInterimAgent:
+    """Simulates commentary (already_streamed=False) that should NOT create new bubbles on WeCom."""
+
+    def __init__(self, **kwargs):
+        self.stream_delta_callback = kwargs.get("stream_delta_callback")
+        self.interim_assistant_callback = kwargs.get("interim_assistant_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        self.stream_delta_callback("第一段内容。")
+        time.sleep(0.05)
+        # Commentary NOT already streamed — on other platforms this creates a new bubble
+        self.interim_assistant_callback("中间想法", already_streamed=False)
+        time.sleep(0.05)
+        self.stream_delta_callback("\n\n继续回复。")
+        return {
+            "final_response": "第一段内容。\n\n继续回复。",
+            "response_previewed": True,
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
 class QueuedCommentaryAgent:
     calls = 0
 
@@ -744,6 +902,207 @@ async def test_run_agent_matrix_streaming_omits_cursor(monkeypatch, tmp_path):
     assert all_text, "expected streamed Matrix content to be sent or edited"
     assert all("▉" not in text for text in all_text)
     assert any("Continuing to refine:" in text for text in all_text)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_wecom_streaming_sets_preview_metadata_and_omits_cursor(
+    monkeypatch, tmp_path
+):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        StreamingRefineAgent,
+        session_id="sess-wecom-streaming",
+        config_data={
+            "display": {"tool_progress": "off", "interim_assistant_messages": False},
+            "streaming": {"enabled": True, "edit_interval": 0.01, "buffer_threshold": 1},
+        },
+        platform=Platform.WECOM,
+        chat_id="wecom-user-1",
+        chat_type="dm",
+        thread_id=None,
+    )
+
+    assert result.get("already_sent") is True
+    assert adapter.sent, "expected streamed WeCom content to start with a preview send"
+    assert adapter.sent[0]["content"] == ""
+    assert adapter.sent[0]["metadata"] == {"streaming_preview": True}
+    all_text = [call["content"] for call in adapter.sent] + [call["content"] for call in adapter.edits]
+    assert all("▉" not in text for text in all_text)
+    assert any("Continuing to refine:" in text for text in all_text)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_wecom_replaces_placeholder_when_no_stream_deltas(
+    monkeypatch, tmp_path
+):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        NoStreamAnswerAgent,
+        session_id="sess-wecom-placeholder-final",
+        config_data={
+            "display": {"tool_progress": "off", "interim_assistant_messages": False},
+            "streaming": {"enabled": True, "edit_interval": 0.01, "buffer_threshold": 1},
+        },
+        platform=Platform.WECOM,
+        chat_id="wecom-user-2",
+        chat_type="dm",
+        thread_id=None,
+    )
+
+    assert result.get("already_sent") is True
+    assert adapter.sent == [
+        {
+            "chat_id": "wecom-user-2",
+            "content": "",
+            "reply_to": None,
+            "metadata": {"streaming_preview": True},
+        }
+    ]
+    assert adapter.edits
+    assert adapter.edits[-1]["content"] == "done"
+    assert adapter.edits[-1]["finalize"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_agent_wecom_tool_progress_reuses_stream_placeholder(
+    monkeypatch, tmp_path
+):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        WeComToolProgressAgent,
+        session_id="sess-wecom-tool-progress-stream",
+        config_data={
+            "display": {"tool_progress": "all", "interim_assistant_messages": False},
+            "streaming": {"enabled": True, "edit_interval": 0.01, "buffer_threshold": 1},
+        },
+        platform=Platform.WECOM,
+        chat_id="wecom-user-tools",
+        chat_type="dm",
+        thread_id=None,
+        adapter_cls=WeComProgressCaptureAdapter,
+    )
+
+    assert result.get("already_sent") is True
+    assert adapter.sent == [
+        {
+            "chat_id": "wecom-user-tools",
+            "content": "",
+            "reply_to": None,
+            "metadata": {"streaming_preview": True},
+        }
+    ]
+    assert any("session_search" in call["content"] for call in adapter.edits)
+    assert adapter.edits[-1]["content"] == "done"
+    assert adapter.edits[-1]["finalize"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_agent_wecom_tool_progress_reuses_active_stream_after_first_delta(
+    monkeypatch, tmp_path
+):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        WeComDeltaThenToolAgent,
+        session_id="sess-wecom-tool-progress-after-delta",
+        config_data={
+            "display": {"tool_progress": "all", "interim_assistant_messages": False},
+            "streaming": {"enabled": True, "edit_interval": 0.01, "buffer_threshold": 1},
+        },
+        platform=Platform.WECOM,
+        chat_id="wecom-user-tool-delta",
+        chat_type="dm",
+        thread_id=None,
+        adapter_cls=WeComProgressCaptureAdapter,
+    )
+
+    assert result.get("already_sent") is True
+    assert adapter.sent == [
+        {
+            "chat_id": "wecom-user-tool-delta",
+            "content": "",
+            "reply_to": None,
+            "metadata": {"streaming_preview": True},
+        }
+    ]
+    assert any("我先帮你梳理一下方向。" in call["content"] for call in adapter.edits)
+    assert any("python3 ~/.hermes/skills/openclaw-imp..." in call["content"] for call in adapter.edits)
+    # Tool progress edits preserve response text as prefix (no overwrite)
+    progress_edits = [e for e in adapter.edits if "python3 ~/.hermes/skills/openclaw-imp..." in e["content"]]
+    for pe in progress_edits:
+        assert "我先帮你梳理一下方向。" in pe["content"], "Tool progress must not overwrite response text"
+    assert adapter.edits[-1]["content"] == "我先帮你梳理一下方向。 已经整理好了候选方向。"
+    assert adapter.edits[-1]["finalize"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_agent_wecom_multi_tool_segment_breaks_single_bubble(
+    monkeypatch, tmp_path
+):
+    """Multiple tool boundaries (stream_delta_callback(None)) must NOT create
+    new WeCom bubbles.  All content stays in one stream reply."""
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        WeComMultiToolSegmentBreakAgent,
+        session_id="sess-wecom-multi-tool-segment",
+        config_data={
+            "display": {"tool_progress": "all", "interim_assistant_messages": True},
+            "streaming": {"enabled": True, "edit_interval": 0.01, "buffer_threshold": 1},
+        },
+        platform=Platform.WECOM,
+        chat_id="wecom-user-multi-tool",
+        chat_type="dm",
+        thread_id=None,
+        adapter_cls=WeComProgressCaptureAdapter,
+    )
+
+    assert result.get("already_sent") is True
+    # Only ONE send call — the initial placeholder. No extra bubbles.
+    assert len(adapter.sent) == 1
+    assert adapter.sent[0]["metadata"] == {"streaming_preview": True}
+    # Final edit contains the full response, finalized
+    assert adapter.edits[-1]["finalize"] is True
+    assert "找到了配置" in adapter.edits[-1]["content"]
+    assert "初始化完成" in adapter.edits[-1]["content"]
+    # Tool progress edits must preserve response text prefix (no overwrite)
+    progress_edits = [e for e in adapter.edits if "export VAR=value" in e["content"] or "wecom-cli init" in e["content"]]
+    for pe in progress_edits:
+        assert "找到了配置" in pe["content"], "Tool progress must not overwrite response text"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_wecom_commentary_interim_does_not_split_bubble(
+    monkeypatch, tmp_path
+):
+    """Commentary (already_streamed=False) must NOT create separate WeCom bubbles."""
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        WeComCommentaryInterimAgent,
+        session_id="sess-wecom-commentary-interim",
+        config_data={
+            "display": {"tool_progress": "off", "interim_assistant_messages": True},
+            "streaming": {"enabled": True, "edit_interval": 0.01, "buffer_threshold": 1},
+        },
+        platform=Platform.WECOM,
+        chat_id="wecom-user-commentary",
+        chat_type="dm",
+        thread_id=None,
+        adapter_cls=WeComProgressCaptureAdapter,
+    )
+
+    assert result.get("already_sent") is True
+    # Only ONE send call — the initial placeholder. Commentary does NOT create new bubble.
+    assert len(adapter.sent) == 1
+    assert adapter.sent[0]["metadata"] == {"streaming_preview": True}
+    # Final edit has the full response
+    assert adapter.edits[-1]["finalize"] is True
+    assert "第一段内容" in adapter.edits[-1]["content"]
+    assert "继续回复" in adapter.edits[-1]["content"]
 
 
 @pytest.mark.asyncio

@@ -142,10 +142,13 @@ class WeComAdapter(BasePlatformAdapter):
     """WeCom AI Bot adapter backed by a persistent WebSocket connection."""
 
     MAX_MESSAGE_LENGTH = MAX_MESSAGE_LENGTH
-    SUPPORTS_MESSAGE_EDITING = False
     # Threshold for detecting WeCom client-side message splits.
     # When a chunk is near the 4000-char limit, a continuation is almost certain.
     _SPLIT_THRESHOLD = 3900
+
+    # WeCom replyStream requires an explicit finalize call (finish=true)
+    # to transition the UI out of the "typing" indicator state.
+    REQUIRES_EDIT_FINALIZE = True
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.WECOM)
@@ -174,6 +177,15 @@ class WeComAdapter(BasePlatformAdapter):
         self._pending_responses: Dict[str, asyncio.Future] = {}
         self._dedup = MessageDeduplicator(max_size=DEDUP_MAX_SIZE)
         self._reply_req_ids: Dict[str, str] = {}
+        self._last_chat_req_ids: Dict[str, str] = {}
+
+        # Streaming reply state: maps message_id -> reply_req_id for progressive
+        # updates via aibot_respond_msg with finish flag.
+        self._streaming_replies: Dict[str, str] = {}
+        # Chats where a streaming respond was started (finish=false sent).
+        # Used to avoid double-responding when the gateway falls back after
+        # streaming edit failures.
+        self._streaming_active_chats: set = set()
 
         # Text batching: merge rapid successive messages (Telegram-style).
         # WeCom clients split long messages around 4000 chars.
@@ -182,7 +194,6 @@ class WeComAdapter(BasePlatformAdapter):
         self._pending_text_batches: Dict[str, MessageEvent] = {}
         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
         self._device_id = uuid.uuid4().hex
-        self._last_chat_req_ids: Dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -454,6 +465,35 @@ class WeComAdapter(BasePlatformAdapter):
             return response
         finally:
             self._pending_responses.pop(normalized_req_id, None)
+
+    async def _send_reply_stream(
+        self,
+        reply_req_id: str,
+        stream_id: str,
+        content: str,
+        *,
+        finish: bool = True,
+    ) -> Dict[str, Any]:
+        """Send a native WeCom stream reply via ``aibot_respond_msg``.
+
+        WeCom associates progressive updates with the combination of inbound
+        ``req_id`` and a stable ``stream.id``. The first ``finish=False`` frame
+        creates the streaming bubble, later ``finish=False`` frames refresh it,
+        and the final ``finish=True`` frame closes it.
+        """
+        response = await self._send_reply_request(
+            reply_req_id,
+            {
+                "msgtype": "stream",
+                "stream": {
+                    "id": stream_id,
+                    "finish": finish,
+                    "content": content[:self.MAX_MESSAGE_LENGTH],
+                },
+            },
+        )
+        self._raise_for_wecom_error(response, "send reply stream")
+        return response
 
     @staticmethod
     def _new_req_id(prefix: str) -> str:
@@ -1002,6 +1042,20 @@ class WeComAdapter(BasePlatformAdapter):
         errmsg = str(response.get("errmsg") or "unknown error")
         return f"WeCom errcode {errcode}: {errmsg}"
 
+    @staticmethod
+    def _is_stale_reply_context_error(error: Optional[str]) -> bool:
+        lowered = str(error or "").lower()
+        return "846609" in lowered or "websocket not subscribed" in lowered
+
+    def _clear_reply_context_cache(self, chat_id: Optional[str], reply_to: Optional[str] = None) -> None:
+        normalized_chat_id = str(chat_id or "").strip()
+        normalized_reply_to = str(reply_to or "").strip()
+        if normalized_chat_id:
+            self._last_chat_req_ids.pop(normalized_chat_id, None)
+            self._streaming_active_chats.discard(normalized_chat_id)
+        if normalized_reply_to:
+            self._reply_req_ids.pop(normalized_reply_to, None)
+
     @classmethod
     def _raise_for_wecom_error(cls, response: Dict[str, Any], operation: str) -> None:
         error = cls._response_error(response)
@@ -1338,11 +1392,30 @@ class WeComAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        """Send markdown to a WeCom chat via proactive ``aibot_send_msg``."""
-        del metadata
+        """Send markdown to a WeCom chat via proactive ``aibot_send_msg``.
+
+        When the gateway marks this send as a streaming preview, replies to an
+        inbound message use native WeCom stream replies so later
+        ``edit_message()`` calls can refresh the same bubble. Ordinary one-shot
+        replies continue to use markdown reply mode.
+        """
 
         if not chat_id:
             return SendResult(success=False, error="chat_id is required")
+
+        metadata = metadata or {}
+        streaming_preview = bool(metadata.get("streaming_preview"))
+
+        async def _send_proactive_markdown() -> tuple[Dict[str, Any], str]:
+            response = await self._send_request(
+                APP_CMD_SEND,
+                {
+                    "chatid": chat_id,
+                    "msgtype": "markdown",
+                    "markdown": {"content": content[:self.MAX_MESSAGE_LENGTH]},
+                },
+            )
+            return response, self._payload_req_id(response) or uuid.uuid4().hex[:12]
 
         try:
             reply_req_id = self._reply_req_id_for_message(reply_to)
@@ -1350,17 +1423,47 @@ class WeComAdapter(BasePlatformAdapter):
             if not reply_req_id and chat_id in self._last_chat_req_ids:
                 reply_req_id = self._last_chat_req_ids[chat_id]
 
-            if reply_req_id:
-                response = await self._send_reply_markdown(reply_req_id, content)
-            else:
-                response = await self._send_request(
-                    APP_CMD_SEND,
-                    {
-                        "chatid": chat_id,
-                        "msgtype": "markdown",
-                        "markdown": {"content": content[:self.MAX_MESSAGE_LENGTH]},
-                    },
+            # If a streaming respond was already initiated for this chat
+            # (initial respond succeeded but subsequent edits failed,
+            # triggering the gateway's fallback path), use aibot_send_msg
+            # to avoid creating a second streaming reply in the same conversation.
+            if reply_req_id and chat_id in self._streaming_active_chats:
+                logger.debug(
+                    "[%s] Streaming already active for chat %s, using proactive send",
+                    self.name, chat_id,
                 )
+                reply_req_id = None
+
+            if reply_req_id and streaming_preview:
+                # Use streaming reply: finish=false so edit_message() can
+                # send progressive updates, with finish=true on final.
+                # Track this chat as having an active streaming respond
+                # so fallback sends use aibot_send_msg instead of duplicating.
+                message_id = self._new_req_id("stream")
+                response = await self._send_reply_stream(
+                    reply_req_id,
+                    message_id,
+                    content,
+                    finish=False,
+                )
+                self._streaming_replies[message_id] = reply_req_id
+                self._streaming_active_chats.add(chat_id)
+            elif reply_req_id:
+                try:
+                    response = await self._send_reply_markdown(reply_req_id, content)
+                    message_id = self._payload_req_id(response) or uuid.uuid4().hex[:12]
+                except Exception as exc:
+                    if not self._is_stale_reply_context_error(str(exc)):
+                        raise
+                    logger.warning(
+                        "[%s] Reply markdown context for chat %s became stale; retrying with proactive send",
+                        self.name,
+                        chat_id,
+                    )
+                    self._clear_reply_context_cache(chat_id, reply_to=reply_to)
+                    response, message_id = await _send_proactive_markdown()
+            else:
+                response, message_id = await _send_proactive_markdown()
         except asyncio.TimeoutError:
             return SendResult(success=False, error="Timeout sending message to WeCom")
         except Exception as exc:
@@ -1369,11 +1472,14 @@ class WeComAdapter(BasePlatformAdapter):
 
         error = self._response_error(response)
         if error:
+            if streaming_preview:
+                self._streaming_replies.pop(message_id, None)
+                self._streaming_active_chats.discard(chat_id)
             return SendResult(success=False, error=error)
 
         return SendResult(
             success=True,
-            message_id=self._payload_req_id(response) or uuid.uuid4().hex[:12],
+            message_id=message_id,
             raw_response=response,
         )
 
@@ -1476,6 +1582,51 @@ class WeComAdapter(BasePlatformAdapter):
             "name": chat_id,
             "type": "group" if chat_id and chat_id.lower().startswith("group") else "dm",
         }
+
+    async def edit_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        content: str,
+        *,
+        finalize: bool = False,
+    ) -> SendResult:
+        """Edit a streamed message via ``aibot_respond_msg`` with finish flag.
+
+        WeCom's AI Bot API does not support editing sent messages. Instead,
+        progressive streaming replies use ``aibot_respond_msg`` with
+        ``finish=false`` for intermediate updates and ``finish=true`` for
+        the final message, which the WeCom client renders as a single
+        updating message bubble.
+
+        The ``message_id`` here is the synthetic ID returned by ``send()``
+        on the first call; we use it to look up the inbound ``reply_req_id``
+        so every update targets the same conversation context.
+        """
+        reply_req_id = self._streaming_replies.get(message_id)
+        if not reply_req_id:
+            return SendResult(success=False, error="No streaming reply context for this message")
+
+        try:
+            await self._send_reply_stream(
+                reply_req_id,
+                message_id,
+                content,
+                finish=finalize,
+            )
+            if finalize:
+                self._streaming_replies.pop(message_id, None)
+                self._streaming_active_chats.discard(chat_id)
+            return SendResult(success=True, message_id=message_id)
+        except asyncio.TimeoutError:
+            return SendResult(success=False, error="Timeout sending streaming reply to WeCom")
+        except Exception as exc:
+            if self._is_stale_reply_context_error(str(exc)):
+                self._streaming_replies.pop(message_id, None)
+                self._streaming_active_chats.discard(chat_id)
+                self._clear_reply_context_cache(chat_id)
+            logger.error("[%s] Stream edit failed: %s", self.name, exc)
+            return SendResult(success=False, error=str(exc))
 
 
 # ------------------------------------------------------------------

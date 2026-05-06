@@ -224,6 +224,7 @@ class TestPlatformDefaults:
         from gateway.display_config import resolve_display_setting
 
         assert resolve_display_setting({}, "telegram", "streaming") is None
+        assert resolve_display_setting({}, "wecom", "streaming") is None
 
 
 # ---------------------------------------------------------------------------

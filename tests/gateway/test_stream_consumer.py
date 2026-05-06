@@ -1254,6 +1254,40 @@ class TestBufferOnlyMode:
         # The key assertion: this doesn't break.
         assert adapter.send.call_count >= 1
 
+    @pytest.mark.asyncio
+    async def test_uses_newly_added_chars_for_buffer_threshold(self):
+        """Once the message is long, one new char should not force another edit."""
+        adapter = MagicMock()
+        adapter.MAX_MESSAGE_LENGTH = 4096
+        adapter.send = AsyncMock(return_value=SimpleNamespace(success=True, message_id="msg1"))
+        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True))
+
+        cfg = StreamConsumerConfig(
+            edit_interval=0.01,
+            buffer_threshold=40,
+            min_chunk_chars=12,
+            cursor="",
+        )
+        consumer = GatewayStreamConsumer(adapter, "!room:server", config=cfg)
+
+        task = asyncio.create_task(consumer.run())
+
+        consumer.on_delta("A" * 45)
+        await asyncio.sleep(0.05)
+        assert adapter.send.call_count == 1
+        assert adapter.edit_message.call_count == 0
+
+        consumer.on_delta("B")
+        await asyncio.sleep(0.05)
+        assert adapter.edit_message.call_count == 0
+
+        consumer.on_delta("C" * 11)
+        await asyncio.sleep(0.05)
+        assert adapter.edit_message.call_count >= 1
+
+        consumer.finish()
+        await task
+
 
 # ── Cursor stripping on fallback (#7183) ────────────────────────────────────
 
