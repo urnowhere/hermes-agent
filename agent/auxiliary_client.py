@@ -2004,6 +2004,21 @@ def _resolve_auto(main_runtime: Optional[Dict[str, Any]] = None) -> Tuple[Option
                         main_provider, resolved or main_model)
             return client, resolved or main_model
 
+    # OpenRouter is an aggregator, but when it is the configured primary
+    # provider we should still honor the saved model slug rather than
+    # swapping to the hardcoded auxiliary default.  That keeps side-task
+    # calls aligned with the user's selected OpenRouter model.
+    if main_provider == "openrouter" and main_model:
+        client, resolved = resolve_provider_client(
+            "openrouter",
+            main_model,
+            api_mode=runtime_api_mode or None,
+        )
+        if client is not None:
+            logger.info("Auxiliary auto-detect: using configured OpenRouter model %s",
+                        resolved or main_model)
+            return client, resolved or main_model
+
     # ── Step 2: aggregator / fallback chain ──────────────────────────────
     tried = []
     for label, try_fn in _get_provider_chain():
@@ -3210,6 +3225,10 @@ def _resolve_task_provider_model(
     cfg_base_url = None
     cfg_api_key = None
     cfg_api_mode = None
+    env_provider = None
+    env_model = None
+    env_base_url = None
+    env_api_key = None
 
     if task:
         task_config = _get_auxiliary_task_config(task)
@@ -3219,7 +3238,13 @@ def _resolve_task_provider_model(
         cfg_api_key = str(task_config.get("api_key", "")).strip() or None
         cfg_api_mode = str(task_config.get("api_mode", "")).strip() or None
 
-    resolved_model = model or cfg_model
+        env_prefix = f"AUXILIARY_{str(task).strip().upper()}"
+        env_provider = os.getenv(f"{env_prefix}_PROVIDER", "").strip() or None
+        env_model = os.getenv(f"{env_prefix}_MODEL", "").strip() or None
+        env_base_url = os.getenv(f"{env_prefix}_BASE_URL", "").strip() or None
+        env_api_key = os.getenv(f"{env_prefix}_API_KEY", "").strip() or None
+
+    resolved_model = model or cfg_model or env_model
     resolved_api_mode = cfg_api_mode
 
     if base_url:
@@ -3239,6 +3264,12 @@ def _resolve_task_provider_model(
             return cfg_provider, resolved_model, cfg_base_url, None, resolved_api_mode
         if cfg_provider and cfg_provider != "auto":
             return cfg_provider, resolved_model, None, None, resolved_api_mode
+        # Legacy env vars still work as a fallback when config.yaml does not
+        # provide a task-specific route.
+        if env_base_url:
+            return "custom", resolved_model, env_base_url, env_api_key, resolved_api_mode
+        if env_provider and env_provider != "auto":
+            return env_provider, resolved_model, None, None, resolved_api_mode
 
         return "auto", resolved_model, None, None, resolved_api_mode
 
