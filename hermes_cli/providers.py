@@ -195,6 +195,18 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         transport="openai_chat",  # default; overridden by api_mode in config
         base_url_env_var="AZURE_FOUNDRY_BASE_URL",
     ),
+    "astraflow": HermesOverlay(
+        transport="openai_chat",
+        is_aggregator=True,
+        base_url_override="https://api-us-ca.umodelverse.ai/v1",
+        base_url_env_var="ASTRAFLOW_BASE_URL",
+    ),
+    "astraflow-cn": HermesOverlay(
+        transport="openai_chat",
+        is_aggregator=True,
+        base_url_override="https://api.modelverse.cn/v1",
+        base_url_env_var="ASTRAFLOW_CN_BASE_URL",
+    ),
     "bedrock": HermesOverlay(
         transport="bedrock_converse",
         auth_type="aws_sdk",
@@ -319,6 +331,13 @@ ALIASES: Dict[str, str] = {
     "tencent-cloud": "tencent-tokenhub",
     "tencentmaas": "tencent-tokenhub",
 
+    # astraflow
+    "ucloud": "astraflow",
+    "modelverse": "astraflow",
+    "astraflow-global": "astraflow",
+    "astraflow-china": "astraflow-cn",
+    "astraflow_cn": "astraflow-cn",
+
     # bedrock
     "aws": "bedrock",
     "aws-bedrock": "bedrock",
@@ -357,6 +376,8 @@ _LABEL_OVERRIDES: Dict[str, str] = {
     "xiaomi": "Xiaomi MiMo",
     "gmi": "GMI Cloud",
     "tencent-tokenhub": "Tencent TokenHub",
+    "astraflow": "Astraflow (UCloud)",
+    "astraflow-cn": "Astraflow China (UCloud)",
     "lmstudio": "LM Studio",
     "local": "Local endpoint",
     "bedrock": "AWS Bedrock",
