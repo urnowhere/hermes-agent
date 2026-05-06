@@ -205,6 +205,19 @@ class TestTakeCheckpoint:
         r = mgr.ensure_checkpoint(str(Path.home()), "home")
         assert r is False
 
+    def test_skip_system_temp_dir(self, mgr, monkeypatch):
+        called = False
+
+        def _unexpected_take(*args, **kwargs):
+            nonlocal called
+            called = True
+            return True
+
+        monkeypatch.setattr(mgr, "_take", _unexpected_take)
+        r = mgr.ensure_checkpoint("/tmp", "temp")
+        assert r is False
+        assert called is False
+
 
 # =========================================================================
 # CheckpointManager — listing checkpoints

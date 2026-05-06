@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from hermes_constants import get_hermes_home
 from typing import Dict, List, Optional, Set
@@ -324,9 +325,10 @@ class CheckpointManager:
             return False
 
         abs_dir = str(_normalize_path(working_dir))
+        temp_dir = str(_normalize_path(tempfile.gettempdir()))
 
         # Skip root, home, and other overly broad directories
-        if abs_dir in ("/", str(Path.home())):
+        if abs_dir in ("/", str(Path.home()), temp_dir):
             logger.debug("Checkpoint skipped: directory too broad (%s)", abs_dir)
             return False
 
