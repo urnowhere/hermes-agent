@@ -2,6 +2,7 @@
 
 import importlib
 import unittest
+from unittest.mock import patch
 
 from tools.registry import registry
 
@@ -56,6 +57,17 @@ class TestFeishuToolRegistration(unittest.TestCase):
             props = entry.schema["parameters"].get("properties", {})
             self.assertIn("file_token", props, f"{tool_name} missing file_token param")
             self.assertIn("file_type", props, f"{tool_name} missing file_type param")
+
+    def test_feishu_checks_use_spec_probe_without_importing_sdk(self):
+        doc_entry = registry.get_entry("feishu_doc_read")
+        drive_entry = registry.get_entry("feishu_drive_list_comments")
+
+        with patch("importlib.util.find_spec", return_value=object()) as find_spec:
+            self.assertTrue(doc_entry.check_fn())
+            self.assertTrue(drive_entry.check_fn())
+
+        assert find_spec.call_count == 2
+        find_spec.assert_called_with("lark_oapi")
 
 
 if __name__ == "__main__":
