@@ -49,6 +49,7 @@ from gateway.platforms.base import (
     SendResult,
     is_network_accessible,
 )
+from hermes_constants import get_hermes_home
 
 logger = logging.getLogger(__name__)
 
@@ -2490,6 +2491,236 @@ class APIServerAdapter(BasePlatformAdapter):
             return web.json_response({"error": str(e)}, status=500)
 
     # ------------------------------------------------------------------
+    # Read-only / metadata APIs for web UIs
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_session_record(record: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": record.get("id"),
+            "source": record.get("source"),
+            "user_id": record.get("user_id"),
+            "model": record.get("model"),
+            "title": record.get("title"),
+            "started_at": record.get("started_at"),
+            "ended_at": record.get("ended_at"),
+            "end_reason": record.get("end_reason"),
+            "message_count": record.get("message_count") or 0,
+            "tool_call_count": record.get("tool_call_count") or 0,
+            "input_tokens": record.get("input_tokens") or 0,
+            "output_tokens": record.get("output_tokens") or 0,
+            "last_active": record.get("last_active"),
+            "parent_session_id": record.get("parent_session_id"),
+        }
+
+    async def _handle_list_sessions(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            db = self._ensure_session_db()
+            if not db:
+                return web.json_response({"items": [], "total": 0})
+            limit = max(1, min(500, int(request.query.get("limit", "50"))))
+            offset = max(0, int(request.query.get("offset", "0")))
+            items = db.list_sessions_rich(limit=limit, offset=offset)
+            total = db.session_count()
+            return web.json_response({
+                "items": [self._normalize_session_record(item) for item in items],
+                "total": total,
+            })
+        except Exception as e:
+            logger.exception("Error listing sessions")
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_get_session(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            db = self._ensure_session_db()
+            if not db:
+                return web.json_response({"error": "Session DB unavailable"}, status=503)
+            session_id = request.match_info.get("session_id", "")
+            resolved = db.resolve_session_id(session_id) or session_id
+            item = db.get_session(resolved)
+            if not item:
+                return web.json_response({"error": "Session not found"}, status=404)
+            return web.json_response({"session": self._normalize_session_record(item)})
+        except Exception as e:
+            logger.exception("Error getting session")
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_create_session(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            body = await request.json() if request.can_read_body else {}
+            requested_id = str(body.get("id") or "").strip()
+            session_id = requested_id or str(uuid.uuid4())
+            title = str(body.get("title") or "").strip() or None
+            model = str(body.get("model") or "").strip() or None
+            db = self._ensure_session_db()
+            if not db:
+                return web.json_response({"error": "Session DB unavailable"}, status=503)
+            created_id = db.create_session(session_id=session_id, source="api_server", model=model)
+            if title:
+                try:
+                    db.set_session_title(created_id, title)
+                except Exception:
+                    pass
+            item = db.get_session(created_id) or {"id": created_id, "model": model, "title": title, "started_at": time.time()}
+            return web.json_response({"session": self._normalize_session_record(item)})
+        except Exception as e:
+            logger.exception("Error creating session")
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_update_session(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            db = self._ensure_session_db()
+            if not db:
+                return web.json_response({"error": "Session DB unavailable"}, status=503)
+            session_id = request.match_info.get("session_id", "")
+            resolved = db.resolve_session_id(session_id) or session_id
+            body = await request.json() if request.can_read_body else {}
+            title = str(body.get("title") or "").strip()
+            if not title:
+                return web.json_response({"error": "title required"}, status=400)
+            ok = db.set_session_title(resolved, title)
+            if not ok:
+                return web.json_response({"error": "Session not found"}, status=404)
+            item = db.get_session(resolved)
+            return web.json_response({"session": self._normalize_session_record(item or {"id": resolved, "title": title})})
+        except Exception as e:
+            logger.exception("Error updating session")
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_delete_session(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            db = self._ensure_session_db()
+            if not db:
+                return web.json_response({"error": "Session DB unavailable"}, status=503)
+            session_id = request.match_info.get("session_id", "")
+            resolved = db.resolve_session_id(session_id) or session_id
+            ok = db.delete_session(resolved)
+            if not ok:
+                return web.json_response({"error": "Session not found"}, status=404)
+            return web.json_response({"ok": True, "session_id": resolved})
+        except Exception as e:
+            logger.exception("Error deleting session")
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_get_session_messages(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            db = self._ensure_session_db()
+            if not db:
+                return web.json_response({"items": [], "total": 0})
+            session_id = request.match_info.get("session_id", "")
+            resolved = db.resolve_session_id(session_id) or session_id
+            items = db.get_messages(resolved)
+            return web.json_response({"items": items, "total": len(items)})
+        except Exception as e:
+            logger.exception("Error getting session messages")
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_get_memory(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            from tools.memory_tool import get_memory_dir
+            mem_dir = get_memory_dir()
+            result = {}
+            for name in ("MEMORY.md", "USER.md"):
+                path = mem_dir / name
+                if path.exists():
+                    result[name] = path.read_text(encoding="utf-8")
+            return web.json_response(result)
+        except Exception as e:
+            logger.exception("Error reading memory")
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_list_skills(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            import yaml
+            from agent.skill_utils import get_all_skills_dirs, iter_skill_index_files
+
+            skills = []
+            for skills_dir in get_all_skills_dirs():
+                if not skills_dir.is_dir():
+                    continue
+                for skill_path in iter_skill_index_files(skills_dir, "SKILL.md"):
+                    try:
+                        raw = skill_path.read_text(encoding="utf-8")
+                        frontmatter = {}
+                        if raw.startswith("---"):
+                            parts = raw.split("---", 2)
+                            if len(parts) >= 3:
+                                frontmatter = yaml.safe_load(parts[1]) or {}
+                        skill_dir = skill_path.parent
+                        name = frontmatter.get("name") or skill_dir.name
+                        skills.append({
+                            "id": name,
+                            "name": name,
+                            "description": frontmatter.get("description", ""),
+                            "author": frontmatter.get("author", ""),
+                            "tags": frontmatter.get("tags", []),
+                            "triggers": frontmatter.get("triggers", []),
+                            "category": frontmatter.get("category", ""),
+                            "installed": True,
+                            "enabled": True,
+                            "sourcePath": str(skill_path),
+                            "content": raw,
+                        })
+                    except Exception as skill_err:
+                        logger.debug("Error reading skill %s: %s", skill_path, skill_err)
+            return web.json_response({"items": skills, "total": len(skills)})
+        except Exception as e:
+            logger.exception("Error listing skills")
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_get_config(self, request: "web.Request") -> "web.Response":
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        try:
+            import copy
+            import yaml
+
+            config_path = get_hermes_home() / "config.yaml"
+            if not config_path.exists():
+                return web.json_response({})
+            with open(config_path, encoding="utf-8") as f:
+                config = yaml.safe_load(f) or {}
+            safe_keys = [
+                "model", "provider", "display", "memory", "timezone",
+                "skills", "toolsets", "agent", "tts", "stt",
+                "smart_model_routing", "custom_providers",
+            ]
+            safe_config = {k: copy.deepcopy(config[k]) for k in safe_keys if k in config}
+            if "custom_providers" in safe_config and isinstance(safe_config["custom_providers"], list):
+                for provider in safe_config["custom_providers"]:
+                    if isinstance(provider, dict):
+                        provider.pop("api_key", None)
+            return web.json_response(safe_config)
+        except Exception as e:
+            logger.exception("Error reading config")
+            return web.json_response({"error": str(e)}, status=500)
+
+    # ------------------------------------------------------------------
     # Output extraction helper
     # ------------------------------------------------------------------
 
@@ -3064,6 +3295,16 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/api/jobs/{job_id}/pause", self._handle_pause_job)
             self._app.router.add_post("/api/jobs/{job_id}/resume", self._handle_resume_job)
             self._app.router.add_post("/api/jobs/{job_id}/run", self._handle_run_job)
+            # Read-only / metadata APIs for web UIs
+            self._app.router.add_get("/api/sessions", self._handle_list_sessions)
+            self._app.router.add_post("/api/sessions", self._handle_create_session)
+            self._app.router.add_get("/api/sessions/{session_id}", self._handle_get_session)
+            self._app.router.add_patch("/api/sessions/{session_id}", self._handle_update_session)
+            self._app.router.add_delete("/api/sessions/{session_id}", self._handle_delete_session)
+            self._app.router.add_get("/api/sessions/{session_id}/messages", self._handle_get_session_messages)
+            self._app.router.add_get("/api/memory", self._handle_get_memory)
+            self._app.router.add_get("/api/skills", self._handle_list_skills)
+            self._app.router.add_get("/api/config", self._handle_get_config)
             # Structured event streaming
             self._app.router.add_post("/v1/runs", self._handle_runs)
             self._app.router.add_get("/v1/runs/{run_id}", self._handle_get_run)
