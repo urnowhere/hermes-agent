@@ -128,10 +128,18 @@ def _read_manifest(plugin_dir: Path) -> dict:
         import yaml
 
         with open(manifest_file) as f:
-            return yaml.safe_load(f) or {}
+            data = yaml.safe_load(f) or {}
     except Exception as e:
         logger.warning("Failed to read plugin.yaml in %s: %s", plugin_dir, e)
         return {}
+    if not isinstance(data, dict):
+        logger.warning(
+            "plugin.yaml in %s is not a mapping (got %s); ignoring manifest.",
+            plugin_dir,
+            type(data).__name__,
+        )
+        return {}
+    return data
 
 
 def _copy_example_files(plugin_dir: Path, console) -> None:
@@ -705,6 +713,8 @@ def _discover_all_plugins() -> list:
                 try:
                     with open(manifest_file) as f:
                         manifest = yaml.safe_load(f) or {}
+                    if not isinstance(manifest, dict):
+                        manifest = {}
                     name = manifest.get("name", d.name)
                     version = manifest.get("version", "")
                     description = manifest.get("description", "")

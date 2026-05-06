@@ -162,6 +162,29 @@ class TestPluginDiscovery:
         }
         assert len(non_bundled) == 0
 
+    def test_discover_skips_non_mapping_manifest(self, tmp_path, monkeypatch, caplog):
+        """plugin.yaml that parses to a list/scalar is valid YAML but not a
+        manifest. It must be skipped with a warning instead of crashing the
+        discovery loop with ``AttributeError: 'list' object has no attribute 'get'``.
+        """
+        plugins_dir = tmp_path / "hermes_test" / "plugins"
+        bad = plugins_dir / "bad_manifest"
+        bad.mkdir(parents=True)
+        (bad / "plugin.yaml").write_text("- not\n- a\n- mapping\n")
+        (bad / "__init__.py").write_text("def register(ctx):\n    pass\n")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_test"))
+
+        mgr = PluginManager()
+        with caplog.at_level(logging.WARNING, logger="hermes_cli.plugins"):
+            mgr.discover_and_load()
+
+        non_bundled = {
+            n: p for n, p in mgr._plugins.items()
+            if p.manifest.source != "bundled"
+        }
+        assert len(non_bundled) == 0
+        assert any("not a mapping" in r.message for r in caplog.records)
+
     def test_entry_points_scanned(self, tmp_path, monkeypatch):
         """Entry-point based plugins are discovered (mocked)."""
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_test"))

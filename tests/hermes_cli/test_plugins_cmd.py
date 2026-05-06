@@ -155,6 +155,22 @@ class TestReadManifest:
         result = _read_manifest(tmp_path)
         assert result == {}
 
+    def test_non_mapping_yaml_returns_empty_and_logs(self, tmp_path, caplog):
+        """A plugin.yaml that parses to a list/scalar is valid YAML but not a
+        manifest. Callers use ``manifest.get(...)``, so the safe behavior is to
+        coerce to an empty dict rather than crash.
+        """
+        (tmp_path / "plugin.yaml").write_text("- not\n- a\n- mapping\n")
+        with caplog.at_level(logging.WARNING, logger="hermes_cli.plugins_cmd"):
+            result = _read_manifest(tmp_path)
+        assert result == {}
+        assert any("not a mapping" in r.message for r in caplog.records)
+
+    def test_scalar_yaml_returns_empty(self, tmp_path):
+        (tmp_path / "plugin.yaml").write_text("just-a-string\n")
+        result = _read_manifest(tmp_path)
+        assert result == {}
+
 
 # ── cmd_install tests ─────────────────────────────────────────────────────────
 
