@@ -3597,3 +3597,93 @@ def test_reclaim_task_clears_failure_counter(kanban_home):
         assert task.status == "ready"
     finally:
         conn.close()
+
+# ---------------------------------------------------------------------------
+# Automatic routing rules
+# ---------------------------------------------------------------------------
+
+def test_apply_routing_rules_promotes_pm_triage_and_adds_skill(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Rough product idea", assignee="pm", triage=True)
+        changed = kb.apply_routing_rules(conn, rules=[{
+            "name": "pm-triage-promote",
+            "assignee": "pm",
+            "statuses": ["triage"],
+            "action": "promote",
+            "ensure_skills": ["kanban-orchestrator"],
+        }])
+        task = kb.get_task(conn, tid)
+        assert changed == 1
+        assert task.status == "todo"
+        assert task.assignee == "pm"
+        assert task.skills == ["kanban-orchestrator"]
+
+
+def test_apply_routing_rules_reassigns_pm_created_test_card_to_qa(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="Test: finance assistant E2E",
+            assignee="pm",
+            created_by="pm",
+        )
+        changed = kb.apply_routing_rules(conn, rules=[{
+            "name": "qa-from-pm",
+            "created_by": "pm",
+            "statuses": ["todo", "ready", "blocked"],
+            "title_kw": ["test", "qa", "review", "e2e"],
+            "assign_to": "qa",
+            "action": "reassign",
+        }])
+        task = kb.get_task(conn, tid)
+        assert changed == 1
+        assert task.assignee == "qa"
+
+
+def test_apply_routing_rules_uses_first_matching_priority_rule(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="Build import pipeline",
+            assignee="pm",
+            created_by="pm",
+        )
+        changed = kb.apply_routing_rules(conn, rules=[
+            {
+                "name": "routine-from-pm",
+                "priority": 10,
+                "created_by": "pm",
+                "statuses": ["todo", "ready"],
+                "title_kw": ["build"],
+                "assign_to": "routine",
+                "action": "reassign",
+            },
+            {
+                "name": "coding-from-pm",
+                "priority": 0,
+                "created_by": "pm",
+                "statuses": ["todo", "ready"],
+                "title_kw": ["build"],
+                "assign_to": "coding",
+                "action": "reassign",
+            },
+        ])
+        task = kb.get_task(conn, tid)
+        assert changed == 1
+        assert task.assignee == "coding"
+
+
+def test_dispatch_once_reports_routed_count(monkeypatch, kanban_home):
+    rules = [{
+        "name": "pm-triage-promote",
+        "assignee": "pm",
+        "statuses": ["triage"],
+        "action": "promote",
+    }]
+    monkeypatch.setattr(kb, "_load_config_routing_rules", lambda: rules)
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Spec rough task", assignee="pm", triage=True)
+        result = kb.dispatch_once(conn, dry_run=True)
+        task = kb.get_task(conn, tid)
+        assert result.routed == 1
+        assert task.status == "todo"

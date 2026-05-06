@@ -192,6 +192,51 @@ kanban:
   dispatch_interval_seconds: 60    # default
 ```
 
+#### Automatic routing rules
+
+For durable role pipelines you can let a strong PM/specifier profile turn rough
+triage cards into concrete work, while the dispatcher enforces that the child
+cards move to cheaper or specialized profiles before they spawn. Routing is
+disabled by default and runs during each dispatcher tick after `todo → ready`
+promotion and before worker spawn.
+
+```yaml
+kanban:
+  routing:
+    enabled: true
+    rules:
+      # Specifier lane: rough cards assigned to pm leave triage automatically
+      # and force-load the orchestrator playbook.
+      - name: pm-triage-promote
+        assignee: pm
+        statuses: [triage]
+        action: promote
+        ensure_skills: [kanban-orchestrator]
+
+      # PM-created QA/review cards run on qa instead of spending PM tokens.
+      - name: qa-from-pm
+        priority: 0
+        created_by: pm
+        statuses: [todo, ready, blocked]
+        title_kw: [test, qa, review, validate, e2e]
+        action: reassign
+        assign_to: qa
+
+      # Simple build/script/report work can go to a cheaper routine profile.
+      - name: routine-from-pm
+        priority: 10
+        created_by: pm
+        statuses: [todo, ready, blocked]
+        title_kw: [build, script, import, report, schema, sqlite, csv, xlsx]
+        action: reassign
+        assign_to: routine
+```
+
+Supported rule filters: `created_by`, `assignee` / `assignee_glob`, `statuses`,
+`title_kw`, and `body_kw`. Keyword lists use OR semantics across title + body.
+Supported actions: `promote` (`triage → todo`), `reassign`, and
+`promote_and_assign`. `ensure_skills` appends per-task force-loaded skills.
+
 Override the config flag at runtime via `HERMES_KANBAN_DISPATCH_IN_GATEWAY=0`
 for debugging. Standard gateway supervision applies: run `hermes gateway
 start` directly, or wire the gateway up as a systemd user unit (see the

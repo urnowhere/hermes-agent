@@ -1230,6 +1230,15 @@ DEFAULT_CONFIG = {
         # Seconds between dispatcher ticks (idle or not). Lower = snappier
         # pickup of newly-ready tasks; higher = less SQL pressure.
         "dispatch_interval_seconds": 60,
+        # Optional automatic routing rules evaluated by the dispatcher
+        # after todo->ready promotion and before worker spawn. This supports
+        # PM/specifier lanes: expensive planners can decompose work while
+        # concrete implementation/review is reassigned to cheaper or
+        # specialized profiles. Disabled by default for back-compat.
+        "routing": {
+            "enabled": False,
+            "rules": [],
+        },
     },
 
     # execute_code settings — controls the tool used for programmatic tool calls.

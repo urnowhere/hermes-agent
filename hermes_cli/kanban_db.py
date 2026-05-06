@@ -82,6 +82,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
+import fnmatch
 
 
 # ---------------------------------------------------------------------------
@@ -1736,6 +1737,148 @@ def recompute_ready(conn: sqlite3.Connection) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Automatic routing rules
+# ---------------------------------------------------------------------------
+
+def _load_config_routing_rules() -> list[dict[str, Any]]:
+    """Return enabled kanban routing rules from config.yaml.
+
+    The feature is intentionally config-gated so existing boards keep the
+    historical behaviour unless operators opt in. Rules are deliberately
+    simple: filters match task metadata/title/body, then perform one of:
+    ``promote`` (triage -> todo), ``reassign``, or ``promote_and_assign``.
+    """
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config() or {}
+    except Exception:
+        return []
+    routing = (cfg.get("kanban") or {}).get("routing") or {}
+    if not routing.get("enabled", False):
+        return []
+    raw = routing.get("rules") or []
+    return [r for r in raw if isinstance(r, dict) and r.get("enabled", True)]
+
+
+def _as_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple, set)):
+        return [str(v) for v in value if v is not None and str(v)]
+    return [str(value)]
+
+
+def _merge_task_skills(existing_raw: Optional[str], new_skills: Iterable[str]) -> list[str]:
+    existing: list[str] = []
+    if existing_raw:
+        try:
+            parsed = json.loads(existing_raw)
+            if isinstance(parsed, list):
+                existing = [str(s) for s in parsed if s]
+        except Exception:
+            existing = []
+    seen = set(existing)
+    for skill in new_skills:
+        if skill and skill not in seen:
+            existing.append(str(skill))
+            seen.add(str(skill))
+    return existing
+
+
+def _routing_rule_matches(row: sqlite3.Row, rule: dict[str, Any]) -> bool:
+    created_by = rule.get("created_by")
+    if created_by is not None and row["created_by"] != created_by:
+        return False
+
+    assignee = rule.get("assignee") or rule.get("assignee_glob")
+    if assignee is not None and not fnmatch.fnmatch(row["assignee"] or "", str(assignee)):
+        return False
+
+    statuses = _as_list(rule.get("statuses"))
+    if statuses and row["status"] not in statuses:
+        return False
+
+    text = f"{row['title'] or ''}\n{row['body'] or ''}".lower()
+    keywords = [k.lower() for k in _as_list(rule.get("title_kw")) + _as_list(rule.get("body_kw"))]
+    if keywords and not any(k in text for k in keywords):
+        return False
+
+    return True
+
+
+def apply_routing_rules(
+    conn: sqlite3.Connection,
+    *,
+    rules: Optional[list[dict[str, Any]]] = None,
+) -> int:
+    """Apply configured automatic routing rules to inactive tasks.
+
+    This gives Kanban a native version of the common PM/specifier pattern:
+    a strong PM profile turns triage cards into concrete child cards, while
+    the dispatcher enforces that implementation and QA cards move to cheaper
+    or specialized profiles before workers are spawned.
+
+    Returns the number of task rows materially changed.
+    """
+    active_rules = rules if rules is not None else _load_config_routing_rules()
+    if not active_rules:
+        return 0
+    ordered = sorted(active_rules, key=lambda r: int(r.get("priority", 0)))
+    changed = 0
+    with write_txn(conn):
+        rows = conn.execute(
+            """
+            SELECT id, title, body, assignee, status, created_by, skills
+            FROM tasks
+            WHERE status NOT IN ('running', 'done', 'archived')
+            ORDER BY priority DESC, created_at ASC
+            """
+        ).fetchall()
+        for row in rows:
+            for rule in ordered:
+                if not _routing_rule_matches(row, rule):
+                    continue
+                task_id = row["id"]
+                action = str(rule.get("action") or "reassign")
+                assign_to = rule.get("assign_to")
+                ensure_skills = _as_list(rule.get("ensure_skills"))
+                updates: list[str] = []
+                params: list[Any] = []
+                payload: dict[str, Any] = {
+                    "source": "routing_rule",
+                    "rule": rule.get("name") or rule.get("id"),
+                    "action": action,
+                }
+
+                if action in {"promote", "promote_and_assign"} and row["status"] == "triage":
+                    updates.append("status = 'todo'")
+                    payload["status"] = "todo"
+
+                if action in {"reassign", "promote_and_assign"} and assign_to and assign_to != row["assignee"]:
+                    updates.append("assignee = ?")
+                    params.append(str(assign_to))
+                    payload["assignee"] = str(assign_to)
+                    payload["previous_assignee"] = row["assignee"]
+
+                if ensure_skills:
+                    merged = _merge_task_skills(row["skills"], ensure_skills)
+                    if json.dumps(merged, ensure_ascii=False) != (row["skills"] or ""):
+                        updates.append("skills = ?")
+                        params.append(json.dumps(merged, ensure_ascii=False))
+                        payload["skills"] = merged
+
+                if updates:
+                    params.append(task_id)
+                    conn.execute(f"UPDATE tasks SET {', '.join(updates)} WHERE id = ?", tuple(params))
+                    _append_event(conn, task_id, "routed", payload)
+                    changed += 1
+                break
+    return changed
+
+
+# ---------------------------------------------------------------------------
 # Claim / complete / block
 # ---------------------------------------------------------------------------
 
@@ -2567,6 +2710,7 @@ class DispatchResult:
 
     reclaimed: int = 0
     promoted: int = 0
+    routed: int = 0
     spawned: list[tuple[str, str, str]] = field(default_factory=list)
     """List of ``(task_id, assignee, workspace_path)`` triples."""
     skipped_unassigned: list[str] = field(default_factory=list)
@@ -3137,6 +3281,7 @@ def dispatch_once(
       1. Reclaim stale running tasks (TTL expired).
       2. Reclaim crashed running tasks (host-local PID no longer alive).
       3. Promote todo -> ready where all parents are done.
+      3b. Apply configured routing rules before spawning.
       4. For each ready task with an assignee, atomically claim and call
          ``spawn_fn(task, workspace_path, board) -> Optional[int]``. The
          return value (if any) is recorded as ``worker_pid`` so subsequent
@@ -3155,6 +3300,7 @@ def dispatch_once(
     result.crashed = detect_crashed_workers(conn)
     result.timed_out = enforce_max_runtime(conn)
     result.promoted = recompute_ready(conn)
+    result.routed = apply_routing_rules(conn)
 
     ready_rows = conn.execute(
         "SELECT id, assignee FROM tasks "
