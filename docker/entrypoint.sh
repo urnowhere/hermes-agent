@@ -37,8 +37,18 @@ if [ "$(id -u)" = "0" ]; then
         # In rootless Podman the container's "root" is mapped to an unprivileged
         # host UID — chown will fail.  That's fine: the volume is already owned
         # by the mapped user on the host side.
-        chown -R hermes:hermes "$HERMES_HOME" 2>/dev/null || \
-            echo "Warning: chown failed (rootless container?) — continuing anyway"
+        #
+        # WARNING: Do NOT use `chown -R` on the entire HERMES_HOME volume.
+        # That would recursively change every file in the mounted host directory,
+        # potentially destroying host-side file ownership (see issue #19788).
+        # Instead, fix only the top-level directory and the specific subdirectories
+        # that hermes actually writes to at runtime.
+        chown hermes:hermes "$HERMES_HOME" 2>/dev/null || true
+        for subdir in cron sessions logs hooks memories skills skins plans workspace home; do
+            mkdir -p "$HERMES_HOME/$subdir"
+            chown hermes:hermes "$HERMES_HOME/$subdir" 2>/dev/null || true
+        done
+        echo "Ownership fix complete (non-recursive)"
     fi
 
     # Ensure config.yaml is readable by the hermes runtime user even if it was
