@@ -10,6 +10,7 @@ from tools.skills_sync import (
     _write_manifest,
     _discover_bundled_skills,
     _compute_relative_dest,
+    _copy_file_writable,
     _dir_hash,
     sync_skills,
     reset_bundled_skill,
@@ -106,6 +107,47 @@ class TestDirHash:
     def test_nonexistent_dir(self, tmp_path):
         h = _dir_hash(tmp_path / "nope")
         assert isinstance(h, str)  # returns hash of empty content
+
+
+class TestCopyFileWritable:
+    """Tests for _copy_file_writable: verifies read-only source files end up writable."""
+
+    def test_readonly_source_becomes_writable(self, tmp_path):
+        import os
+        import stat
+
+        src = tmp_path / "src.txt"
+        dst = tmp_path / "dst.txt"
+        src.write_text("hello")
+        os.chmod(src, 0o444)  # read-only, like Nix store
+
+        _copy_file_writable(src, dst)
+
+        dst_mode = os.stat(dst).st_mode
+        assert dst_mode & stat.S_IWUSR, f"dst should be owner-writable, got {oct(dst_mode)}"
+
+    def test_writable_source_stays_writable(self, tmp_path):
+        import os
+        import stat
+
+        src = tmp_path / "src.txt"
+        dst = tmp_path / "dst.txt"
+        src.write_text("hello")
+        os.chmod(src, 0o644)
+
+        _copy_file_writable(src, dst)
+
+        dst_mode = os.stat(dst).st_mode
+        assert dst_mode & stat.S_IWUSR
+
+    def test_content_preserved(self, tmp_path):
+        src = tmp_path / "src.txt"
+        dst = tmp_path / "dst.txt"
+        src.write_text("some skill content")
+
+        _copy_file_writable(src, dst)
+
+        assert dst.read_text() == "some skill content"
 
 
 class TestDiscoverBundledSkills:
@@ -581,6 +623,39 @@ class TestSyncSkills:
         new_bundled_hash = _dir_hash(bundled / "old-skill")
         assert manifest["old-skill"] == new_bundled_hash
         assert manifest["old-skill"] != old_hash
+
+    def test_readonly_source_files_are_copied_writable(self, tmp_path):
+        """Files copied from read-only Nix store paths must end up owner-writable.
+
+        Nix store files have mode 444/555. Without the _copy_file_writable
+        helper, shutil.copy2 preserves those modes, leaving users unable to
+        edit or delete ~/.hermes/skills/ copies. This test simulates that
+        scenario by creating a source directory with mode 444 files and
+        verifying the destination copies are owner-writable.
+        """
+        import os
+        import stat
+
+        bundled = tmp_path / "bundled"
+        skills_dir = tmp_path / "user_skills"
+        manifest_file = skills_dir / ".bundled_manifest"
+
+        # Create a bundled skill with a read-only file (simulates Nix store)
+        skill_dir = bundled / "readonly-skill"
+        skill_dir.mkdir(parents=True)
+        skill_md = skill_dir / "SKILL.md"
+        skill_md.write_text("---\nname: readonly-skill\n---\n# Skill")
+        os.chmod(skill_md, 0o444)  # read-only — like Nix store files
+
+        with self._patches(bundled, skills_dir, manifest_file):
+            result = sync_skills(quiet=True)
+
+        dest_md = skills_dir / "readonly-skill" / "SKILL.md"
+        assert dest_md.exists(), f"Expected {dest_md} to exist"
+        dest_mode = os.stat(dest_md).st_mode
+        assert dest_mode & stat.S_IWUSR, (
+            f"Copied file {dest_md} should be owner-writable, got mode {oct(dest_mode)}"
+        )
 
 
 class TestGetBundledDir:

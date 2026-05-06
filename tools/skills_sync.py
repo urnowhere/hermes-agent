@@ -160,6 +160,24 @@ def _compute_relative_dest(skill_dir: Path, bundled_dir: Path) -> Path:
     return SKILLS_DIR / rel
 
 
+def _copy_file_writable(src: Path, dst: Path):
+    """Copy a single file (like shutil.copy2) but ensure it is owner-writable.
+
+    Nix store paths contain files with mode 444 (read-only), and copy2
+    preserves those modes when copying into ~/.hermes/skills/.  This leaves
+    users unable to edit or delete the copied skill files without manually
+    running chmod.  This helper fixes that by ensuring the destination file
+    is always owner-writable after the copy.
+    """
+    shutil.copy2(src, dst)
+    # Strip read-only bits inherited from Nix store files (mode 444 / 555).
+    # os.chmod succeeds even on read-only files when run as the owner.
+    try:
+        os.chmod(dst, 0o644)
+    except OSError:
+        pass  # permission errors are non-fatal here
+
+
 def _dir_hash(directory: Path) -> str:
     """Compute a hash of all file contents in a directory for change detection."""
     hasher = hashlib.md5()
@@ -228,7 +246,7 @@ def sync_skills(quiet: bool = False) -> dict:
                         )
                 else:
                     dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copytree(skill_src, dest)
+                    shutil.copytree(skill_src, dest, copy_function=_copy_file_writable)
                     copied.append(skill_name)
                     manifest[skill_name] = bundled_hash
                     if not quiet:
@@ -268,7 +286,7 @@ def sync_skills(quiet: bool = False) -> dict:
                     backup = dest.with_suffix(".bak")
                     shutil.move(str(dest), str(backup))
                     try:
-                        shutil.copytree(skill_src, dest)
+                        shutil.copytree(skill_src, dest, copy_function=_copy_file_writable)
                         manifest[skill_name] = bundled_hash
                         updated.append(skill_name)
                         if not quiet:
@@ -302,7 +320,7 @@ def sync_skills(quiet: bool = False) -> dict:
         if not dest_desc.exists():
             try:
                 dest_desc.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(desc_md, dest_desc)
+                _copy_file_writable(desc_md, dest_desc)
             except (OSError, IOError) as e:
                 logger.debug("Could not copy %s: %s", desc_md, e)
 
