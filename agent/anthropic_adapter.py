@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import platform
+import re
 import subprocess
 from pathlib import Path
 
@@ -228,7 +229,13 @@ def _supports_fast_mode(model: str) -> bool:
     returns HTTP 400. This guard prevents silently 400'ing when stale config
     or older callers leave fast mode enabled across a model upgrade.
     """
-    return any(v in model for v in _FAST_MODE_SUPPORTED_SUBSTRINGS)
+    normalized = model.lower()
+    return bool(
+        re.search(
+            r"(^|[/_.:-])claude-opus-4[-.]6($|[/_.:-])",
+            normalized,
+        )
+    )
 
 
 # Beta headers for enhanced features (sent with ALL auth types).
@@ -1943,17 +1950,12 @@ def build_anthropic_kwargs(
             kwargs.pop(_sampling_key, None)
 
     # ── Fast mode (Opus 4.6 only) ────────────────────────────────────
-    # Adds extra_body.speed="fast" + the fast-mode beta header for ~2.5x
-    # output speed. Per Anthropic docs, fast mode is only supported on
-    # Opus 4.6 — Opus 4.7 and other models 400 on the speed parameter.
-    # Only for native Anthropic endpoints — third-party providers would
-    # reject the unknown beta header and speed parameter.
-    if (
-        fast_mode
-        and not _is_third_party_anthropic_endpoint(base_url)
-        and _supports_fast_mode(model)
-    ):
-        kwargs.setdefault("extra_body", {})["speed"] = "fast"
+    # Fast-mode calls need per-request extra_headers because the Anthropic SDK
+    # merges them over client-level default_headers. Keep common betas on the
+    # request even when speed=fast is rejected for this model, so Bedrock/Azure
+    # 1M-context support does not disappear when stale config leaves fast_mode
+    # enabled after an Opus 4.6 -> 4.7 migration.
+    if fast_mode and not _is_third_party_anthropic_endpoint(base_url):
         # Build extra_headers with ALL applicable betas (the per-request
         # extra_headers override the client-level anthropic-beta header).
         betas = list(_common_betas_for_base_url(
@@ -1962,9 +1964,10 @@ def build_anthropic_kwargs(
         ))
         if is_oauth:
             betas.extend(_OAUTH_ONLY_BETAS)
-        betas.append(_FAST_MODE_BETA)
+        if _supports_fast_mode(model):
+            kwargs.setdefault("extra_body", {})["speed"] = "fast"
+            betas.append(_FAST_MODE_BETA)
         kwargs["extra_headers"] = {"anthropic-beta": ",".join(betas)}
 
     return kwargs
-
 

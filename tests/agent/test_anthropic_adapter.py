@@ -1118,7 +1118,9 @@ class TestBuildAnthropicKwargs:
         from agent.anthropic_adapter import _supports_fast_mode
         assert _supports_fast_mode("claude-opus-4-6") is True
         assert _supports_fast_mode("anthropic/claude-opus-4-6") is True
+        assert _supports_fast_mode("Claude-Opus-4.6") is True
         assert _supports_fast_mode("claude-opus-4-7") is False
+        assert _supports_fast_mode("claude-opus-4-60") is False
         assert _supports_fast_mode("claude-sonnet-4-6") is False
         assert _supports_fast_mode("claude-haiku-4-5") is False
         assert _supports_fast_mode("") is False
