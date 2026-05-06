@@ -3178,7 +3178,13 @@ class AIAgent:
             return False
         if stripped.endswith("```"):
             return True
-        return stripped[-1] in '.!?:)"\']}。！？：）】」』》'
+        last = stripped[-1]
+        if last in '.!?:)"\']}。！？：）】」』》':
+            return True
+        # Emoji and other symbols (Unicode categories So, Sk, Sm, Sc)
+        # are common sign-offs — treat them as intentional endings (#14572).
+        import unicodedata
+        return unicodedata.category(last).startswith('S')
 
     def _is_ollama_glm_backend(self) -> bool:
         """Detect the narrow backend family affected by Ollama/GLM stop misreports."""
