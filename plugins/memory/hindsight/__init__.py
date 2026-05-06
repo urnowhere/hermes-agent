@@ -336,6 +336,12 @@ def _load_config() -> dict:
     }
 
 
+def _tag_slug(value: str, *, max_len: int = 80) -> str:
+    """Return a compact tag-safe slug for dynamic Hindsight tags."""
+    text = "".join(ch.lower() if ch.isalnum() else "-" for ch in str(value or ""))
+    return "-".join(part for part in text.split("-") if part)[:max_len].strip("-")
+
+
 def _normalize_retain_tags(value: Any) -> List[str]:
     """Normalize tag config/tool values to a deduplicated list of strings."""
     if value is None:
@@ -535,6 +541,7 @@ class HindsightMemoryProvider(MemoryProvider):
         self._chat_id = ""
         self._chat_name = ""
         self._chat_type = ""
+        self._chat_topic = ""
         self._thread_id = ""
         self._agent_identity = ""
         self._agent_workspace = ""
@@ -1094,6 +1101,7 @@ class HindsightMemoryProvider(MemoryProvider):
         self._chat_id = str(kwargs.get("chat_id") or "").strip()
         self._chat_name = str(kwargs.get("chat_name") or "").strip()
         self._chat_type = str(kwargs.get("chat_type") or "").strip()
+        self._chat_topic = str(kwargs.get("chat_topic") or "").strip()
         self._thread_id = str(kwargs.get("thread_id") or "").strip()
         self._agent_identity = str(kwargs.get("agent_identity") or "").strip()
         self._agent_workspace = str(kwargs.get("agent_workspace") or "").strip()
@@ -1368,6 +1376,8 @@ class HindsightMemoryProvider(MemoryProvider):
             metadata["chat_name"] = self._chat_name
         if self._chat_type:
             metadata["chat_type"] = self._chat_type
+        if self._chat_topic:
+            metadata["chat_topic"] = self._chat_topic
         if self._thread_id:
             metadata["thread_id"] = self._thread_id
         if self._agent_identity:
@@ -1396,6 +1406,9 @@ class HindsightMemoryProvider(MemoryProvider):
         if retain_async is not None:
             kwargs["retain_async"] = retain_async
         merged_tags = _normalize_retain_tags(self._retain_tags)
+        topic_tag = _tag_slug(self._chat_topic)
+        if topic_tag and f"topic:{topic_tag}" not in merged_tags:
+            merged_tags.append(f"topic:{topic_tag}")
         for tag in _normalize_retain_tags(tags):
             if tag not in merged_tags:
                 merged_tags.append(tag)
