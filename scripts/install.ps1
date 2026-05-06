@@ -37,32 +37,231 @@ $NodeVersion = "22"
 
 function Write-Banner {
     Write-Host ""
-    Write-Host "┌─────────────────────────────────────────────────────────┐" -ForegroundColor Magenta
-    Write-Host "│             ⚕ Hermes Agent Installer                    │" -ForegroundColor Magenta
-    Write-Host "├─────────────────────────────────────────────────────────┤" -ForegroundColor Magenta
-    Write-Host "│  An open source AI agent by Nous Research.              │" -ForegroundColor Magenta
-    Write-Host "└─────────────────────────────────────────────────────────┘" -ForegroundColor Magenta
+    Write-Host "+---------------------------------------------------------+" -ForegroundColor Magenta
+    Write-Host "|              Hermes Agent Installer                     |" -ForegroundColor Magenta
+    Write-Host "+---------------------------------------------------------+" -ForegroundColor Magenta
+    Write-Host "|  An open source AI agent by Nous Research.              |" -ForegroundColor Magenta
+    Write-Host "+---------------------------------------------------------+" -ForegroundColor Magenta
     Write-Host ""
 }
 
 function Write-Info {
     param([string]$Message)
-    Write-Host "→ $Message" -ForegroundColor Cyan
+    Write-Host "-> $Message" -ForegroundColor Cyan
 }
 
 function Write-Success {
     param([string]$Message)
-    Write-Host "✓ $Message" -ForegroundColor Green
+    Write-Host "[OK] $Message" -ForegroundColor Green
 }
 
 function Write-Warn {
     param([string]$Message)
-    Write-Host "⚠ $Message" -ForegroundColor Yellow
+    Write-Host "[WARN] $Message" -ForegroundColor Yellow
 }
 
 function Write-Err {
     param([string]$Message)
-    Write-Host "✗ $Message" -ForegroundColor Red
+    Write-Host "[ERR] $Message" -ForegroundColor Red
+}
+
+function ConvertTo-PowerShellSingleQuoted {
+    param([string]$Value)
+    return "'" + ($Value -replace "'", "''") + "'"
+}
+
+function Test-IsAdministrator {
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch {
+        return $false
+    }
+}
+
+function Write-HermesWindowsLaunchers {
+    param(
+        [Parameter(Mandatory = $true)][string]$LauncherDir,
+        [Parameter(Mandatory = $true)][string]$HermesExe
+    )
+
+    if (-not (Test-Path -LiteralPath $HermesExe)) {
+        Write-Warn "Skipping Windows launcher shims because hermes.exe was not found at $HermesExe"
+        return
+    }
+
+    New-Item -ItemType Directory -Force -Path $LauncherDir | Out-Null
+
+    $quotedHermesHome = ConvertTo-PowerShellSingleQuoted $HermesHome
+    $quotedHermesExe = ConvertTo-PowerShellSingleQuoted $HermesExe
+
+    $hermesCmd = @"
+@echo off
+set "HERMES_HOME=$HermesHome"
+"$HermesExe" %*
+exit /b %ERRORLEVEL%
+"@
+    Set-Content -Path (Join-Path $LauncherDir "hermes.cmd") -Value $hermesCmd -Encoding ASCII
+    Set-Content -Path (Join-Path $LauncherDir "hermes-native.cmd") -Value $hermesCmd -Encoding ASCII
+    Set-Content -Path (Join-Path $LauncherDir "hermes-cmd.cmd") -Value $hermesCmd -Encoding ASCII
+    Set-Content -Path (Join-Path $LauncherDir "hermes-native-cmd.cmd") -Value $hermesCmd -Encoding ASCII
+
+    $hermesPs1 = @"
+`$env:HERMES_HOME = $quotedHermesHome
+& $quotedHermesExe @args
+exit `$LASTEXITCODE
+"@
+    Set-Content -Path (Join-Path $LauncherDir "hermes.ps1") -Value $hermesPs1 -Encoding UTF8
+    Set-Content -Path (Join-Path $LauncherDir "hermes-native.ps1") -Value $hermesPs1 -Encoding UTF8
+
+    $startPs1 = @"
+param(
+    [Parameter(ValueFromRemainingArguments = `$true)]
+    [string[]] `$HermesArgs
+)
+
+`$ErrorActionPreference = "Stop"
+`$HermesHome = $quotedHermesHome
+`$HermesExe = $quotedHermesExe
+
+function ConvertTo-SingleQuotedLiteral {
+    param([string] `$Value)
+    return "'" + (`$Value -replace "'", "''") + "'"
+}
+
+function ConvertTo-NativeArgument {
+    param([string] `$Value)
+    if (`$null -eq `$Value) { return '""' }
+    if (`$Value -notmatch '[\s"]') { return `$Value }
+    return '"' + (`$Value -replace '\\', '\\' -replace '"', '\"') + '"'
+}
+
+function Get-PwshRank {
+    param([string] `$Path)
+    `$dir = Split-Path -Parent `$Path
+    `$name = Split-Path -Leaf `$dir
+    `$match = [regex]::Match(`$name, '\d+(?:\.\d+){0,3}')
+    if (`$match.Success) {
+        try { `$version = [version]`$match.Value } catch { `$version = [version]'0.0' }
+    } else {
+        `$version = [version]'0.0'
+    }
+    `$build = if (`$version.Build -ge 0) { `$version.Build } else { 0 }
+    `$revision = if (`$version.Revision -ge 0) { `$version.Revision } else { 0 }
+    `$stable = if (`$name -notmatch '(?i)preview|rc|daily|nightly') { 1 } else { 0 }
+    return ('{0:D3}.{1:D3}.{2:D3}.{3:D3}.{4}' -f `$version.Major, `$version.Minor, `$build, `$revision, `$stable)
+}
+
+function Resolve-HermesPowerShellPath {
+    if (`$env:HERMES_POWERSHELL_PATH -and (Test-Path -LiteralPath `$env:HERMES_POWERSHELL_PATH)) {
+        return `$env:HERMES_POWERSHELL_PATH
+    }
+
+    `$candidates = [System.Collections.Generic.List[string]]::new()
+    foreach (`$root in @(`$env:ProgramFiles, `$env:ProgramW6432, (Join-Path `$env:LOCALAPPDATA 'Programs'))) {
+        if (-not `$root) { continue }
+        `$psRoot = Join-Path `$root 'PowerShell'
+        if (-not (Test-Path -LiteralPath `$psRoot)) { continue }
+        Get-ChildItem -LiteralPath `$psRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            `$candidate = Join-Path `$_.FullName 'pwsh.exe'
+            if (Test-Path -LiteralPath `$candidate) { `$candidates.Add(`$candidate) }
+        }
+    }
+
+    `$pathPwsh = Get-Command pwsh.exe -ErrorAction SilentlyContinue
+    if (`$pathPwsh) { `$candidates.Add(`$pathPwsh.Source) }
+
+    `$bestPwsh = `$candidates |
+        Where-Object { `$_ -and (Test-Path -LiteralPath `$_) } |
+        Select-Object -Unique |
+        Sort-Object @{ Expression = { Get-PwshRank `$_ }; Descending = `$true } |
+        Select-Object -First 1
+    if (`$bestPwsh) { return `$bestPwsh }
+
+    `$fallback = Get-Command powershell.exe -ErrorAction SilentlyContinue
+    if (`$fallback) { return `$fallback.Source }
+
+    return Join-Path `$env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+}
+
+function Resolve-HermesWindowsTerminalPath {
+    `$wt = Get-Command wt.exe -ErrorAction SilentlyContinue
+    if (`$wt) { return `$wt.Source }
+    `$windowsAppsWt = Join-Path `$env:LOCALAPPDATA 'Microsoft\WindowsApps\wt.exe'
+    if (Test-Path -LiteralPath `$windowsAppsWt) { return `$windowsAppsWt }
+    return `$null
+}
+
+`$argListLiteral = ''
+if (`$HermesArgs -and `$HermesArgs.Count -gt 0) {
+    `$argListLiteral = '@(' + ((`$HermesArgs | ForEach-Object { ConvertTo-SingleQuotedLiteral `$_ }) -join ', ') + ')'
+}
+
+`$inner = '`$env:HERMES_HOME = ' + (ConvertTo-SingleQuotedLiteral `$HermesHome) + "``n& " + (ConvertTo-SingleQuotedLiteral `$HermesExe)
+if (`$argListLiteral) {
+    `$inner += " `$argListLiteral"
+}
+`$inner += "``n" + 'if (`$LASTEXITCODE -is [int] -and `$LASTEXITCODE -ne 0) { Write-Host ""; Write-Host "Hermes exited with code `$LASTEXITCODE" -ForegroundColor Yellow }'
+
+`$encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(`$inner))
+`$shell = Resolve-HermesPowerShellPath
+`$workDir = Split-Path -Parent `$HermesExe
+`$shellArgs = @('-NoExit', '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', `$encoded)
+
+`$wt = Resolve-HermesWindowsTerminalPath
+if (`$env:HERMES_START_DRY_RUN) {
+    [pscustomobject]@{
+        terminal = `$wt
+        shell = `$shell
+        workDir = `$workDir
+        hermesExe = `$HermesExe
+        encodedCommand = `$encoded
+    } | ConvertTo-Json -Compress
+    return
+}
+
+if (`$wt) {
+    `$wtArgs = @('-w', '0', 'nt', '--title', 'Hermes Agent', '--startingDirectory', `$workDir, `$shell) + `$shellArgs
+    Start-Process -FilePath `$wt -ArgumentList (`$wtArgs | ForEach-Object { ConvertTo-NativeArgument `$_ })
+    return
+}
+
+Start-Process -FilePath `$shell -ArgumentList (`$shellArgs | ForEach-Object { ConvertTo-NativeArgument `$_ })
+"@
+    Set-Content -Path (Join-Path $LauncherDir "hermes-start.ps1") -Value $startPs1 -Encoding UTF8
+
+    $startCmd = @"
+@echo off
+set "HERMES_START_SCRIPT=%~dp0hermes-start.ps1"
+where pwsh.exe >nul 2>nul
+if %ERRORLEVEL% EQU 0 (
+    pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%HERMES_START_SCRIPT%" %*
+) else (
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%HERMES_START_SCRIPT%" %*
+)
+exit /b %ERRORLEVEL%
+"@
+    Set-Content -Path (Join-Path $LauncherDir "hermes-start.cmd") -Value $startCmd -Encoding ASCII
+    Set-Content -Path (Join-Path $LauncherDir "hermes-native-start.cmd") -Value $startCmd -Encoding ASCII
+
+    $windowCmd = @"
+@echo off
+call "%~dp0hermes-start.cmd" %*
+exit /b %ERRORLEVEL%
+"@
+    Set-Content -Path (Join-Path $LauncherDir "hermes-window.cmd") -Value $windowCmd -Encoding ASCII
+    Set-Content -Path (Join-Path $LauncherDir "hermes-native-window.cmd") -Value $windowCmd -Encoding ASCII
+
+    $windowPs1 = @"
+& "`$PSScriptRoot\hermes-start.ps1" @args
+exit `$LASTEXITCODE
+"@
+    Set-Content -Path (Join-Path $LauncherDir "hermes-window.ps1") -Value $windowPs1 -Encoding UTF8
+    Set-Content -Path (Join-Path $LauncherDir "hermes-native-start.ps1") -Value $windowPs1 -Encoding UTF8
+    Set-Content -Path (Join-Path $LauncherDir "hermes-native-window.ps1") -Value $windowPs1 -Encoding UTF8
+
+    Write-Success "Windows launchers installed in $LauncherDir"
 }
 
 # ============================================================================
@@ -142,7 +341,7 @@ function Test-Python {
         }
     } catch { }
     
-    # Python not found — use uv to install it (no admin needed!)
+    # Python not found - use uv to install it (no admin needed!)
     Write-Info "Python $PythonVersion not found, installing via uv..."
     try {
         $uvOutput = & $UvCmd python install $PythonVersion 2>&1
@@ -226,7 +425,7 @@ function Test-Node {
         return $true
     }
 
-    Write-Info "Node.js not found — installing Node.js $NodeVersion LTS..."
+    Write-Info "Node.js not found - installing Node.js $NodeVersion LTS..."
 
     # Try winget first (cleanest on modern Windows)
     if (Get-Command winget -ErrorAction SilentlyContinue) {
@@ -416,9 +615,28 @@ function Install-Repository {
         if (Test-Path "$InstallDir\.git") {
             Write-Info "Existing installation found, updating..."
             Push-Location $InstallDir
+            $statusOutput = @(git status --porcelain 2>$null)
+            $statusRelevant = @($statusOutput | Where-Object {
+                $_ -notmatch '^\?\?\s+package-lock\.json$' -and
+                $_ -notmatch '^\s*M\s+package-lock\.json$' -and
+                $_ -notmatch '^\?\?\s+scripts/whatsapp-bridge/package-lock\.json$' -and
+                $_ -notmatch '^\s*M\s+scripts/whatsapp-bridge/package-lock\.json$'
+            })
             git -c windows.appendAtomically=false fetch origin
             git -c windows.appendAtomically=false checkout $Branch
-            git -c windows.appendAtomically=false pull origin $Branch
+
+            if ($statusRelevant.Count -gt 0) {
+                Write-Warn "Local changes detected in existing install - skipping git pull"
+            } else {
+                try {
+                    git -c windows.appendAtomically=false pull --rebase origin $Branch
+                    if ($LASTEXITCODE -ne 0) {
+                        Write-Warn "Git update failed - continuing with existing checkout"
+                    }
+                } catch {
+                    Write-Warn "Git update failed - continuing with existing checkout"
+                }
+            }
             Pop-Location
         } else {
             Write-Err "Directory exists but is not a git repository: $InstallDir"
@@ -459,7 +677,7 @@ function Install-Repository {
         # Fallback: download ZIP archive (bypasses git file I/O issues entirely)
         if (-not $cloneSuccess) {
             if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue }
-            Write-Warn "Git clone failed — downloading ZIP archive instead..."
+            Write-Warn "Git clone failed - downloading ZIP archive instead..."
             try {
                 $zipUrl = "https://github.com/NousResearch/hermes-agent/archive/refs/heads/$Branch.zip"
                 $zipPath = "$env:TEMP\hermes-agent-$Branch.zip"
@@ -506,9 +724,19 @@ function Install-Repository {
 
     # Ensure submodules are initialized and updated
     Write-Info "Initializing submodules..."
-    git -c windows.appendAtomically=false submodule update --init --recursive 2>$null
-    if ($LASTEXITCODE -ne 0) {
+    $oldErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $submoduleOutput = git -c windows.appendAtomically=false submodule update --init --recursive 2>&1
+        $submoduleExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $oldErrorActionPreference
+    }
+    if ($submoduleExitCode -ne 0) {
         Write-Warn "Submodule init failed (terminal/RL tools may need manual setup)"
+        if ($submoduleOutput) {
+            Write-Host $submoduleOutput -ForegroundColor DarkGray
+        }
     } else {
         Write-Success "Submodules ready"
     }
@@ -550,11 +778,67 @@ function Install-Dependencies {
         $env:VIRTUAL_ENV = "$InstallDir\venv"
     }
     
+    $mainInstallArgs = @("pip", "install")
+    $fallbackInstallArgs = @("pip", "install")
+    $submoduleInstallArgs = @("pip", "install")
+
+    if ($NoVenv) {
+        $mainInstallArgs += "--system"
+        $fallbackInstallArgs += "--system"
+        $submoduleInstallArgs += "--system"
+    }
+
+    $mainInstallArgs += @("-e", ".[all]")
+    $fallbackInstallArgs += @("-e", ".")
+    $submoduleInstallArgs += @("-e", ".\tinker-atropos")
+
+    function Invoke-UvAndCapture {
+        param([string[]]$UvArgs)
+
+        $stdoutPath = Join-Path $env:TEMP ([System.Guid]::NewGuid().ToString() + '-uv-out.txt')
+        $stderrPath = Join-Path $env:TEMP ([System.Guid]::NewGuid().ToString() + '-uv-err.txt')
+
+        try {
+            $proc = Start-Process -FilePath $UvCmd -ArgumentList $UvArgs -WorkingDirectory $InstallDir -NoNewWindow -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+            $stdout = if (Test-Path $stdoutPath) { Get-Content -Raw -Path $stdoutPath } else { '' }
+            $stderr = if (Test-Path $stderrPath) { Get-Content -Raw -Path $stderrPath } else { '' }
+
+            return [pscustomobject]@{
+                ExitCode = $proc.ExitCode
+                StdOut = $stdout
+                StdErr = $stderr
+            }
+        } finally {
+            Remove-Item -Force $stdoutPath -ErrorAction SilentlyContinue
+            Remove-Item -Force $stderrPath -ErrorAction SilentlyContinue
+        }
+    }
+
     # Install main package with all extras
-    try {
-        & $UvCmd pip install -e ".[all]" 2>&1 | Out-Null
-    } catch {
-        & $UvCmd pip install -e "." | Out-Null
+    $mainInstalled = $false
+    $mainResult = Invoke-UvAndCapture -UvArgs $mainInstallArgs
+    if ($mainResult.ExitCode -eq 0) {
+        $mainInstalled = $true
+    } else {
+        Write-Warn "Primary dependency install failed - retrying with minimal extras"
+        if ($mainResult.StdOut) { Write-Host $mainResult.StdOut }
+        if ($mainResult.StdErr) { Write-Host $mainResult.StdErr }
+    }
+
+    if (-not $mainInstalled) {
+        $fallbackResult = Invoke-UvAndCapture -UvArgs $fallbackInstallArgs
+        if ($fallbackResult.ExitCode -eq 0) {
+            $mainInstalled = $true
+        } else {
+            Write-Warn "Fallback dependency install failed"
+            if ($fallbackResult.StdOut) { Write-Host $fallbackResult.StdOut }
+            if ($fallbackResult.StdErr) { Write-Host $fallbackResult.StdErr }
+        }
+    }
+
+    if (-not $mainInstalled) {
+        Pop-Location
+        throw "Failed to install the main Hermes package dependencies."
     }
     
     Write-Success "Main package installed"
@@ -563,8 +847,14 @@ function Install-Dependencies {
     Write-Info "Installing tinker-atropos (RL training backend)..."
     if (Test-Path "tinker-atropos\pyproject.toml") {
         try {
-            & $UvCmd pip install -e ".\tinker-atropos" 2>&1 | Out-Null
-            Write-Success "tinker-atropos installed"
+            $submoduleResult = Invoke-UvAndCapture -UvArgs $submoduleInstallArgs
+            if ($submoduleResult.StdOut) { Write-Host $submoduleResult.StdOut }
+            if ($submoduleResult.StdErr) { Write-Host $submoduleResult.StdErr }
+            if ($LASTEXITCODE -eq 0) {
+                Write-Success "tinker-atropos installed"
+            } else {
+                Write-Warn "tinker-atropos install failed (RL tools may not work)"
+            }
         } catch {
             Write-Warn "tinker-atropos install failed (RL tools may not work)"
         }
@@ -585,20 +875,68 @@ function Set-PathVariable {
     } else {
         $hermesBin = "$InstallDir\venv\Scripts"
     }
+
+    $hermesExe = Join-Path $hermesBin "hermes.exe"
+    $launcherDir = Join-Path $HermesHome "bin"
+    Write-HermesWindowsLaunchers -LauncherDir $launcherDir -HermesExe $hermesExe
+
+    if (Test-IsAdministrator) {
+        $machineLauncherDir = Join-Path $env:ProgramData "Hermes\bin"
+        try {
+            Write-HermesWindowsLaunchers -LauncherDir $machineLauncherDir -HermesExe $hermesExe
+        } catch {
+            Write-Warn "Could not install machine-wide Hermes launchers: $_"
+        }
+    }
     
-    # Add the venv Scripts dir to user PATH so hermes is globally available
-    # On Windows, the hermes.exe in venv\Scripts\ has the venv Python baked in
+    # Add the stable launcher dir first, then the venv Scripts dir. The
+    # launcher dir provides hermes-start for modern Windows Terminal/pwsh
+    # sessions while the venv Scripts dir remains a direct executable fallback.
     $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    
-    if ($currentPath -notlike "*$hermesBin*") {
+    $currentParts = @()
+    if ($currentPath) {
+        $currentParts = $currentPath -split ";" | Where-Object { $_ }
+    }
+    $desiredUserPath = @($launcherDir, $hermesBin)
+    $missingUserPath = @(
+        $desiredUserPath | Where-Object {
+            $candidate = $_
+            -not ($currentParts | Where-Object { $_.TrimEnd("\") -ieq $candidate.TrimEnd("\") })
+        }
+    )
+
+    if ($missingUserPath.Count -gt 0) {
+        $newUserPath = (($missingUserPath + $currentParts) | Where-Object { $_ }) -join ";"
         [Environment]::SetEnvironmentVariable(
             "Path",
-            "$hermesBin;$currentPath",
+            $newUserPath,
             "User"
         )
-        Write-Success "Added to user PATH: $hermesBin"
+        Write-Success "Added to user PATH: $($missingUserPath -join ';')"
     } else {
         Write-Info "PATH already configured"
+    }
+
+    if (Test-IsAdministrator) {
+        $machineLauncherDir = Join-Path $env:ProgramData "Hermes\bin"
+        $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+        $machineParts = @()
+        if ($machinePath) {
+            $machineParts = $machinePath -split ";" | Where-Object { $_ }
+        }
+        $machineHasLauncher = $machineParts | Where-Object { $_.TrimEnd("\") -ieq $machineLauncherDir.TrimEnd("\") }
+        if (-not $machineHasLauncher) {
+            try {
+                [Environment]::SetEnvironmentVariable(
+                    "Path",
+                    (($machineLauncherDir, $machineParts) | Where-Object { $_ }) -join ";",
+                    "Machine"
+                )
+                Write-Success "Added to machine PATH: $machineLauncherDir"
+            } catch {
+                Write-Warn "Could not update machine PATH: $_"
+            }
+        }
     }
     
     # Set HERMES_HOME so the Python code finds config/data in the right place.
@@ -612,7 +950,7 @@ function Set-PathVariable {
     $env:HERMES_HOME = $HermesHome
     
     # Update current session
-    $env:Path = "$hermesBin;$env:Path"
+    $env:Path = "$launcherDir;$hermesBin;$env:Path"
     
     Write-Success "hermes command ready"
 }
@@ -825,13 +1163,13 @@ function Start-GatewayIfConfigured {
 
 function Write-Completion {
     Write-Host ""
-    Write-Host "┌─────────────────────────────────────────────────────────┐" -ForegroundColor Green
-    Write-Host "│              ✓ Installation Complete!                   │" -ForegroundColor Green
-    Write-Host "└─────────────────────────────────────────────────────────┘" -ForegroundColor Green
+    Write-Host "+---------------------------------------------------------+" -ForegroundColor Green
+    Write-Host "|              Installation Complete!                     |" -ForegroundColor Green
+    Write-Host "+---------------------------------------------------------+" -ForegroundColor Green
     Write-Host ""
     
     # Show file locations
-    Write-Host "📁 Your files:" -ForegroundColor Cyan
+    Write-Host "Your files:" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "   Config:    " -NoNewline -ForegroundColor Yellow
     Write-Host "$HermesHome\config.yaml"
@@ -843,12 +1181,14 @@ function Write-Completion {
     Write-Host "$HermesHome\hermes-agent\"
     Write-Host ""
     
-    Write-Host "─────────────────────────────────────────────────────────" -ForegroundColor Cyan
+    Write-Host "---------------------------------------------------------" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "🚀 Commands:" -ForegroundColor Cyan
+    Write-Host "Commands:" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "   hermes              " -NoNewline -ForegroundColor Green
     Write-Host "Start chatting"
+    Write-Host "   hermes-start        " -NoNewline -ForegroundColor Green
+    Write-Host "Open Hermes in Windows Terminal / PowerShell 7"
     Write-Host "   hermes setup        " -NoNewline -ForegroundColor Green
     Write-Host "Configure API keys & settings"
     Write-Host "   hermes config       " -NoNewline -ForegroundColor Green
@@ -861,9 +1201,9 @@ function Write-Completion {
     Write-Host "Update to latest version"
     Write-Host ""
     
-    Write-Host "─────────────────────────────────────────────────────────" -ForegroundColor Cyan
+    Write-Host "---------------------------------------------------------" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "⚡ Restart your terminal for PATH changes to take effect" -ForegroundColor Yellow
+    Write-Host "Restart your terminal for PATH changes to take effect" -ForegroundColor Yellow
     Write-Host ""
     
     if (-not $HasNode) {
@@ -887,9 +1227,9 @@ function Write-Completion {
 function Main {
     Write-Banner
     
-    if (-not (Install-Uv)) { throw "uv installation failed — cannot continue" }
-    if (-not (Test-Python)) { throw "Python $PythonVersion not available — cannot continue" }
-    if (-not (Test-Git)) { throw "Git not found — install from https://git-scm.com/download/win" }
+    if (-not (Install-Uv)) { throw "uv installation failed - cannot continue" }
+    if (-not (Test-Python)) { throw "Python $PythonVersion not available - cannot continue" }
+    if (-not (Test-Git)) { throw "Git not found - install from https://git-scm.com/download/win" }
     Test-Node              # Auto-installs if missing
     Install-SystemPackages  # ripgrep + ffmpeg in one step
     

@@ -1627,7 +1627,6 @@ def _find_agent_browser() -> str:
         _cached_agent_browser = "npx agent-browser"
         _agent_browser_resolved = True
         return _cached_agent_browser
-
     # Nothing found — cache the failure so subsequent calls don't re-scan.
     _agent_browser_resolved = True
     raise FileNotFoundError(
@@ -1749,15 +1748,6 @@ def _run_browser_command(
     if engine != "auto" and not _is_camofox_mode() and not session_info.get("cdp_url"):
         backend_args += ["--engine", engine]
 
-    # Keep concrete executable paths intact, even when they contain spaces.
-    # Only the synthetic npx fallback needs to expand into multiple argv items.
-    cmd_prefix = ["npx", "agent-browser"] if browser_cmd == "npx agent-browser" else [browser_cmd]
-
-    cmd_parts = cmd_prefix + backend_args + [
-        "--json",
-        command
-    ] + args
-
     try:
         # Give each task its own socket directory to prevent concurrency conflicts.
         # Without this, parallel workers fight over the same default socket path,
@@ -1816,6 +1806,23 @@ def _run_browser_command(
                 browser_env["AGENT_BROWSER_CHROME_FLAGS"] = (
                     "--no-sandbox --disable-dev-shm-usage"
                 )
+
+        # Keep concrete executable paths intact, even when they contain spaces.
+        # Only the synthetic npx fallback needs to expand into multiple argv items.
+        if browser_cmd == "npx agent-browser":
+            resolved_npx = (
+                shutil.which("npx", path=browser_env["PATH"])
+                or shutil.which("npx.cmd", path=browser_env["PATH"])
+                or "npx"
+            )
+            cmd_prefix = [resolved_npx, "agent-browser"]
+        else:
+            cmd_prefix = [browser_cmd]
+
+        cmd_parts = cmd_prefix + backend_args + [
+            "--json",
+            command
+        ] + args
 
         # Use temp files for stdout/stderr instead of pipes.
         # agent-browser starts a background daemon that inherits file
@@ -3374,7 +3381,6 @@ if __name__ == "__main__":
         if _cp is not None and not _cp.is_configured():
             print(f"   - {_cp.provider_name()} credentials not configured")
             print("   Tip: set browser.cloud_provider to 'local' to use free local mode instead")
-
     print("\n📋 Available Browser Tools:")
     for schema in BROWSER_TOOL_SCHEMAS:
         print(f"  🔹 {schema['name']}: {schema['description'][:60]}...")

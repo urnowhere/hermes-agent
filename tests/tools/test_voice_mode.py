@@ -39,6 +39,12 @@ def temp_voice_dir(tmp_path, monkeypatch):
     return voice_dir
 
 
+@pytest.fixture(autouse=True)
+def _disable_container_detection(monkeypatch):
+    """Exercise voice-mode logic without the outer test container masking it."""
+    monkeypatch.setattr("hermes_constants.is_container", lambda: False)
+
+
 @pytest.fixture
 def mock_sd(monkeypatch):
     """Mock _import_audio to return (mock_sd, real_np) so lazy imports work."""
@@ -1147,8 +1153,14 @@ class TestSubprocessTimeoutKill:
     """Bug: proc.wait(timeout) raised TimeoutExpired but process was not killed."""
 
     def test_timeout_kills_process(self):
-        import subprocess, os
-        proc = subprocess.Popen(["sleep", "600"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        import subprocess
+        import sys
+
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(600)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         pid = proc.pid
         assert proc.poll() is None
 

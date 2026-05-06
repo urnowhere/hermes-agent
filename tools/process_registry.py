@@ -41,7 +41,12 @@ import time
 import uuid
 
 _IS_WINDOWS = platform.system() == "Windows"
-from tools.environments.local import _find_shell, _resolve_safe_cwd, _sanitize_subprocess_env
+from tools.environments.local import (
+    _find_shell,
+    _resolve_safe_cwd,
+    _sanitize_subprocess_env,
+    _wrap_windows_native_command,
+)
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -404,10 +409,36 @@ class ProcessRegistry:
         """Best-effort liveness check for host-visible PIDs."""
         if not pid:
             return False
+        if _IS_WINDOWS:
+            try:
+                import ctypes
+
+                kernel32 = ctypes.windll.kernel32
+                process_query_limited_information = 0x1000
+                still_active = 259
+                handle = kernel32.OpenProcess(
+                    process_query_limited_information,
+                    False,
+                    int(pid),
+                )
+                if not handle:
+                    return False
+                try:
+                    exit_code = ctypes.c_ulong()
+                    if not kernel32.GetExitCodeProcess(
+                        handle,
+                        ctypes.byref(exit_code),
+                    ):
+                        return False
+                    return exit_code.value == still_active
+                finally:
+                    kernel32.CloseHandle(handle)
+            except (OSError, ValueError, OverflowError):
+                return False
         try:
             os.kill(pid, 0)
             return True
-        except (ProcessLookupError, PermissionError):
+        except (ProcessLookupError, PermissionError, OSError):
             return False
 
     def _refresh_detached_session(self, session: Optional[ProcessSession]) -> Optional[ProcessSession]:
@@ -494,8 +525,9 @@ class ProcessRegistry:
                 user_shell = _find_shell()
                 pty_env = _sanitize_subprocess_env(os.environ, env_vars)
                 pty_env["PYTHONUNBUFFERED"] = "1"
+                spawn_command = _wrap_windows_native_command(command)
                 pty_proc = _PtyProcessCls.spawn(
-                    [user_shell, "-lic", f"set +m; {command}"],
+                    [user_shell, "-lic", f"set +m; {spawn_command}"],
                     cwd=session.cwd,
                     env=pty_env,
                     dimensions=(30, 120),
@@ -535,8 +567,9 @@ class ProcessRegistry:
         # stdout is a pipe, hiding output from process(action="poll")).
         bg_env = _sanitize_subprocess_env(os.environ, env_vars)
         bg_env["PYTHONUNBUFFERED"] = "1"
+        spawn_command = _wrap_windows_native_command(command)
         proc = subprocess.Popen(
-            [user_shell, "-lic", f"set +m; {command}"],
+            [user_shell, "-lic", f"set +m; {spawn_command}"],
             text=True,
             cwd=session.cwd,
             env=bg_env,

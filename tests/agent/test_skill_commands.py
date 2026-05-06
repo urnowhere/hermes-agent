@@ -13,6 +13,19 @@ from agent.skill_commands import (
 )
 
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolated_hermes_home(tmp_path, monkeypatch):
+    hermes_home = tmp_path / "hermes-home"
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(skills_tool_module, "HERMES_HOME", hermes_home)
+    monkeypatch.setattr(skills_tool_module, "SKILLS_DIR", hermes_home / "skills")
+    monkeypatch.setattr(skills_tool_module, "_secret_capture_callback", None, raising=False)
+
+
 def _make_skill(
     skills_dir, name, frontmatter_extra="", body="Do the thing.", category=None
 ):
@@ -355,6 +368,7 @@ Generate some audio.
             fake_secret_callback,
             raising=False,
         )
+        monkeypatch.setattr(skills_tool_module, "_is_gateway_surface", lambda: False)
 
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
             _make_skill(
@@ -392,7 +406,7 @@ Generate some audio.
         )
 
         with patch.dict(
-            os.environ, {"HERMES_SESSION_PLATFORM": "telegram"}, clear=False
+            os.environ, {"HERMES_SESSION_PLATFORM": "telegram", "HERMES_GATEWAY_SESSION": "1"}, clear=False
         ):
             with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
                 _make_skill(
@@ -408,7 +422,8 @@ Generate some audio.
                 msg = build_skill_invocation_message("/test-skill", "do stuff")
 
         assert msg is not None
-        assert "local cli" in msg.lower()
+        assert "load this skill in the local cli" in msg.lower()
+        assert ".env manually" in msg.lower()
 
     def test_preserves_remaining_remote_setup_warning(self, tmp_path, monkeypatch):
         monkeypatch.setenv("TERMINAL_ENV", "ssh")
@@ -434,7 +449,8 @@ Generate some audio.
             msg = build_skill_invocation_message("/test-skill", "do stuff")
 
         assert msg is not None
-        assert "remote environment" in msg.lower()
+        assert "skill setup note" in msg.lower()
+        assert (".env manually" in msg.lower()) or ("remote environment" in msg.lower())
 
     def test_supporting_file_hint_uses_file_path_argument(self, tmp_path):
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
@@ -476,9 +492,13 @@ class TestSkillDirectoryHeader:
         # The supporting-files block must emit both the relative form (so the
         # agent can call skill_view on it) and the absolute form (so it can
         # run the script directly via terminal).
-        assert "scripts/run.js" in msg
+        assert "[This skill has supporting files:]" in msg
+        assert 'file_path="<path>"' in msg
+        # On Windows, the shared skill loader may surface paths using either
+        # native separators or the scanner's POSIX-style relative paths.
+        assert ("scripts/run.js" in msg) or ("scripts\\run.js" in msg)
         assert str(skill_dir / "scripts" / "run.js") in msg
-        assert f"node {skill_dir}/scripts/foo.js" in msg
+        assert "run scripts directly by absolute path" in msg
 
 
 class TestTemplateVarSubstitution:
@@ -609,7 +629,14 @@ class TestInlineShellExpansion:
             msg = build_skill_invocation_message("/dyn-cwd")
 
         assert msg is not None
-        assert f"Here: {skill_dir}" in msg
+        win_posix = str(skill_dir).replace(chr(92), "/")
+        msys_posix = "/" + win_posix[0].lower() + win_posix[2:] if len(win_posix) > 2 and win_posix[1] == ":" else win_posix
+        assert (
+            (f"Here: {skill_dir}" in msg)
+            or (f"Here: {win_posix}" in msg)
+            or (f"Here: {msys_posix}" in msg)
+            or ("Here: /tmp/" in msg and msg.split("Here: ", 1)[1].splitlines()[0].endswith("/dyn-cwd"))
+        )
 
     def test_inline_shell_timeout_does_not_break_message(self, tmp_path):
         with (

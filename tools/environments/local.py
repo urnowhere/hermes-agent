@@ -1,8 +1,11 @@
 """Local execution environment — spawn-per-call with session snapshot."""
 
+import base64
 import logging
 import os
 import platform
+import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -142,6 +145,389 @@ def _build_provider_env_blocklist() -> frozenset:
 _HERMES_PROVIDER_ENV_BLOCKLIST = _build_provider_env_blocklist()
 
 
+_POWERSHELL_LEADING_COMMAND_RE = re.compile(
+    r"^\s*(?:"
+    r"\$|"
+    r"\[[A-Za-z_][\w.]*\](?:::|\s|\(|$)|"
+    r"(?:Add|Clear|Compare|Compress|ConvertFrom|ConvertTo|Copy|Export|ForEach|"
+    r"Format|Get|Import|Invoke|Join|Measure|Move|New|Out|Pop|Push|Read|Remove|"
+    r"Rename|Resolve|Select|Set|Sort|Split|Start|Stop|Tee|Test|Wait|Where|Write)-"
+    r")",
+    re.IGNORECASE,
+)
+
+_POWERSHELL_PIPELINE_RE = re.compile(
+    r"(?:^|[|;]\s*)"
+    r"(?:"
+    r"(?:ForEach|Format|Get|Measure|Select|Sort|Where)-Object\b|"
+    r"(?:Add|Clear|Compare|Compress|ConvertFrom|ConvertTo|Copy|Export|ForEach|"
+    r"Format|Get|Import|Invoke|Join|Measure|Move|New|Out|Pop|Push|Read|Remove|"
+    r"Rename|Resolve|Select|Set|Sort|Split|Start|Stop|Tee|Test|Wait|Where|Write)-"
+    r")",
+    re.IGNORECASE,
+)
+
+_POWERSHELL_NONINTERACTIVE_PREAMBLE = (
+    "$ProgressPreference='SilentlyContinue'; "
+    "if (Get-Variable PSStyle -ErrorAction SilentlyContinue) { "
+    "$PSStyle.OutputRendering='PlainText' }; "
+)
+
+_EXPLICIT_WINDOWS_SHELLS = {
+    "bash",
+    "bash.exe",
+    "sh",
+    "sh.exe",
+    "cmd",
+    "cmd.exe",
+    "powershell",
+    "powershell.exe",
+    "pwsh",
+    "pwsh.exe",
+}
+
+_CMD_EXCLUSIVE_COMMANDS = {
+    "assoc",
+    "break",
+    "call",
+    "chdir",
+    "chcp",
+    "choice",
+    "clip",
+    "cls",
+    "color",
+    "copy",
+    "date",
+    "del",
+    "endlocal",
+    "erase",
+    "findstr",
+    "ftype",
+    "md",
+    "mklink",
+    "move",
+    "path",
+    "pause",
+    "prompt",
+    "rd",
+    "rem",
+    "ren",
+    "rename",
+    "setlocal",
+    "start",
+    "time",
+    "title",
+    "type",
+    "ver",
+    "verify",
+    "vol",
+    "where",
+}
+
+_CMD_SHARED_COMMANDS = {
+    "cd",
+    "dir",
+    "echo",
+    "if",
+    "for",
+    "mkdir",
+    "rmdir",
+    "set",
+}
+
+_CMD_PERCENT_VAR_RE = re.compile(r"%(?:[A-Za-z_][A-Za-z0-9_]*|[0-9*]|ERRORLEVEL)%", re.IGNORECASE)
+_CMD_SLASH_SWITCH_RE = re.compile(r"(?:^|\s)/(?:[A-Za-z?]|-)")
+_CMD_OPERATOR_RE = re.compile(r"\s(?:&&|\|\||[|&])\s")
+_CMD_PIPELINE_COMMAND_RE = re.compile(
+    r"(?:&&|\|\||[|&])\s*"
+    r"(?:"
+    + "|".join(re.escape(cmd) for cmd in sorted(_CMD_EXCLUSIVE_COMMANDS))
+    + r")\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_CMD_RE = re.compile(r"^\s*@?cmd(?:\.exe)?\s+(?P<args>.*)$", re.IGNORECASE)
+_EXPLICIT_CMD_C_RE = re.compile(r"(?<!\S)(?://|/)c(?:\s+|$)", re.IGNORECASE)
+
+
+def _strip_cmd_grouping_quotes(command: str) -> str:
+    """Remove one outer quote pair used only to group a cmd /c body."""
+    if len(command) >= 2 and command[0] == command[-1] and command[0] in {"'", '"'}:
+        return command[1:-1]
+    return command
+
+
+def _powershell_version_key(dirname: str) -> tuple:
+    """Sort installed PowerShell directory names with stable releases first."""
+    numbers = tuple(int(part) for part in re.findall(r"\d+", dirname))
+    stable = 0 if "preview" in dirname.lower() else 1
+    return numbers, stable, dirname.lower()
+
+
+def _iter_programfiles_pwsh_candidates() -> list[str]:
+    """Return installed PowerShell 7+ pwsh.exe candidates, newest first."""
+    roots = []
+    for env_name in ("ProgramFiles", "ProgramW6432", "LOCALAPPDATA"):
+        root = os.environ.get(env_name)
+        if root:
+            roots.append(root)
+
+    candidates: list[tuple[tuple, str]] = []
+    seen_roots: set[str] = set()
+    for root in roots:
+        ps_root = (
+            os.path.join(root, "PowerShell")
+            if os.path.basename(root).lower() != "local"
+            else os.path.join(root, "Programs", "PowerShell")
+        )
+        normalized_root = os.path.normcase(os.path.abspath(ps_root))
+        if normalized_root in seen_roots:
+            continue
+        seen_roots.add(normalized_root)
+        if not os.path.isdir(ps_root):
+            continue
+
+        try:
+            version_dirs = os.listdir(ps_root)
+        except OSError:
+            continue
+        for dirname in version_dirs:
+            candidate = os.path.join(ps_root, dirname, "pwsh.exe")
+            if os.path.isfile(candidate):
+                candidates.append((_powershell_version_key(dirname), candidate))
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return [path for _, path in candidates]
+
+
+def _dedupe_paths(paths: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for path in paths:
+        if not path:
+            continue
+        key = os.path.normcase(os.path.abspath(path))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
+
+
+def _find_powershell() -> str:
+    """Find the newest native PowerShell executable for Git Bash to launch."""
+    custom = os.environ.get("HERMES_POWERSHELL_PATH")
+    if custom and os.path.isfile(custom):
+        return _normalize_windows_shell_path(custom)
+
+    candidates = _dedupe_paths(
+        _iter_programfiles_pwsh_candidates()
+        + [
+            shutil.which("pwsh.exe") or "",
+            shutil.which("pwsh") or "",
+            os.path.join(
+                os.environ.get("ProgramFiles", r"C:\Program Files"),
+                "PowerShell",
+                "7",
+                "pwsh.exe",
+            ),
+            shutil.which("powershell.exe") or "",
+            shutil.which("powershell") or "",
+        ]
+        + [
+            os.path.join(
+                os.environ.get("SystemRoot", r"C:\Windows"),
+                "System32",
+                "WindowsPowerShell",
+                "v1.0",
+                "powershell.exe",
+            )
+        ]
+    )
+
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return _normalize_windows_shell_path(candidate)
+
+    raise RuntimeError(
+        "PowerShell not found. Native Windows PowerShell commands require "
+        "pwsh.exe or powershell.exe on PATH, or HERMES_POWERSHELL_PATH set."
+    )
+
+
+def _looks_like_powershell(command: str) -> bool:
+    """Return True when a command is PowerShell syntax, not Bash syntax."""
+    stripped = command.lstrip()
+    if not stripped:
+        return False
+
+    first_word = re.split(r"\s+", stripped, maxsplit=1)[0].lower()
+    if first_word in _EXPLICIT_WINDOWS_SHELLS:
+        return False
+
+    return bool(
+        _POWERSHELL_LEADING_COMMAND_RE.search(stripped)
+        or _POWERSHELL_PIPELINE_RE.search(stripped)
+    )
+
+
+def _find_cmd() -> str:
+    """Find native cmd.exe for Git Bash to launch on Windows."""
+    custom = os.environ.get("HERMES_CMD_PATH")
+    if custom and os.path.isfile(custom):
+        return _normalize_windows_shell_path(custom)
+
+    candidates = _dedupe_paths(
+        [
+            shutil.which("cmd.exe") or "",
+            shutil.which("cmd") or "",
+            os.path.join(
+                os.environ.get("SystemRoot", r"C:\Windows"),
+                "System32",
+                "cmd.exe",
+            ),
+        ]
+    )
+
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return _normalize_windows_shell_path(candidate)
+
+    raise RuntimeError(
+        "cmd.exe not found. Native Windows CMD commands require cmd.exe "
+        "on PATH, or HERMES_CMD_PATH set."
+    )
+
+
+def _looks_like_cmd(command: str) -> bool:
+    """Return True when a command is CMD syntax, not Bash or PowerShell syntax."""
+    stripped = command.lstrip()
+    if not stripped or "\n" in stripped or "\r" in stripped:
+        return False
+
+    raw_first_word = re.split(r"\s+", stripped, maxsplit=1)[0].lower()
+    first_word = raw_first_word.lstrip("@")
+    if first_word in _EXPLICIT_WINDOWS_SHELLS:
+        return False
+    if first_word.endswith(".exe") or first_word.endswith(".cmd") or first_word.endswith(".bat"):
+        return False
+
+    if _CMD_PIPELINE_COMMAND_RE.search(stripped):
+        return True
+    if first_word in _CMD_EXCLUSIVE_COMMANDS:
+        return True
+    if _CMD_PERCENT_VAR_RE.search(stripped):
+        return True
+
+    if first_word not in _CMD_SHARED_COMMANDS:
+        return False
+    if raw_first_word.startswith("@"):
+        return True
+
+    remainder = stripped[len(raw_first_word):].lstrip()
+    if first_word in {"cd", "mkdir", "rmdir"}:
+        return bool(_CMD_SLASH_SWITCH_RE.search(remainder) or re.search(r"(^|\s)[A-Za-z]:[\\/]", remainder))
+    if first_word == "dir":
+        return not remainder.startswith("-")
+    if first_word == "set":
+        return not remainder.startswith("-")
+    if first_word == "echo":
+        return bool(
+            _CMD_PERCENT_VAR_RE.search(remainder)
+            or remainder.lower() in {"on", "off"}
+            or _CMD_OPERATOR_RE.search(stripped)
+        )
+    if first_word in {"if", "for"}:
+        return bool(_CMD_PERCENT_VAR_RE.search(stripped) or _CMD_SLASH_SWITCH_RE.search(stripped))
+
+    return False
+
+
+def _wrap_windows_powershell_command(command: str) -> str:
+    """Wrap native PowerShell syntax so Git Bash can execute it on Windows."""
+    if not _IS_WINDOWS or not _looks_like_powershell(command):
+        return command
+
+    script = _POWERSHELL_NONINTERACTIVE_PREAMBLE + command
+    encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    powershell = shlex.quote(_find_powershell())
+    return (
+        f"{powershell} -NoProfile -NonInteractive "
+        f"-ExecutionPolicy Bypass -EncodedCommand {encoded}"
+    )
+
+
+def _wrap_windows_cmd_command(command: str) -> str:
+    """Wrap native CMD syntax so Git Bash can execute it on Windows."""
+    if not _IS_WINDOWS:
+        return command
+
+    # Git Bash/MSYS rewrites /c-style arguments for native Windows programs
+    # unless they use the double-slash escape form.
+    cmd = shlex.quote(_find_cmd())
+
+    explicit = _EXPLICIT_CMD_RE.match(command)
+    if explicit:
+        args = explicit.group("args")
+        c_switch = _EXPLICIT_CMD_C_RE.search(args)
+        if not c_switch:
+            return command
+        body = _strip_cmd_grouping_quotes(args[c_switch.end():].strip())
+        return f"{cmd} //d //s //c {shlex.quote(body)}" if body else f"{cmd} //d //s //c"
+
+    if not _looks_like_cmd(command):
+        return command
+
+    return f"{cmd} //d //s //c {shlex.quote(command)}"
+
+
+def _wrap_windows_native_command(command: str) -> str:
+    """Wrap native Windows shell syntax for the Git Bash local backend."""
+    wrapped = _wrap_windows_powershell_command(command)
+    if wrapped != command:
+        return wrapped
+    return _wrap_windows_cmd_command(command)
+
+
+def _normalize_windows_shell_path(path: str) -> str:
+    """Convert native Windows or MSYS paths into a Git-Bash-friendly form."""
+    if not path:
+        return path
+
+    expanded = os.path.expanduser(path)
+
+    # Drive-letter paths: C:\foo or C:/foo -> C:/foo
+    if re.match(r"^[A-Za-z]:[\\/]", expanded):
+        return expanded.replace("\\", "/")
+
+    # UNC paths: \\server\share -> //server/share
+    if expanded.startswith("\\\\"):
+        return "//" + expanded.lstrip("\\").replace("\\", "/")
+
+    # Git Bash / MSYS drive mounts: /c/Users/foo -> C:/Users/foo
+    msys_match = re.match(r"^/([A-Za-z])/(.*)$", expanded)
+    if msys_match:
+        drive = msys_match.group(1).upper()
+        rest = msys_match.group(2)
+        return f"{drive}:/{rest}"
+
+    # Relative Windows paths: .\foo\bar -> ./foo/bar
+    if "\\" in expanded:
+        return expanded.replace("\\", "/")
+
+    return expanded
+
+
+def _is_wsl_bash_launcher(path: str | None) -> bool:
+    """Return True when *path* is Windows' WSL launcher, not Git Bash."""
+    if not path:
+        return False
+
+    normalized = os.path.normcase(os.path.abspath(path))
+    return normalized.endswith(os.path.normcase(r"\windows\system32\bash.exe")) or normalized.endswith(
+        os.path.normcase(r"\windows\sysnative\bash.exe")
+    )
+
+
 def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = None) -> dict:
     """Filter Hermes-managed secrets from a subprocess environment."""
     try:
@@ -188,10 +574,6 @@ def _find_bash() -> str:
     if custom and os.path.isfile(custom):
         return custom
 
-    found = shutil.which("bash")
-    if found:
-        return found
-
     for candidate in (
         os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "bin", "bash.exe"),
         os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Git", "bin", "bash.exe"),
@@ -199,6 +581,10 @@ def _find_bash() -> str:
     ):
         if candidate and os.path.isfile(candidate):
             return candidate
+
+    found = shutil.which("bash")
+    if found and not _is_wsl_bash_launcher(found):
+        return found
 
     raise RuntimeError(
         "Git Bash not found. Hermes Agent requires Git for Windows on Windows.\n"
@@ -234,7 +620,7 @@ def _make_run_env(env: dict) -> dict:
         elif k not in _HERMES_PROVIDER_ENV_BLOCKLIST or _is_passthrough(k):
             run_env[k] = v
     existing_path = run_env.get("PATH", "")
-    if "/usr/bin" not in existing_path.split(":"):
+    if not _IS_WINDOWS and "/usr/bin" not in existing_path.split(":"):
         run_env["PATH"] = f"{existing_path}:{_SANE_PATH}" if existing_path else _SANE_PATH
 
     # Per-profile HOME isolation: redirect system tool configs (git, ssh, gh,
@@ -342,8 +728,17 @@ class LocalEnvironment(BaseEnvironment):
     def __init__(self, cwd: str = "", timeout: int = 60, env: dict = None):
         if cwd:
             cwd = os.path.expanduser(cwd)
-        super().__init__(cwd=cwd or os.getcwd(), timeout=timeout, env=env)
+        self.shell_path_style = "git-bash" if _IS_WINDOWS else "posix"
+        initial_cwd = self._to_shell_path(cwd or os.getcwd())
+        super().__init__(cwd=initial_cwd, timeout=timeout, env=env)
         self.init_session()
+
+    @staticmethod
+    def _to_shell_path(path: str) -> str:
+        """Normalize local host paths into the shell path format used by this backend."""
+        if not _IS_WINDOWS:
+            return path
+        return _normalize_windows_shell_path(path)
 
     def get_temp_dir(self) -> str:
         """Return a shell-safe writable temp dir for local execution.
@@ -357,6 +752,15 @@ class LocalEnvironment(BaseEnvironment):
         override the temp root explicitly (for example via terminal.env or a
         custom TMPDIR), then fall back to the host process environment.
         """
+        if _IS_WINDOWS:
+            for env_var in ("TMPDIR", "TMP", "TEMP"):
+                candidate = self.env.get(env_var) or os.environ.get(env_var)
+                normalized = self._to_shell_path(candidate) if candidate else ""
+                if normalized and re.match(r"^[A-Za-z]:/", normalized):
+                    return normalized.rstrip("/") or normalized
+
+            return self._to_shell_path(tempfile.gettempdir()).rstrip("/")
+
         for env_var in ("TMPDIR", "TMP", "TEMP"):
             candidate = self.env.get(env_var) or os.environ.get(env_var)
             if candidate and candidate.startswith("/"):
@@ -393,15 +797,17 @@ class LocalEnvironment(BaseEnvironment):
         # (issue #17558).  Popen would otherwise raise FileNotFoundError on
         # the cwd before bash starts, wedging every subsequent call until the
         # gateway restarts.
-        safe_cwd = _resolve_safe_cwd(self.cwd)
-        if safe_cwd != self.cwd:
+        cwd_for_popen = self._to_shell_path(self.cwd) if _IS_WINDOWS else self.cwd
+        safe_cwd = _resolve_safe_cwd(cwd_for_popen)
+        if safe_cwd != cwd_for_popen:
             logger.warning(
                 "LocalEnvironment cwd %r is missing on disk; "
                 "falling back to %r so terminal commands keep working.",
                 self.cwd,
                 safe_cwd,
             )
-            self.cwd = safe_cwd
+            self.cwd = self._to_shell_path(safe_cwd) if _IS_WINDOWS else safe_cwd
+            cwd_for_popen = safe_cwd
 
         proc = subprocess.Popen(
             args,
@@ -413,7 +819,7 @@ class LocalEnvironment(BaseEnvironment):
             stderr=subprocess.STDOUT,
             stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
             preexec_fn=None if _IS_WINDOWS else os.setsid,
-            cwd=self.cwd,
+            cwd=cwd_for_popen,
         )
         if not _IS_WINDOWS:
             try:
@@ -425,6 +831,23 @@ class LocalEnvironment(BaseEnvironment):
             _pipe_stdin(proc, stdin_data)
 
         return proc
+
+    def execute(
+        self,
+        command: str,
+        cwd: str = "",
+        *,
+        timeout: int | None = None,
+        stdin_data: str | None = None,
+    ) -> dict:
+        command = _wrap_windows_native_command(command)
+        shell_cwd = self._to_shell_path(cwd) if cwd else ""
+        return super().execute(
+            command,
+            cwd=shell_cwd,
+            timeout=timeout,
+            stdin_data=stdin_data,
+        )
 
     def _kill_process(self, proc):
         """Kill the entire process group (all children)."""
