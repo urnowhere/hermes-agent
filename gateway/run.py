@@ -3790,11 +3790,19 @@ class GatewayRunner:
     async def _platform_reconnect_watcher(self) -> None:
         """Background task that periodically retries connecting failed platforms.
 
-        Uses exponential backoff: 30s → 60s → 120s → 240s → 300s (cap).
-        Stops retrying a platform after 20 failed attempts or if the error
-        is non-retryable (e.g. bad auth token).
+        Uses exponential backoff: 30s → 60s → 120s → 240s → 300s (cap). A
+        platform is removed from the retry queue when it reconnects
+        successfully or when ``connect()`` reports a non-retryable fatal
+        error (e.g. bad auth token, where retries serve no purpose).
+
+        Retryable failures (network outages, proxy hiccups, transient
+        upstream 5xxs) keep retrying at the capped interval indefinitely.
+        Long-running messaging adapters such as Telegram routinely outlive
+        multi-hour proxy/network interruptions, and stopping retries after
+        a fixed attempt count converts a transient outage into a permanent
+        outage that requires manual ``hermes gateway restart`` to recover
+        from (#17063).
         """
-        _MAX_ATTEMPTS = 20
         _BACKOFF_CAP = 300  # 5 minutes max between retries
 
         await asyncio.sleep(10)  # initial delay — let startup finish
@@ -3815,19 +3823,11 @@ class GatewayRunner:
                 if now < info["next_retry"]:
                     continue  # not time yet
 
-                if info["attempts"] >= _MAX_ATTEMPTS:
-                    logger.warning(
-                        "Giving up reconnecting %s after %d attempts",
-                        platform.value, info["attempts"],
-                    )
-                    del self._failed_platforms[platform]
-                    continue
-
                 platform_config = info["config"]
                 attempt = info["attempts"] + 1
                 logger.info(
-                    "Reconnecting %s (attempt %d/%d)...",
-                    platform.value, attempt, _MAX_ATTEMPTS,
+                    "Reconnecting %s (attempt %d)...",
+                    platform.value, attempt,
                 )
 
                 try:

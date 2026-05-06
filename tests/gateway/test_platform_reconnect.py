@@ -294,20 +294,80 @@ class TestPlatformReconnectWatcher:
         assert runner._failed_platforms[Platform.TELEGRAM]["attempts"] == 2
 
     @pytest.mark.asyncio
-    async def test_reconnect_gives_up_after_max_attempts(self):
-        """After max attempts, platform should be removed from retry queue."""
+    async def test_reconnect_retryable_keeps_trying_past_old_max_cap(self):
+        """Retryable failures are not given up on after the old 20-attempt cap.
+
+        Regression for #17063: a real Telegram outage retried 20 times under
+        proxy unavailability and the old fixed cap then deleted the platform
+        from ``_failed_platforms`` permanently, even though the proxy
+        recovered later. Retryable failures should keep being retried
+        indefinitely with capped backoff.
+        """
         runner = _make_runner()
 
         platform_config = PlatformConfig(enabled=True, token="test")
         runner._failed_platforms[Platform.TELEGRAM] = {
             "config": platform_config,
-            "attempts": 20,  # At max
+            "attempts": 20,  # At the old hard cap
             "next_retry": time.monotonic() - 1,
         }
 
+        fail_adapter = StubAdapter(
+            succeed=False,
+            fatal_error="proxy unreachable",
+            fatal_retryable=True,
+        )
+
         real_sleep = asyncio.sleep
 
-        with patch.object(runner, "_create_adapter") as mock_create:
+        with patch.object(runner, "_create_adapter", return_value=fail_adapter):
+            async def run_one_iteration():
+                runner._running = True
+                call_count = 0
+
+                async def fake_sleep(n):
+                    nonlocal call_count
+                    call_count += 1
+                    if call_count > 1:
+                        runner._running = False
+                    await real_sleep(0)
+
+                with patch("asyncio.sleep", side_effect=fake_sleep):
+                    await runner._platform_reconnect_watcher()
+
+            await run_one_iteration()
+
+        # Platform must still be queued for the next retry — the gateway
+        # should not silently give up on a retryable error.
+        assert Platform.TELEGRAM in runner._failed_platforms
+        assert runner._failed_platforms[Platform.TELEGRAM]["attempts"] == 21
+
+    @pytest.mark.asyncio
+    async def test_reconnect_nonretryable_still_removed_after_many_attempts(self):
+        """Non-retryable errors stay removed regardless of attempt count.
+
+        The fix for #17063 must not blunt the existing fast-path that drops
+        platforms with a fundamentally permanent failure (bad auth token,
+        revoked credentials, etc.) — those should never re-enter the loop.
+        """
+        runner = _make_runner()
+
+        platform_config = PlatformConfig(enabled=True, token="test")
+        runner._failed_platforms[Platform.TELEGRAM] = {
+            "config": platform_config,
+            "attempts": 25,
+            "next_retry": time.monotonic() - 1,
+        }
+
+        fail_adapter = StubAdapter(
+            succeed=False,
+            fatal_error="invalid token",
+            fatal_retryable=False,
+        )
+
+        real_sleep = asyncio.sleep
+
+        with patch.object(runner, "_create_adapter", return_value=fail_adapter):
             async def run_one_iteration():
                 runner._running = True
                 call_count = 0
@@ -325,7 +385,6 @@ class TestPlatformReconnectWatcher:
             await run_one_iteration()
 
         assert Platform.TELEGRAM not in runner._failed_platforms
-        mock_create.assert_not_called()  # Should give up without trying
 
     @pytest.mark.asyncio
     async def test_reconnect_skips_when_not_time_yet(self):
