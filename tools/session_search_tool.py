@@ -110,6 +110,37 @@ def _format_conversation(messages: List[Dict[str, Any]]) -> str:
     return "\n\n".join(parts)
 
 
+def _strip_fts5_operators(query: str) -> str:
+    """Extract plain content terms from an FTS5 query string.
+
+    Strips boolean operators (``AND``, ``OR``, ``NOT``), ``NEAR(...)``
+    clauses, column filters (``column:term``), prefix operators (``*``),
+    and FTS5 special characters (``+``, ``{}``, ``()``, ``^``, ``~``).
+    Preserves quoted-phrase content (without the quotes).
+
+    Returns an empty string if *query* contained only operators / syntax.
+    """
+    result = query
+
+    # Remove quoted phrases but keep their content
+    result = re.sub(r'"([^"]*)"', r'\1', result)
+
+    # Remove NEAR(...) clauses entirely
+    result = re.sub(r'NEAR\s*\([^)]*\)', '', result, flags=re.IGNORECASE)
+
+    # Remove column filters (e.g. role:user, body:term)
+    result = re.sub(r'\w+:\w+', '', result)
+
+    # Remove FTS5 special characters
+    result = re.sub(r'[+{}()^~*]', ' ', result)
+
+    # Remove boolean operators (standalone words)
+    result = re.sub(r'\b(?:AND|OR|NOT)\b', '', result, flags=re.IGNORECASE)
+
+    # Collapse whitespace
+    return ' '.join(result.split()).strip()
+
+
 def _truncate_around_matches(
     full_text: str, query: str, max_chars: int = MAX_SESSION_CHARS
 ) -> str:
@@ -125,21 +156,31 @@ def _truncate_around_matches(
 
     Once candidate positions are collected the function picks the window
     start that covers the most of them.
+
+    FTS5 boolean operators (AND, OR, NOT) and other query syntax are
+    stripped before matching so they are not treated as search terms
+    (fixes #4238 / #4239).
     """
     if len(full_text) <= max_chars:
         return full_text
 
     text_lower = full_text.lower()
     query_lower = query.lower().strip()
+
+    # Strip FTS5 operators so boolean keywords aren't treated as search terms.
+    clean_query = _strip_fts5_operators(query_lower)
+    if not clean_query:
+        clean_query = query_lower  # fallback if stripping removed everything
+
     match_positions: list[int] = []
 
     # --- 1. Full-phrase search ------------------------------------------------
-    phrase_pat = re.compile(re.escape(query_lower))
+    phrase_pat = re.compile(re.escape(clean_query))
     match_positions = [m.start() for m in phrase_pat.finditer(text_lower)]
 
     # --- 2. Proximity co-occurrence of all terms (within 200 chars) -----------
     if not match_positions:
-        terms = query_lower.split()
+        terms = clean_query.split()
         if len(terms) > 1:
             # Collect every occurrence of each term
             term_positions: dict[str, list[int]] = {}
@@ -159,7 +200,7 @@ def _truncate_around_matches(
 
     # --- 3. Individual term positions (last resort) ---------------------------
     if not match_positions:
-        terms = query_lower.split()
+        terms = clean_query.split()
         for t in terms:
             for m in re.finditer(re.escape(t), text_lower):
                 match_positions.append(m.start())
@@ -196,9 +237,25 @@ def _truncate_around_matches(
 
 
 async def _summarize_session(
-    conversation_text: str, query: str, session_meta: Dict[str, Any]
+    conversation_text: str, query: str, session_meta: Dict[str, Any],
+    user_id: str = None,
 ) -> Optional[str]:
     """Summarize a single session conversation focused on the search query."""
+    user_context = ""
+    if user_id:
+        user_context = (
+            f"\n\nIMPORTANT: This conversation belongs to user {user_id}. "
+            "The transcript may mention other people's private information (names, habits, "
+            "study records, personal details) that appeared during debugging or investigation. "
+            "You MUST:\n"
+            "- Only include information that the USER (the conversation owner) asked about, "
+            "decided, or acted upon\n"
+            "- Do NOT include other people's personal details, habits, or private information "
+            "as if they belong to the user\n"
+            "- If the conversation discusses another person's data (e.g. during a bug investigation), "
+            "mention it only as context for what the user was doing, not as the user's own information"
+        )
+
     system_prompt = (
         "You are reviewing a past conversation transcript to help recall what happened. "
         "Summarize the conversation with a focus on the search topic. Include:\n"
@@ -209,6 +266,7 @@ async def _summarize_session(
         "5. Anything left unresolved or notable\n\n"
         "Be thorough but concise. Preserve specific details (commands, paths, error messages) "
         "that would be useful to recall. Write in past tense as a factual recap."
+        f"{user_context}"
     )
 
     source = session_meta.get("source", "unknown")
@@ -265,14 +323,10 @@ async def _summarize_session(
 _HIDDEN_SESSION_SOURCES = ("tool",)
 
 
-def _list_recent_sessions(db, limit: int, current_session_id: str = None) -> str:
+def _list_recent_sessions(db, limit: int, current_session_id: str = None, user_id: str = None) -> str:
     """Return metadata for the most recent sessions (no LLM calls)."""
     try:
-        sessions = db.list_sessions_rich(
-            limit=limit + 5,
-            exclude_sources=list(_HIDDEN_SESSION_SOURCES),
-            order_by_last_active=True,
-        )  # fetch extra to skip current
+        sessions = db.list_sessions_rich(limit=limit + 5, exclude_sources=list(_HIDDEN_SESSION_SOURCES), user_id=user_id, order_by_last_active=True)  # fetch extra to skip current
 
         # Resolve current session lineage to exclude it
         current_root = None
@@ -328,6 +382,7 @@ def session_search(
     limit: int = 3,
     db=None,
     current_session_id: str = None,
+    user_id: str = None,
 ) -> str:
     """
     Search past sessions and return focused summaries of matching conversations.
@@ -352,7 +407,7 @@ def session_search(
     # Recent sessions mode: when query is empty, return metadata for recent sessions.
     # No LLM calls — just DB queries for titles, previews, timestamps.
     if not query or not query.strip():
-        return _list_recent_sessions(db, limit, current_session_id)
+        return _list_recent_sessions(db, limit, current_session_id, user_id=user_id)
 
     query = query.strip()
 
@@ -367,6 +422,7 @@ def session_search(
             query=query,
             role_filter=role_list,
             exclude_sources=list(_HIDDEN_SESSION_SOURCES),
+            user_id=user_id,
             limit=50,  # Get more matches to find unique sessions
             offset=0,
         )
@@ -458,7 +514,7 @@ def session_search(
 
             async def _bounded_summary(text: str, meta: Dict[str, Any]) -> Optional[str]:
                 async with semaphore:
-                    return await _summarize_session(text, query, meta)
+                    return await _summarize_session(text, query, meta, user_id=user_id)
 
             coros = [
                 _bounded_summary(text, meta)
@@ -599,7 +655,8 @@ registry.register(
         role_filter=args.get("role_filter"),
         limit=args.get("limit", 3),
         db=kw.get("db"),
-        current_session_id=kw.get("current_session_id")),
+        current_session_id=kw.get("current_session_id"),
+        user_id=kw.get("user_id")),
     check_fn=check_session_search_requirements,
     emoji="🔍",
 )
