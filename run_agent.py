@@ -955,6 +955,7 @@ class AIAgent:
         chat_id: str = None,
         chat_name: str = None,
         chat_type: str = None,
+        chat_topic: str = None,
         thread_id: str = None,
         gateway_session_key: str = None,
         skip_context_files: bool = False,
@@ -1032,6 +1033,7 @@ class AIAgent:
         self._chat_id = chat_id
         self._chat_name = chat_name
         self._chat_type = chat_type
+        self._chat_topic = chat_topic
         self._thread_id = thread_id
         self._gateway_session_key = gateway_session_key  # Stable per-chat key (e.g. agent:main:telegram:dm:123)
         # Pluggable print function — CLI replaces this with _cprint so that
@@ -1791,6 +1793,8 @@ class AIAgent:
                             _init_kwargs["chat_name"] = self._chat_name
                         if self._chat_type:
                             _init_kwargs["chat_type"] = self._chat_type
+                        if self._chat_topic:
+                            _init_kwargs["chat_topic"] = self._chat_topic
                         if self._thread_id:
                             _init_kwargs["thread_id"] = self._thread_id
                         # Thread gateway session key for stable per-chat Honcho session isolation

@@ -663,6 +663,7 @@ class TestSyncTurn:
             chat_id="1485316232612941897",
             chat_name="fakeassistantname-forums",
             chat_type="thread",
+            chat_topic="Hindsight Setup 🚀",
             thread_id="1491249007475949698",
             agent_identity="fakeassistantname",
         )
@@ -679,7 +680,7 @@ class TestSyncTurn:
         assert len(call_kwargs["items"]) == 1
         item = call_kwargs["items"][0]
         assert item["context"] == "conversation between Hermes Agent and the User"
-        assert item["tags"] == ["conv", "session1", "session:session-1"]
+        assert item["tags"] == ["conv", "session1", "topic:hindsight-setup", "session:session-1"]
         content = json.loads(item["content"])
         assert len(content) == 1
         assert content[0][0]["role"] == "user"
@@ -694,6 +695,7 @@ class TestSyncTurn:
         assert item["metadata"]["chat_id"] == "1485316232612941897"
         assert item["metadata"]["chat_name"] == "fakeassistantname-forums"
         assert item["metadata"]["chat_type"] == "thread"
+        assert item["metadata"]["chat_topic"] == "Hindsight Setup 🚀"
         assert item["metadata"]["thread_id"] == "1491249007475949698"
         assert item["metadata"]["agent_identity"] == "fakeassistantname"
         assert item["metadata"]["turn_index"] == "1"
