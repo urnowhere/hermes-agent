@@ -1947,6 +1947,113 @@ class TestBuildCallKwargsToolDedup:
         assert "tools" not in kwargs
 
 
+# ---------------------------------------------------------------------------
+# _build_call_kwargs — system-message ordering
+# ---------------------------------------------------------------------------
+
+class TestBuildCallKwargsSystemMessageOrdering:
+    """``_build_call_kwargs`` must place system messages before user /
+    assistant / tool messages so chat templates that enforce strict role
+    ordering accept the request.
+
+    Qwen-family models served via vLLM reject requests with a 400
+    ``System message must be at the beginning`` error if a system role
+    appears after a user or assistant message.  See:
+    https://github.com/NousResearch/hermes-agent/issues/20866
+    """
+
+    def test_system_first_is_passthrough(self):
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Hi"},
+        ]
+        kwargs = _build_call_kwargs(
+            provider="custom", model="qwen3-27b", messages=messages,
+        )
+        assert kwargs["messages"] == messages
+
+    def test_no_system_message_is_passthrough(self):
+        messages = [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello"},
+            {"role": "user", "content": "More"},
+        ]
+        kwargs = _build_call_kwargs(
+            provider="custom", model="qwen3-27b", messages=messages,
+        )
+        assert kwargs["messages"] == messages
+
+    def test_empty_messages_list(self):
+        kwargs = _build_call_kwargs(
+            provider="custom", model="qwen3-27b", messages=[],
+        )
+        assert kwargs["messages"] == []
+
+    def test_system_after_user_is_reordered(self):
+        """RED test — fails until the ordering guard is added."""
+        messages = [
+            {"role": "user", "content": "Hi"},
+            {"role": "system", "content": "Be terse."},
+            {"role": "assistant", "content": "ok"},
+        ]
+        kwargs = _build_call_kwargs(
+            provider="custom", model="qwen3-27b", messages=messages,
+        )
+        result = kwargs["messages"]
+        assert result[0]["role"] == "system"
+        # Non-system messages keep their original relative order.
+        non_system = [m for m in result if m.get("role") != "system"]
+        assert non_system == [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "ok"},
+        ]
+
+    def test_multiple_system_messages_kept_in_order(self):
+        messages = [
+            {"role": "user", "content": "Hi"},
+            {"role": "system", "content": "First system"},
+            {"role": "system", "content": "Second system"},
+            {"role": "user", "content": "Bye"},
+        ]
+        kwargs = _build_call_kwargs(
+            provider="custom", model="qwen3-27b", messages=messages,
+        )
+        result = kwargs["messages"]
+        assert result[0] == {"role": "system", "content": "First system"}
+        assert result[1] == {"role": "system", "content": "Second system"}
+        # Non-system messages keep their original relative order.
+        assert [m for m in result if m.get("role") != "system"] == [
+            {"role": "user", "content": "Hi"},
+            {"role": "user", "content": "Bye"},
+        ]
+
+    def test_does_not_mutate_input_list(self):
+        original = [
+            {"role": "user", "content": "Hi"},
+            {"role": "system", "content": "Be terse."},
+        ]
+        snapshot = [dict(m) for m in original]
+        _build_call_kwargs(
+            provider="custom", model="qwen3-27b", messages=original,
+        )
+        # Caller's list reference is not reordered in place.
+        assert original == snapshot
+
+    def test_logs_warning_when_reordering(self, caplog):
+        messages = [
+            {"role": "user", "content": "Hi"},
+            {"role": "system", "content": "Be terse."},
+        ]
+        with caplog.at_level(logging.WARNING, logger="agent.auxiliary_client"):
+            _build_call_kwargs(
+                provider="custom", model="qwen3-27b", messages=messages,
+            )
+        assert any(
+            "reordered" in rec.message and "system" in rec.message
+            for rec in caplog.records
+        )
+
+
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     """Strip provider env vars so each test starts clean."""

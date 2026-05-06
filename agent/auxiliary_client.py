@@ -3353,6 +3353,55 @@ def _convert_openai_images_to_anthropic(messages: list) -> list:
     return converted
 
 
+def _ensure_system_messages_first(messages: list) -> list:
+    """Reorder messages so any ``role="system"`` entries appear before
+    ``user`` / ``assistant`` / ``tool`` entries.
+
+    Some chat templates — notably Qwen's — enforce strict role ordering and
+    reject requests with a 400 ``System message must be at the beginning``
+    error if a system role appears after a user or assistant message.
+    Hermes auxiliary callers normally place the system prompt first, but
+    callers that prepend conversational context can produce out-of-order
+    lists.  Reorder defensively while preserving the relative order within
+    each group.  Returns the original list when no reorder is needed
+    (zero-copy fast path).
+
+    See: https://github.com/NousResearch/hermes-agent/issues/20866
+    """
+    if not messages:
+        return messages
+
+    seen_non_system = False
+    needs_reorder = False
+    for msg in messages:
+        if not isinstance(msg, dict):
+            seen_non_system = True
+            continue
+        if msg.get("role") == "system":
+            if seen_non_system:
+                needs_reorder = True
+                break
+        else:
+            seen_non_system = True
+
+    if not needs_reorder:
+        return messages
+
+    system_msgs = [
+        m for m in messages
+        if isinstance(m, dict) and m.get("role") == "system"
+    ]
+    other_msgs = [
+        m for m in messages
+        if not (isinstance(m, dict) and m.get("role") == "system")
+    ]
+    logger.warning(
+        "_build_call_kwargs: reordered %d system message(s) to the front "
+        "(some chat templates require system role at index 0)",
+        len(system_msgs),
+    )
+    return system_msgs + other_msgs
+
 
 def _build_call_kwargs(
     provider: str,
@@ -3368,7 +3417,7 @@ def _build_call_kwargs(
     """Build kwargs for .chat.completions.create() with model/provider adjustments."""
     kwargs: Dict[str, Any] = {
         "model": model,
-        "messages": messages,
+        "messages": _ensure_system_messages_first(messages),
         "timeout": timeout,
     }
 
