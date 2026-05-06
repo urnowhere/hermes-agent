@@ -423,6 +423,10 @@ class GatewayConfig:
     # Unauthorized DM policy
     unauthorized_dm_behavior: str = "pair"  # "pair" or "ignore"
 
+    # Feishu thin-cockpit routing controls
+    feishu_auto_dispatch_enabled: bool = False
+    feishu_route_shadow_hints_enabled: bool = True
+
     # Streaming configuration
     streaming: StreamingConfig = field(default_factory=StreamingConfig)
 
@@ -524,6 +528,8 @@ class GatewayConfig:
             "group_sessions_per_user": self.group_sessions_per_user,
             "thread_sessions_per_user": self.thread_sessions_per_user,
             "unauthorized_dm_behavior": self.unauthorized_dm_behavior,
+            "feishu_auto_dispatch_enabled": self.feishu_auto_dispatch_enabled,
+            "feishu_route_shadow_hints_enabled": self.feishu_route_shadow_hints_enabled,
             "streaming": self.streaming.to_dict(),
             "session_store_max_age_days": self.session_store_max_age_days,
         }
@@ -572,6 +578,15 @@ class GatewayConfig:
             data.get("unauthorized_dm_behavior"),
             "pair",
         )
+        routing_cfg = data.get("routing") if isinstance(data.get("routing"), dict) else {}
+        feishu_auto_dispatch_enabled = data.get(
+            "feishu_auto_dispatch_enabled",
+            routing_cfg.get("feishu_auto_dispatch_enabled"),
+        )
+        feishu_route_shadow_hints_enabled = data.get(
+            "feishu_route_shadow_hints_enabled",
+            routing_cfg.get("feishu_route_shadow_hints_enabled"),
+        )
 
         try:
             session_store_max_age_days = int(data.get("session_store_max_age_days", 90))
@@ -593,6 +608,8 @@ class GatewayConfig:
             group_sessions_per_user=_coerce_bool(group_sessions_per_user, True),
             thread_sessions_per_user=_coerce_bool(thread_sessions_per_user, False),
             unauthorized_dm_behavior=unauthorized_dm_behavior,
+            feishu_auto_dispatch_enabled=_coerce_bool(feishu_auto_dispatch_enabled, False),
+            feishu_route_shadow_hints_enabled=_coerce_bool(feishu_route_shadow_hints_enabled, True),
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
             session_store_max_age_days=session_store_max_age_days,
         )
@@ -697,6 +714,26 @@ def load_gateway_config() -> GatewayConfig:
                     yaml_cfg.get("unauthorized_dm_behavior"),
                     "pair",
                 )
+
+            routing_cfg = yaml_cfg.get("routing")
+            if isinstance(routing_cfg, dict):
+                if "feishu_auto_dispatch_enabled" in routing_cfg:
+                    gw_data["feishu_auto_dispatch_enabled"] = routing_cfg[
+                        "feishu_auto_dispatch_enabled"
+                    ]
+                if "feishu_route_shadow_hints_enabled" in routing_cfg:
+                    gw_data["feishu_route_shadow_hints_enabled"] = routing_cfg[
+                        "feishu_route_shadow_hints_enabled"
+                    ]
+            # Backward-compatible flat keys used by early routing builds.
+            if "feishu_auto_dispatch_enabled" in yaml_cfg:
+                gw_data["feishu_auto_dispatch_enabled"] = yaml_cfg[
+                    "feishu_auto_dispatch_enabled"
+                ]
+            if "feishu_route_shadow_hints_enabled" in yaml_cfg:
+                gw_data["feishu_route_shadow_hints_enabled"] = yaml_cfg[
+                    "feishu_route_shadow_hints_enabled"
+                ]
 
             # Merge platforms section from config.yaml into gw_data so that
             # nested keys like platforms.webhook.extra.routes are loaded.

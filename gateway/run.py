@@ -5574,6 +5574,27 @@ class GatewayRunner:
                 return self._telegram_topic_root_lobby_message()
             return None
 
+        auto_dispatch_result = None
+        try:
+            _active_toolsets: tuple[str, ...] = ()
+            try:
+                from hermes_cli.config import load_config as _load_config_for_routing
+                from hermes_cli.tools_config import _get_platform_tools as _get_tools_for_routing
+
+                _platform_key = _platform_config_key(source.platform)
+                _active_toolsets = tuple(sorted(_get_tools_for_routing(_load_config_for_routing(), _platform_key)))
+            except Exception:
+                _active_toolsets = ()
+            auto_dispatch_result = await self._maybe_auto_dispatch_feishu_route(
+                event,
+                source,
+                active_toolsets=_active_toolsets,
+            )
+        except Exception as exc:
+            logger.debug("Feishu auto-dispatch check skipped: %s", exc)
+        if auto_dispatch_result is not None:
+            return auto_dispatch_result
+
         # ── Claim this session before any await ───────────────────────
         # Between here and _run_agent registering the real AIAgent, there
         # are numerous await points (hooks, vision enrichment, STT,
@@ -8888,7 +8909,89 @@ class GatewayRunner:
             )
         return f"❌ {result['error']}"
 
-    async def _handle_background_command(self, event: MessageEvent) -> str:
+    async def _maybe_auto_dispatch_feishu_route(
+        self,
+        event: MessageEvent,
+        source: "SessionSource" | None,
+        *,
+        active_toolsets: tuple[str, ...] | list[str] | None = None,
+    ) -> str | None:
+        """Auto-dispatch safe Feishu work to background wrappers when ROI is clear."""
+
+        if source is None or getattr(source, "platform", None) != Platform.FEISHU:
+            return None
+        if bool(getattr(event, "internal", False)):
+            return None
+        prompt = str(getattr(event, "text", "") or "").strip()
+        if not prompt or event.get_command():
+            return None
+        if getattr(event, "message_type", MessageType.TEXT) != MessageType.TEXT:
+            return None
+        if getattr(event, "media_urls", None) or getattr(event, "media_types", None):
+            return None
+
+        session_key = ""
+        try:
+            session_key = self._session_key_for_source(source)
+        except Exception:
+            session_key = ""
+        if session_key and session_key in (getattr(self, "_running_agents", {}) or {}):
+            return None
+
+        config = getattr(self, "config", None)
+        if isinstance(config, dict):
+            auto_dispatch_enabled = bool(config.get("feishu_auto_dispatch_enabled", False))
+        else:
+            auto_dispatch_enabled = bool(getattr(config, "feishu_auto_dispatch_enabled", False))
+
+        from gateway.route_decision import resolve_route_decision, should_auto_dispatch_feishu
+
+        decision = resolve_route_decision(
+            prompt,
+            platform="feishu",
+            active_toolsets=tuple(active_toolsets or ()),
+            feishu_auto_dispatch_enabled=auto_dispatch_enabled,
+            telemetry_source="feishu_auto_dispatch",
+        )
+        if not should_auto_dispatch_feishu(
+            decision,
+            feishu_auto_dispatch_enabled=auto_dispatch_enabled,
+        ):
+            return None
+
+        for route in decision.forced_routes:
+            try:
+                from tools.skill_usage import log_route_usage_event
+
+                log_route_usage_event(
+                    route_name=route,
+                    event="route_selected_for_background",
+                    details={
+                        "source": "feishu_auto_dispatch",
+                        "decision_type": decision.decision_type,
+                        "score": decision.score.total,
+                        "confidence": decision.confidence,
+                        "routes": list(decision.forced_routes),
+                    },
+                )
+            except Exception:
+                pass
+
+        result = await self._handle_background_command(
+            event,
+            forced_routes=tuple(decision.forced_routes),
+        )
+        prefix = f"Auto-dispatched to background lanes: {', '.join(decision.forced_routes)}."
+        if isinstance(result, str) and result:
+            return f"{prefix}\n{result}"
+        return prefix
+
+    async def _handle_background_command(
+        self,
+        event: MessageEvent,
+        *,
+        forced_routes: tuple[str, ...] | list[str] | None = None,
+    ) -> str:
         """Handle /background <prompt> — run a prompt in a separate background session.
 
         Spawns a new AIAgent in a background thread with its own session.
@@ -8909,7 +9012,12 @@ class GatewayRunner:
 
         # Fire-and-forget the background task
         _task = asyncio.create_task(
-            self._run_background_task(prompt, source, task_id)
+            self._run_background_task(
+                prompt,
+                source,
+                task_id,
+                forced_routes=tuple(forced_routes or ()),
+            )
         )
         self._background_tasks.add(_task)
         _task.add_done_callback(self._background_tasks.discard)
@@ -8918,7 +9026,12 @@ class GatewayRunner:
         return f'🔄 Background task started: "{preview}"\nTask ID: {task_id}\nYou can keep chatting — results will appear when done.'
 
     async def _run_background_task(
-        self, prompt: str, source: "SessionSource", task_id: str
+        self,
+        prompt: str,
+        source: "SessionSource",
+        task_id: str,
+        *,
+        forced_routes: tuple[str, ...] | list[str] | None = None,
     ) -> None:
         """Execute a background agent task and deliver the result to the chat."""
         from run_agent import AIAgent
@@ -8948,6 +9061,24 @@ class GatewayRunner:
 
             from hermes_cli.tools_config import _get_platform_tools
             enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+            wake_plan = None
+            ephemeral_prompt = None
+            try:
+                from gateway.background_wakeups import (
+                    build_background_ephemeral_prompt,
+                    resolve_background_wakeup,
+                )
+
+                wake_plan = resolve_background_wakeup(
+                    prompt,
+                    platform=platform_key,
+                    default_toolsets=enabled_toolsets,
+                    forced_routes=tuple(forced_routes or ()),
+                )
+                enabled_toolsets = list(wake_plan.enabled_toolsets or enabled_toolsets)
+                ephemeral_prompt = build_background_ephemeral_prompt(wake_plan) or None
+            except Exception:
+                logger.debug("Background route wakeup resolution skipped", exc_info=True)
             agent_cfg = user_config.get("agent") or {}
             disabled_toolsets = agent_cfg.get("disabled_toolsets") or None
 
@@ -8967,6 +9098,7 @@ class GatewayRunner:
                     verbose_logging=False,
                     enabled_toolsets=enabled_toolsets,
                     disabled_toolsets=disabled_toolsets,
+                    ephemeral_system_prompt=ephemeral_prompt,
                     reasoning_config=reasoning_config,
                     service_tier=self._service_tier,
                     request_overrides=turn_route.get("request_overrides"),
@@ -9000,6 +9132,31 @@ class GatewayRunner:
             response = result.get("final_response", "") if result else ""
             if not response and result and result.get("error"):
                 response = f"Error: {result['error']}"
+
+            if forced_routes:
+                try:
+                    from gateway.worker_evaluator import evaluate_background_worker_outcome
+                    from tools.skill_usage import log_route_usage_event
+
+                    evaluation = evaluate_background_worker_outcome(
+                        prompt=prompt,
+                        route_names=tuple(forced_routes),
+                        response=response,
+                    )
+                    for route in tuple(forced_routes):
+                        log_route_usage_event(
+                            route_name=route,
+                            event="route_worker_outcome",
+                            details={
+                                "task_id": task_id,
+                                "passed": evaluation.passed,
+                                "score": evaluation.score,
+                                "issues": list(evaluation.issues),
+                                "worker_evaluation": evaluation.to_dict(),
+                            },
+                        )
+                except Exception:
+                    logger.debug("Background worker route evaluation skipped", exc_info=True)
 
             # Extract media files from the response
             if response:
@@ -12744,6 +12901,50 @@ class GatewayRunner:
 
         from hermes_cli.tools_config import _get_platform_tools
         enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+        if platform_key == "feishu":
+            try:
+                from gateway.background_wakeups import (
+                    build_feishu_capability_gap_hint,
+                    build_feishu_director_hint,
+                )
+                from gateway.route_decision import (
+                    build_feishu_route_decision_shadow_hint,
+                    resolve_route_decision,
+                )
+
+                director_hint = build_feishu_director_hint()
+                if director_hint:
+                    context_prompt = (
+                        f"{context_prompt}\n\n{director_hint}".strip()
+                        if context_prompt else director_hint
+                    )
+
+                capability_hint = build_feishu_capability_gap_hint(
+                    str(message or ""),
+                    active_toolsets=tuple(enabled_toolsets),
+                )
+                route_shadow_hint = ""
+                route_shadow_hints_enabled = bool(getattr(getattr(self, "config", None), "feishu_route_shadow_hints_enabled", True))
+                if capability_hint and route_shadow_hints_enabled:
+                    auto_dispatch_enabled = bool(getattr(getattr(self, "config", None), "feishu_auto_dispatch_enabled", False))
+                    decision = resolve_route_decision(
+                        str(message or ""),
+                        platform="feishu",
+                        active_toolsets=tuple(enabled_toolsets),
+                        feishu_auto_dispatch_enabled=auto_dispatch_enabled,
+                    )
+                    route_shadow_hint = build_feishu_route_decision_shadow_hint(
+                        decision,
+                        enabled=route_shadow_hints_enabled,
+                    )
+                if capability_hint or route_shadow_hint:
+                    prefix = "\n\n".join(
+                        part for part in (capability_hint, route_shadow_hint) if part
+                    )
+                    message = f"{prefix}\n\n{message}".strip()
+            except Exception as exc:
+                logger.debug("Feishu route hint injection skipped: %s", exc)
+
         agent_cfg_local = user_config.get("agent") or {}
         disabled_toolsets = agent_cfg_local.get("disabled_toolsets") or None
 
