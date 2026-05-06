@@ -65,6 +65,8 @@ _HERMES_CORE_TOOLS = [
     # zero schema footprint. Gated via check_fn in tools/kanban_tools.py.
     "kanban_show", "kanban_complete", "kanban_block", "kanban_heartbeat",
     "kanban_comment", "kanban_create", "kanban_link",
+    # Mixin Network messaging
+    "mixin_send_message", "mixin_send_trending",
 ]
 
 
@@ -276,6 +278,12 @@ TOOLSETS = {
             "spotify_playback", "spotify_devices", "spotify_queue", "spotify_search",
             "spotify_playlists", "spotify_albums", "spotify_library",
         ],
+        "includes": []
+    },
+
+    "mixin": {
+        "description": "Mixin Network messaging — send text/Markdown/app cards via Mixin Messenger bot",
+        "tools": ["mixin_send_message", "mixin_send_trending"],
         "includes": []
     },
 
