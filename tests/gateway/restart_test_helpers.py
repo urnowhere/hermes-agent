@@ -9,8 +9,8 @@ from gateway.session import SessionSource
 
 
 class RestartTestAdapter(BasePlatformAdapter):
-    def __init__(self):
-        super().__init__(PlatformConfig(enabled=True, token="***"), Platform.TELEGRAM)
+    def __init__(self, platform: Platform = Platform.TELEGRAM):
+        super().__init__(PlatformConfig(enabled=True, token="***"), platform)
         self.sent: list[str] = []
         self.sent_calls: list[tuple[str, str, object]] = []
 

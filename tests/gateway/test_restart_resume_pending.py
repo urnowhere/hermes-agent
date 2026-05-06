@@ -42,6 +42,7 @@ from gateway.run import (
 )
 from gateway.session import SessionEntry, SessionSource, SessionStore
 from tests.gateway.restart_test_helpers import (
+    RestartTestAdapter,
     make_restart_runner,
     make_restart_source,
 )
@@ -933,7 +934,7 @@ async def test_restart_banner_uses_try_to_resume_wording():
 
 
 @pytest.mark.asyncio
-async def test_restart_notifies_home_channel_even_without_active_sessions():
+async def test_restart_does_not_notify_home_channel_without_active_sessions():
     runner, adapter = make_restart_runner()
     runner._restart_requested = True
     runner.config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
@@ -944,10 +945,35 @@ async def test_restart_notifies_home_channel_even_without_active_sessions():
 
     await runner._notify_active_sessions_of_shutdown()
 
-    assert adapter.sent == [
-        "⚠️ Gateway restarting — Your current task will be interrupted. "
-        "Send any message after restart and I'll try to resume where you left off."
-    ]
+    assert adapter.sent == []
+
+
+@pytest.mark.asyncio
+async def test_restart_does_not_broadcast_active_session_notice_to_other_home_channels():
+    slack_adapter = RestartTestAdapter(Platform.SLACK)
+    discord_adapter = RestartTestAdapter(Platform.DISCORD)
+    runner, _ = make_restart_runner(adapter=slack_adapter)
+    runner._restart_requested = True
+    runner.config.platforms = {
+        Platform.SLACK: PlatformConfig(enabled=True, token="***"),
+        Platform.DISCORD: PlatformConfig(enabled=True, token="***"),
+    }
+    runner.adapters = {
+        Platform.SLACK: slack_adapter,
+        Platform.DISCORD: discord_adapter,
+    }
+    runner._running_agents["agent:main:slack:dm:C0AVC5PAKRP"] = MagicMock()
+    runner.config.platforms[Platform.DISCORD].home_channel = HomeChannel(
+        platform=Platform.DISCORD,
+        chat_id="1488410119489454130",
+        name="Discord Home",
+    )
+
+    await runner._notify_active_sessions_of_shutdown()
+
+    assert len(slack_adapter.sent) == 1
+    assert "Gateway restarting" in slack_adapter.sent[0]
+    assert discord_adapter.sent == []
 
 
 @pytest.mark.asyncio
@@ -967,7 +993,7 @@ async def test_restart_home_channel_notification_dedupes_active_chat():
 
 
 @pytest.mark.asyncio
-async def test_restart_home_channel_notification_not_deduped_across_threads():
+async def test_restart_active_session_notification_preserves_thread_metadata():
     runner, adapter = make_restart_runner()
     runner._restart_requested = True
     session_key = "agent:main:telegram:group:999"
@@ -989,13 +1015,12 @@ async def test_restart_home_channel_notification_not_deduped_across_threads():
 
     await runner._notify_active_sessions_of_shutdown()
 
-    assert len(adapter.sent) == 2
+    assert len(adapter.sent) == 1
     assert adapter.sent_calls[0][2] == {"thread_id": "topic-7"}
-    assert adapter.sent_calls[1][2] is None
 
 
 @pytest.mark.asyncio
-async def test_restart_home_channel_notification_ignores_false_send_result():
+async def test_restart_home_channel_send_not_attempted_when_no_active_sessions():
     runner, adapter = make_restart_runner()
     runner._restart_requested = True
     runner.config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
@@ -1007,7 +1032,7 @@ async def test_restart_home_channel_notification_ignores_false_send_result():
 
     await runner._notify_active_sessions_of_shutdown()
 
-    adapter.send.assert_called_once()
+    adapter.send.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
