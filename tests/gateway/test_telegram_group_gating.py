@@ -47,6 +47,7 @@ def _group_message(
     chat_id=-100,
     from_user_id=111,
     thread_id=None,
+    from_user_id=111,
     reply_to_bot=False,
     entities=None,
     caption=None,
@@ -61,6 +62,7 @@ def _group_message(
         entities=entities or [],
         caption_entities=caption_entities or [],
         message_thread_id=thread_id,
+        from_user=SimpleNamespace(id=from_user_id),
         chat=SimpleNamespace(id=chat_id, type="group"),
         from_user=SimpleNamespace(id=from_user_id),
         reply_to_message=reply_to_message,
@@ -171,6 +173,44 @@ def test_invalid_regex_patterns_are_ignored():
 
     assert adapter._should_process_message(_group_message("chompy status")) is True
     assert adapter._should_process_message(_group_message("hello everyone")) is False
+
+
+def test_self_bot_messages_are_ignored_in_dm_and_group():
+    # bot.id is 999 (see _make_adapter); require_mention disabled so group
+    # messages would otherwise pass — isolates the self-bot gate.
+    adapter = _make_adapter(require_mention=False)
+
+    # Control: a regular user in the same group IS processed.
+    assert adapter._should_process_message(_group_message("hi", chat_id=-100)) is True
+
+    self_bot_dm = _group_message("[SYSTEM: tick]", chat_id=123, from_user_id=999)
+    self_bot_dm.chat.type = "private"
+    assert adapter._should_process_message(self_bot_dm) is False
+
+    self_bot_group = _group_message("status tick", chat_id=-100, from_user_id=999)
+    assert adapter._should_process_message(self_bot_group) is False
+
+
+def test_other_bots_in_group_are_still_processed():
+    """A different bot's message must not be over-filtered.
+
+    Distinguishes this fix from a blanket ``from_user.is_bot`` check, which would
+    incorrectly drop messages from unrelated bots (weather, music, etc.) sharing
+    the same group chat.
+    """
+    adapter = _make_adapter(require_mention=False)
+    other_bot = _group_message("weather update", chat_id=-100, from_user_id=555)
+    other_bot.from_user = SimpleNamespace(id=555, is_bot=True)
+
+    assert adapter._should_process_message(other_bot) is True
+
+
+def test_missing_from_user_does_not_crash():
+    adapter = _make_adapter(require_mention=False)
+    anon = _group_message("channel post", chat_id=-100)
+    anon.from_user = None
+
+    assert adapter._should_process_message(anon) is True
 
 
 def test_config_bridges_telegram_group_settings(monkeypatch, tmp_path):
