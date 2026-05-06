@@ -822,6 +822,12 @@ DEFAULT_CONFIG = {
         "user_message_preview": {  # CLI: how many submitted user-message lines to echo back in scrollback
             "first_lines": 2,
             "last_lines": 2,
+            "boxed": True,
+            "box_style": "round",  # round, square, double, heavy, ascii
+            "accent_color": "#B084FF",
+            "text_color": "#F2EAFE",
+            "margin_top": 2,
+            "margin_bottom": 2,
         },
         "interim_assistant_messages": True,  # Gateway: show natural mid-turn assistant status messages
         "tool_progress_command": False,  # Enable /verbose command in messaging gateway
@@ -4509,7 +4515,10 @@ def show_config():
     ump = display.get('user_message_preview', {}) if isinstance(display.get('user_message_preview', {}), dict) else {}
     ump_first = ump.get('first_lines', 2)
     ump_last = ump.get('last_lines', 2)
-    print(f"  User preview: first {ump_first} line(s), last {ump_last} line(s)")
+    ump_box = 'boxed' if ump.get('boxed', True) else 'line'
+    ump_box_style = ump.get('box_style', 'round')
+    ump_accent = ump.get('accent_color', '#B084FF')
+    print(f"  User preview: first {ump_first} line(s), last {ump_last} line(s), {ump_box}/{ump_box_style}, {ump_accent}")
 
     # Terminal
     print()

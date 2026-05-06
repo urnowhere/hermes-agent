@@ -2191,6 +2191,22 @@ class HermesCLI:
             _ump_last_lines = 2
         self.user_message_preview_first_lines = max(1, _ump_first_lines)
         self.user_message_preview_last_lines = max(0, _ump_last_lines)
+        self.user_message_preview_boxed = bool(_ump.get("boxed", True))
+        self.user_message_preview_box_style = str(_ump.get("box_style", "round") or "round").strip().lower()
+        if self.user_message_preview_box_style not in {"ascii", "double", "heavy", "round", "square"}:
+            self.user_message_preview_box_style = "round"
+        self.user_message_preview_accent_color = str(_ump.get("accent_color", "#B084FF") or "#B084FF").strip()
+        self.user_message_preview_text_color = str(_ump.get("text_color", "#F2EAFE") or "#F2EAFE").strip()
+        try:
+            _ump_margin_top = int(_ump.get("margin_top", 2))
+        except (TypeError, ValueError):
+            _ump_margin_top = 2
+        try:
+            _ump_margin_bottom = int(_ump.get("margin_bottom", 2))
+        except (TypeError, ValueError):
+            _ump_margin_bottom = 2
+        self.user_message_preview_margin_top = max(0, _ump_margin_top)
+        self.user_message_preview_margin_bottom = max(0, _ump_margin_bottom)
 
         # Streaming display state
         self._stream_buf = ""        # Partial line buffer for line-buffered rendering
@@ -3137,9 +3153,10 @@ class HermesCLI:
 
     def _format_submitted_user_message_preview(self, user_input: str) -> str:
         """Format the submitted user-message scrollback preview."""
+        accent = getattr(self, "user_message_preview_accent_color", _accent_hex())
         lines = user_input.split("\n")
         if len(lines) <= 1:
-            return f"[bold {_accent_hex()}]●[/] [bold]{_escape(user_input)}[/]"
+            return f"[bold {accent}]●[/] [bold]{_escape(user_input)}[/]"
 
         first_lines = int(getattr(self, "user_message_preview_first_lines", 2))
         last_lines = int(getattr(self, "user_message_preview_last_lines", 2))
@@ -3156,7 +3173,7 @@ class HermesCLI:
             tail = []
 
         preview_lines = [
-            f"[bold {_accent_hex()}]●[/] [bold]{_escape(head[0])}[/]"
+            f"[bold {accent}]●[/] [bold]{_escape(head[0])}[/]"
         ]
         preview_lines.extend(f"[bold]{_escape(line)}[/]" for line in head[1:])
 
@@ -3188,12 +3205,36 @@ class HermesCLI:
 
     def _print_user_message_preview(self, user_input: str) -> None:
         """Render a user message using the normal chat scrollback style."""
-        ChatConsole().print(f"[{_accent_hex()}]{'─' * 40}[/]")
+        chat_console = ChatConsole()
+        for _ in range(max(0, int(getattr(self, "user_message_preview_margin_top", 0)))):
+            chat_console.print("")
         text = str(user_input or "")
-        if "\n" in text:
-            ChatConsole().print(self._format_submitted_user_message_preview(text))
+        preview = self._format_submitted_user_message_preview(text)
+        accent = getattr(self, "user_message_preview_accent_color", "#B084FF")
+        text_color = getattr(self, "user_message_preview_text_color", "#F2EAFE")
+        if getattr(self, "user_message_preview_boxed", True):
+            box_styles = {
+                "ascii": rich_box.ASCII,
+                "double": rich_box.DOUBLE,
+                "heavy": rich_box.HEAVY,
+                "round": rich_box.ROUNDED,
+                "square": rich_box.SQUARE,
+            }
+            box_style = box_styles.get(getattr(self, "user_message_preview_box_style", "round"), rich_box.ROUNDED)
+            chat_console.print(Panel(
+                _RichText.from_markup(preview, style=text_color),
+                title=f"[bold {accent}]You[/]",
+                title_align="left",
+                border_style=accent,
+                style=text_color,
+                box=box_style,
+                padding=(0, 1),
+            ))
         else:
-            ChatConsole().print(f"[bold {_accent_hex()}]●[/] [bold]{_escape(text)}[/]")
+            chat_console.print(f"[{accent}]{'─' * 40}[/]")
+            chat_console.print(preview)
+        for _ in range(max(0, int(getattr(self, "user_message_preview_margin_bottom", 0)))):
+            chat_console.print("")
 
     def _stream_reasoning_delta(self, text: str) -> None:
         """Stream reasoning/thinking tokens into a dim box above the response.

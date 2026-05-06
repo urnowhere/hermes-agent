@@ -20,7 +20,16 @@ def _make_cli(user_message_preview=None):
         "display": {
             "compact": False,
             "tool_progress": "all",
-            "user_message_preview": user_message_preview or {"first_lines": 2, "last_lines": 2},
+            "user_message_preview": user_message_preview or {
+                "first_lines": 2,
+                "last_lines": 2,
+                "boxed": True,
+                "box_style": "round",
+                "accent_color": "#B084FF",
+                "text_color": "#F2EAFE",
+                "margin_top": 2,
+                "margin_bottom": 2,
+            },
         },
         "agent": {},
         "terminal": {"env_type": "local"},
@@ -90,3 +99,21 @@ class TestSubmittedUserMessagePreview:
         assert "line3" in rendered
         assert "line4" in rendered
         assert "(+1 more line)" in rendered
+
+    def test_default_preview_uses_purple_box_anchor_and_spacing(self):
+        cli = _make_cli()
+
+        assert cli.user_message_preview_boxed is True
+        assert cli.user_message_preview_box_style == "round"
+        assert cli.user_message_preview_accent_color == "#B084FF"
+        assert cli.user_message_preview_text_color == "#F2EAFE"
+        assert cli.user_message_preview_margin_top == 2
+        assert cli.user_message_preview_margin_bottom == 2
+
+        rendered = cli._format_submitted_user_message_preview("hello")
+        assert "#B084FF" in rendered
+
+    def test_preview_box_style_falls_back_to_round(self):
+        cli = _make_cli({"first_lines": 2, "last_lines": 2, "box_style": "unknown"})
+
+        assert cli.user_message_preview_box_style == "round"
