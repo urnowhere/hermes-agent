@@ -868,6 +868,14 @@ class TestAgentCacheSpilloverLive:
             platform="telegram",
         )
 
+    def _cheap_agent(self):
+        """Minimal agent-shaped object for pure cache locking/cap stress."""
+        agent = MagicMock()
+        agent.client = MagicMock()
+        agent.close = MagicMock(side_effect=lambda: setattr(agent, "client", None))
+        agent.shutdown_memory_provider = MagicMock()
+        return agent
+
     def test_fill_to_cap_then_spillover(self, monkeypatch):
         """Fill to cap with real agents, insert one more, oldest evicted."""
         from gateway import run as gw_run
@@ -942,12 +950,16 @@ class TestAgentCacheSpilloverLive:
         monkeypatch.setattr(gw_run, "_AGENT_CACHE_MAX_SIZE", CAP)
         runner = self._runner()
 
+        # This is a cache-concurrency test, not an AIAgent-constructor stress
+        # test. Use cheap agent-shaped objects so slow CI workers spend the
+        # timeout budget on the cache lock/cap logic under test, not on dozens
+        # of provider/client initializations.
         N_THREADS = 8
         PER_THREAD = 20  # 8 * 20 = 160 inserts into a 16-slot cache
 
         def worker(tid: int):
             for j in range(PER_THREAD):
-                a = self._real_agent()
+                a = self._cheap_agent()
                 key = f"t{tid}-s{j}"
                 with runner._agent_cache_lock:
                     runner._agent_cache[key] = (a, "sig")
