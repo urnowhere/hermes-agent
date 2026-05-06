@@ -869,6 +869,38 @@ def _pool_may_recover_from_rate_limit(
     return len(pool.entries()) > 1
 
 
+def _normalize_fallback_chain(fallback_model: Any) -> List[Dict[str, Any]]:
+    """Return a flat ordered fallback chain from all supported config shapes."""
+    chain: List[Dict[str, Any]] = []
+    seen: set[int] = set()
+
+    def _visit(node: Any) -> None:
+        if isinstance(node, list):
+            for entry in node:
+                _visit(entry)
+            return
+        if not isinstance(node, dict):
+            return
+
+        node_id = id(node)
+        if node_id in seen:
+            return
+        seen.add(node_id)
+
+        if node.get("provider") and node.get("model"):
+            chain.append({
+                key: value
+                for key, value in node.items()
+                if key not in {"fallback_model", "fallback_providers"}
+            })
+
+        _visit(node.get("fallback_providers"))
+        _visit(node.get("fallback_model"))
+
+    _visit(fallback_model)
+    return chain
+
+
 def _qwen_portal_headers() -> dict:
     """Return default HTTP headers required by Qwen Portal API."""
     import platform as _plat
@@ -1589,17 +1621,9 @@ class AIAgent:
         
         # Provider fallback chain — ordered list of backup providers tried
         # when the primary is exhausted (rate-limit, overload, connection
-        # failure).  Supports both legacy single-dict ``fallback_model`` and
-        # new list ``fallback_providers`` format.
-        if isinstance(fallback_model, list):
-            self._fallback_chain = [
-                f for f in fallback_model
-                if isinstance(f, dict) and f.get("provider") and f.get("model")
-            ]
-        elif isinstance(fallback_model, dict) and fallback_model.get("provider") and fallback_model.get("model"):
-            self._fallback_chain = [fallback_model]
-        else:
-            self._fallback_chain = []
+        # failure). Supports legacy single-dict ``fallback_model``, list-based
+        # ``fallback_providers``, and older nested ``fallback_model`` blocks.
+        self._fallback_chain = _normalize_fallback_chain(fallback_model)
         self._fallback_index = 0
         self._fallback_activated = getattr(self, "_fallback_activated", False)
         # Legacy attribute kept for backward compat (tests, external callers)

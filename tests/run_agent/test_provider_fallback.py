@@ -81,6 +81,21 @@ class TestFallbackChainInit:
         agent = _make_agent(fallback_model={"model": "gpt-4o"})
         assert agent._fallback_chain == []
 
+    def test_nested_legacy_fallback_model_flattens_chain(self):
+        fbs = {
+            "provider": "groq",
+            "model": "llama-3.3-70b",
+            "fallback_model": {
+                "provider": "mistral",
+                "model": "mistral-large-latest",
+            },
+        }
+        agent = _make_agent(fallback_model=fbs)
+        assert agent._fallback_chain == [
+            {"provider": "groq", "model": "llama-3.3-70b"},
+            {"provider": "mistral", "model": "mistral-large-latest"},
+        ]
+
 
 # ── Chain advancement ─────────────────────────────────────────────────────
 
@@ -155,6 +170,26 @@ class TestFallbackChainAdvancement:
             ]
             assert agent._try_activate_fallback() is True
             assert agent.model == "gpt-4o"
+
+    def test_nested_fallback_cascades_when_first_fallback_fails(self):
+        fbs = {
+            "provider": "groq",
+            "model": "llama-3.3-70b",
+            "fallback_model": {
+                "provider": "mistral",
+                "model": "mistral-large-latest",
+            },
+        }
+        agent = _make_agent(fallback_model=fbs)
+        with patch("agent.auxiliary_client.resolve_provider_client") as mock_rpc:
+            mock_rpc.side_effect = [
+                RuntimeError("HTTP 401 invalid key"),
+                (_mock_client(), "mistral-large-latest"),
+            ]
+            assert agent._try_activate_fallback() is True
+            assert agent.provider == "mistral"
+            assert agent.model == "mistral-large-latest"
+            assert agent._fallback_index == 2
 
     def test_resolves_key_env_for_fallback_provider(self):
         fbs = [
