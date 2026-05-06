@@ -48,6 +48,17 @@ def _make_agent(monkeypatch):
         # real interrupt() method can fan out to concurrent-tool workers.
         _active_children: list = []
 
+        # PR #18108 added guardrail gating to ``_execute_tool_calls_concurrent``;
+        # the stub doesn't exercise that path so a permissive mock is enough,
+        # but the attribute must exist or AttributeError aborts the test
+        # before the interrupt logic under test runs.
+        _tool_guardrails = MagicMock(
+            **{
+                "before_call.return_value": MagicMock(allows_execution=True),
+                "after_call.return_value": MagicMock(allows_execution=True),
+            }
+        )
+
         def __init__(self):
             # Instance-level (not class-level) so each test gets a fresh set.
             self._tool_worker_threads: set = set()
@@ -81,6 +92,10 @@ def _make_agent(monkeypatch):
     # tool batch. Stub it as a no-op — this test exercises interrupt
     # fanout, not steer injection.
     stub._apply_pending_steer_to_tool_results = lambda *a, **kw: None
+    # Guardrail post-processing was added to the concurrent path; the
+    # interrupt tests don't exercise guardrails so just pass results
+    # through unchanged.
+    stub._append_guardrail_observation = lambda name, args, result, failed=False: result
     stub._invoke_tool = MagicMock(side_effect=lambda *a, **kw: '{"ok": true}')
     return stub
 
@@ -107,7 +122,10 @@ def test_concurrent_interrupt_cancels_pending(monkeypatch):
 
     original_invoke = agent._invoke_tool
 
-    def slow_tool(name, args, task_id, call_id=None):
+    def slow_tool(name, args, task_id, call_id=None, **kwargs):
+        # ``_execute_tool_calls_concurrent`` now forwards ``messages=`` and
+        # ``pre_tool_block_checked=`` into ``_invoke_tool``; absorb any future
+        # plumbing kwargs without forcing a test rewrite each time.
         if name == "slow_one":
             # Block until the test sets the interrupt
             barrier.wait(timeout=10)
@@ -184,7 +202,10 @@ def test_running_concurrent_worker_sees_is_interrupted(monkeypatch):
     observed = {"saw_true": False, "poll_count": 0, "worker_tid": None}
     worker_started = threading.Event()
 
-    def polling_tool(name, args, task_id, call_id=None, messages=None):
+    def polling_tool(name, args, task_id, call_id=None, messages=None, **kwargs):
+        # Absorb any future ``_invoke_tool`` plumbing kwargs (e.g.
+        # ``pre_tool_block_checked``) without forcing this fixture to
+        # track signature drift.
         observed["worker_tid"] = threading.current_thread().ident
         worker_started.set()
         deadline = time.monotonic() + 5.0
