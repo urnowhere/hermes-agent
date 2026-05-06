@@ -16,6 +16,7 @@ Inspired by Block/goose's SubdirectoryHintTracker.
 import logging
 import os
 import shlex
+import subprocess
 from pathlib import Path
 from typing import Dict, Any, Optional, Set
 
@@ -45,6 +46,29 @@ _COMMAND_TOOLS = {"terminal"}
 # Prevents scanning all the way to / for deeply nested paths.
 _MAX_ANCESTOR_WALK = 5
 
+def _find_git_root(start: Path) -> Optional[Path]:
+    """Return the git repository root containing *start*, or None."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=str(start) if start.is_dir() else str(start.parent),
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return Path(result.stdout.strip()).resolve()
+    except Exception:
+        pass
+    return None
+
+
+def _is_within_workspace(path: Path, workspace_root: Path) -> bool:
+    """Check if *path* is inside *workspace_root* (symlink-safe)."""
+    resolved = path.resolve()
+    resolved_root = workspace_root.resolve()
+    # Use trailing sep to prevent /foo/bar matching /foo/barbaz
+    return resolved == resolved_root or str(resolved).startswith(str(resolved_root) + os.sep)
+
+
 class SubdirectoryHintTracker:
     """Track which directories the agent visits and load hints on first access.
 
@@ -63,6 +87,9 @@ class SubdirectoryHintTracker:
         self._loaded_dirs: Set[Path] = set()
         # Pre-mark the working dir as loaded (startup context handles it)
         self._loaded_dirs.add(self.working_dir)
+        # Workspace boundary: git root if available, otherwise working_dir
+        git_root = _find_git_root(self.working_dir)
+        self._workspace_root = git_root if git_root else self.working_dir
 
     def check_tool_call(
         self,
@@ -111,11 +138,13 @@ class SubdirectoryHintTracker:
     def _add_path_candidate(self, raw_path: str, candidates: Set[Path]):
         """Resolve a raw path and add its directory + ancestors to candidates.
 
-        Walks up from the resolved directory toward the filesystem root,
-        stopping at the first directory already in ``_loaded_dirs`` (or after
-        ``_MAX_ANCESTOR_WALK`` levels).  This ensures that reading
-        ``project/src/main.py`` discovers ``project/AGENTS.md`` even when
-        ``project/src/`` has no hint files of its own.
+        Walks up from the resolved directory toward the workspace root,
+        stopping at the first directory already in ``_loaded_dirs``, at the
+        workspace boundary, or after ``_MAX_ANCESTOR_WALK`` levels.
+
+        Paths outside the workspace boundary are silently skipped to prevent
+        unrelated AGENTS.md / CLAUDE.md / .cursorrules files from being
+        injected into the agent context.
         """
         try:
             p = Path(raw_path).expanduser()
@@ -125,9 +154,14 @@ class SubdirectoryHintTracker:
             # Use parent if it's a file path (has extension or doesn't exist as dir)
             if p.suffix or (p.exists() and p.is_file()):
                 p = p.parent
-            # Walk up ancestors — stop at already-loaded or root
+            # Skip paths outside the workspace boundary entirely
+            if not _is_within_workspace(p, self._workspace_root):
+                return
+            # Walk up ancestors — stop at already-loaded, workspace root, or fs root
             for _ in range(_MAX_ANCESTOR_WALK):
                 if p in self._loaded_dirs:
+                    break
+                if not _is_within_workspace(p, self._workspace_root):
                     break
                 if self._is_valid_subdir(p):
                     candidates.add(p)
