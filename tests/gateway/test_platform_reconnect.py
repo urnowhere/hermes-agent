@@ -294,20 +294,23 @@ class TestPlatformReconnectWatcher:
         assert runner._failed_platforms[Platform.TELEGRAM]["attempts"] == 2
 
     @pytest.mark.asyncio
-    async def test_reconnect_gives_up_after_max_attempts(self):
-        """After max attempts, platform should be removed from retry queue."""
+    async def test_reconnect_retryable_past_previous_max_attempts(self):
+        """Retryable failures should remain queued even after many attempts."""
         runner = _make_runner()
 
         platform_config = PlatformConfig(enabled=True, token="test")
         runner._failed_platforms[Platform.TELEGRAM] = {
             "config": platform_config,
-            "attempts": 20,  # At max
+            "attempts": 20,
             "next_retry": time.monotonic() - 1,
         }
 
+        fail_adapter = StubAdapter(
+            succeed=False, fatal_error="DNS failure", fatal_retryable=True
+        )
         real_sleep = asyncio.sleep
 
-        with patch.object(runner, "_create_adapter") as mock_create:
+        with patch.object(runner, "_create_adapter", return_value=fail_adapter) as mock_create:
             async def run_one_iteration():
                 runner._running = True
                 call_count = 0
@@ -324,8 +327,9 @@ class TestPlatformReconnectWatcher:
 
             await run_one_iteration()
 
-        assert Platform.TELEGRAM not in runner._failed_platforms
-        mock_create.assert_not_called()  # Should give up without trying
+        assert Platform.TELEGRAM in runner._failed_platforms
+        assert runner._failed_platforms[Platform.TELEGRAM]["attempts"] == 21
+        mock_create.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_reconnect_skips_when_not_time_yet(self):

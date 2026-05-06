@@ -3775,10 +3775,9 @@ class GatewayRunner:
         """Background task that periodically retries connecting failed platforms.
 
         Uses exponential backoff: 30s → 60s → 120s → 240s → 300s (cap).
-        Stops retrying a platform after 20 failed attempts or if the error
-        is non-retryable (e.g. bad auth token).
+        Retryable failures remain in the reconnect queue until they recover
+        or become non-retryable (e.g. bad auth token).
         """
-        _MAX_ATTEMPTS = 20
         _BACKOFF_CAP = 300  # 5 minutes max between retries
 
         await asyncio.sleep(10)  # initial delay — let startup finish
@@ -3799,19 +3798,20 @@ class GatewayRunner:
                 if now < info["next_retry"]:
                     continue  # not time yet
 
-                if info["attempts"] >= _MAX_ATTEMPTS:
-                    logger.warning(
-                        "Giving up reconnecting %s after %d attempts",
-                        platform.value, info["attempts"],
-                    )
-                    del self._failed_platforms[platform]
-                    continue
-
                 platform_config = info["config"]
                 attempt = info["attempts"] + 1
+                retry_delay = max(0, int(info["next_retry"] - now))
+                if attempt % 10 == 0:
+                    logger.warning(
+                        "Still retrying %s after %d failed attempt(s)",
+                        platform.value,
+                        info["attempts"],
+                    )
                 logger.info(
-                    "Reconnecting %s (attempt %d/%d)...",
-                    platform.value, attempt, _MAX_ATTEMPTS,
+                    "Reconnecting %s (attempt %d, retry delay %ds)...",
+                    platform.value,
+                    attempt,
+                    retry_delay,
                 )
 
                 try:
