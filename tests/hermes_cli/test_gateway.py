@@ -15,6 +15,17 @@ def _install_fake_gateway_run(monkeypatch, start_gateway):
     monkeypatch.setitem(sys.modules, "gateway.run", module)
 
 
+def _disable_service_refresh(monkeypatch):
+    monkeypatch.setattr(gateway, "supports_systemd_services", lambda: False)
+    monkeypatch.setattr(
+        gateway,
+        "refresh_systemd_unit_if_needed",
+        lambda system=False: pytest.fail(
+            "foreground gateway tests must not refresh service units"
+        ),
+    )
+
+
 def test_run_gateway_exits_cleanly_on_keyboard_interrupt(monkeypatch, capsys):
     calls = []
 
@@ -26,6 +37,7 @@ def test_run_gateway_exits_cleanly_on_keyboard_interrupt(monkeypatch, capsys):
         raise KeyboardInterrupt
 
     _install_fake_gateway_run(monkeypatch, fake_start_gateway)
+    _disable_service_refresh(monkeypatch)
     monkeypatch.setattr(gateway.asyncio, "run", fake_asyncio_run)
 
     gateway.run_gateway()
@@ -44,6 +56,7 @@ def test_run_gateway_exits_nonzero_when_start_gateway_reports_failure(monkeypatc
         return object()
 
     _install_fake_gateway_run(monkeypatch, fake_start_gateway)
+    _disable_service_refresh(monkeypatch)
     monkeypatch.setattr(gateway.asyncio, "run", lambda coro: False)
 
     with pytest.raises(SystemExit) as exc_info:
