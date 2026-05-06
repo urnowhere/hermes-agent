@@ -5055,7 +5055,12 @@ class AIAgent:
 
         from hermes_time import now as _hermes_now
         now = _hermes_now()
-        timestamp_line = f"Conversation started: {now.strftime('%A, %B %d, %Y %I:%M %p')}"
+        # NOTE: Only the date is included here — not the time.  The full
+        # timestamp changes every session and invalidates KV-cache attention
+        # from the system prompt on subsequent sessions.  Keeping just the
+        # date preserves cache hits across sessions on the same day.  If the
+        # user needs the precise time, it's available via tools anyway.
+        timestamp_line = f"Conversation started: {now.strftime('%A, %B %d, %Y')}"
         if self.pass_session_id and self.session_id:
             timestamp_line += f"\nSession ID: {self.session_id}"
         if self.model:
@@ -10651,7 +10656,7 @@ class AIAgent:
         self._incomplete_scratchpad_retries = 0
         self._codex_incomplete_retries = 0
         self._thinking_prefill_retries = 0
-        self._post_tool_empty_retried = False
+        self._post_tool_empty_retries = 0
         self._last_content_with_tools = None
         self._last_content_tools_all_housekeeping = False
         self._mute_post_response = False
@@ -11217,6 +11222,18 @@ class AIAgent:
             # lone surrogates (U+D800-U+DFFF) that crash json.dumps() inside
             # the OpenAI SDK. Sanitizing here prevents the 3-retry cycle.
             _sanitize_messages_surrogates(api_messages)
+
+            # Safety net: if context compression or session resume stripped all
+            # user messages, the upstream provider (e.g. Airrouter/litellm) will
+            # reject the request with 400 "No user query found in messages",
+            # which the jmunch gateway converts to a 502.  Detect this and
+            # inject a continuation prompt so the model can keep going.
+            if not any(m.get("role") == "user" for m in api_messages):
+                api_messages.append({"role": "user", "content": "[System: please continue the conversation from your last response, taking the next appropriate action or providing a final response to the user."})
+                request_logger.info(
+                    "Injected continuation prompt: no user messages found in api_messages (session=%s)",
+                    self.session_id or "-",
+                )
 
             # Calculate approximate request size for logging
             total_chars = sum(len(str(msg)) for msg in api_messages)
@@ -13490,7 +13507,7 @@ class AIAgent:
                     # Successful tool execution — reset the post-tool nudge
                     # flag so it can fire again if the model goes empty on
                     # a LATER tool round.
-                    self._post_tool_empty_retried = False
+                    self._post_tool_empty_retries = 0
 
                     messages.append(assistant_msg)
                     self._emit_interim_assistant_message(assistant_msg)
@@ -13683,21 +13700,22 @@ class AIAgent:
                         )
                         if (
                             _prior_was_tool
-                            and not getattr(self, "_post_tool_empty_retried", False)
+                            and getattr(self, "_post_tool_empty_retries", 0) < 2
                             and not _has_inline_thinking  # thinking model still working — let prefill handle
                         ):
-                            self._post_tool_empty_retried = True
+                            self._post_tool_empty_retries = getattr(self, "_post_tool_empty_retries", 0) + 1
                             # Clear stale narration so it doesn't resurface
                             # on a later empty response after the nudge.
                             self._last_content_with_tools = None
                             self._last_content_tools_all_housekeeping = False
                             logger.info(
                                 "Empty response after tool calls — nudging model "
-                                "to continue processing"
+                                "to continue processing (attempt %d/2)",
+                                self._post_tool_empty_retries,
                             )
                             self._emit_status(
-                                "⚠️ Model returned empty after tool calls — "
-                                "nudging to continue"
+                                f"⚠️ Model returned empty after tool calls — "
+                                f"nudging to continue ({self._post_tool_empty_retries}/2)"
                             )
                             # Append the empty assistant message first so the
                             # message sequence stays valid:
@@ -13707,13 +13725,43 @@ class AIAgent:
                             _nudge_msg = self._build_assistant_message(assistant_message, finish_reason)
                             _nudge_msg["content"] = "(empty)"
                             messages.append(_nudge_msg)
-                            messages.append({
-                                "role": "user",
-                                "content": (
+
+                            if self._post_tool_empty_retries >= 2:
+                                # ── Strong nudge with context reinjection ──
+                                # Second attempt failed — reinject the tool results
+                                # as a summary so the model has something concrete
+                                # to work with.
+                                _tool_summaries = []
+                                for _m in messages[-10:]:  # scan recent messages
+                                    if _m.get("role") == "tool":
+                                        _name = _m.get("name", "unknown")
+                                        _content = _m.get("content", "")
+                                        # Truncate long tool outputs
+                                        _preview = _content[:300]
+                                        if len(_content) > 300:
+                                            _preview += f" [...{len(_content)} chars total]"
+                                        _tool_summaries.append(f"- {_name}: {_preview}")
+
+                                _nudge_text = (
+                                    "You just executed tool calls but didn't process the results. "
+                                    "Here's what you need to respond to:\n\n"
+                                )
+                                if _tool_summaries:
+                                    _nudge_text += "Tool results:\n" + "\n".join(_tool_summaries) + "\n\n"
+                                _nudge_text += (
+                                    "Please provide your response based on these tool results. "
+                                    "Do not return an empty response."
+                                )
+                            else:
+                                _nudge_text = (
                                     "You just executed tool calls but returned an "
                                     "empty response. Please process the tool "
                                     "results above and continue with the task."
-                                ),
+                                )
+
+                            messages.append({
+                                "role": "user",
+                                "content": _nudge_text,
                             })
                             continue
 
