@@ -87,6 +87,7 @@ class SessionSource:
     chat_topic: Optional[str] = None  # Channel topic/description (Discord, Slack)
     user_id_alt: Optional[str] = None  # Platform-specific stable alt ID (Signal UUID, Feishu union_id)
     chat_id_alt: Optional[str] = None  # Signal group internal ID
+    robot_code: Optional[str] = None  # DingTalk robotCode for proactive media sends
     is_bot: bool = False  # True when the message author is a bot/webhook (Discord)
     guild_id: Optional[str] = None  # Discord guild / Slack workspace / Matrix server scope
     parent_chat_id: Optional[str] = None  # Parent channel when chat_id refers to a thread
@@ -134,6 +135,8 @@ class SessionSource:
             d["parent_chat_id"] = self.parent_chat_id
         if self.message_id:
             d["message_id"] = self.message_id
+        if self.robot_code:
+            d["robot_code"] = self.robot_code
         return d
 
     @classmethod
@@ -152,6 +155,7 @@ class SessionSource:
             guild_id=data.get("guild_id"),
             parent_chat_id=data.get("parent_chat_id"),
             message_id=data.get("message_id"),
+            robot_code=data.get("robot_code"),
         )
     
 
@@ -893,6 +897,10 @@ class SessionStore:
                 else:
                     reset_reason = self._should_reset(entry, source)
                 if not reset_reason:
+                    entry.origin = source
+                    entry.display_name = source.chat_name
+                    entry.platform = source.platform
+                    entry.chat_type = source.chat_type
                     entry.updated_at = now
                     self._save()
                     return entry

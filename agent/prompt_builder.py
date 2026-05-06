@@ -484,6 +484,16 @@ PLATFORM_HINTS = {
         "downloaded and sent as native photos. Do NOT tell the user you lack file-sending "
         "capability — use MEDIA: syntax whenever a file delivery is appropriate."
     ),
+    "dingtalk": (
+        "You are on DingTalk (钉钉). Markdown support is limited, so keep formatting simple. "
+        "You CAN send media files natively — to deliver a file to the user, include "
+        "MEDIA:/absolute/path/to/file in your response. Images (.png, .jpg, .jpeg, .webp, .gif) "
+        "are sent as native DingTalk image messages, videos are sent inline when supported, and "
+        "other files arrive as downloadable attachments. You can also include image URLs in markdown "
+        "format ![alt](url) and they may be sent as native images when routed through a compatible "
+        "delivery path. Do NOT tell the user that you can only send text or that file sending is "
+        "unsupported on DingTalk — use MEDIA: syntax whenever a file delivery is appropriate."
+    ),
     "qqbot": (
         "You are on QQ, a popular Chinese messaging platform. QQ supports markdown formatting "
         "and emoji. You can send media files natively: include MEDIA:/absolute/path/to/file in "
