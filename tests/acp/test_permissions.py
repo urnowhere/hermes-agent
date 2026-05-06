@@ -87,3 +87,32 @@ class TestApprovalMapping:
             result = cb("echo hi", "demo")
 
         assert result == "deny"
+
+    def test_approval_uses_hermes_config_timeout_when_not_provided(self):
+        """ACP approvals should inherit Hermes approvals.timeout when timeout=None."""
+        loop = MagicMock(spec=asyncio.AbstractEventLoop)
+        mock_rp = MagicMock(name="request_permission")
+        future = MagicMock(spec=Future)
+        future.result.return_value = _make_response(AllowedOutcome(option_id="allow_once", outcome="selected"))
+
+        with patch("acp_adapter.permissions.asyncio.run_coroutine_threadsafe", return_value=future), \
+             patch("tools.approval._get_approval_timeout", return_value=86400):
+            cb = make_approval_callback(mock_rp, loop, session_id="s1")
+            result = cb("rm -rf /", "dangerous")
+
+        future.result.assert_called_once_with(timeout=86400.0)
+        assert result == "once"
+
+    def test_non_positive_timeout_waits_indefinitely(self):
+        """A non-positive timeout should call Future.result() with no timeout."""
+        loop = MagicMock(spec=asyncio.AbstractEventLoop)
+        mock_rp = MagicMock(name="request_permission")
+        future = MagicMock(spec=Future)
+        future.result.return_value = _make_response(AllowedOutcome(option_id="allow_once", outcome="selected"))
+
+        with patch("acp_adapter.permissions.asyncio.run_coroutine_threadsafe", return_value=future):
+            cb = make_approval_callback(mock_rp, loop, session_id="s1", timeout=0)
+            result = cb("rm -rf /", "dangerous")
+
+        future.result.assert_called_once_with()
+        assert result == "once"

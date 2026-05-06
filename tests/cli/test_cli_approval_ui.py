@@ -117,6 +117,28 @@ class TestCliApprovalUi:
         thread.join(timeout=2)
         assert result["value"] == "deny"
 
+
+    def test_approval_callback_uses_configured_timeout(self):
+        cli = _make_cli_stub()
+        command = "rm -f /tmp/test-file"
+        captured = {}
+
+        def _fake_get(self, timeout=None):
+            captured["poll_timeout"] = timeout
+            captured["remaining_before_expire"] = cli._approval_deadline - time.monotonic()
+            cli._approval_deadline = time.monotonic() - 1
+            raise queue.Empty
+
+        with patch.object(cli_module, "CLI_CONFIG", {"approvals": {"timeout": 86400}}), \
+             patch.object(queue.Queue, "get", _fake_get), \
+             patch.object(cli_module, "_cprint"):
+            result = cli._approval_callback(command, "delete temp file")
+
+        assert result == "deny"
+        assert captured["poll_timeout"] == 1
+        assert captured["remaining_before_expire"] > 86000
+        assert cli._approval_deadline == 0
+
     def test_handle_approval_selection_view_expands_in_place(self):
         cli = _make_cli_stub()
         cli._approval_state = {

@@ -27,7 +27,7 @@ def make_approval_callback(
     request_permission_fn: Callable,
     loop: asyncio.AbstractEventLoop,
     session_id: str,
-    timeout: float = 60.0,
+    timeout: float | None = None,
 ) -> Callable[[str, str], str]:
     """
     Return a hermes-compatible ``approval_callback(command, description) -> str``
@@ -38,7 +38,16 @@ def make_approval_callback(
         loop: The event loop on which the ACP connection lives.
         session_id: Current ACP session id.
         timeout: Seconds to wait for a response before auto-denying.
+            If None, use Hermes approvals.timeout config. If <= 0, wait indefinitely.
     """
+
+    if timeout is None:
+        try:
+            from tools.approval import _get_approval_timeout
+
+            timeout = float(_get_approval_timeout())
+        except Exception:
+            timeout = 60.0
 
     def _callback(command: str, description: str) -> str:
         options = [
@@ -58,7 +67,10 @@ def make_approval_callback(
 
         try:
             future = asyncio.run_coroutine_threadsafe(coro, loop)
-            response = future.result(timeout=timeout)
+            if timeout is not None and timeout <= 0:
+                response = future.result()
+            else:
+                response = future.result(timeout=timeout)
         except (FutureTimeout, Exception) as exc:
             logger.warning("Permission request timed out or failed: %s", exc)
             return "deny"
