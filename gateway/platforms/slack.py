@@ -34,6 +34,7 @@ import sys
 from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 
+from hermes_constants import get_hermes_home
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.helpers import MessageDeduplicator
 from gateway.platforms.base import (
@@ -290,6 +291,13 @@ class SlackAdapter(BasePlatformAdapter):
         self._bot_user_id: Optional[str] = None
         self._user_name_cache: Dict[str, str] = {}  # user_id → display name
         self._socket_mode_task: Optional[asyncio.Task] = None
+        # True multi-workspace Socket Mode: one app/handler/task per account.
+        self._apps: Dict[str, Any] = {}
+        self._handlers: Dict[str, Any] = {}
+        self._socket_mode_tasks: Dict[str, asyncio.Task] = {}
+        self._token_lock_identities: List[str] = []
+        self._platform_lock_identity: Optional[str] = None
+        self._platform_lock_scope: Optional[str] = None
         # Multi-workspace support
         self._team_clients: Dict[str, Any] = {}   # team_id → WebClient
         self._team_bot_user_ids: Dict[str, str] = {}          # team_id → bot_user_id
@@ -312,7 +320,7 @@ class SlackAdapter(BasePlatformAdapter):
         # AI Assistant lifecycle events can arrive before/alongside message
         # events, and they carry the user/thread identity needed for stable
         # session + memory scoping.
-        self._assistant_threads: Dict[Tuple[str, str], Dict[str, str]] = {}
+        self._assistant_threads: Dict[Tuple[str, ...], Dict[str, str]] = {}
         self._ASSISTANT_THREADS_MAX = 5000
         # Cache for _fetch_thread_context results: cache_key → _ThreadContextCache
         self._thread_context_cache: Dict[str, _ThreadContextCache] = {}
@@ -321,12 +329,55 @@ class SlackAdapter(BasePlatformAdapter):
         self._reacting_message_ids: set = set()
         # Track active assistant thread status indicators so stop_typing can
         # clear them (chat_id → thread_ts).
-        self._active_status_threads: Dict[str, str] = {}
+        self._active_status_threads: Dict[Any, str] = {}
         # Slash-command contexts: stash response_url + user_id so send()
         # can route the first reply ephemerally.  Keyed by
-        # (channel_id, user_id) to avoid cross-user collisions.
+        # (team_id, channel_id, user_id) to avoid cross-workspace and
+        # cross-user collisions.
         # Each value: {"response_url": str, "ts": float}
-        self._slash_command_contexts: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._slash_command_contexts: Dict[Tuple[str, ...], Dict[str, Any]] = {}
+
+    def _channel_routes_path(self) -> _Path:
+        return get_hermes_home() / "slack_channel_teams.json"
+
+    def _load_channel_team_routes(self) -> None:
+        """Load persisted channel→team routing learned from previous traffic."""
+        try:
+            path = self._channel_routes_path()
+            if not path.exists():
+                return
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                self._channel_team.update(
+                    {
+                        str(channel_id): str(team_id)
+                        for channel_id, team_id in data.items()
+                        if channel_id and team_id
+                    }
+                )
+        except Exception as e:
+            logger.warning("[Slack] Failed to load %s: %s", self._channel_routes_path(), e)
+
+    def _persist_channel_team_routes(self) -> None:
+        """Persist channel→team routing so outbound sends survive restarts."""
+        try:
+            path = self._channel_routes_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(self._channel_team, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.warning("[Slack] Failed to write %s: %s", self._channel_routes_path(), e)
+
+    def _record_channel_team(self, channel_id: str, team_id: str) -> None:
+        """Remember which workspace owns a Slack channel and persist the mapping."""
+        if not channel_id or not team_id:
+            return
+        if self._channel_team.get(channel_id) == team_id:
+            return
+        self._channel_team[channel_id] = team_id
+        self._persist_channel_team_routes()
 
     def _describe_slack_api_error(self, response: Any, *, file_obj: Optional[Dict[str, Any]] = None) -> Optional[str]:
         """Convert Slack API auth/permission failures into actionable user-facing text."""
@@ -394,7 +445,7 @@ class SlackAdapter(BasePlatformAdapter):
     # as ephemeral if the command handler was slow or dropped.
 
     def _pop_slash_context(
-        self, chat_id: str,
+        self, chat_id: str, team_id: str = "",
     ) -> Optional[Dict[str, Any]]:
         """Return and remove the slash-command context for *chat_id*, if fresh.
 
@@ -416,16 +467,27 @@ class SlackAdapter(BasePlatformAdapter):
         for k in stale_keys:
             self._slash_command_contexts.pop(k, None)
 
-        # Precise match: (channel_id, user_id) from ContextVar.
+        team_id = team_id or self._channel_team.get(chat_id, "")
+
+        # Precise match: (team_id, channel_id, user_id) from ContextVar.
         uid = _slash_user_id.get()
         if uid:
-            return self._slash_command_contexts.pop((chat_id, uid), None)
+            context = None
+            if team_id:
+                context = self._slash_command_contexts.pop((team_id, chat_id, uid), None)
+            if context is None:
+                context = self._slash_command_contexts.pop((chat_id, uid), None)
+            if context is not None:
+                return context
 
         # Fallback: channel-only scan (only reachable when ContextVar is
         # unset, i.e. send() called outside a slash-command async context).
         match_key = None
         for key in list(self._slash_command_contexts):
-            if key[0] == chat_id:
+            if len(key) == 3 and key[0] == team_id and key[1] == chat_id:
+                match_key = key
+                break
+            if len(key) == 2 and not team_id and key[0] == chat_id:
                 match_key = key
                 break
         if match_key is None:
@@ -482,6 +544,184 @@ class SlackAdapter(BasePlatformAdapter):
         # Non-fatal — the user saw the initial ack already.
         return SendResult(success=True, message_id=None)
 
+    def _load_accounts(self) -> List[Dict[str, Any]]:
+        """Load Slack account configs.
+
+        `slack_accounts.json` enables true multi-workspace Socket Mode: each
+        account gets its own bot token, app token, AsyncApp, and websocket.
+        The env-var path remains the backward-compatible fallback.
+        """
+        accounts_file = get_hermes_home() / "slack_accounts.json"
+        if accounts_file.exists():
+            try:
+                data = json.loads(accounts_file.read_text(encoding="utf-8"))
+            except Exception as e:
+                logger.warning("[Slack] Failed to read %s: %s", accounts_file, e)
+            else:
+                accounts: List[Dict[str, Any]] = []
+                if isinstance(data, list):
+                    for idx, entry in enumerate(data):
+                        if not isinstance(entry, dict):
+                            logger.warning("[Slack] Ignoring non-object account at index %d", idx)
+                            continue
+                        name = str(entry.get("name") or f"account-{idx}")
+                        bot_token = str(entry.get("bot_token") or "").strip()
+                        app_token = str(entry.get("app_token") or "").strip()
+                        if not bot_token or not app_token:
+                            logger.warning(
+                                "[Slack] Account %s missing bot_token or app_token; skipping",
+                                name,
+                            )
+                            continue
+                        accounts.append({
+                            "name": name,
+                            "bot_token": bot_token,
+                            "app_token": app_token,
+                        })
+                else:
+                    logger.warning("[Slack] %s must contain a JSON array", accounts_file)
+                if accounts:
+                    logger.info("[Slack] Loaded %d account(s) from %s", len(accounts), accounts_file)
+                    return accounts
+
+        raw_token = self.config.token
+        app_token = os.getenv("SLACK_APP_TOKEN")
+        if not raw_token:
+            logger.error("[Slack] SLACK_BOT_TOKEN not set")
+            return []
+        if not app_token:
+            logger.error("[Slack] SLACK_APP_TOKEN not set")
+            return []
+
+        bot_tokens = [token.strip() for token in raw_token.split(",") if token.strip()]
+
+        tokens_file = get_hermes_home() / "slack_tokens.json"
+        if tokens_file.exists():
+            try:
+                saved = json.loads(tokens_file.read_text(encoding="utf-8"))
+                for team_id, entry in saved.items():
+                    token = entry.get("token", "") if isinstance(entry, dict) else ""
+                    if token and token not in bot_tokens:
+                        bot_tokens.append(token)
+                        team_label = entry.get("team_name", team_id) if isinstance(entry, dict) else team_id
+                        logger.info("[Slack] Loaded saved token for workspace %s", team_label)
+            except Exception as e:
+                logger.warning("[Slack] Failed to read %s: %s", tokens_file, e)
+
+        if not bot_tokens:
+            logger.error("[Slack] SLACK_BOT_TOKEN did not contain a usable token")
+            return []
+
+        return [{
+            "name": "default",
+            "bot_token": bot_tokens[0],
+            "app_token": app_token,
+            "_extra_bot_tokens": bot_tokens[1:],
+        }]
+
+    def _register_app_handlers(self, app: Any) -> None:
+        """Register Bolt event/command/action handlers on one Slack app."""
+        @app.event("message")
+        async def handle_message_event(event, say):
+            await self._handle_slack_message(event)
+
+        @app.event("app_mention")
+        async def handle_app_mention(event, say):
+            await self._handle_slack_message(event)
+
+        @app.event("file_shared")
+        async def handle_file_shared(event, say):
+            pass
+
+        @app.event("file_created")
+        async def handle_file_created(event, say):
+            pass
+
+        @app.event("file_change")
+        async def handle_file_change(event, say):
+            pass
+
+        @app.event("assistant_thread_started")
+        async def handle_assistant_thread_started(event, say):
+            await self._handle_assistant_thread_lifecycle_event(event)
+
+        @app.event("assistant_thread_context_changed")
+        async def handle_assistant_thread_context_changed(event, say):
+            await self._handle_assistant_thread_lifecycle_event(event)
+
+        from hermes_cli.commands import slack_native_slashes
+        import re as _re
+
+        slash_names = [name for name, _desc, _handler in slack_native_slashes()]
+        if slash_names:
+            slash_pattern = _re.compile(
+                r"^/(?:" + "|".join(_re.escape(name) for name in slash_names) + r")$"
+            )
+        else:  # pragma: no cover - registry always non-empty
+            slash_pattern = _re.compile(r"^/hermes$")
+
+        @app.command(slash_pattern)
+        async def handle_hermes_command(ack, command):
+            slash = (command.get("command") or "").lstrip("/")
+            await ack(
+                response_type="ephemeral",
+                text=f"Running `/{slash}`…",
+            )
+            await self._handle_slash_command(command)
+
+        for action_id in (
+            "hermes_approve_once",
+            "hermes_approve_session",
+            "hermes_approve_always",
+            "hermes_deny",
+        ):
+            app.action(action_id)(self._handle_approval_action)
+
+        for action_id in (
+            "hermes_confirm_once",
+            "hermes_confirm_always",
+            "hermes_confirm_cancel",
+        ):
+            app.action(action_id)(self._handle_slash_confirm_action)
+
+    async def _close_socket_mode_handlers(self) -> None:
+        """Close all known Socket Mode handlers and clear app/task state."""
+        handlers = dict(self._handlers)
+        if self._handler is not None and all(self._handler is not handler for handler in handlers.values()):
+            handlers["default"] = self._handler
+
+        for name, handler in handlers.items():
+            try:
+                await handler.close_async()
+            except Exception as e:  # pragma: no cover - defensive logging
+                logger.warning("[Slack] Error closing handler %s: %s", name, e, exc_info=True)
+
+        tasks = dict(self._socket_mode_tasks)
+        if self._socket_mode_task is not None and all(
+            self._socket_mode_task is not task for task in tasks.values()
+        ):
+            tasks["default"] = self._socket_mode_task
+        for task in tasks.values():
+            if task and not task.done():
+                task.cancel()
+
+        self._apps.clear()
+        self._handlers.clear()
+        self._socket_mode_tasks.clear()
+        self._app = None
+        self._handler = None
+        self._socket_mode_task = None
+
+    def _release_token_locks(self) -> None:
+        """Release all per-account Socket Mode locks held by this adapter."""
+        try:
+            from gateway.status import release_scoped_lock
+            for identity in list(dict.fromkeys(self._token_lock_identities)):
+                release_scoped_lock("slack-app-token", identity)
+        finally:
+            self._token_lock_identities.clear()
+            self._release_platform_lock()
+
     async def connect(self) -> bool:
         """Connect to Slack via Socket Mode."""
         if not SLACK_AVAILABLE:
@@ -490,214 +730,193 @@ class SlackAdapter(BasePlatformAdapter):
             )
             return False
 
-        raw_token = self.config.token
-        app_token = os.getenv("SLACK_APP_TOKEN")
-
-        if not raw_token:
-            logger.error("[Slack] SLACK_BOT_TOKEN not set")
-            return False
-        if not app_token:
-            logger.error("[Slack] SLACK_APP_TOKEN not set")
+        accounts = self._load_accounts()
+        if not accounts:
+            logger.error(
+                "[Slack] No Slack accounts configured. Set SLACK_BOT_TOKEN + "
+                "SLACK_APP_TOKEN or create ~/.hermes/slack_accounts.json",
+            )
             return False
 
         proxy_url = _resolve_slack_proxy_url()
         if proxy_url:
             logger.info("[Slack] Using proxy for Slack transport: %s", safe_url_for_log(proxy_url))
 
-        # Support comma-separated bot tokens for multi-workspace
-        bot_tokens = [t.strip() for t in raw_token.split(",") if t.strip()]
+        if self._handler is not None or self._handlers:
+            await self._close_socket_mode_handlers()
+            self._release_token_locks()
+            self._running = False
 
-        # Also load tokens from OAuth token file
-        from hermes_constants import get_hermes_home
-        tokens_file = get_hermes_home() / "slack_tokens.json"
-        if tokens_file.exists():
-            try:
-                saved = json.loads(tokens_file.read_text(encoding="utf-8"))
-                for team_id, entry in saved.items():
-                    tok = entry.get("token", "") if isinstance(entry, dict) else ""
-                    if tok and tok not in bot_tokens:
-                        bot_tokens.append(tok)
-                        team_label = entry.get("team_name", team_id) if isinstance(entry, dict) else team_id
-                        logger.info("[Slack] Loaded saved token for workspace %s", team_label)
-            except Exception as e:
-                logger.warning("[Slack] Failed to read %s: %s", tokens_file, e)
+        self._load_channel_team_routes()
 
-        lock_acquired = False
         try:
-            if not self._acquire_platform_lock('slack-app-token', app_token, 'Slack app token'):
-                return False
-            lock_acquired = True
+            from gateway.status import acquire_scoped_lock, release_scoped_lock
 
-            # Close any previous handler before creating a new one so that
-            # calling connect() a second time (e.g. during a gateway restart or
-            # in-process reconnect attempt) does not leave a zombie Socket Mode
-            # connection alive.  Both the old and new connections would otherwise
-            # receive every Slack event and dispatch it twice, producing double
-            # responses — the same bug that affected DiscordAdapter (#18187).
-            if self._handler is not None:
-                try:
-                    await self._handler.close_async()
-                except Exception:
-                    logger.debug("[%s] Failed to close previous Slack handler", self.name)
-                finally:
-                    self._handler = None
-                    self._app = None
+            connected_accounts = 0
+            for account in accounts:
+                account_name = str(account["name"])
+                bot_token = str(account["bot_token"])
+                app_token = str(account["app_token"])
 
-            # First token is the primary — used for AsyncApp / Socket Mode
-            primary_token = bot_tokens[0]
-            self._app = AsyncApp(token=primary_token)
-            _apply_slack_proxy(self._app.client, proxy_url)
+                acquired, existing = acquire_scoped_lock(
+                    "slack-app-token",
+                    app_token,
+                    metadata={"platform": "slack", "account": account_name},
+                )
+                if not acquired:
+                    owner_pid = existing.get("pid") if isinstance(existing, dict) else None
+                    message = (
+                        f'Slack app token for account "{account_name}" already in use'
+                        + (f" (PID {owner_pid})" if owner_pid else "")
+                        + ". Stop the other gateway first."
+                    )
+                    logger.error("[%s] %s", self.name, message)
+                    self._set_fatal_error("slack-app-token_lock", message, retryable=False)
+                    await self._close_socket_mode_handlers()
+                    self._release_token_locks()
+                    return False
+                self._token_lock_identities.append(app_token)
 
-            # Register each bot token and map team_id → client
-            for token in bot_tokens:
-                client = AsyncWebClient(token=token)
+                client = AsyncWebClient(token=bot_token)
                 _apply_slack_proxy(client, proxy_url)
-                auth_response = await client.auth_test()
+                try:
+                    auth_response = await client.auth_test()
+                except Exception as e:
+                    logger.warning(
+                        "[Slack] Account %s auth_test failed, skipping: %s",
+                        account_name,
+                        e,
+                    )
+                    release_scoped_lock("slack-app-token", app_token)
+                    self._token_lock_identities.remove(app_token)
+                    continue
+
                 team_id = auth_response.get("team_id", "")
                 bot_user_id = auth_response.get("user_id", "")
                 bot_name = auth_response.get("user", "unknown")
                 team_name = auth_response.get("team", "unknown")
+                if not team_id or not bot_user_id:
+                    logger.warning(
+                        "[Slack] Account %s returned incomplete auth_test response; skipping",
+                        account_name,
+                    )
+                    release_scoped_lock("slack-app-token", app_token)
+                    self._token_lock_identities.remove(app_token)
+                    continue
 
                 self._team_clients[team_id] = client
                 self._team_bot_user_ids[team_id] = bot_user_id
-
-                # First token sets the primary bot_user_id (backward compat)
                 if self._bot_user_id is None:
                     self._bot_user_id = bot_user_id
 
                 logger.info(
-                    "[Slack] Authenticated as @%s in workspace %s (team: %s)",
-                    bot_name, team_name, team_id,
+                    "[Slack] Account %s authenticated as @%s in workspace %s (team: %s)",
+                    account_name,
+                    bot_name,
+                    team_name,
+                    team_id,
                 )
 
-            # Register message event handler
-            @self._app.event("message")
-            async def handle_message_event(event, say):
-                await self._handle_slack_message(event)
+                for extra_token in account.get("_extra_bot_tokens", []):
+                    extra_client = AsyncWebClient(token=extra_token)
+                    _apply_slack_proxy(extra_client, proxy_url)
+                    try:
+                        extra_auth = await extra_client.auth_test()
+                    except Exception as e:
+                        logger.warning(
+                            "[Slack] Account %s extra token auth_test failed, skipping: %s",
+                            account_name,
+                            e,
+                        )
+                        continue
+                    extra_team_id = extra_auth.get("team_id", "")
+                    extra_bot_user_id = extra_auth.get("user_id", "")
+                    if not extra_team_id or not extra_bot_user_id:
+                        logger.warning(
+                            "[Slack] Account %s extra token returned incomplete auth_test response; skipping",
+                            account_name,
+                        )
+                        continue
+                    self._team_clients[extra_team_id] = extra_client
+                    self._team_bot_user_ids[extra_team_id] = extra_bot_user_id
+                    logger.info(
+                        "[Slack] Account %s registered extra send-only workspace %s (team: %s)",
+                        account_name,
+                        extra_auth.get("team", "unknown"),
+                        extra_team_id,
+                    )
 
-            # Handle app_mention explicitly. In some Slack app configurations,
-            # channel mentions arrive only as app_mention events rather than the
-            # generic message event. Forward them into the normal message
-            # pipeline so @mentions reliably produce replies.
-            # NOTE: when Slack fires BOTH message and app_mention for the same
-            # @mention, they share the same event ts — the dedup in
-            # _handle_slack_message (MessageDeduplicator) suppresses the second.
-            @self._app.event("app_mention")
-            async def handle_app_mention(event, say):
-                await self._handle_slack_message(event)
+                app = AsyncApp(token=bot_token)
+                _apply_slack_proxy(app.client, proxy_url)
+                self._register_app_handlers(app)
 
-            # File lifecycle events can arrive around snippet uploads even when
-            # the actual user message is what we care about. Ack them so Slack
-            # doesn't log noisy 404 "unhandled request" warnings.
-            @self._app.event("file_shared")
-            async def handle_file_shared(event, say):
-                pass
+                handler = AsyncSocketModeHandler(app, app_token, proxy=proxy_url)
+                _apply_slack_proxy(handler.client, proxy_url)
+                task = asyncio.create_task(handler.start_async())
 
-            @self._app.event("file_created")
-            async def handle_file_created(event, say):
-                pass
+                self._apps[account_name] = app
+                self._handlers[account_name] = handler
+                self._socket_mode_tasks[account_name] = task
+                connected_accounts += 1
+                if self._app is None:
+                    self._app = app
+                    self._handler = handler
+                    self._socket_mode_task = task
 
-            @self._app.event("file_change")
-            async def handle_file_change(event, say):
-                pass
-
-            @self._app.event("assistant_thread_started")
-            async def handle_assistant_thread_started(event, say):
-                await self._handle_assistant_thread_lifecycle_event(event)
-
-            @self._app.event("assistant_thread_context_changed")
-            async def handle_assistant_thread_context_changed(event, say):
-                await self._handle_assistant_thread_lifecycle_event(event)
-
-            # Register slash command handler(s)
-            #
-            # Every gateway command from COMMAND_REGISTRY is a native Slack
-            # slash, matching Discord and Telegram's model (e.g. /btw, /stop,
-            # /model work directly without /hermes prefix). A single regex
-            # matcher dispatches all of them to one handler so we don't need
-            # N identical @app.command() decorators.
-            #
-            # The slash commands must ALSO be declared in the Slack app
-            # manifest (see `hermes slack manifest`). In Socket Mode, Slack
-            # routes the command event through the socket regardless of the
-            # manifest's request URL, but it will not deliver an event for
-            # a slash command the manifest doesn't declare.
-            from hermes_cli.commands import slack_native_slashes
-            import re as _re
-
-            _slash_names = [name for name, _d, _h in slack_native_slashes()]
-            if _slash_names:
-                _slash_pattern = _re.compile(
-                    r"^/(?:" + "|".join(_re.escape(n) for n in _slash_names) + r")$"
-                )
-            else:  # pragma: no cover - registry always non-empty
-                _slash_pattern = _re.compile(r"^/hermes$")
-
-            @self._app.command(_slash_pattern)
-            async def handle_hermes_command(ack, command):
-                slash = (command.get("command") or "").lstrip("/")
-                await ack(
-                    response_type="ephemeral",
-                    text=f"Running `/{slash}`…",
-                )
-                await self._handle_slash_command(command)
-
-            # Register Block Kit action handlers for approval buttons
-            for _action_id in (
-                "hermes_approve_once",
-                "hermes_approve_session",
-                "hermes_approve_always",
-                "hermes_deny",
-            ):
-                self._app.action(_action_id)(self._handle_approval_action)
-
-            # Register Block Kit action handlers for slash-confirm buttons
-            # (generic three-option prompts; see tools/slash_confirm.py).
-            for _action_id in (
-                "hermes_confirm_once",
-                "hermes_confirm_always",
-                "hermes_confirm_cancel",
-            ):
-                self._app.action(_action_id)(self._handle_slash_confirm_action)
-
-            # Start Socket Mode handler in background
-            self._handler = AsyncSocketModeHandler(self._app, app_token, proxy=proxy_url)
-            _apply_slack_proxy(self._handler.client, proxy_url)
-            self._socket_mode_task = asyncio.create_task(self._handler.start_async())
+            if connected_accounts == 0:
+                logger.error("[Slack] No Slack accounts could be connected")
+                await self._close_socket_mode_handlers()
+                self._release_token_locks()
+                return False
 
             self._running = True
             logger.info(
-                "[Slack] Socket Mode connected (%d workspace(s))",
+                "[Slack] Socket Mode connected: %d account(s), %d workspace(s)",
+                len(self._apps),
                 len(self._team_clients),
             )
             return True
 
         except Exception as e:  # pragma: no cover - defensive logging
             logger.error("[Slack] Connection failed: %s", e, exc_info=True)
+            await self._close_socket_mode_handlers()
+            self._release_token_locks()
+            self._running = False
             return False
-        finally:
-            if lock_acquired and not self._running:
-                self._release_platform_lock()
 
     async def disconnect(self) -> None:
         """Disconnect from Slack."""
-        if self._handler:
-            try:
-                await self._handler.close_async()
-            except Exception as e:  # pragma: no cover - defensive logging
-                logger.warning("[Slack] Error while closing Socket Mode handler: %s", e, exc_info=True)
+        await self._close_socket_mode_handlers()
         self._running = False
-
-        self._release_platform_lock()
-
+        self._release_token_locks()
         logger.info("[Slack] Disconnected")
 
-    def _get_client(self, chat_id: str) -> Any:
+    def _get_client(self, chat_id: str, team_id: str = "") -> Any:
         """Return the workspace-specific WebClient for a channel."""
-        team_id = self._channel_team.get(chat_id)
+        team_id = team_id or self._channel_team.get(chat_id)
         if team_id and team_id in self._team_clients:
             return self._team_clients[team_id]
         return self._app.client  # fallback to primary
+
+    def _metadata_team_id(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> str:
+        """Resolve Slack workspace scope from send metadata or channel cache."""
+        if isinstance(metadata, dict):
+            for key in ("team_id", "guild_id", "workspace_id"):
+                value = metadata.get(key)
+                if value:
+                    return str(value)
+            source = metadata.get("source")
+            if isinstance(source, dict) and source.get("guild_id"):
+                return str(source["guild_id"])
+        return self._channel_team.get(chat_id, "")
+
+    @staticmethod
+    def _thread_marker(team_id: str, thread_ts: str) -> str:
+        return f"{team_id}:{thread_ts}" if team_id else str(thread_ts)
+
+    @staticmethod
+    def _status_key(team_id: str, chat_id: str) -> Any:
+        return (team_id, chat_id) if team_id else chat_id
 
     async def send(
         self,
@@ -711,12 +930,13 @@ class SlackAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
 
         try:
+            team_id = self._metadata_team_id(chat_id, metadata)
             # Check for a pending slash-command context.  When the user ran a
             # native slash command (e.g. /q, /stop, /model), the initial ack
             # already showed an ephemeral "Running /cmd…" message.  If we have
             # a stashed response_url for this channel, replace that ack with
             # the actual command reply ephemerally instead of posting publicly.
-            slash_ctx = self._pop_slash_context(chat_id)
+            slash_ctx = self._pop_slash_context(chat_id, team_id)
             if slash_ctx:
                 return await self._send_slash_ephemeral(
                     slash_ctx, content,
@@ -747,20 +967,24 @@ class SlackAdapter(BasePlatformAdapter):
                     if broadcast and i == 0:
                         kwargs["reply_broadcast"] = True
 
-                last_result = await self._get_client(chat_id).chat_postMessage(**kwargs)
+                last_result = await self._get_client(chat_id, team_id).chat_postMessage(**kwargs)
 
             # Clear Slack Assistant status as soon as the final message is posted.
             if thread_ts:
-                await self.stop_typing(chat_id)
+                await self.stop_typing(chat_id, metadata=metadata)
 
             # Track the sent message ts so we can auto-respond to thread
             # replies without requiring @mention.
             sent_ts = last_result.get("ts") if last_result else None
             if sent_ts:
-                self._bot_message_ts.add(sent_ts)
+                self._bot_message_ts.add(self._thread_marker(team_id, sent_ts))
+                if team_id:
+                    self._bot_message_ts.add(sent_ts)
                 # Also register the thread root so replies-to-my-replies work
                 if thread_ts:
-                    self._bot_message_ts.add(thread_ts)
+                    self._bot_message_ts.add(self._thread_marker(team_id, thread_ts))
+                    if team_id:
+                        self._bot_message_ts.add(thread_ts)
                 if len(self._bot_message_ts) > self._BOT_TS_MAX:
                     excess = len(self._bot_message_ts) - self._BOT_TS_MAX // 2
                     for old_ts in list(self._bot_message_ts)[:excess]:
@@ -860,9 +1084,10 @@ class SlackAdapter(BasePlatformAdapter):
         if not thread_ts:
             return  # Can only set status in a thread context
 
-        self._active_status_threads[chat_id] = thread_ts
+        team_id = self._metadata_team_id(chat_id, metadata)
+        self._active_status_threads[self._status_key(team_id, chat_id)] = thread_ts
         try:
-            await self._get_client(chat_id).assistant_threads_setStatus(
+            await self._get_client(chat_id, team_id).assistant_threads_setStatus(
                 channel_id=chat_id,
                 thread_ts=thread_ts,
                 status="is thinking...",
@@ -876,11 +1101,15 @@ class SlackAdapter(BasePlatformAdapter):
         """Clear the assistant thread status indicator."""
         if not self._app:
             return
-        thread_ts = self._active_status_threads.pop(chat_id, None)
+        team_id = self._metadata_team_id(chat_id, metadata)
+        thread_ts = self._active_status_threads.pop(
+            self._status_key(team_id, chat_id),
+            None,
+        )
         if not thread_ts:
             return
         try:
-            await self._get_client(chat_id).assistant_threads_setStatus(
+            await self._get_client(chat_id, team_id).assistant_threads_setStatus(
                 channel_id=chat_id,
                 thread_ts=thread_ts,
                 status="",
@@ -1091,7 +1320,10 @@ class SlackAdapter(BasePlatformAdapter):
         """Treat successful file uploads as bot participation in a thread."""
         if not thread_ts:
             return
-        self._bot_message_ts.add(thread_ts)
+        team_id = self._channel_team.get(chat_id, "")
+        self._bot_message_ts.add(self._thread_marker(team_id, thread_ts))
+        if team_id:
+            self._bot_message_ts.add(thread_ts)
         if len(self._bot_message_ts) > self._BOT_TS_MAX:
             excess = len(self._bot_message_ts) - self._BOT_TS_MAX // 2
             for old_ts in list(self._bot_message_ts)[:excess]:
@@ -1579,10 +1811,17 @@ class SlackAdapter(BasePlatformAdapter):
 
     # ----- Internal handlers -----
 
-    def _assistant_thread_key(self, channel_id: str, thread_ts: str) -> Optional[Tuple[str, str]]:
+    def _assistant_thread_key(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        team_id: str = "",
+    ) -> Optional[Tuple[str, ...]]:
         """Return a stable cache key for Slack assistant thread metadata."""
         if not channel_id or not thread_ts:
             return None
+        if team_id:
+            return (str(team_id), str(channel_id), str(thread_ts))
         return (str(channel_id), str(thread_ts))
 
     def _extract_assistant_thread_metadata(self, event: dict) -> Dict[str, str]:
@@ -1628,7 +1867,8 @@ class SlackAdapter(BasePlatformAdapter):
         """Remember assistant thread identity data for later message events."""
         channel_id = metadata.get("channel_id", "")
         thread_ts = metadata.get("thread_ts", "")
-        key = self._assistant_thread_key(channel_id, thread_ts)
+        team_id = metadata.get("team_id", "")
+        key = self._assistant_thread_key(channel_id, thread_ts, team_id)
         if not key:
             return
 
@@ -1643,9 +1883,8 @@ class SlackAdapter(BasePlatformAdapter):
             for old_key in list(self._assistant_threads)[:excess]:
                 del self._assistant_threads[old_key]
 
-        team_id = merged.get("team_id", "")
         if team_id and channel_id:
-            self._channel_team[channel_id] = team_id
+            self._record_channel_team(channel_id, team_id)
 
     def _lookup_assistant_thread_metadata(
         self,
@@ -1663,8 +1902,16 @@ class SlackAdapter(BasePlatformAdapter):
         key = self._assistant_thread_key(
             metadata.get("channel_id", ""),
             metadata.get("thread_ts", ""),
+            metadata.get("team_id", ""),
         )
         cached = self._assistant_threads.get(key, {}) if key else {}
+        if not cached and metadata.get("team_id"):
+            legacy_key = self._assistant_thread_key(
+                metadata.get("channel_id", ""),
+                metadata.get("thread_ts", ""),
+                "",
+            )
+            cached = self._assistant_threads.get(legacy_key, {}) if legacy_key else {}
         if cached:
             merged = dict(cached)
             merged.update({k: v for k, v in metadata.items() if v})
@@ -1851,7 +2098,7 @@ class SlackAdapter(BasePlatformAdapter):
 
         # Track which workspace owns this channel
         if team_id and channel_id:
-            self._channel_team[channel_id] = team_id
+            self._record_channel_team(channel_id, team_id)
 
         # Determine if this is a DM or channel message
         channel_type = event.get("channel_type", "")
@@ -1894,12 +2141,13 @@ class SlackAdapter(BasePlatformAdapter):
             elif self._slack_strict_mention() and not is_mentioned:
                 return  # Strict mode: ignore until @-mentioned again
             elif not is_mentioned:
+                event_thread_marker = self._thread_marker(team_id, event_thread_ts)
                 reply_to_bot_thread = (
-                    is_thread_reply and event_thread_ts in self._bot_message_ts
+                    is_thread_reply and event_thread_marker in self._bot_message_ts
                 )
                 in_mentioned_thread = (
                     event_thread_ts is not None
-                    and event_thread_ts in self._mentioned_threads
+                    and event_thread_marker in self._mentioned_threads
                 )
                 has_session = (
                     is_thread_reply
@@ -1907,6 +2155,7 @@ class SlackAdapter(BasePlatformAdapter):
                         channel_id=channel_id,
                         thread_ts=event_thread_ts,
                         user_id=user_id,
+                        team_id=team_id,
                     )
                 )
                 if not reply_to_bot_thread and not in_mentioned_thread and not has_session:
@@ -1920,7 +2169,7 @@ class SlackAdapter(BasePlatformAdapter):
             # re-mentioned every turn, so remembering the thread would
             # defeat the feature (and re-enable agent-to-agent ack loops).
             if event_thread_ts and not self._slack_strict_mention():
-                self._mentioned_threads.add(event_thread_ts)
+                self._mentioned_threads.add(self._thread_marker(team_id, event_thread_ts))
                 if len(self._mentioned_threads) > self._MENTIONED_THREADS_MAX:
                     to_remove = list(self._mentioned_threads)[:self._MENTIONED_THREADS_MAX // 2]
                     for t in to_remove:
@@ -1932,6 +2181,7 @@ class SlackAdapter(BasePlatformAdapter):
             channel_id=channel_id,
             thread_ts=event_thread_ts,
             user_id=user_id,
+            team_id=team_id,
         ):
             thread_context = await self._fetch_thread_context(
                 channel_id=channel_id,
@@ -2105,6 +2355,7 @@ class SlackAdapter(BasePlatformAdapter):
             user_id=user_id,
             user_name=user_name,
             thread_id=thread_ts,
+            guild_id=team_id,
         )
 
         # Per-channel ephemeral prompt
@@ -2694,7 +2945,7 @@ class SlackAdapter(BasePlatformAdapter):
 
         # Track which workspace owns this channel
         if team_id and channel_id:
-            self._channel_team[channel_id] = team_id
+            self._record_channel_team(channel_id, team_id)
 
         if slash_name in ("hermes", ""):
             # Legacy /hermes <subcommand> [args] routing + free-form questions.
@@ -2725,6 +2976,7 @@ class SlackAdapter(BasePlatformAdapter):
             chat_id=channel_id,
             chat_type="dm" if is_dm else "group",
             user_id=user_id,
+            guild_id=team_id,
         )
 
         event = MessageEvent(
@@ -2742,7 +2994,8 @@ class SlackAdapter(BasePlatformAdapter):
         # the whole channel can see the agent's answer.
         response_url = command.get("response_url", "")
         if response_url and user_id and channel_id and text.startswith("/"):
-            self._slash_command_contexts[(channel_id, user_id)] = {
+            key = (team_id, channel_id, user_id) if team_id else (channel_id, user_id)
+            self._slash_command_contexts[key] = {
                 "response_url": response_url,
                 "ts": time.monotonic(),
             }
@@ -2760,6 +3013,7 @@ class SlackAdapter(BasePlatformAdapter):
         channel_id: str,
         thread_ts: str,
         user_id: str,
+        team_id: str = "",
     ) -> bool:
         """Check if there's an active session for a thread.
 
@@ -2784,6 +3038,7 @@ class SlackAdapter(BasePlatformAdapter):
                 chat_type="group",
                 user_id=user_id,
                 thread_id=thread_ts,
+                guild_id=team_id,
             )
 
             # Read session isolation settings from the store's config
@@ -2798,7 +3053,23 @@ class SlackAdapter(BasePlatformAdapter):
             )
 
             session_store._ensure_loaded()
-            return session_key in session_store._entries
+            if session_key in session_store._entries:
+                return True
+            if team_id:
+                legacy_source = SessionSource(
+                    platform=Platform.SLACK,
+                    chat_id=channel_id,
+                    chat_type="group",
+                    user_id=user_id,
+                    thread_id=thread_ts,
+                )
+                legacy_key = build_session_key(
+                    legacy_source,
+                    group_sessions_per_user=gspu,
+                    thread_sessions_per_user=tspu,
+                )
+                return legacy_key in session_store._entries
+            return False
         except Exception:
             return False
 
