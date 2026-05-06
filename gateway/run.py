@@ -6327,6 +6327,7 @@ class GatewayRunner:
                 run_generation=run_generation,
                 event_message_id=event.message_id,
                 channel_prompt=event.channel_prompt,
+                profile_name=_profile_name,
             )
 
             # Stop persistent typing indicator now that the agent is done
@@ -12010,6 +12011,7 @@ class GatewayRunner:
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None,
+        profile_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -13733,6 +13735,7 @@ class GatewayRunner:
                     _interrupt_depth=_interrupt_depth + 1,
                     event_message_id=next_message_id,
                     channel_prompt=next_channel_prompt,
+                    profile_name=profile_name,
                 )
         finally:
             # Stop progress sender, interrupt monitor, and notification task
