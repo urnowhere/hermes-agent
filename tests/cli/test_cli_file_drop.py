@@ -52,6 +52,10 @@ class TestNonFileInputs:
     def test_slash_command_with_args(self):
         assert _detect_file_drop("/config set key value") is None
 
+    def test_long_slash_command_with_pasted_text_is_not_file_drop(self):
+        long_pasted_text = "제 SNS 말투에 맞춰서 더 쉽게 설명해주세요. " + ("Hermes aux 모델 설명 " * 200)
+        assert _detect_file_drop(f"/plan {long_pasted_text}") is None
+
     def test_empty_string(self):
         assert _detect_file_drop("") is None
 

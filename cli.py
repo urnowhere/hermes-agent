@@ -1462,7 +1462,10 @@ def _resolve_attachment_path(raw_path: str) -> Path | None:
     except Exception:
         resolved = path
 
-    if not resolved.exists() or not resolved.is_file():
+    try:
+        if not resolved.exists() or not resolved.is_file():
+            return None
+    except OSError:
         return None
     return resolved
 
