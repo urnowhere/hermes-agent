@@ -1632,6 +1632,9 @@ class WeixinAdapter(BasePlatformAdapter):
         _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
         async def _deliver_media(path: str, is_voice: bool = False) -> None:
+            if not path or not os.path.isfile(path):
+                logger.warning('[%s] Skipping invalid media path: %r', self.name, path)
+                return
             ext = Path(path).suffix.lower()
             if is_voice or ext in _AUDIO_EXTS:
                 await self.send_voice(chat_id=chat_id, audio_path=path, metadata=metadata)
