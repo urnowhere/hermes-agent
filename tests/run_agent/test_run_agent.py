@@ -2390,6 +2390,32 @@ class TestRunConversation:
         assert result["final_response"] == "Final answer"
         assert result["completed"] is True
 
+    def test_copilot_acp_without_stream_consumers_uses_non_streaming_call(self, agent):
+        self._setup_agent(agent)
+        agent.provider = "copilot-acp"
+        agent.base_url = "acp://copilot"
+        agent.api_mode = "chat_completions"
+        agent.client = SimpleNamespace()
+        resp = _mock_response(content="ACP final answer", finish_reason="stop")
+
+        with (
+            patch.object(agent, "_has_stream_consumers", return_value=False),
+            patch.object(
+                agent,
+                "_interruptible_streaming_api_call",
+                side_effect=AssertionError("copilot-acp should not use streaming"),
+            ),
+            patch.object(agent, "_interruptible_api_call", return_value=resp) as mock_non_stream,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello")
+
+        mock_non_stream.assert_called_once()
+        assert result["final_response"] == "ACP final answer"
+        assert result["completed"] is True
+
     def test_tool_calls_then_stop(self, agent):
         self._setup_agent(agent)
         tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")

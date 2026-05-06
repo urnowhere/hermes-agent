@@ -478,17 +478,21 @@ class TestResolveApiKeyProviderCredentials:
         assert _try_gh_cli_token() == "gh-cli-secret"
         assert calls == [["/opt/homebrew/bin/gh", "auth", "token"]]
 
-    def test_resolve_copilot_acp_with_local_cli(self, monkeypatch):
-        monkeypatch.setenv("HERMES_COPILOT_ACP_ARGS", "--acp --stdio")
-        monkeypatch.setattr("hermes_cli.auth.shutil.which", lambda command: f"/usr/local/bin/{command}")
+    def test_resolve_copilot_acp_with_shell_override(self, monkeypatch):
+        monkeypatch.setenv("HERMES_COPILOT_ACP_COMMAND", "opencode")
+        monkeypatch.setenv("HERMES_COPILOT_ACP_ARGS", "acp")
+        monkeypatch.setattr(
+            "hermes_cli.auth.shutil.which",
+            lambda command: "/usr/local/bin/opencode" if command == "opencode" else None,
+        )
 
         creds = resolve_external_process_provider_credentials("copilot-acp")
 
         assert creds["provider"] == "copilot-acp"
         assert creds["api_key"] == "copilot-acp"
         assert creds["base_url"] == "acp://copilot"
-        assert creds["command"] == "/usr/local/bin/copilot"
-        assert creds["args"] == ["--acp", "--stdio"]
+        assert creds["command"] == "/usr/local/bin/opencode"
+        assert creds["args"] == ["acp"]
         assert creds["source"] == "process"
 
     def test_resolve_kimi_with_key(self, monkeypatch):
@@ -697,9 +701,13 @@ class TestRuntimeProviderResolution:
         assert result["provider"] == "copilot"
         assert result["api_mode"] == "codex_responses"
 
-    def test_runtime_copilot_acp_uses_process_runtime(self, monkeypatch):
-        monkeypatch.setattr("hermes_cli.auth.shutil.which", lambda command: f"/usr/local/bin/{command}")
-        monkeypatch.setenv("HERMES_COPILOT_ACP_ARGS", "--acp --stdio --debug")
+    def test_runtime_copilot_acp_uses_shell_override_process_runtime(self, monkeypatch):
+        monkeypatch.setenv("HERMES_COPILOT_ACP_COMMAND", "opencode")
+        monkeypatch.setenv("HERMES_COPILOT_ACP_ARGS", "acp")
+        monkeypatch.setattr(
+            "hermes_cli.auth.shutil.which",
+            lambda command: "/usr/local/bin/opencode" if command == "opencode" else None,
+        )
 
         from hermes_cli.runtime_provider import resolve_runtime_provider
 
@@ -709,8 +717,8 @@ class TestRuntimeProviderResolution:
         assert result["api_mode"] == "chat_completions"
         assert result["api_key"] == "copilot-acp"
         assert result["base_url"] == "acp://copilot"
-        assert result["command"] == "/usr/local/bin/copilot"
-        assert result["args"] == ["--acp", "--stdio", "--debug"]
+        assert result["command"] == "/usr/local/bin/opencode"
+        assert result["args"] == ["acp"]
 
 
 # =============================================================================

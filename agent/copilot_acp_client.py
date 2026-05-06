@@ -31,6 +31,24 @@ _TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.D
 _TOOL_CALL_JSON_RE = re.compile(r"\{\s*\"id\"\s*:\s*\"[^\"]+\"\s*,\s*\"type\"\s*:\s*\"function\"\s*,\s*\"function\"\s*:\s*\{.*?\}\s*\}", re.DOTALL)
 
 
+def _coerce_timeout_seconds(timeout: Any) -> float:
+    if timeout is None:
+        return _DEFAULT_TIMEOUT_SECONDS
+    if isinstance(timeout, (int, float)):
+        return float(timeout)
+
+    for attr in ("read", "timeout"):
+        value = getattr(timeout, attr, None)
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+
+    return float(_DEFAULT_TIMEOUT_SECONDS)
+
+
 def _resolve_command() -> str:
     return (
         os.getenv("HERMES_COPILOT_ACP_COMMAND", "").strip()
@@ -369,25 +387,9 @@ class CopilotACPClient:
             tools=tools,
             tool_choice=tool_choice,
         )
-        # Normalise timeout: run_agent.py may pass an httpx.Timeout object
-        # (used natively by the OpenAI SDK) rather than a plain float.
-        if timeout is None:
-            _effective_timeout = _DEFAULT_TIMEOUT_SECONDS
-        elif isinstance(timeout, (int, float)):
-            _effective_timeout = float(timeout)
-        else:
-            # httpx.Timeout or similar — pick the largest component so the
-            # subprocess has enough wall-clock time for the full response.
-            _candidates = [
-                getattr(timeout, attr, None)
-                for attr in ("read", "write", "connect", "pool", "timeout")
-            ]
-            _numeric = [float(v) for v in _candidates if isinstance(v, (int, float))]
-            _effective_timeout = max(_numeric) if _numeric else _DEFAULT_TIMEOUT_SECONDS
-
         response_text, reasoning_text = self._run_prompt(
             prompt_text,
-            timeout_seconds=_effective_timeout,
+            timeout_seconds=_coerce_timeout_seconds(timeout),
         )
 
         tool_calls, cleaned_text = _extract_tool_calls_from_text(response_text)
