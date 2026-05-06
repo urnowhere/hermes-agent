@@ -9,6 +9,7 @@ We mock the slack modules at import time to avoid collection errors.
 """
 
 import asyncio
+import json
 import os
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch, call
@@ -86,10 +87,11 @@ def adapter():
 
 @pytest.fixture(autouse=True)
 def _redirect_cache(tmp_path, monkeypatch):
-    """Point document cache to tmp_path so tests don't touch ~/.hermes."""
+    """Point local Slack/cache state to tmp_path so tests don't touch ~/.hermes."""
     monkeypatch.setattr(
         "gateway.platforms.base.DOCUMENT_CACHE_DIR", tmp_path / "doc_cache"
     )
+    monkeypatch.setattr(_slack_mod, "get_hermes_home", lambda: tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +281,209 @@ class TestSlackConnectCleanup:
         assert result is True
         first_handler.close_async.assert_awaited_once_with()
         assert adapter._handler is second_handler
+
+
+class TestSlackMultiWorkspaceSocketMode:
+    def test_load_accounts_from_file(self, tmp_path):
+        accounts_file = tmp_path / "slack_accounts.json"
+        accounts_file.write_text(
+            json.dumps([
+                {
+                    "name": "engineering",
+                    "bot_token": "xoxb-eng",
+                    "app_token": "xapp-eng",
+                },
+                {
+                    "name": "partner",
+                    "bot_token": "xoxb-partner",
+                    "app_token": "xapp-partner",
+                },
+            ]),
+            encoding="utf-8",
+        )
+        adapter = SlackAdapter(PlatformConfig(enabled=True, token=""))
+
+        assert adapter._load_accounts() == [
+            {
+                "name": "engineering",
+                "bot_token": "xoxb-eng",
+                "app_token": "xapp-eng",
+            },
+            {
+                "name": "partner",
+                "bot_token": "xoxb-partner",
+                "app_token": "xapp-partner",
+            },
+        ]
+
+    def test_load_accounts_falls_back_to_env(self):
+        adapter = SlackAdapter(PlatformConfig(enabled=True, token="xoxb-primary,xoxb-sendonly"))
+
+        with patch.dict(os.environ, {"SLACK_APP_TOKEN": "xapp-primary"}, clear=False):
+            assert adapter._load_accounts() == [
+                {
+                    "name": "default",
+                    "bot_token": "xoxb-primary",
+                    "app_token": "xapp-primary",
+                    "_extra_bot_tokens": ["xoxb-sendonly"],
+                }
+            ]
+
+    @pytest.mark.asyncio
+    async def test_connect_starts_one_socket_handler_per_account(self, tmp_path):
+        accounts_file = tmp_path / "slack_accounts.json"
+        accounts_file.write_text(
+            json.dumps([
+                {
+                    "name": "engineering",
+                    "bot_token": "xoxb-eng",
+                    "app_token": "xapp-eng",
+                },
+                {
+                    "name": "partner",
+                    "bot_token": "xoxb-partner",
+                    "app_token": "xapp-partner",
+                },
+            ]),
+            encoding="utf-8",
+        )
+        created_handlers = []
+        created_apps = []
+
+        class FakeWebClient:
+            def __init__(self, token):
+                self.token = token
+                self.proxy = None
+                suffix = token.rsplit("-", 1)[-1]
+                self.auth_test = AsyncMock(return_value={
+                    "team_id": f"T_{suffix}",
+                    "user_id": f"U_{suffix}",
+                    "user": f"bot-{suffix}",
+                    "team": f"Team {suffix}",
+                })
+
+        class FakeApp:
+            def __init__(self, token):
+                self.token = token
+                self.client = MagicMock(proxy=None)
+                self.events = []
+                self.commands = []
+                self.actions = []
+                created_apps.append(self)
+
+            def event(self, event_type):
+                self.events.append(event_type)
+                return lambda fn: fn
+
+            def command(self, command_name):
+                self.commands.append(command_name)
+                return lambda fn: fn
+
+            def action(self, action_id):
+                self.actions.append(action_id)
+                return lambda fn: fn
+
+        class FakeHandler:
+            def __init__(self, app, app_token, proxy=None):
+                self.app = app
+                self.app_token = app_token
+                self.proxy = proxy
+                self.client = MagicMock(proxy=None)
+                self.close_async = AsyncMock()
+                created_handlers.append(self)
+
+            def start_async(self):
+                return MagicMock(name="start_async")
+
+        with patch.object(_slack_mod, "AsyncApp", side_effect=FakeApp), \
+             patch.object(_slack_mod, "AsyncWebClient", side_effect=FakeWebClient), \
+             patch.object(_slack_mod, "AsyncSocketModeHandler", FakeHandler), \
+             patch("gateway.status.acquire_scoped_lock", return_value=(True, None)), \
+             patch("asyncio.create_task", side_effect=lambda coro: MagicMock(done=lambda: True)):
+            adapter = SlackAdapter(PlatformConfig(enabled=True, token=""))
+            result = await adapter.connect()
+
+        assert result is True
+        assert set(adapter._apps) == {"engineering", "partner"}
+        assert set(adapter._handlers) == {"engineering", "partner"}
+        assert set(adapter._team_clients) == {"T_eng", "T_partner"}
+        assert [handler.app_token for handler in created_handlers] == ["xapp-eng", "xapp-partner"]
+        assert all("message" in app.events for app in created_apps)
+        assert all("app_mention" in app.events for app in created_apps)
+
+    @pytest.mark.asyncio
+    async def test_disconnect_closes_all_socket_handlers_and_releases_locks(self):
+        adapter = SlackAdapter(PlatformConfig(enabled=True, token=""))
+        first = MagicMock()
+        first.close_async = AsyncMock()
+        second = MagicMock()
+        second.close_async = AsyncMock()
+        adapter._handlers = {"engineering": first, "partner": second}
+        adapter._socket_mode_tasks = {
+            "engineering": MagicMock(done=lambda: False, cancel=MagicMock()),
+            "partner": MagicMock(done=lambda: False, cancel=MagicMock()),
+        }
+        adapter._token_lock_identities = ["xapp-eng", "xapp-partner"]
+        adapter._running = True
+
+        with patch("gateway.status.release_scoped_lock") as release:
+            await adapter.disconnect()
+
+        first.close_async.assert_awaited_once()
+        second.close_async.assert_awaited_once()
+        release.assert_has_calls([
+            call("slack-app-token", "xapp-eng"),
+            call("slack-app-token", "xapp-partner"),
+        ])
+        assert adapter._handlers == {}
+        assert adapter._socket_mode_tasks == {}
+        assert adapter._running is False
+
+    @pytest.mark.asyncio
+    async def test_records_channel_route_on_inbound_message(self, adapter, tmp_path):
+        adapter._app.client.reactions_add = AsyncMock()
+        adapter._app.client.reactions_remove = AsyncMock()
+        adapter._app.client.users_info = AsyncMock(return_value={
+            "user": {"profile": {"display_name": "Tyler"}}
+        })
+
+        await adapter._handle_slack_message({
+            "text": "hello",
+            "user": "U_USER",
+            "channel": "C456",
+            "channel_type": "im",
+            "ts": "1234567890.000001",
+            "team": "T456",
+        })
+
+        routes_path = tmp_path / "slack_channel_teams.json"
+        assert routes_path.exists()
+        saved = json.loads(routes_path.read_text(encoding="utf-8"))
+        assert saved["C456"] == "T456"
+
+    @pytest.mark.asyncio
+    async def test_send_uses_persisted_channel_team_route(self, tmp_path):
+        routes_path = tmp_path / "slack_channel_teams.json"
+        routes_path.write_text(json.dumps({"C999": "TSECOND"}), encoding="utf-8")
+
+        adapter = SlackAdapter(PlatformConfig(enabled=True, token="xoxb-primary"))
+        primary_client = AsyncMock()
+        secondary_client = AsyncMock()
+        secondary_client.chat_postMessage = AsyncMock(return_value={"ts": "2.0"})
+        adapter._app = MagicMock()
+        adapter._app.client = primary_client
+        adapter._team_clients = {"TSECOND": secondary_client}
+
+        adapter._load_channel_team_routes()
+        result = await adapter.send("C999", "hello")
+
+        assert result.success is True
+        secondary_client.chat_postMessage.assert_called_once_with(
+            channel="C999",
+            text="hello",
+            mrkdwn=True,
+        )
+        primary_client.chat_postMessage.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
