@@ -124,6 +124,25 @@ class TestDefaults:
         engine = StubEngine()
         assert engine.should_compress_preflight([]) is False
 
+    def test_ingest_message_default_noop(self):
+        engine = StubEngine()
+        engine.ingest_message({"role": "user", "content": "hi"}, token_budget=100000)
+        # Default is no-op — no crash, no state mutation
+        assert engine.last_prompt_tokens == 0
+
+    def test_after_turn_default_noop(self):
+        engine = StubEngine()
+        engine.after_turn([], token_budget=100000, session_file="/tmp/test.jsonl")
+        # Default is no-op — no crash, no state mutation
+        assert engine.last_prompt_tokens == 0
+
+    def test_new_hooks_optional_no_typeerror(self):
+        """A subclass that doesn't override new hooks should instantiate fine."""
+        engine = StubEngine()
+        assert isinstance(engine, ContextEngine)
+        assert hasattr(engine, "ingest_message")
+        assert hasattr(engine, "after_turn")
+
 
 # ---------------------------------------------------------------------------
 # StubEngine behavior

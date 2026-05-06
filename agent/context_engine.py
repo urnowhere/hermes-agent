@@ -120,6 +120,32 @@ class ContextEngine(ABC):
         """
         return True
 
+    # -- Optional: continuous lifecycle hooks ------------------------------
+
+    def ingest_message(self, message: Dict[str, Any], token_budget: int = 0) -> None:
+        """Called after every message is appended to the conversation list.
+
+        Engines use this to persist individual messages to their own store
+        (DB, embedding queue, etc.), enabling cross-turn context continuity
+        without waiting for compress().
+        """
+        pass
+
+    def after_turn(
+        self,
+        messages: List[Dict[str, Any]],
+        token_budget: int = 0,
+        session_file: str = "",
+    ) -> None:
+        """Called once per LLM API turn after all messages for this turn
+        have been appended (including tool results) but before compression.
+
+        Engines use this for lightweight checks (amnesia, failure patterns,
+        repeat input), proactive partial compaction, DER constraint recording,
+        and session reset detection.
+        """
+        pass
+
     # -- Optional: session lifecycle ---------------------------------------
 
     def on_session_start(self, session_id: str, **kwargs) -> None:

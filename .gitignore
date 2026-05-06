@@ -68,5 +68,6 @@ mini-swe-agent/
 .direnv/
 .nix-stamps/
 result
+nix-install.sh
 website/static/api/skills-index.json
 models-dev-upstream/

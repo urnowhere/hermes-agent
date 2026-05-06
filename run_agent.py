@@ -6691,6 +6691,40 @@ class AIAgent:
         except Exception:
             logger.debug("interim_assistant_callback error", exc_info=True)
 
+    # ------------------------------------------------------------------
+    # Context-engine lifecycle hooks (ingest + after_turn)
+    # ------------------------------------------------------------------
+
+    def _notify_ingest(self, message: Dict[str, Any]) -> None:
+        """Forward a single appended message to the active context engine."""
+        compressor = self.context_compressor
+        if compressor is None:
+            return
+        ingest = getattr(compressor, "ingest_message", None)
+        if ingest is None:
+            return
+        try:
+            ingest(message, token_budget=getattr(compressor, "context_length", 0))
+        except Exception:
+            logger.debug("ingest_message hook error", exc_info=True)
+
+    def _notify_after_turn(self, messages: List[Dict[str, Any]]) -> None:
+        """Signal the end of an LLM turn to the active context engine."""
+        compressor = self.context_compressor
+        if compressor is None:
+            return
+        after_turn = getattr(compressor, "after_turn", None)
+        if after_turn is None:
+            return
+        try:
+            after_turn(
+                messages,
+                token_budget=getattr(compressor, "context_length", 0),
+                session_file="",
+            )
+        except Exception:
+            logger.debug("after_turn hook error", exc_info=True)
+
     def _fire_stream_delta(self, text: str) -> None:
         """Fire all registered stream delta callbacks (display + TTS)."""
         # If a tool iteration set the break flag, prepend a single paragraph
@@ -9942,6 +9976,7 @@ class AIAgent:
                 "tool_call_id": tc.id,
             }
             messages.append(tool_msg)
+            self._notify_ingest(tool_msg)
 
             # ── Per-tool /steer drain ───────────────────────────────────
             # Same as the sequential path: drain between each collected
@@ -10331,6 +10366,7 @@ class AIAgent:
                 "tool_call_id": tool_call.id
             }
             messages.append(tool_msg)
+            self._notify_ingest(tool_msg)
 
             # ── Per-tool /steer drain ───────────────────────────────────
             # Drain pending steer BETWEEN individual tool calls so the
@@ -10741,6 +10777,7 @@ class AIAgent:
         # Add user message
         user_msg = {"role": "user", "content": user_message}
         messages.append(user_msg)
+        self._notify_ingest(user_msg)
         current_turn_user_idx = len(messages) - 1
         self._persist_user_message_idx = current_turn_user_idx
         
@@ -13321,6 +13358,7 @@ class AIAgent:
 
                         assistant_msg = self._build_assistant_message(assistant_message, finish_reason)
                         messages.append(assistant_msg)
+                        self._notify_ingest(assistant_msg)
                         for tc in assistant_message.tool_calls:
                             if tc.function.name not in self.valid_tool_names:
                                 content = f"Tool '{tc.function.name}' does not exist. Available tools: {available}"
@@ -13493,6 +13531,7 @@ class AIAgent:
                     self._post_tool_empty_retried = False
 
                     messages.append(assistant_msg)
+                    self._notify_ingest(assistant_msg)
                     self._emit_interim_assistant_message(assistant_msg)
 
                     # Close any open streaming display (response box, reasoning
@@ -13569,6 +13608,8 @@ class AIAgent:
                         _real_tokens = estimate_request_tokens_rough(
                             messages, tools=self.tools or None
                         )
+
+                    self._notify_after_turn(messages)
 
                     if self.compression_enabled and _compressor.should_compress(_real_tokens):
                         self._safe_print("  ⟳ compacting context…")
@@ -13819,6 +13860,7 @@ class AIAgent:
                         assistant_msg = self._build_assistant_message(assistant_message, finish_reason)
                         assistant_msg["content"] = "(empty)"
                         messages.append(assistant_msg)
+                        self._notify_ingest(assistant_msg)
 
                         if reasoning_text:
                             reasoning_preview = reasoning_text[:500] + "..." if len(reasoning_text) > 500 else reasoning_text
@@ -13902,7 +13944,9 @@ class AIAgent:
                         messages.pop()
 
                     messages.append(final_msg)
-                    
+                    self._notify_ingest(final_msg)
+                    self._notify_after_turn(messages)
+
                     _turn_exit_reason = f"text_response(finish_reason={finish_reason})"
                     if not self.quiet_mode:
                         self._safe_print(f"🎉 Conversation completed after {api_call_count} OpenAI-compatible API call(s)")
