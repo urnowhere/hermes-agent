@@ -301,6 +301,18 @@ def _sanitize_error(text: str) -> str:
     return _CREDENTIAL_PATTERN.sub("[REDACTED]", text)
 
 
+def _exc_str(exc: BaseException) -> str:
+    """Return a non-empty human-readable string for *exc*.
+
+    Some exception classes (e.g. ``anyio.ClosedResourceError``) are raised
+    without a message argument, so ``str(exc)`` is ``""``.  This helper
+    falls back to ``repr(exc)`` so that error messages shown to the user
+    and logged to disk always carry *some* diagnostic information.
+    """
+    text = str(exc).strip()
+    return text if text else repr(exc)
+
+
 # ---------------------------------------------------------------------------
 # MCP tool description content scanning
 # ---------------------------------------------------------------------------
@@ -820,7 +832,7 @@ class SamplingHandler:
         except Exception as exc:
             self.metrics["errors"] += 1
             return self._error(
-                f"Sampling LLM call failed: {_sanitize_error(str(exc))}"
+                f"Sampling LLM call failed: {_sanitize_error(_exc_str(exc))}"
             )
 
         # Guard against empty choices (content filtering, provider errors)
@@ -2120,7 +2132,7 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             )
             return json.dumps({
                 "error": _sanitize_error(
-                    f"MCP call failed: {type(exc).__name__}: {exc}"
+                    f"MCP call failed: {type(exc).__name__}: {_exc_str(exc)}"
                 )
             }, ensure_ascii=False)
 
@@ -2178,7 +2190,7 @@ def _make_list_resources_handler(server_name: str, tool_timeout: float):
             )
             return json.dumps({
                 "error": _sanitize_error(
-                    f"MCP call failed: {type(exc).__name__}: {exc}"
+                    f"MCP call failed: {type(exc).__name__}: {_exc_str(exc)}"
                 )
             }, ensure_ascii=False)
 
@@ -2238,7 +2250,7 @@ def _make_read_resource_handler(server_name: str, tool_timeout: float):
             )
             return json.dumps({
                 "error": _sanitize_error(
-                    f"MCP call failed: {type(exc).__name__}: {exc}"
+                    f"MCP call failed: {type(exc).__name__}: {_exc_str(exc)}"
                 )
             }, ensure_ascii=False)
 
@@ -2301,7 +2313,7 @@ def _make_list_prompts_handler(server_name: str, tool_timeout: float):
             )
             return json.dumps({
                 "error": _sanitize_error(
-                    f"MCP call failed: {type(exc).__name__}: {exc}"
+                    f"MCP call failed: {type(exc).__name__}: {_exc_str(exc)}"
                 )
             }, ensure_ascii=False)
 
@@ -2372,7 +2384,7 @@ def _make_get_prompt_handler(server_name: str, tool_timeout: float):
             )
             return json.dumps({
                 "error": _sanitize_error(
-                    f"MCP call failed: {type(exc).__name__}: {exc}"
+                    f"MCP call failed: {type(exc).__name__}: {_exc_str(exc)}"
                 )
             }, ensure_ascii=False)
 
