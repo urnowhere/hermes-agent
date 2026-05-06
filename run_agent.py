@@ -1878,6 +1878,14 @@ class AIAgent:
         compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in ("true", "1", "yes")
         compression_target_ratio = float(_compression_cfg.get("target_ratio", 0.20))
         compression_protect_last = int(_compression_cfg.get("protect_last_n", 20))
+        try:
+            _threshold_tokens_cfg = _compression_cfg.get("threshold_tokens")
+            compression_threshold_tokens = int(_threshold_tokens_cfg) if _threshold_tokens_cfg is not None else None
+            if compression_threshold_tokens is not None and compression_threshold_tokens <= 0:
+                compression_threshold_tokens = None
+        except (TypeError, ValueError):
+            compression_threshold_tokens = None
+        self._compression_threshold_tokens_config = compression_threshold_tokens
 
         # Read optional explicit context_length override for the auxiliary
         # compression model. Custom endpoints often cannot report this via
@@ -2061,6 +2069,7 @@ class AIAgent:
                 config_context_length=_config_context_length,
                 provider=self.provider,
                 api_mode=self.api_mode,
+                threshold_tokens_override=self._compression_threshold_tokens_config,
             )
         self.compression_enabled = compression_enabled
 
@@ -2732,15 +2741,29 @@ class AIAgent:
                 # the raw messages plus a small summarisation instruction.
                 old_threshold = threshold
                 new_threshold = aux_context
-                self.context_compressor.threshold_tokens = new_threshold
-                # Keep threshold_percent in sync so future main-model
-                # context_length changes (update_model) re-derive from a
-                # sensible number rather than the original too-high value.
                 main_ctx = self.context_compressor.context_length
-                if main_ctx:
-                    self.context_compressor.threshold_percent = (
-                        new_threshold / main_ctx
+                # If the active threshold came from an absolute token override,
+                # lower that session-scoped override as well.  Otherwise a later
+                # model switch/update_model() would recompute from the stale
+                # too-high override and undo this feasibility correction.
+                if getattr(
+                    self.context_compressor,
+                    "threshold_tokens_override",
+                    None,
+                ) is not None:
+                    self.context_compressor.set_threshold_tokens_override(
+                        new_threshold,
+                        update_percent=True,
                     )
+                else:
+                    self.context_compressor.threshold_tokens = new_threshold
+                    # Keep threshold_percent in sync so future main-model
+                    # context_length changes (update_model) re-derive from a
+                    # sensible number rather than the original too-high value.
+                    if main_ctx:
+                        self.context_compressor.threshold_percent = (
+                            new_threshold / main_ctx
+                        )
                 safe_pct = int((aux_context / main_ctx) * 100) if main_ctx else 50
                 # Build human-readable "model (provider)" labels for both
                 # the main model and the compression model so users can
