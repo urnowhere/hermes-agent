@@ -71,6 +71,7 @@ def test_background_review_agent_tools_are_limited():
     expected_tools = set(resolve_multiple_toolsets(["memory", "skills"]))
 
     assert "memory" in expected_tools
+    assert "skill_candidates" in expected_tools
     assert "skill_manage" in expected_tools
     assert "skill_view" in expected_tools
     assert "skills_list" in expected_tools

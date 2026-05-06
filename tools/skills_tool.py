@@ -628,6 +628,203 @@ def _sort_skills(skills: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return sorted(skills, key=lambda s: (s.get("category") or "", s["name"]))
 
 
+def _candidate_tokens(text: str) -> Set[str]:
+    """Return meaningful lowercase tokens for lightweight skill matching."""
+    stop_words = {
+        "a", "an", "and", "are", "as", "at", "be", "by", "can", "for", "from",
+        "how", "i", "in", "into", "is", "it", "of", "on", "or", "that", "the",
+        "this", "to", "use", "when", "with", "you", "your",
+    }
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]{2,}", (text or "").lower())
+        if token not in stop_words
+    }
+
+
+def _score_skill_candidate(query: str, name: str, description: str, tags: List[str] | None = None) -> Tuple[int, str]:
+    """Score a skill candidate using deterministic metadata overlap only."""
+    query_text = query or ""
+    haystack = f"{name} {description} {' '.join(tags or [])}".lower()
+    query_lower = query_text.lower().strip()
+    name_lower = (name or "").lower()
+
+    if not query_lower:
+        return 0, "no query terms"
+
+    score = 0
+    reasons: List[str] = []
+
+    if query_lower == name_lower:
+        score += 100
+        reasons.append("exact name match")
+    elif query_lower in name_lower:
+        score += 70
+        reasons.append("query appears in skill name")
+    elif name_lower and name_lower in query_lower:
+        score += 55
+        reasons.append("skill name appears in query")
+
+    query_tokens = _candidate_tokens(query_text)
+    candidate_tokens = _candidate_tokens(haystack)
+    overlap = query_tokens & candidate_tokens
+    if overlap:
+        token_score = min(45, len(overlap) * 12)
+        score += token_score
+        reasons.append("shared terms: " + ", ".join(sorted(overlap)[:5]))
+
+    if any(token in name_lower for token in query_tokens):
+        score += 15
+        reasons.append("name contains task terms")
+
+    return score, "; ".join(reasons) if reasons else "weak metadata overlap"
+
+
+def _local_skill_candidates(query: str, limit: int) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    for skill in _find_all_skills():
+        score, reason = _score_skill_candidate(
+            query,
+            str(skill.get("name", "")),
+            str(skill.get("description", "")),
+        )
+        if score <= 0:
+            continue
+        candidates.append(
+            {
+                "name": skill.get("name"),
+                "description": skill.get("description", ""),
+                "category": skill.get("category"),
+                "source_type": "installed",
+                "source": "local",
+                "installed": True,
+                "score": score,
+                "reason": reason,
+            }
+        )
+    candidates.sort(key=lambda item: (-int(item.get("score", 0)), str(item.get("name", ""))))
+    return candidates[:limit]
+
+
+def _hub_skill_candidates(query: str, limit: int) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """Return central hub-index metadata candidates. Best-effort and read-only."""
+    try:
+        from tools.skills_hub import GitHubAuth, HermesIndexSource
+
+        source = HermesIndexSource(GitHubAuth())
+        search_terms = [query]
+        search_terms.extend(
+            sorted(_candidate_tokens(query), key=lambda token: (-len(token), token))[:5]
+        )
+
+        seen: Set[str] = set()
+        results = []
+        for term in search_terms:
+            for result in source.search(term, limit=max(limit * 2, limit)):
+                key = result.identifier or result.name
+                if key in seen:
+                    continue
+                seen.add(key)
+                results.append(result)
+    except Exception as e:
+        logger.debug("skill_candidates hub lookup failed: %s", e, exc_info=True)
+        return [], str(e)
+
+    candidates: List[Dict[str, Any]] = []
+    for result in results:
+        score, reason = _score_skill_candidate(
+            query,
+            result.name,
+            result.description,
+            list(result.tags or []),
+        )
+        if score <= 0:
+            continue
+        candidates.append(
+            {
+                "name": result.name,
+                "description": result.description,
+                "source_type": "hub",
+                "source": result.source,
+                "identifier": result.identifier,
+                "trust_level": result.trust_level,
+                "installed": False,
+                "score": score,
+                "reason": reason,
+            }
+        )
+    candidates.sort(key=lambda item: (-int(item.get("score", 0)), str(item.get("name", ""))))
+    return candidates[:limit], None
+
+
+def skill_candidates(query: str, limit: int = 8, include_hub: bool = True) -> str:
+    """Find likely existing skills for a task before creating a new skill.
+
+    This helper is intentionally read-only. It surfaces installed skills and
+    hub metadata candidates, but never installs, patches, deletes, or creates.
+    """
+    try:
+        query = (query or "").strip()
+        if not query:
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": "query is required.",
+                    "candidates": [],
+                },
+                ensure_ascii=False,
+            )
+
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = 8
+        limit = max(1, min(limit, 20))
+
+        local = _local_skill_candidates(query, limit)
+        hub: List[Dict[str, Any]] = []
+        hub_error: Optional[str] = None
+        if include_hub:
+            hub, hub_error = _hub_skill_candidates(query, limit)
+
+        by_key: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for candidate in [*local, *hub]:
+            key = (
+                str(candidate.get("source_type", "")),
+                str(candidate.get("name", "")).lower(),
+            )
+            existing = by_key.get(key)
+            if existing is None or int(candidate.get("score", 0)) > int(existing.get("score", 0)):
+                by_key[key] = candidate
+
+        candidates = sorted(
+            by_key.values(),
+            key=lambda item: (
+                -int(item.get("score", 0)),
+                str(item.get("source_type")) != "installed",
+                str(item.get("name", "")),
+            ),
+        )[:limit]
+
+        result: Dict[str, Any] = {
+            "success": True,
+            "query": query,
+            "candidates": candidates,
+            "count": len(candidates),
+            "hint": (
+                "Review candidates before skill_manage action=create. "
+                "Patch an installed skill when it fits, suggest installing a hub skill when it is a better fit, "
+                "and create a new skill only when no candidate covers the task."
+            ),
+        }
+        if hub_error:
+            result["hub_unavailable"] = True
+            result["hub_error"] = hub_error
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as e:
+        return tool_error(str(e), success=False)
+
+
 def _load_category_description(category_dir: Path) -> Optional[str]:
     """
     Load category description from DESCRIPTION.md if it exists.
@@ -1468,6 +1665,33 @@ SKILLS_LIST_SCHEMA = {
     },
 }
 
+SKILL_CANDIDATES_SCHEMA = {
+    "name": "skill_candidates",
+    "description": (
+        "Find likely existing skills for a task before creating a new skill. "
+        "Read-only: returns installed skill matches and hub metadata candidates, "
+        "but never installs, patches, deletes, or creates skills."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Task, workflow, or proposed skill summary to match against existing skills.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum candidates to return. Defaults to 8, capped at 20.",
+            },
+            "include_hub": {
+                "type": "boolean",
+                "description": "Whether to include Skills Hub metadata candidates when available. Defaults to true.",
+            },
+        },
+        "required": ["query"],
+    },
+}
+
 SKILL_VIEW_SCHEMA = {
     "name": "skill_view",
     "description": "Skills allow for loading information about specific tasks and workflows, as well as scripts and templates. Load a skill's full content or access its linked files (references, templates, scripts). First call returns SKILL.md content plus a 'linked_files' dict showing available references/templates/scripts. To access those, call again with file_path parameter.",
@@ -1497,6 +1721,20 @@ registry.register(
     check_fn=check_skills_requirements,
     emoji="📚",
 )
+
+registry.register(
+    name="skill_candidates",
+    toolset="skills",
+    schema=SKILL_CANDIDATES_SCHEMA,
+    handler=lambda args, **kw: skill_candidates(
+        query=args.get("query", ""),
+        limit=args.get("limit", 8),
+        include_hub=args.get("include_hub", True),
+    ),
+    check_fn=check_skills_requirements,
+    emoji="📚",
+)
+
 def _skill_view_with_bump(args, **kw):
     """Invoke skill_view, then bump view_count on success. Best-effort: a
     telemetry failure never breaks the tool call."""

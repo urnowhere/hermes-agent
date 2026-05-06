@@ -2,6 +2,8 @@
 
 import json
 import os
+import sys
+import types
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,6 +17,7 @@ from tools.skills_tool import (
     _get_category_from_path,
     _find_all_skills,
     skill_matches_platform,
+    skill_candidates,
     skills_list,
     skill_view,
     MAX_DESCRIPTION_LENGTH,
@@ -330,6 +333,146 @@ class TestSkillsList:
         assert result["count"] == 1
         assert result["categories"] == ["linked"]
         assert result["skills"][0]["name"] == "knowledge-brain"
+
+
+# ---------------------------------------------------------------------------
+# skill_candidates
+# ---------------------------------------------------------------------------
+
+
+class TestSkillCandidates:
+    def test_returns_installed_skill_matches(self, tmp_path):
+        with (
+            patch("tools.skills_tool.SKILLS_DIR", tmp_path),
+            patch("tools.skills_tool._hub_skill_candidates", return_value=([], None)),
+        ):
+            _make_skill(
+                tmp_path,
+                "python-debugging",
+                body="Use pytest traces and focused reproduction steps.",
+            )
+            raw = skill_candidates("debug python pytest failure")
+
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert result["count"] == 1
+        candidate = result["candidates"][0]
+        assert candidate["name"] == "python-debugging"
+        assert candidate["source_type"] == "installed"
+        assert candidate["installed"] is True
+        assert "shared terms" in candidate["reason"]
+
+    def test_returns_hub_candidates_when_available(self, tmp_path):
+        hub_candidate = {
+            "name": "docker-builds",
+            "description": "Build and debug Docker images.",
+            "source_type": "hub",
+            "source": "hermes-index",
+            "identifier": "hub/docker-builds",
+            "trust_level": "trusted",
+            "installed": False,
+            "score": 80,
+            "reason": "shared terms: docker",
+        }
+
+        with (
+            patch("tools.skills_tool.SKILLS_DIR", tmp_path),
+            patch("tools.skills_tool._hub_skill_candidates", return_value=([hub_candidate], None)),
+        ):
+            raw = skill_candidates("debug docker build")
+
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert result["candidates"][0]["name"] == "docker-builds"
+        assert result["candidates"][0]["source_type"] == "hub"
+        assert result["candidates"][0]["identifier"] == "hub/docker-builds"
+
+    def test_ranks_by_relevance_before_source_type(self, tmp_path):
+        hub_candidate = {
+            "name": "exact-docker-helper",
+            "description": "Exact Docker build troubleshooting workflow.",
+            "source_type": "hub",
+            "source": "hermes-index",
+            "identifier": "hub/exact-docker-helper",
+            "trust_level": "trusted",
+            "installed": False,
+            "score": 100,
+            "reason": "exact name match",
+        }
+
+        with (
+            patch("tools.skills_tool.SKILLS_DIR", tmp_path),
+            patch("tools.skills_tool._hub_skill_candidates", return_value=([hub_candidate], None)),
+        ):
+            _make_skill(tmp_path, "docker-notes")
+            raw = skill_candidates("exact docker helper")
+
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert result["candidates"][0]["name"] == "exact-docker-helper"
+        assert result["candidates"][0]["source_type"] == "hub"
+
+    def test_hub_lookup_falls_back_to_task_terms(self):
+        class _FakeAuth:
+            pass
+
+        class _FakeIndex:
+            def __init__(self, auth):
+                self.auth = auth
+
+            def search(self, query, limit=10):
+                if query == "docker":
+                    return [
+                        types.SimpleNamespace(
+                            name="docker-builds",
+                            description="Build and debug Docker images.",
+                            source="hermes-index",
+                            identifier="hub/docker-builds",
+                            trust_level="trusted",
+                            tags=["containers"],
+                        )
+                    ]
+                return []
+
+        fake_hub = types.SimpleNamespace(
+            GitHubAuth=_FakeAuth,
+            HermesIndexSource=_FakeIndex,
+        )
+
+        with patch.dict(sys.modules, {"tools.skills_hub": fake_hub}):
+            candidates, error = skills_tool_module._hub_skill_candidates(
+                "debug docker build failure",
+                limit=5,
+            )
+
+        assert error is None
+        assert candidates[0]["name"] == "docker-builds"
+        assert candidates[0]["identifier"] == "hub/docker-builds"
+
+    def test_hub_failure_is_non_fatal(self, tmp_path):
+        with (
+            patch("tools.skills_tool.SKILLS_DIR", tmp_path),
+            patch(
+                "tools.skills_tool._hub_skill_candidates",
+                return_value=([], "network unavailable"),
+            ),
+        ):
+            _make_skill(tmp_path, "local-python")
+            raw = skill_candidates("python task")
+
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert result["hub_unavailable"] is True
+        assert result["hub_error"] == "network unavailable"
+        assert result["candidates"][0]["name"] == "local-python"
+
+    def test_rejects_empty_query(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            raw = skill_candidates("")
+
+        result = json.loads(raw)
+        assert result["success"] is False
+        assert "query" in result["error"].lower()
 
 
 # ---------------------------------------------------------------------------
