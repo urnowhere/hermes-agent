@@ -3291,23 +3291,49 @@ class TelegramAdapter(BasePlatformAdapter):
                 event.media_types = [mime_type]
                 logger.info("[Telegram] Cached user document at %s", cached_path)
 
-                # For text files, inject content into event.text (capped at 100 KB)
+                # --- Document Intelligence Layer ---
+                # Delegate parsing to agent/document_processing instead of
+                # handling it inline.  The router returns a DocumentResult
+                # whose .to_injection_text() gives a clean LLM-ready string.
                 MAX_TEXT_INJECT_BYTES = 100 * 1024
-                if ext in (".md", ".txt") and len(raw_bytes) <= MAX_TEXT_INJECT_BYTES:
+                if len(raw_bytes) <= MAX_TEXT_INJECT_BYTES:
                     try:
-                        text_content = raw_bytes.decode("utf-8")
-                        display_name = original_filename or f"document{ext}"
-                        display_name = re.sub(r'[^\w.\- ]', '_', display_name)
-                        injection = f"[Content of {display_name}]:\n{text_content}"
-                        if event.text:
-                            event.text = f"{injection}\n\n{event.text}"
-                        else:
-                            event.text = injection
-                    except UnicodeDecodeError:
+                        from agent.document_processing.router import process_document as _process_doc
+
+                        doc_result = _process_doc(
+                            raw_bytes,
+                            filename=original_filename,
+                            ext=ext,
+                            mime_type=mime_type,
+                            source_type="telegram_file",
+                        )
+                        injection = doc_result.to_injection_text()
+                        if injection:
+                            if event.text:
+                                event.text = f"{injection}\n\n{event.text}"
+                            else:
+                                event.text = injection
+                    except Exception:
                         logger.warning(
-                            "[Telegram] Could not decode text file as UTF-8, skipping content injection",
+                            "[Telegram] document_processing failed, falling back to raw text injection",
                             exc_info=True,
                         )
+                        # Fallback: try raw UTF-8 decode for text-ish files
+                        if ext in (".md", ".txt", ".html", ".htm", ".csv", ".json", ".xml", ".yaml", ".yml", ".toml", ".log", ".ini", ".cfg"):
+                            try:
+                                text_content = raw_bytes.decode("utf-8")
+                                display_name = original_filename or f"document{ext}"
+                                display_name = re.sub(r'[^\w.\- ]', '_', display_name)
+                                fallback_injection = f"[Content of {display_name}]:\n{text_content}"
+                                if event.text:
+                                    event.text = f"{fallback_injection}\n\n{event.text}"
+                                else:
+                                    event.text = fallback_injection
+                            except UnicodeDecodeError:
+                                logger.warning(
+                                    "[Telegram] Could not decode document as UTF-8",
+                                    exc_info=True,
+                                )
 
             except Exception as e:
                 logger.warning("[Telegram] Failed to cache document: %s", e, exc_info=True)
