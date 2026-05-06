@@ -2335,6 +2335,11 @@ class HermesCLI:
             fb = [fb] if fb.get("provider") and fb.get("model") else []
         self._fallback_model = fb
 
+        # Smart model routing — pre-turn task-difficulty router.  Stored
+        # raw and forwarded to AIAgent; the runtime decides per-turn.
+        smr = CLI_CONFIG.get("smart_model_routing") or {}
+        self._smart_model_routing = smr if isinstance(smr, dict) else {}
+
         # Signature of the currently-initialised agent's runtime.  Used to
         # rebuild the agent when provider / model / base_url changes across
         # turns (e.g. after /model or credential rotation).
@@ -3859,6 +3864,7 @@ class HermesCLI:
                 reasoning_callback=self._current_reasoning_callback(),
 
                 fallback_model=self._fallback_model,
+                smart_model_routing=self._smart_model_routing,
                 thinking_callback=self._on_thinking,
                 checkpoints_enabled=self.checkpoints_enabled,
                 checkpoint_max_snapshots=self.checkpoint_max_snapshots,
@@ -7044,6 +7050,7 @@ class HermesCLI:
                     provider_require_parameters=self._provider_require_params,
                     provider_data_collection=self._provider_data_collection,
                     fallback_model=self._fallback_model,
+                    smart_model_routing=self._smart_model_routing,
                 )
                 # Silence raw spinner; route thinking through TUI widget when no foreground agent is active.
                 bg_agent._print_fn = lambda *_a, **_kw: None

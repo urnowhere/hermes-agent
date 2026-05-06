@@ -970,6 +970,7 @@ class AIAgent:
         checkpoint_max_total_size_mb: int = 500,
         checkpoint_max_file_size_mb: int = 10,
         pass_session_id: bool = False,
+        smart_model_routing: Optional[Dict[str, Any]] = None,
     ):
         """
         Initialize the AI Agent.
@@ -1611,6 +1612,19 @@ class AIAgent:
             else:
                 print(f"🔄 Fallback chain ({len(self._fallback_chain)} providers): " +
                       " → ".join(f"{f['model']} ({f['provider']})" for f in self._fallback_chain))
+
+        # ── Smart model routing (pre-turn task-difficulty router) ─────
+        # Pure config blob; the runtime decision is computed at the top of
+        # run_conversation() via _maybe_apply_smart_routing().  Disabled
+        # when missing/invalid so existing fallback semantics are preserved.
+        if isinstance(smart_model_routing, dict):
+            self._smart_routing_config = dict(smart_model_routing)
+        else:
+            self._smart_routing_config = {}
+        # Set when a routed turn is active so _restore_primary_runtime
+        # treats the swap as turn-scoped (same path as fallback).
+        self._smart_routing_active = False
+        self._last_smart_routing_decision: Optional[Dict[str, Any]] = None
 
         # Get available tools with filtering
         self.tools = get_tool_definitions(
@@ -7826,6 +7840,190 @@ class AIAgent:
             logging.error("Failed to activate fallback %s: %s", fb_model, e)
             return self._try_activate_fallback()  # try next in chain
 
+    # ── Smart model routing (pre-turn) ───────────────────────────────────
+
+    def _maybe_apply_smart_routing(self, user_message: str) -> bool:
+        """Compute and apply a smart-routing decision for this turn.
+
+        Runs at the top of ``run_conversation()`` AFTER any fallback
+        restoration has put us back on the primary runtime, so the
+        decision is made against the user-configured primary model.
+
+        Returns True if a routed runtime was activated.  On any error
+        (bad config, runtime resolution failure) we log and stay on the
+        primary — never crashing the turn.
+
+        No live HTTP requests are made here beyond constructing an SDK
+        client object via the existing ``resolve_provider_client`` helper
+        (the same path fallback uses).  Tests mock that helper so unit
+        coverage never reaches a network.
+        """
+        cfg = getattr(self, "_smart_routing_config", None) or {}
+        if not cfg.get("enabled"):
+            return False
+
+        try:
+            from agent.smart_model_routing import decide_route
+        except Exception as e:  # pragma: no cover - defensive import
+            logging.warning("smart_model_routing import failed: %s", e)
+            return False
+
+        try:
+            decision = decide_route(
+                user_message=user_message or "",
+                primary_provider=(self._primary_runtime or {}).get("provider", self.provider) or "",
+                primary_model=(self._primary_runtime or {}).get("model", self.model) or "",
+                config=cfg,
+                fallback_chain=list(getattr(self, "_fallback_chain", []) or []),
+            )
+        except Exception as e:
+            logging.warning("smart_model_routing decision failed: %s", e)
+            return False
+
+        self._last_smart_routing_decision = {
+            "route": decision.route,
+            "mode": decision.mode,
+            "classification": decision.classification,
+            "reason": decision.reason,
+            "target": decision.target.to_fallback_entry() if decision.target else None,
+        }
+
+        if decision.route == "primary" or decision.target is None:
+            logging.debug(
+                "smart_model_routing: stay on primary (%s, %s)",
+                decision.classification, decision.reason,
+            )
+            return False
+
+        if not decision.target.is_valid():
+            logging.warning(
+                "smart_model_routing: invalid target for route=%s — staying on primary",
+                decision.route,
+            )
+            return False
+
+        # Inline runtime swap.  Mirrors the client/runtime bookkeeping
+        # done by _try_activate_fallback (resolve client, determine
+        # api_mode, swap fields, refresh prompt-cache + context engine)
+        # without consuming a real fallback chain slot.  Sets
+        # _fallback_activated=True so the next turn's
+        # _restore_primary_runtime puts us back on the primary.
+        target = decision.target
+        try:
+            from agent.auxiliary_client import resolve_provider_client
+            target_provider = target.provider.strip().lower()
+            target_model = target.model.strip()
+            base_hint = target.base_url
+            key_hint = target.api_key
+            client, _resolved = resolve_provider_client(
+                target_provider, model=target_model, raw_codex=True,
+                explicit_base_url=base_hint,
+                explicit_api_key=key_hint,
+            )
+            if client is None:
+                logging.warning(
+                    "smart_model_routing: provider %s not configured — staying on primary",
+                    target_provider,
+                )
+                return False
+
+            try:
+                from hermes_cli.model_normalize import normalize_model_for_provider
+                target_model = normalize_model_for_provider(target_model, target_provider)
+            except Exception:
+                pass
+
+            target_base_url = str(client.base_url)
+
+            target_api_mode = "chat_completions"
+            if target_provider == "openai-codex":
+                target_api_mode = "codex_responses"
+            elif target_provider == "anthropic" or target_base_url.rstrip("/").lower().endswith("/anthropic"):
+                target_api_mode = "anthropic_messages"
+            elif self._is_azure_openai_url(target_base_url):
+                target_api_mode = "chat_completions"
+            elif self._is_direct_openai_url(target_base_url):
+                target_api_mode = "codex_responses"
+            elif self._provider_model_requires_responses_api(target_model, provider=target_provider):
+                target_api_mode = "codex_responses"
+
+            old_model = self.model
+            self.model = target_model
+            self.provider = target_provider
+            self.base_url = target_base_url
+            self.api_mode = target_api_mode
+            if hasattr(self, "_transport_cache"):
+                self._transport_cache.clear()
+            self._fallback_activated = True
+
+            _timeout = get_provider_request_timeout(target_provider, target_model)
+            if target_api_mode == "anthropic_messages":
+                from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token, _is_oauth_token
+                effective_key = (
+                    (client.api_key or resolve_anthropic_token() or "")
+                    if target_provider == "anthropic"
+                    else (client.api_key or "")
+                )
+                self.api_key = effective_key
+                self._anthropic_api_key = effective_key
+                self._anthropic_base_url = target_base_url
+                self._anthropic_client = build_anthropic_client(
+                    effective_key, self._anthropic_base_url, timeout=_timeout,
+                )
+                self._is_anthropic_oauth = _is_oauth_token(effective_key) if target_provider == "anthropic" else False
+                self.client = None
+                self._client_kwargs = {}
+            else:
+                self.api_key = client.api_key
+                self.client = client
+                target_headers = getattr(client, "_custom_headers", None) or getattr(client, "default_headers", None)
+                self._client_kwargs = {
+                    "api_key": client.api_key,
+                    "base_url": target_base_url,
+                    **({"default_headers": dict(target_headers)} if target_headers else {}),
+                }
+                if _timeout is not None:
+                    self._client_kwargs["timeout"] = _timeout
+
+            self._use_prompt_caching, self._use_native_cache_layout = (
+                self._anthropic_prompt_cache_policy(
+                    provider=target_provider,
+                    base_url=target_base_url,
+                    api_mode=target_api_mode,
+                    model=target_model,
+                )
+            )
+
+            if hasattr(self, "context_compressor") and self.context_compressor:
+                from agent.model_metadata import get_model_context_length
+                target_context_length = get_model_context_length(
+                    self.model, base_url=self.base_url,
+                    api_key=self.api_key, provider=self.provider,
+                    config_context_length=getattr(self, "_config_context_length", None),
+                )
+                self.context_compressor.update_model(
+                    model=self.model,
+                    context_length=target_context_length,
+                    base_url=self.base_url,
+                    api_key=getattr(self, "api_key", ""),
+                    provider=self.provider,
+                )
+
+            self._smart_routing_active = True
+            logging.info(
+                "smart_model_routing: %s → %s/%s (was %s) [%s, %s]",
+                decision.route, target_provider, target_model, old_model,
+                decision.classification, decision.reason,
+            )
+            self._emit_status(
+                f"🧭 Smart routing → {target_model} ({target_provider}) "
+                f"[{decision.classification}]"
+            )
+            return True
+        except Exception as e:
+            logging.warning("smart_model_routing activation raised: %s", e)
+            return False
+
     # ── Per-turn primary restoration ─────────────────────────────────────
 
     def _restore_primary_runtime(self) -> bool:
@@ -10622,6 +10820,15 @@ class AIAgent:
         # runtime so this turn gets a fresh attempt with the preferred model.
         # No-op when _fallback_activated is False (gateway, first turn, etc.).
         self._restore_primary_runtime()
+
+        # Smart model routing: pre-turn task-difficulty router that may
+        # swap to cheap_model (for trivial tasks) or smart_model (for hard
+        # ones).  Disabled by default; turn-scoped so the next turn starts
+        # back on the primary via _restore_primary_runtime above.
+        try:
+            self._maybe_apply_smart_routing(user_message)
+        except Exception as _smr_err:
+            logger.warning("smart_model_routing failed unexpectedly: %s", _smr_err)
 
         # Sanitize surrogate characters from user input.  Clipboard paste from
         # rich-text editors (Google Docs, Word, etc.) can inject lone surrogates

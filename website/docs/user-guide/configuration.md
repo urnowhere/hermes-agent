@@ -888,6 +888,8 @@ Each auxiliary task has a configurable `timeout` (in seconds). Defaults: vision 
 
 :::info
 Context compression has its own `compression:` block for thresholds and an `auxiliary.compression:` block for model/provider settings — see [Context Compression](#context-compression) above. The fallback model uses a `fallback_model:` block — see [Fallback Model](/docs/integrations/providers#fallback-model). All three follow the same provider/model/base_url pattern.
+
+For pre-turn task-difficulty routing (cheap-on-simple or smart-on-hard) see [Smart Model Routing](./features/smart-model-routing.md). It uses a `smart_model_routing:` block with the same provider/model shape and is independent of fallback (fallback handles provider *failure*; smart routing handles task *difficulty*).
 :::
 
 ### Session Search Tuning
