@@ -2946,6 +2946,13 @@ def _resolve_chat_argv(
     argv, cwd = _make_tui_argv(PROJECT_ROOT / "ui-tui", tui_dev=False)
     env = os.environ.copy()
     env.setdefault("NODE_ENV", "production")
+    # Browser-embedded chat should prefer stable wheel-based scrollback over
+    # native terminal mouse tracking. When mouse tracking is enabled, wheel
+    # events are consumed by the TUI and forwarded as terminal input, which
+    # makes browser-side transcript scrolling feel broken. Keep the terminal
+    # build unchanged for native CLI usage; only disable mouse tracking for
+    # the dashboard PTY path.
+    env.setdefault("HERMES_TUI_DISABLE_MOUSE", "1")
 
     if resume:
         env["HERMES_TUI_RESUME"] = resume
