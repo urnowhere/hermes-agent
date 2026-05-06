@@ -2,7 +2,7 @@
 
 Covers the pure logic of the new wrapper: catalog integrity, the three size
 families (image_size_preset / aspect_ratio / gpt_literal), the supports
-whitelist, default merging, GPT quality override, and model resolution
+whitelist, default merging, GPT quality override, per-call quality, and model resolution
 fallback. Does NOT exercise fal_client submission — that's covered by
 tests/tools/test_managed_media_gateways.py.
 """
@@ -253,16 +253,29 @@ class TestDefaults:
 
 
 # ---------------------------------------------------------------------------
-# GPT-Image quality is pinned to medium (not user-configurable)
+# GPT-Image quality defaults and per-call override
 # ---------------------------------------------------------------------------
 
-class TestGptQualityPinnedToMedium:
-    """GPT-Image quality is baked into the FAL_MODELS defaults at 'medium'
-    and cannot be overridden via config. Pinning keeps Nous Portal billing
-    predictable across all users."""
+class TestGptQualityDefaults:
+    """GPT-Image defaults to medium quality unless the image_generate call
+    explicitly asks for low/medium/high. Config-level quality knobs remain
+    ignored so billing stays predictable by default."""
 
-    def test_gpt_payload_always_has_medium_quality(self, image_tool):
+    def test_gpt_payload_defaults_to_medium_quality(self, image_tool):
         p = image_tool._build_fal_payload("fal-ai/gpt-image-1.5", "hi", "square")
+        assert p["quality"] == "medium"
+
+    @pytest.mark.parametrize("quality", ["low", "medium", "high"])
+    def test_gpt_payload_accepts_per_call_quality_override(self, image_tool, quality):
+        p = image_tool._build_fal_payload(
+            "fal-ai/gpt-image-2", "hi", "square", overrides={"quality": quality}
+        )
+        assert p["quality"] == quality
+
+    def test_invalid_gpt_quality_override_is_ignored(self, image_tool):
+        p = image_tool._build_fal_payload(
+            "fal-ai/gpt-image-2", "hi", "square", overrides={"quality": "ultra"}
+        )
         assert p["quality"] == "medium"
 
     def test_config_quality_setting_is_ignored(self, image_tool):
@@ -363,11 +376,15 @@ class TestAspectRatioNormalization:
 
 class TestRegistryIntegration:
 
-    def test_schema_exposes_only_prompt_and_aspect_ratio_to_agent(self, image_tool):
-        """The agent-facing schema must stay tight — model selection is a
-        user-level config choice, not an agent-level arg."""
+    def test_schema_exposes_prompt_aspect_ratio_and_quality_to_agent(self, image_tool):
+        """Agents may request low/medium/high quality per image, while provider
+        and model selection remain user-level config choices."""
         props = image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["properties"]
-        assert set(props.keys()) == {"prompt", "aspect_ratio"}
+        assert set(props.keys()) == {"prompt", "aspect_ratio", "quality"}
+
+    def test_quality_enum_is_three_values(self, image_tool):
+        enum = image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["properties"]["quality"]["enum"]
+        assert set(enum) == {"low", "medium", "high"}
 
     def test_aspect_ratio_enum_is_three_values(self, image_tool):
         enum = image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["properties"]["aspect_ratio"]["enum"]
