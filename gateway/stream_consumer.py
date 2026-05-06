@@ -522,7 +522,22 @@ class GatewayStreamConsumer:
         if "MEDIA:" not in text and "[[audio_as_voice]]" not in text:
             return text
         cleaned = text.replace("[[audio_as_voice]]", "")
-        cleaned = GatewayStreamConsumer._MEDIA_RE.sub("", cleaned)
+
+        # Build code spans to avoid stripping MEDIA: inside code blocks
+        code_spans: list = []
+        for m in re.finditer(r'```[^\n]*\n.*?```', cleaned, re.DOTALL):
+            code_spans.append((m.start(), m.end()))
+        for m in re.finditer(r'`[^`\n]+`', cleaned):
+            code_spans.append((m.start(), m.end()))
+
+        def _in_code(pos: int) -> bool:
+            return any(s <= pos < e for s, e in code_spans)
+
+        def _safe_sub(m):
+            if _in_code(m.start()):
+                return m.group(0)
+            return ''
+        cleaned = GatewayStreamConsumer._MEDIA_RE.sub(_safe_sub, cleaned)
         # Collapse excessive blank lines left behind by removed tags
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
         # Strip trailing whitespace/newlines but preserve leading content
