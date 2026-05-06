@@ -254,37 +254,18 @@ def lookup_models_dev_context(provider: str, model: str) -> Optional[int]:
     """Look up context_length for a provider+model combo in models.dev.
 
     Returns the context window in tokens, or None if not found.
-    Handles case-insensitive matching and filters out context=0 entries.
+    Delegates lookup to ``_find_model_entry`` so vendor-prefix-stripping
+    and case-insensitive matching apply uniformly with capability lookups.
+    Filters out context=0 entries.
     """
-    mdev_provider_id = PROVIDER_TO_MODELS_DEV.get(provider)
-    if not mdev_provider_id:
+    models = _get_provider_models(provider)
+    if models is None:
         return None
 
-    data = fetch_models_dev()
-    provider_data = data.get(mdev_provider_id)
-    if not isinstance(provider_data, dict):
+    entry = _find_model_entry(models, model)
+    if entry is None:
         return None
-
-    models = provider_data.get("models", {})
-    if not isinstance(models, dict):
-        return None
-
-    # Exact match
-    entry = models.get(model)
-    if entry:
-        ctx = _extract_context(entry)
-        if ctx:
-            return ctx
-
-    # Case-insensitive match
-    model_lower = model.lower()
-    for mid, mdata in models.items():
-        if mid.lower() == model_lower:
-            ctx = _extract_context(mdata)
-            if ctx:
-                return ctx
-
-    return None
+    return _extract_context(entry)
 
 
 def _extract_context(entry: Dict[str, Any]) -> Optional[int]:
@@ -342,16 +323,28 @@ def _get_provider_models(provider: str) -> Optional[Dict[str, Any]]:
 
 
 def _find_model_entry(models: Dict[str, Any], model: str) -> Optional[Dict[str, Any]]:
-    """Find a model entry by exact match, then case-insensitive fallback."""
-    # Exact match
-    entry = models.get(model)
-    if isinstance(entry, dict):
-        return entry
+    """Find a model entry by exact match, vendor-prefix strip, or
+    case-insensitive fallback.
 
-    # Case-insensitive match
-    model_lower = model.lower()
+    The prefix-strip fallback accepts inputs like ``xiaomi/mimo-v2.5``
+    against a direct provider whose cache is keyed by bare names
+    (``mimo-v2.5``). Aggregator caches are keyed by full ``vendor/model``
+    slugs and matched by the exact path. Callers pre-constrain the search
+    to one provider's catalog, so a non-matching prefix simply falls
+    through to None.
+    """
+    candidates = [model]
+    if "/" in model:
+        candidates.append(model.split("/", 1)[1])
+
+    for candidate in candidates:
+        entry = models.get(candidate)
+        if isinstance(entry, dict):
+            return entry
+
+    candidates_lower = {c.lower() for c in candidates}
     for mid, mdata in models.items():
-        if mid.lower() == model_lower and isinstance(mdata, dict):
+        if mid.lower() in candidates_lower and isinstance(mdata, dict):
             return mdata
 
     return None
