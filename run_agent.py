@@ -2581,25 +2581,35 @@ class AIAgent:
             and getattr(self, "platform", "") == "cli"
         )
 
-    def _emit_status(self, message: str) -> None:
+    def _emit_status(self, message: str, *, print_to_cli: bool = True) -> None:
         """Emit a lifecycle status message to both CLI and gateway channels.
 
-        CLI users see the message via ``_vprint(force=True)`` so it is always
+        CLI users normally see the message via ``_vprint(force=True)`` so it is
         visible regardless of verbose/quiet mode.  Gateway consumers receive
         it through ``status_callback("lifecycle", ...)``.
+
+        ``print_to_cli=False`` is for routine progress heartbeats while a
+        stream consumer owns the terminal; callback delivery is kept, but
+        direct stdout output is skipped so progress text cannot land inside
+        the live assistant response box.
 
         This helper never raises — exceptions are swallowed so it cannot
         interrupt the retry/fallback logic.
         """
-        try:
-            self._vprint(f"{self.log_prefix}{message}", force=True)
-        except Exception:
-            pass
+        if print_to_cli:
+            try:
+                self._vprint(f"{self.log_prefix}{message}", force=True)
+            except Exception:
+                pass
         if self.status_callback:
             try:
                 self.status_callback("lifecycle", message)
             except Exception:
                 logger.debug("status_callback error in _emit_status", exc_info=True)
+
+    def _emit_progress_status(self, message: str) -> None:
+        """Emit a non-critical progress heartbeat without corrupting streams."""
+        self._emit_status(message, print_to_cli=not self._has_stream_consumers())
 
     def _emit_warning(self, message: str) -> None:
         """Emit a user-visible warning through the same status plumbing.
@@ -5907,7 +5917,13 @@ class AIAgent:
     def _close_request_openai_client(self, client: Any, *, reason: str) -> None:
         self._close_openai_client(client, reason=reason, shared=False)
 
-    def _run_codex_stream(self, api_kwargs: dict, client: Any = None, on_first_delta: callable = None):
+    def _run_codex_stream(
+        self,
+        api_kwargs: dict,
+        client: Any = None,
+        on_first_delta: callable = None,
+        on_stream_event: callable = None,
+    ):
         """Execute one streaming Responses API request and return the final response."""
         import httpx as _httpx
 
@@ -5926,6 +5942,11 @@ class AIAgent:
             try:
                 with active_client.responses.stream(**api_kwargs) as stream:
                     for event in stream:
+                        if on_stream_event:
+                            try:
+                                on_stream_event()
+                            except Exception:
+                                pass
                         self._touch_activity("receiving stream response")
                         if self._interrupt_requested:
                             break
@@ -6473,6 +6494,10 @@ class AIAgent:
         """
         result = {"response": None, "error": None}
         request_client_holder = {"client": None}
+        codex_last_stream_event = {"t": time.time()}
+
+        def _mark_codex_stream_event() -> None:
+            codex_last_stream_event["t"] = time.time()
 
         def _call():
             try:
@@ -6485,6 +6510,7 @@ class AIAgent:
                         api_kwargs,
                         client=request_client_holder["client"],
                         on_first_delta=getattr(self, "_codex_on_first_delta", None),
+                        on_stream_event=_mark_codex_stream_event,
                     )
                 elif self.api_mode == "anthropic_messages":
                     result["response"] = self._anthropic_messages_create(api_kwargs)
@@ -6547,27 +6573,78 @@ class AIAgent:
             # Touch activity every ~30s so the gateway's inactivity
             # monitor knows we're alive while waiting for the response.
             if _poll_count % 100 == 0:  # 100 × 0.3s = 30s
-                _elapsed = time.time() - _call_start
-                self._touch_activity(
-                    f"waiting for non-streaming response ({int(_elapsed)}s elapsed)"
-                )
+                _total_elapsed = time.time() - _call_start
+                if self.api_mode == "codex_responses":
+                    _since_event = time.time() - codex_last_stream_event["t"]
+                    self._touch_activity(
+                        f"waiting for Codex Responses stream "
+                        f"({int(_total_elapsed)}s total, "
+                        f"{int(_since_event)}s since last event)"
+                    )
+                    self._emit_progress_status(
+                        f"⏳ Still waiting for Codex response "
+                        f"({int(_total_elapsed)}s total; "
+                        f"{int(_since_event)}s since last stream event)…"
+                    )
+                else:
+                    self._touch_activity(
+                        f"waiting for non-streaming response ({int(_total_elapsed)}s elapsed)"
+                    )
 
             # Stale-call detector: kill the connection if no response
-            # arrives within the configured timeout.
-            _elapsed = time.time() - _call_start
+            # arrives within the configured timeout. Codex Responses is
+            # internally streaming even though it is routed through this helper,
+            # so freshness is measured from the last stream event instead of
+            # wall-clock request start.
+            _now = time.time()
+            _total_elapsed = _now - _call_start
+            if self.api_mode == "codex_responses":
+                _elapsed = _now - codex_last_stream_event["t"]
+            else:
+                _elapsed = _total_elapsed
             if _elapsed > _stale_timeout:
                 _est_ctx = sum(len(str(v)) for v in api_kwargs.get("messages", [])) // 4
-                logger.warning(
-                    "Non-streaming API call stale for %.0fs (threshold %.0fs). "
-                    "model=%s context=~%s tokens. Killing connection.",
-                    _elapsed, _stale_timeout,
-                    api_kwargs.get("model", "unknown"), f"{_est_ctx:,}",
-                )
-                self._emit_status(
-                    f"⚠️ No response from provider for {int(_elapsed)}s "
-                    f"(non-streaming, model: {api_kwargs.get('model', 'unknown')}). "
-                    f"Aborting call."
-                )
+                if self.api_mode == "codex_responses":
+                    logger.warning(
+                        "Codex Responses stream stale for %.0fs since last event "
+                        "(threshold %.0fs, total %.0fs). model=%s context=~%s tokens. "
+                        "Killing connection.",
+                        _elapsed, _stale_timeout, _total_elapsed,
+                        api_kwargs.get("model", "unknown"), f"{_est_ctx:,}",
+                    )
+                    self._emit_status(
+                        f"⚠️ No Codex stream event for {int(_elapsed)}s "
+                        f"(model: {api_kwargs.get('model', 'unknown')}, "
+                        f"{int(_total_elapsed)}s total). Aborting call."
+                    )
+                    _stale_activity = (
+                        f"stale Codex stream killed after {int(_elapsed)}s "
+                        f"without stream event"
+                    )
+                    _timeout_message = (
+                        f"Codex Responses stream timed out after {int(_elapsed)}s "
+                        f"without a stream event (threshold: {int(_stale_timeout)}s, "
+                        f"total: {int(_total_elapsed)}s)"
+                    )
+                else:
+                    logger.warning(
+                        "Non-streaming API call stale for %.0fs (threshold %.0fs). "
+                        "model=%s context=~%s tokens. Killing connection.",
+                        _elapsed, _stale_timeout,
+                        api_kwargs.get("model", "unknown"), f"{_est_ctx:,}",
+                    )
+                    self._emit_status(
+                        f"⚠️ No response from provider for {int(_elapsed)}s "
+                        f"(non-streaming, model: {api_kwargs.get('model', 'unknown')}). "
+                        f"Aborting call."
+                    )
+                    _stale_activity = (
+                        f"stale non-streaming call killed after {int(_elapsed)}s"
+                    )
+                    _timeout_message = (
+                        f"Non-streaming API call timed out after {int(_elapsed)}s "
+                        f"with no response (threshold: {int(_stale_timeout)}s)"
+                    )
                 try:
                     if self.api_mode == "anthropic_messages":
                         self._anthropic_client.close()
@@ -6578,16 +6655,11 @@ class AIAgent:
                             self._close_request_openai_client(rc, reason="stale_call_kill")
                 except Exception:
                     pass
-                self._touch_activity(
-                    f"stale non-streaming call killed after {int(_elapsed)}s"
-                )
+                self._touch_activity(_stale_activity)
                 # Wait briefly for the thread to notice the closed connection.
                 t.join(timeout=2.0)
                 if result["error"] is None and result["response"] is None:
-                    result["error"] = TimeoutError(
-                        f"Non-streaming API call timed out after {int(_elapsed)}s "
-                        f"with no response (threshold: {int(_stale_timeout)}s)"
-                    )
+                    result["error"] = TimeoutError(_timeout_message)
                 break
 
             if self._interrupt_requested:

@@ -1,4 +1,6 @@
 import sys
+import threading
+import time
 import types
 from types import SimpleNamespace
 
@@ -396,6 +398,69 @@ def test_build_api_kwargs_copilot_responses_omits_reasoning_for_non_reasoning_mo
     assert "reasoning" not in kwargs
     assert "include" not in kwargs
     assert "prompt_cache_key" not in kwargs
+
+
+def test_codex_interruptible_call_keeps_alive_when_stream_events_arrive(request):
+    """Codex Responses streams must not use wall-clock non-stream staleness.
+
+    The active Codex path is routed through _interruptible_api_call(), but it
+    is still a real stream internally. Long reasoning/high-context turns can
+    exceed the stale-call threshold while healthy stream events are arriving.
+    The watchdog must measure time since the last Codex event, not time since
+    request start.
+    """
+    mp = request.getfixturevalue("monkey" + "patch")
+    agent = _build_agent(mp)
+    mp.setattr(
+        agent, "_compute_non_stream_stale_timeout", lambda messages: 0.35
+    )
+    mp.setattr(agent, "_create_request_openai_client", lambda **kwargs: object())
+    mp.setattr(agent, "_close_request_openai_client", lambda *a, **k: None)
+
+    def _fake_codex_stream(api_kwargs, client=None, on_first_delta=None, on_stream_event=None):
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            if on_stream_event:
+                on_stream_event()
+            threading.Event().wait(0.05)
+        return _codex_message_response("still alive")
+
+    mp.setattr(agent, "_run_codex_stream", _fake_codex_stream)
+
+    response = agent._interruptible_api_call(_codex_request_kwargs())
+
+    assert response.output[0].content[0].text == "still alive"
+
+
+def test_progress_status_avoids_direct_cli_print_when_stream_consumer_owns_output(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    printed = []
+    statuses = []
+    agent._print_fn = lambda *args, **kwargs: printed.append(args)
+    agent.status_callback = lambda event_type, message: statuses.append((event_type, message))
+    agent.stream_delta_callback = lambda text: None
+
+    agent._emit_progress_status("⏳ Still waiting for Codex response (30s total)…")
+
+    assert printed == []
+    assert statuses == [
+        ("lifecycle", "⏳ Still waiting for Codex response (30s total)…")
+    ]
+
+
+def test_progress_status_prints_directly_when_no_stream_consumer(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    printed = []
+    statuses = []
+    agent._print_fn = lambda *args, **kwargs: printed.append(args)
+    agent.status_callback = lambda event_type, message: statuses.append((event_type, message))
+
+    agent._emit_progress_status("⏳ Still waiting for Codex response (30s total)…")
+
+    assert printed == [("⏳ Still waiting for Codex response (30s total)…",)]
+    assert statuses == [
+        ("lifecycle", "⏳ Still waiting for Codex response (30s total)…")
+    ]
 
 
 def test_run_codex_stream_retries_when_completed_event_missing(monkeypatch):
