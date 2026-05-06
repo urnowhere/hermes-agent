@@ -264,6 +264,29 @@ class TestGetModelCapabilities:
         assert caps is not None
         assert caps.supports_vision is False
 
+    def test_modalities_input_text_only_overrides_attachment(self):
+        """When modalities.input is explicitly provided without 'image',
+        the model should NOT be vision-capable even if attachment=True.
+
+        This is the fix for NousResearch/hermes-agent#18884: mimo-v2.5-pro
+        on xiaomi-token-plan-cn has attachment:true but
+        modalities.input:["text"]. The modalities should take precedence.
+        """
+        registry = {
+            "xiaomi": {"id": "xiaomi", "models": {
+                "mimo-v2.5-pro": {
+                    "id": "mimo-v2.5-pro",
+                    "attachment": True,
+                    "modalities": {"input": ["text"]},
+                    "limit": {"context": 128000, "output": 8192},
+                },
+            }},
+        }
+        with patch("agent.models_dev.fetch_models_dev", return_value=registry):
+            caps = get_model_capabilities("xiaomi", "mimo-v2.5-pro")
+        assert caps is not None
+        assert caps.supports_vision is False
+
     def test_modalities_non_dict_handled(self):
         """Non-dict modalities field should not crash."""
         registry = {

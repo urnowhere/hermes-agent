@@ -85,7 +85,11 @@ class ModelInfo:
         return self.cost_input > 0 or self.cost_output > 0
 
     def supports_vision(self) -> bool:
-        return self.attachment or "image" in self.input_modalities
+        # When input_modalities is explicitly provided, it takes precedence
+        # over the attachment flag (see get_model_capabilities for rationale).
+        if self.input_modalities:
+            return "image" in self.input_modalities
+        return self.attachment
 
     def supports_pdf(self) -> bool:
         return "pdf" in self.input_modalities
@@ -381,14 +385,20 @@ def get_model_capabilities(provider: str, model: str) -> Optional[ModelCapabilit
 
     # Extract capability flags (default to False if missing)
     supports_tools = bool(entry.get("tool_call", False))
-    # Vision: check both the `attachment` flag and `modalities.input` for "image".
-    # Some models (e.g. gemma-4) list image in input modalities but not attachment.
+    # Vision: when modalities.input is explicitly provided, it takes precedence
+    # over the attachment flag.  Some models.dev entries have incorrect
+    # attachment flags (e.g. mimo-v2.5-pro on xiaomi-token-plan-cn has
+    # attachment:true but modalities.input:["text"]).  When modalities.input
+    # is absent, fall back to the attachment flag.
     input_mods = entry.get("modalities", {})
     if isinstance(input_mods, dict):
         input_mods = input_mods.get("input", [])
     else:
         input_mods = []
-    supports_vision = bool(entry.get("attachment", False)) or "image" in input_mods
+    if input_mods:
+        supports_vision = "image" in input_mods
+    else:
+        supports_vision = bool(entry.get("attachment", False))
     supports_reasoning = bool(entry.get("reasoning", False))
 
     # Extract limits
