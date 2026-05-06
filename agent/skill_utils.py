@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from hermes_constants import get_config_path, get_skills_dir
+from hermes_constants import get_config_path, get_skills_dir, get_subprocess_home
 
 logger = logging.getLogger(__name__)
 
@@ -382,6 +382,56 @@ def _resolve_dotpath(config: Dict[str, Any], dotted_key: str):
     return current
 
 
+_TILDE_PREFIXES: Tuple[str, ...] = ("~/", "~\\")
+
+
+def _expanduser_for_subprocess(
+    path: str,
+    subprocess_home: Optional[str] = None,
+) -> str:
+    """Expand ``~`` in a path using the Hermes subprocess HOME when active.
+
+    Skill config values are surfaced in the agent's prompt and then acted on
+    by subprocess tools (Bash, background processes, external launchers)
+    whose ``HOME`` is set to ``{HERMES_HOME}/home`` — *not* the Python
+    process's own ``HOME`` (which in Docker may be ``/opt/data`` or
+    ``/root``).  Using :func:`os.path.expanduser` here produced a path that
+    pointed somewhere the subprocess tools wouldn't find — see #12260.
+
+    Behaviour:
+      * If :func:`hermes_constants.get_subprocess_home` is active
+        (``{HERMES_HOME}/home`` exists on disk), expand ``~``, ``~/…`` and
+        ``~\\…`` (Windows) against that directory.  Leading path separators
+        on the remainder (``~//foo``, ``~\\\\foo``) are stripped so the
+        result always lives under the subprocess HOME — mirroring what
+        :func:`os.path.expanduser` does for the same inputs.
+      * ``~user`` forms are still resolved via :func:`os.path.expanduser`
+        (they name a specific OS user and are independent of Hermes).
+      * When no subprocess HOME is active (or the caller already resolved
+        ``None``), behaviour is identical to the original
+        :func:`os.path.expanduser` call.
+
+    ``subprocess_home`` may be passed in to avoid repeated
+    :func:`get_subprocess_home` lookups when this helper is called in a
+    loop (see :func:`resolve_skill_config_values`).
+    """
+    if subprocess_home is None:
+        subprocess_home = get_subprocess_home()
+    if subprocess_home is None:
+        return os.path.expanduser(path)
+    if path == "~":
+        return subprocess_home
+    for prefix in _TILDE_PREFIXES:
+        if path.startswith(prefix):
+            # Strip the leading ``~`` and *all* leading separators so
+            # ``~//foo`` or ``~\\foo`` join under the subprocess HOME
+            # instead of returning an accidentally-absolute path.
+            remainder = path[len(prefix) - 1:].lstrip("/\\")
+            return os.path.join(subprocess_home, remainder)
+    # ``~user`` or embedded ``~`` — defer to the OS user database.
+    return os.path.expanduser(path)
+
+
 def resolve_skill_config_values(
     config_vars: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
@@ -390,7 +440,11 @@ def resolve_skill_config_values(
     Skill config is stored under ``skills.config.<key>`` in config.yaml.
     Returns a dict mapping **logical** keys (as declared by skills) to their
     current values (or the declared default if the key isn't set).
-    Path values are expanded via ``os.path.expanduser``.
+
+    Path values are expanded via :func:`_expanduser_for_subprocess` so that
+    ``~/…`` defaults resolve to the same ``HOME`` that Hermes-spawned
+    subprocess tools will see — ``{HERMES_HOME}/home`` when that directory
+    exists, otherwise the Python process's own ``HOME``.  See #12260.
     """
     config_path = get_config_path()
     config: Dict[str, Any] = {}
@@ -402,6 +456,12 @@ def resolve_skill_config_values(
         except Exception:
             pass
 
+    # Resolve the subprocess HOME once up-front so we don't re-``stat``
+    # ``{HERMES_HOME}/home`` for every config var.  ``None`` means no
+    # subprocess HOME is active and the helper will fall through to
+    # ``os.path.expanduser``.
+    subprocess_home = get_subprocess_home()
+
     resolved: Dict[str, Any] = {}
     for var in config_vars:
         logical_key = var["key"]
@@ -411,9 +471,12 @@ def resolve_skill_config_values(
         if value is None or (isinstance(value, str) and not value.strip()):
             value = var.get("default", "")
 
-        # Expand ~ in path-like values
+        # Expand ~ in path-like values — subprocess HOME wins when active.
         if isinstance(value, str) and ("~" in value or "${" in value):
-            value = os.path.expanduser(os.path.expandvars(value))
+            value = _expanduser_for_subprocess(
+                os.path.expandvars(value),
+                subprocess_home=subprocess_home,
+            )
 
         resolved[logical_key] = value
 
