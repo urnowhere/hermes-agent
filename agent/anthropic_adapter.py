@@ -11,6 +11,7 @@ Auth supports:
 """
 
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -43,6 +44,9 @@ def _get_anthropic_sdk():
     return _anthropic_sdk
 
 logger = logging.getLogger(__name__)
+
+_WIF_ACCESS_TOKEN_CACHE: dict[str, dict[str, Any]] = {}
+_WIF_CACHE_SKEW_SECONDS = 60
 
 THINKING_BUDGET = {"xhigh": 32000, "high": 16000, "medium": 8000, "low": 4000}
 # Hermes effort → Anthropic adaptive-thinking effort (output_config.effort).
@@ -1050,6 +1054,29 @@ def exchange_anthropic_wif_for_access_token(config: Optional[Dict[str, Any]] = N
     if not assertion:
         raise ValueError(f"Anthropic WIF identity token file is empty: {identity_token_path}")
 
+    api_base_url = str(resolved.get("api_base_url") or "https://api.anthropic.com").strip().rstrip("/")
+    if not api_base_url.startswith("https://"):
+        raise ValueError("Anthropic WIF api_base_url must use https://")
+
+    cache_key = hashlib.sha256(
+        "\n".join(
+            [
+                api_base_url,
+                str(resolved["organization_id"]),
+                str(resolved["service_account_id"]),
+                str(resolved["federation_rule_id"]),
+                assertion,
+            ]
+        ).encode("utf-8")
+    ).hexdigest()
+    now_ms = int(time.time() * 1000)
+    cached = _WIF_ACCESS_TOKEN_CACHE.get(cache_key)
+    if cached:
+        cached_token = str(cached.get("access_token") or "").strip()
+        cached_expires_at_ms = int(cached.get("expires_at_ms") or 0)
+        if cached_token and cached_expires_at_ms - now_ms > (_WIF_CACHE_SKEW_SECONDS * 1000):
+            return dict(cached)
+
     payload = json.dumps({
         "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
         "assertion": assertion,
@@ -1058,9 +1085,6 @@ def exchange_anthropic_wif_for_access_token(config: Optional[Dict[str, Any]] = N
         "federation_rule_id": resolved["federation_rule_id"],
     }).encode("utf-8")
 
-    api_base_url = str(resolved.get("api_base_url") or "https://api.anthropic.com").strip().rstrip("/")
-    if not api_base_url.startswith("https://"):
-        raise ValueError("Anthropic WIF api_base_url must use https://")
     endpoint = f"{api_base_url}/v1/oauth/token"
     req = urllib.request.Request(
         endpoint,
@@ -1082,13 +1106,15 @@ def exchange_anthropic_wif_for_access_token(config: Optional[Dict[str, Any]] = N
     if not access_token:
         raise ValueError("Anthropic WIF exchange response was missing access_token")
     expires_in = int(result.get("expires_in") or 3600)
-    return {
+    exchanged = {
         "access_token": access_token,
         "token_type": result.get("token_type") or "Bearer",
         "scope": result.get("scope"),
         "expires_in": expires_in,
         "expires_at_ms": int(time.time() * 1000) + (expires_in * 1000),
     }
+    _WIF_ACCESS_TOKEN_CACHE[cache_key] = dict(exchanged)
+    return exchanged
 
 
 def resolve_anthropic_token() -> Optional[str]:

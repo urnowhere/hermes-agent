@@ -7,6 +7,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+import agent.anthropic_adapter as anthropic_adapter
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.anthropic_adapter import (
     _is_oauth_token,
@@ -17,6 +18,7 @@ from agent.anthropic_adapter import (
     build_anthropic_kwargs,
     convert_messages_to_anthropic,
     convert_tools_to_anthropic,
+    exchange_anthropic_wif_for_access_token,
     is_claude_code_token_valid,
     normalize_model_name,
     read_claude_code_credentials,
@@ -348,6 +350,51 @@ class TestRefreshOauthToken:
 
         with patch("urllib.request.urlopen", side_effect=Exception("network error")):
             assert _refresh_oauth_token(creds) is None
+
+
+class TestAnthropicWifExchangeCaching:
+    def test_reuses_cached_access_token_for_same_assertion(self, tmp_path, monkeypatch):
+        anthropic_adapter._WIF_ACCESS_TOKEN_CACHE.clear()
+        token_file = tmp_path / "oidc.jwt"
+        token_file.write_text("jwt-assertion", encoding="utf-8")
+
+        config = {
+            "federation_rule_id": "fdrl_test123",
+            "organization_id": "org_test456",
+            "service_account_id": "svac_test789",
+            "identity_token_file": str(token_file),
+            "api_base_url": "https://api.anthropic.com",
+        }
+
+        monkeypatch.setattr("agent.anthropic_adapter._get_claude_code_version", lambda: "2.1.74")
+
+        calls = []
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "access_token": "cached-wif-token",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                }).encode()
+
+        def _fake_urlopen(req, timeout=0):
+            calls.append((req.full_url, timeout))
+            return _Resp()
+
+        with patch("urllib.request.urlopen", side_effect=_fake_urlopen):
+            first = exchange_anthropic_wif_for_access_token(config)
+            second = exchange_anthropic_wif_for_access_token(config)
+
+        assert first["access_token"] == "cached-wif-token"
+        assert second["access_token"] == "cached-wif-token"
+        assert len(calls) == 1
 
 
 class TestWriteClaudeCodeCredentials:
