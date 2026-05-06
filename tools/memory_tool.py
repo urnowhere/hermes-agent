@@ -249,14 +249,31 @@ class MemoryStore:
 
             if new_total > limit:
                 current = self._char_count(target)
+                # Find the oldest/largest entry to suggest for removal
+                _oldest = entries[0] if entries else None
+                _largest = max(entries, key=len) if entries else None
+                _suggest = []
+                if _largest and len(_largest) > 100:
+                    _suggest.append(
+                        f"Remove or shorten the largest entry ({len(_largest)} chars): "
+                        f"{_largest[:80]!r}..."
+                    )
+                elif _oldest:
+                    _suggest.append(
+                        f"Remove the oldest entry: {_oldest[:80]!r}..."
+                    )
+                _suggest.append(
+                    "Use action='replace' to shorten an existing entry instead of adding."
+                )
                 return {
                     "success": False,
                     "error": (
                         f"Memory at {current:,}/{limit:,} chars. "
-                        f"Adding this entry ({len(content)} chars) would exceed the limit. "
-                        f"Replace or remove existing entries first."
+                        f"Adding this entry ({len(content)} chars) would exceed the limit."
                     ),
+                    "suggestions": _suggest,
                     "current_entries": entries,
+                    "entry_count": len(entries),
                     "usage": f"{current:,}/{limit:,}",
                 }
 
