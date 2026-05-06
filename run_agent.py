@@ -966,7 +966,8 @@ class AIAgent:
         fallback_model: Dict[str, Any] = None,
         credential_pool=None,
         checkpoints_enabled: bool = False,
-        checkpoint_max_snapshots: int = 50,
+        checkpoint_max_snapshots: int = 10,
+        checkpoint_max_total_bytes: int = 1_000_000_000,
         pass_session_id: bool = False,
     ):
         """
@@ -1689,6 +1690,7 @@ class AIAgent:
         self._checkpoint_mgr = CheckpointManager(
             enabled=checkpoints_enabled,
             max_snapshots=checkpoint_max_snapshots,
+            max_total_bytes=checkpoint_max_total_bytes,
         )
         
         # SQLite session store (optional -- provided by CLI or gateway)
@@ -2690,11 +2692,20 @@ class AIAgent:
             aux_base_url = str(getattr(client, "base_url", ""))
             aux_api_key = str(getattr(client, "api_key", ""))
 
+            aux_context_config = getattr(
+                self, "_aux_compression_context_length_config", None
+            )
+            if aux_context_config is None:
+                main_model = str(getattr(self, "model", "") or "")
+                main_base_url = str(getattr(self, "base_url", "") or "")
+                if aux_model == main_model and aux_base_url.rstrip("/") == main_base_url.rstrip("/"):
+                    aux_context_config = getattr(self, "_config_context_length", None)
+
             aux_context = get_model_context_length(
                 aux_model,
                 base_url=aux_base_url,
                 api_key=aux_api_key,
-                config_context_length=getattr(self, "_aux_compression_context_length_config", None),
+                config_context_length=aux_context_config,
                 # Each model must be resolved with its own provider so that
                 # provider-specific paths (e.g. Bedrock static table, OpenRouter API)
                 # are invoked for the correct client, not inherited from the main model.

@@ -2182,7 +2182,8 @@ class HermesCLI:
         if isinstance(cp_cfg, bool):
             cp_cfg = {"enabled": cp_cfg}
         self.checkpoints_enabled = checkpoints or cp_cfg.get("enabled", False)
-        self.checkpoint_max_snapshots = cp_cfg.get("max_snapshots", 50)
+        self.checkpoint_max_snapshots = cp_cfg.get("max_snapshots", 10)
+        self.checkpoint_max_total_bytes = cp_cfg.get("max_total_bytes", 1_000_000_000)
         self.pass_session_id = pass_session_id
         # --ignore-rules: honor either the constructor flag or the env var set
         # by `hermes chat --ignore-rules` in hermes_cli/main.py. When true we
@@ -3685,6 +3686,7 @@ class HermesCLI:
                 thinking_callback=self._on_thinking,
                 checkpoints_enabled=self.checkpoints_enabled,
                 checkpoint_max_snapshots=self.checkpoint_max_snapshots,
+                checkpoint_max_total_bytes=self.checkpoint_max_total_bytes,
                 pass_session_id=self.pass_session_id,
                 skip_context_files=self.ignore_rules,
                 skip_memory=self.ignore_rules,
@@ -6829,7 +6831,13 @@ class HermesCLI:
                     acp_command=turn_route["runtime"].get("command"),
                     acp_args=turn_route["runtime"].get("args"),
                     max_iterations=self.max_turns,
-                    enabled_toolsets=self.enabled_toolsets,
+                    # /background is an independent operator lane, not a
+                    # restricted child of the current foreground session. Give
+                    # it the full available tool surface so it can orchestrate,
+                    # delegate, use shell/file/web/MCP tools, and write its own
+                    # artifacts unless the prompt itself narrows scope.
+                    enabled_toolsets=None,
+                    disabled_toolsets=[],
                     quiet_mode=True,
                     verbose_logging=False,
                     session_id=task_id,

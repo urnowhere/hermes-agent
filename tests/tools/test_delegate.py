@@ -740,7 +740,7 @@ class TestBlockedTools(unittest.TestCase):
         self.assertEqual(_get_max_spawn_depth(), 1)       # default: flat
         self.assertTrue(_get_orchestrator_enabled())      # default
         self.assertEqual(_MIN_SPAWN_DEPTH, 1)
-        self.assertEqual(_MAX_SPAWN_DEPTH_CAP, 3)
+        self.assertEqual(_MAX_SPAWN_DEPTH_CAP, 4)
 
 
 class TestDelegationCredentialResolution(unittest.TestCase):
@@ -784,7 +784,9 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertEqual(creds["base_url"], "https://openrouter.ai/api/v1")
         self.assertEqual(creds["api_key"], "sk-or-test-key")
         self.assertEqual(creds["api_mode"], "chat_completions")
-        mock_resolve.assert_called_once_with(requested="openrouter")
+        mock_resolve.assert_called_once_with(
+            requested="openrouter", target_model="google/gemini-3-flash-preview"
+        )
 
     @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_provider_resolution_uses_runtime_model_when_config_model_missing(self, mock_resolve):
@@ -804,7 +806,9 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertEqual(creds["model"], "server-default-model")
         self.assertEqual(creds["provider"], "custom")
         self.assertEqual(creds["base_url"], "https://my-server.example/v1")
-        mock_resolve.assert_called_once_with(requested="custom:my-server")
+        mock_resolve.assert_called_once_with(
+            requested="custom:my-server", target_model=None
+        )
 
     def test_direct_endpoint_uses_configured_base_url_and_api_key(self):
         parent = _make_mock_parent(depth=0)
@@ -854,6 +858,54 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertEqual(creds["provider"], "custom")
 
     @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
+    def test_runtime_provider_wins_over_base_url_for_openai_codex_without_api_key(self, mock_resolve):
+        mock_resolve.return_value = {
+            "provider": "openai-codex",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "api_key": "codex-token",
+            "api_mode": "codex_responses",
+        }
+        parent = _make_mock_parent(depth=0)
+        cfg = {
+            "model": "gpt-5.4",
+            "provider": "openai-codex",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+        }
+        creds = _resolve_delegation_credentials(cfg, parent)
+        self.assertEqual(creds["model"], "gpt-5.4")
+        self.assertEqual(creds["provider"], "openai-codex")
+        self.assertEqual(creds["base_url"], "https://chatgpt.com/backend-api/codex")
+        self.assertEqual(creds["api_key"], "codex-token")
+        self.assertEqual(creds["api_mode"], "codex_responses")
+        mock_resolve.assert_called_once_with(
+            requested="openai-codex", target_model="gpt-5.4"
+        )
+
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
+    def test_runtime_provider_wins_over_base_url_for_anthropic_without_api_key(self, mock_resolve):
+        mock_resolve.return_value = {
+            "provider": "anthropic",
+            "base_url": "https://api.anthropic.com",
+            "api_key": "anthropic-token",
+            "api_mode": "anthropic_messages",
+        }
+        parent = _make_mock_parent(depth=0)
+        cfg = {
+            "model": "claude-sonnet-4-6",
+            "provider": "anthropic",
+            "base_url": "https://api.anthropic.com",
+        }
+        creds = _resolve_delegation_credentials(cfg, parent)
+        self.assertEqual(creds["model"], "claude-sonnet-4-6")
+        self.assertEqual(creds["provider"], "anthropic")
+        self.assertEqual(creds["base_url"], "https://api.anthropic.com")
+        self.assertEqual(creds["api_key"], "anthropic-token")
+        self.assertEqual(creds["api_mode"], "anthropic_messages")
+        mock_resolve.assert_called_once_with(
+            requested="anthropic", target_model="claude-sonnet-4-6"
+        )
+
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_nous_provider_resolves_nous_credentials(self, mock_resolve):
         """Nous provider resolves Nous Portal base_url and api_key."""
         mock_resolve.return_value = {
@@ -868,7 +920,9 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertEqual(creds["provider"], "nous")
         self.assertEqual(creds["base_url"], "https://inference-api.nousresearch.com/v1")
         self.assertEqual(creds["api_key"], "nous-agent-key-xyz")
-        mock_resolve.assert_called_once_with(requested="nous")
+        mock_resolve.assert_called_once_with(
+            requested="nous", target_model="hermes-3-llama-3.1-8b"
+        )
 
     @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_provider_resolution_failure_raises_valueerror(self, mock_resolve):
@@ -1055,6 +1109,42 @@ class TestDelegationProviderIntegration(unittest.TestCase):
             self.assertEqual(kwargs["base_url"], "http://localhost:1234/v1")
             self.assertEqual(kwargs["api_key"], "local-key")
             self.assertEqual(kwargs["api_mode"], "chat_completions")
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
+    def test_delegate_task_prefers_runtime_provider_for_oauth_base_url_without_api_key(self, mock_resolve, mock_cfg):
+        mock_cfg.return_value = {
+            "max_iterations": 45,
+            "model": "gpt-5.4",
+            "provider": "openai-codex",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+        }
+        mock_resolve.return_value = {
+            "provider": "openai-codex",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "api_key": "codex-token",
+            "api_mode": "codex_responses",
+        }
+        parent = _make_mock_parent(depth=0)
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.run_conversation.return_value = {
+                "final_response": "done", "completed": True, "api_calls": 1
+            }
+            MockAgent.return_value = mock_child
+
+            delegate_task(goal="OAuth runtime provider test", parent_agent=parent)
+
+            _, kwargs = MockAgent.call_args
+            self.assertEqual(kwargs["model"], "gpt-5.4")
+            self.assertEqual(kwargs["provider"], "openai-codex")
+            self.assertEqual(kwargs["base_url"], "https://chatgpt.com/backend-api/codex")
+            self.assertEqual(kwargs["api_key"], "codex-token")
+            self.assertEqual(kwargs["api_mode"], "codex_responses")
+            mock_resolve.assert_called_once_with(
+                requested="openai-codex", target_model="gpt-5.4"
+            )
 
     @patch("tools.delegate_tool._load_config")
     @patch("tools.delegate_tool._resolve_delegation_credentials")
@@ -1578,11 +1668,13 @@ class TestDelegateHeartbeat(unittest.TestCase):
         child.run_conversation.side_effect = slow_run
 
         # Patch both the interval AND the idle ceiling so the test proves
-        # the in-tool branch takes effect: with a 0.05s interval and the
-        # default _HEARTBEAT_STALE_CYCLES_IDLE=5, the old behavior would
-        # trip after 0.25s and stop firing. We should see heartbeats
-        # continuing through the full 0.4s run.
-        with patch("tools.delegate_tool._HEARTBEAT_INTERVAL", 0.05):
+        # the in-tool branch takes effect quickly: with a 0.05s interval and
+        # a 5-cycle synthetic idle ceiling, the old behavior would trip after
+        # 0.25s and stop firing. We should see heartbeats continuing through
+        # the full 0.4s run.
+        with patch("tools.delegate_tool._HEARTBEAT_INTERVAL", 0.05), patch(
+            "tools.delegate_tool._HEARTBEAT_STALE_CYCLES_IDLE", 5
+        ):
             _run_single_child(
                 task_index=0,
                 goal="Test long-running tool",
@@ -1628,9 +1720,11 @@ class TestDelegateHeartbeat(unittest.TestCase):
 
         child.run_conversation.side_effect = slow_run
 
-        # At interval 0.05s, idle threshold (5 cycles) trips at ~0.25s.
+        # At interval 0.05s, patched idle threshold (5 cycles) trips at ~0.25s.
         # We should see the heartbeat stop firing well before 0.6s.
-        with patch("tools.delegate_tool._HEARTBEAT_INTERVAL", 0.05):
+        with patch("tools.delegate_tool._HEARTBEAT_INTERVAL", 0.05), patch(
+            "tools.delegate_tool._HEARTBEAT_STALE_CYCLES_IDLE", 5
+        ):
             _run_single_child(
                 task_index=0,
                 goal="Test wedged child",
@@ -1943,13 +2037,13 @@ class TestMaxSpawnDepth(unittest.TestCase):
 
     @patch("tools.delegate_tool._load_config",
            return_value={"max_spawn_depth": 99})
-    def test_max_spawn_depth_clamped_above_three(self, mock_cfg):
+    def test_max_spawn_depth_clamped_above_four(self, mock_cfg):
         import logging
         from tools.delegate_tool import _get_max_spawn_depth
         with self.assertLogs("tools.delegate_tool", level=logging.WARNING) as cm:
             result = _get_max_spawn_depth()
-        self.assertEqual(result, 3)
-        self.assertTrue(any("clamping to 3" in m for m in cm.output))
+        self.assertEqual(result, 4)
+        self.assertTrue(any("clamping to 4" in m for m in cm.output))
 
     @patch("tools.delegate_tool._load_config",
            return_value={"max_spawn_depth": "not-a-number"})
