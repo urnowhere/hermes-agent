@@ -4629,6 +4629,38 @@ def _minimax_poll_token(
     )
 
 
+def _minimax_normalize_verification_uri(verification_uri: str) -> str:
+    """Return a browser-usable MiniMax OAuth authorization URL."""
+    # MiniMax's OAuth API may return a www.minimax.io authorize URL that
+    # redirects to the marketing homepage. The actual authorization UI is served
+    # from platform.minimax.io.
+    if verification_uri.startswith("https://www.minimax.io/oauth-authorize"):
+        return verification_uri.replace(
+            "https://www.minimax.io/oauth-authorize",
+            "https://platform.minimax.io/oauth-authorize",
+            1,
+        )
+    return verification_uri
+
+
+def _minimax_token_expiry(raw_expired_in: int, now: datetime) -> Tuple[int, float]:
+    """Return (expires_in_seconds, expires_at_timestamp) for MiniMax OAuth.
+
+    MiniMax's OAuth responses may encode ``expired_in`` either as a relative
+    duration in seconds or as an absolute Unix timestamp in milliseconds.
+    """
+    raw_expired_in = int(raw_expired_in)
+    now_ts = now.timestamp()
+    now_ms = int(now_ts * 1000)
+    if raw_expired_in > now_ms // 2:
+        expires_at = raw_expired_in / 1000.0
+        expires_in_s = max(0, int(expires_at - now_ts))
+    else:
+        expires_in_s = raw_expired_in
+        expires_at = now_ts + expires_in_s
+    return expires_in_s, expires_at
+
+
 def _minimax_save_auth_state(auth_state: Dict[str, Any]) -> None:
     """Persist MiniMax OAuth state to Hermes auth store (~/.hermes/auth.json)."""
     with _auth_store_lock():
@@ -4666,7 +4698,9 @@ def _minimax_oauth_login(
             client_id=pconfig.client_id,
             code_challenge=challenge, state=state,
         )
-        verification_url = str(code_data["verification_uri"])
+        verification_url = _minimax_normalize_verification_uri(
+            str(code_data["verification_uri"])
+        )
         user_code = str(code_data["user_code"])
 
         print()
@@ -4692,8 +4726,9 @@ def _minimax_oauth_login(
         )
 
     now = datetime.now(timezone.utc)
-    expires_in_s = int(token_data["expired_in"])
-    expires_at = now.timestamp() + expires_in_s
+    expires_in_s, expires_at = _minimax_token_expiry(
+        int(token_data["expired_in"]), now
+    )
 
     auth_state = {
         "provider": "minimax-oauth",
@@ -4768,14 +4803,15 @@ def _refresh_minimax_oauth_state(
             relogin_required=True,
         )
     now_dt = datetime.now(timezone.utc)
-    expires_in_s = int(payload["expired_in"])
+    expires_in_s, expires_at = _minimax_token_expiry(
+        int(payload["expired_in"]), now_dt
+    )
     new_state = dict(state)
     new_state.update({
         "access_token": payload["access_token"],
         "refresh_token": payload.get("refresh_token", state["refresh_token"]),
         "obtained_at": now_dt.isoformat(),
-        "expires_at": datetime.fromtimestamp(now_dt.timestamp() + expires_in_s,
-                                             tz=timezone.utc).isoformat(),
+        "expires_at": datetime.fromtimestamp(expires_at, tz=timezone.utc).isoformat(),
         "expires_in": expires_in_s,
     })
     _minimax_save_auth_state(new_state)

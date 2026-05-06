@@ -32,6 +32,8 @@ from hermes_cli.auth import (
     _minimax_pkce_pair,
     _minimax_request_user_code,
     _minimax_poll_token,
+    _minimax_normalize_verification_uri,
+    _minimax_token_expiry,
     _refresh_minimax_oauth_state,
     resolve_minimax_oauth_runtime_credentials,
     get_minimax_oauth_auth_status,
@@ -65,6 +67,43 @@ def _future_iso(seconds_from_now: int = 3600) -> str:
 def _past_iso(seconds_ago: int = 3600) -> str:
     ts = time.time() - seconds_ago
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# MiniMax OAuth normalization helpers
+# ---------------------------------------------------------------------------
+
+def test_minimax_normalize_verification_uri_rewrites_www_authorize_url():
+    url = "https://www.minimax.io/oauth-authorize?client_id=abc&state=xyz"
+
+    assert _minimax_normalize_verification_uri(url) == (
+        "https://platform.minimax.io/oauth-authorize?client_id=abc&state=xyz"
+    )
+
+
+def test_minimax_normalize_verification_uri_preserves_other_urls():
+    url = "https://platform.minimax.io/oauth-authorize?client_id=abc"
+
+    assert _minimax_normalize_verification_uri(url) == url
+
+
+def test_minimax_token_expiry_accepts_relative_seconds():
+    now = datetime.fromtimestamp(1_700_000_000, tz=timezone.utc)
+
+    expires_in_s, expires_at = _minimax_token_expiry(3600, now)
+
+    assert expires_in_s == 3600
+    assert expires_at == now.timestamp() + 3600
+
+
+def test_minimax_token_expiry_accepts_absolute_unix_ms_timestamp():
+    now = datetime.fromtimestamp(1_700_000_000, tz=timezone.utc)
+    expires_at_ms = int((now.timestamp() + 7200) * 1000)
+
+    expires_in_s, expires_at = _minimax_token_expiry(expires_at_ms, now)
+
+    assert expires_in_s == 7200
+    assert expires_at == expires_at_ms / 1000
 
 
 # ---------------------------------------------------------------------------
