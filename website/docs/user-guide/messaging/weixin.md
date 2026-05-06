@@ -226,6 +226,27 @@ WeChat clients connected through the iLink Bot API can render Markdown directly,
 - **Code fences** stay as fenced code blocks
 - **Excessive blank lines** are collapsed to double newlines outside fenced code blocks
 
+### Rewrite Markdown for Text Selection
+
+In some WeChat clients, messages rendered from raw Markdown cannot be selected or copied. Enable the ``rewrite_markdown`` option to rewrite Markdown to plain text:
+
+```bash
+# Environment variable
+WEIXIN_REWRITE_MARKDOWN=true
+
+# Or in ~/.hermes/config.yaml
+platforms:
+  weixin:
+    extra:
+      rewrite_markdown: true
+```
+
+When enabled:
+- **Headers** (`# Title`) → `【Title】` or `**Title**`
+- **Links** (`[text](url)`) → `text (url)`
+- **Tables** → key-value lists
+- **Code blocks** are left unchanged
+
 ## Message Chunking
 
 Messages are delivered as a single chat message whenever they fit within the platform limit. Only oversized payloads are split for delivery:
@@ -291,6 +312,8 @@ Only one Weixin gateway instance can use a given token at a time. The adapter ac
 | `WEIXIN_HOME_CHANNEL` | — | — | Chat ID for cron/notification output |
 | `WEIXIN_HOME_CHANNEL_NAME` | — | `Home` | Display name for the home channel |
 | `WEIXIN_ALLOW_ALL_USERS` | — | — | Gateway-level flag to allow all users (used by setup wizard) |
+| `WEIXIN_REWRITE_MARKDOWN` | — | `false` | When `true`, rewrite Markdown (links, headers, tables) to plain text for text selection. See [Markdown Formatting](#markdown-formatting). |
+| `WEIXIN_SPLIT_MULTILINE_MESSAGES` | — | `false` | When `true`, split multi-line replies into multiple chat messages (legacy behavior). |
 
 ## Troubleshooting
 

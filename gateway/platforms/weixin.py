@@ -694,34 +694,69 @@ def _rewrite_table_block_for_weixin(lines: List[str]) -> str:
     return "\n".join(formatted_rows) if formatted_rows else "\n".join(lines)
 
 
-def _normalize_markdown_blocks(content: str) -> str:
+def _normalize_markdown_blocks(content: str, rewrite_markdown: bool = False) -> str:
     lines = content.splitlines()
     result: List[str] = []
     in_code_block = False
     blank_run = 0
+    i = 0
 
-    for raw_line in lines:
-        line = raw_line.rstrip()
-        if _FENCE_RE.match(line.strip()):
+    while i < len(lines):
+        line = lines[i].rstrip()
+        fence_match = _FENCE_RE.match(line.strip())
+        if fence_match:
             in_code_block = not in_code_block
             result.append(line)
+            i += 1
             blank_run = 0
             continue
 
         if in_code_block:
             result.append(line)
+            i += 1
             continue
 
+        if rewrite_markdown:
+            # Detect table blocks and rewrite them to key-value lists.
+            if (
+                i + 1 < len(lines)
+                and "|" in lines[i]
+                and _TABLE_RULE_RE.match(lines[i + 1].rstrip())
+            ):
+                table_lines = [lines[i].rstrip(), lines[i + 1].rstrip()]
+                i += 2
+                while i < len(lines) and "|" in lines[i]:
+                    table_lines.append(lines[i].rstrip())
+                    i += 1
+                result.append(_rewrite_table_block_for_weixin(table_lines))
+                blank_run = 0
+                continue
+
+            # Rewrite headers and links to plain text.
+            result.append(
+                _MARKDOWN_LINK_RE.sub(
+                    r"\1 (\2)", _rewrite_headers_for_weixin(line)
+                )
+            )
+            i += 1
+            blank_run = 0
+            continue
+
+        # Preserve native markdown (default).
         if not line.strip():
             blank_run += 1
             if blank_run <= 1:
                 result.append("")
+            i += 1
             continue
 
         blank_run = 0
         result.append(line)
+        i += 1
 
-    return "\n".join(result).strip()
+    normalized = "\n".join(item.rstrip() for item in result)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return normalized.strip()
 
 
 def _split_markdown_blocks(content: str) -> List[str]:
@@ -1173,6 +1208,11 @@ class WeixinAdapter(BasePlatformAdapter):
         self._split_multiline_messages = _coerce_bool(
             extra.get("split_multiline_messages")
             or os.getenv("WEIXIN_SPLIT_MULTILINE_MESSAGES"),
+            default=False,
+        )
+        self._rewrite_markdown = _coerce_bool(
+            extra.get("rewrite_markdown")
+            or os.getenv("WEIXIN_REWRITE_MARKDOWN"),
             default=False,
         )
 
@@ -2006,7 +2046,7 @@ class WeixinAdapter(BasePlatformAdapter):
     def format_message(self, content: Optional[str]) -> str:
         if content is None:
             return ""
-        return _normalize_markdown_blocks(content)
+        return _normalize_markdown_blocks(content, rewrite_markdown=self._rewrite_markdown)
 
 
 async def send_weixin_direct(

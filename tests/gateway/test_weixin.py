@@ -482,7 +482,11 @@ class TestWeixinRemoteMediaSafety:
 
 
 class TestWeixinMarkdownLinks:
-    """Markdown links should be preserved so WeChat can render them natively."""
+    """Markdown links are preserved by default for native WeChat rendering.
+
+    When ``rewrite_markdown=True``, links, headers, and tables are rewritten
+    to plain text so users can select and copy message content.
+    """
 
     def test_format_message_preserves_markdown_links(self):
         adapter = _make_adapter()
@@ -496,6 +500,49 @@ class TestWeixinMarkdownLinks:
         content = "See below:\n\n```\n[link](https://example.com)\n```\n\nDone."
         result = adapter.format_message(content)
         assert "[link](https://example.com)" in result
+
+    def test_rewrite_markdown_rewrites_links(self):
+        adapter = WeixinAdapter(
+            PlatformConfig(
+                enabled=True,
+                token="test-token",
+                extra={"account_id": "test-account", "rewrite_markdown": True},
+            )
+        )
+
+        content = "Check [the docs](https://example.com) for details"
+        result = adapter.format_message(content)
+        assert result == "Check the docs (https://example.com) for details"
+
+    def test_rewrite_markdown_rewrites_headers(self):
+        adapter = WeixinAdapter(
+            PlatformConfig(
+                enabled=True,
+                token="test-token",
+                extra={"account_id": "test-account", "rewrite_markdown": True},
+            )
+        )
+
+        content = "# Big Title\nSome text"
+        result = adapter.format_message(content)
+        assert result == "【Big Title】\nSome text"
+
+    def test_rewrite_markdown_preserves_links_in_code_blocks(self):
+        adapter = WeixinAdapter(
+            PlatformConfig(
+                enabled=True,
+                token="test-token",
+                extra={"account_id": "test-account", "rewrite_markdown": True},
+            )
+        )
+
+        content = "See below:\n\n```\n[link](https://example.com)\n```\n\nDone."
+        result = adapter.format_message(content)
+        assert "[link](https://example.com)" in result
+
+    def test_rewrite_markdown_defaults_to_false(self):
+        adapter = _make_adapter()
+        assert adapter._rewrite_markdown is False
 
 
 class TestWeixinBlankMessagePrevention:
