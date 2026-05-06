@@ -1842,6 +1842,7 @@ def delegate_task(
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
+    model: Optional[Dict[str, str]] = None,
     parent_agent=None,
 ) -> str:
     """
@@ -1963,6 +1964,12 @@ def delegate_task(
     try:
         for i, t in enumerate(task_list):
             task_acp_args = t.get("acp_args") if "acp_args" in t else None
+            # Per-task model override: per-task > top-level > config global
+            task_model_spec = t.get("model") or model
+            if task_model_spec:
+                task_creds = _resolve_model_credentials(task_model_spec, cfg) or creds
+            else:
+                task_creds = creds
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
@@ -1971,21 +1978,21 @@ def delegate_task(
                 goal=t["goal"],
                 context=t.get("context"),
                 toolsets=t.get("toolsets") or toolsets,
-                model=creds["model"],
+                model=task_creds["model"],
                 max_iterations=effective_max_iter,
                 task_count=n_tasks,
                 parent_agent=parent_agent,
-                override_provider=creds["provider"],
-                override_base_url=creds["base_url"],
-                override_api_key=creds["api_key"],
-                override_api_mode=creds["api_mode"],
+                override_provider=task_creds["provider"],
+                override_base_url=task_creds["base_url"],
+                override_api_key=task_creds["api_key"],
+                override_api_mode=task_creds["api_mode"],
                 override_acp_command=t.get("acp_command")
                 or acp_command
-                or creds.get("command"),
+                or task_creds.get("command"),
                 override_acp_args=(
                     task_acp_args
                     if task_acp_args is not None
-                    else (acp_args if acp_args is not None else creds.get("args"))
+                    else (acp_args if acp_args is not None else task_creds.get("args"))
                 ),
                 role=effective_role,
             )
@@ -2350,6 +2357,31 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     }
 
 
+def _resolve_model_credentials(model_spec: Dict[str, str], cfg: dict) -> Optional[dict]:
+    """Resolve credentials for a per-task model override.
+    
+    Takes {"provider": "...", "model": "..."} and returns a full credential
+    bundle via resolve_runtime_provider, or None if resolution fails.
+    """
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+    provider = model_spec.get("provider", "")
+    model_name = model_spec.get("model", "")
+    if not provider or not model_name:
+        return None
+    try:
+        rp = resolve_runtime_provider(requested=provider)
+        return {
+            "model": model_name,
+            "provider": provider,
+            "base_url": rp.get("base_url", ""),
+            "api_key": rp.get("api_key", ""),
+            "api_mode": rp.get("api_mode", "chat_completions"),
+        }
+    except Exception as e:
+        logger.warning("Failed to resolve credentials for %s/%s: %s", provider, model_name, e)
+        return None
+
+
 def _load_config() -> dict:
     """Load delegation config from CLI_CONFIG or persistent config.
 
@@ -2491,6 +2523,15 @@ DELEGATE_TASK_SCHEMA = {
                             "enum": ["leaf", "orchestrator"],
                             "description": "Per-task role override. See top-level 'role' for semantics.",
                         },
+                        "model": {
+                            "type": "object",
+                            "properties": {
+                                "provider": {"type": "string", "description": "Per-task provider ID override."},
+                                "model": {"type": "string", "description": "Per-task model name override."},
+                            },
+                            "required": ["provider", "model"],
+                            "description": "Per-task model+provider override. Overrides the top-level model and global delegation config for this task only.",
+                        },
                     },
                     "required": ["goal"],
                 },
@@ -2525,7 +2566,7 @@ DELEGATE_TASK_SCHEMA = {
                     "or other ACP-capable agents from any parent, including Discord/Telegram/CLI."
                 ),
             },
-            "acp_args": {
+"acp_args": {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": (
@@ -2533,7 +2574,19 @@ DELEGATE_TASK_SCHEMA = {
                     "Only used when acp_command is set. Example: ['--acp', '--stdio', '--model', 'claude-opus-4-6']"
                 ),
             },
-        },
+            "model": {
+                "type": "object",
+                "properties": {
+                    "provider": {"type": "string", "description": "Provider ID (e.g. 'nvidia', 'anthropic', 'openrouter')."},
+                    "model": {"type": "string", "description": "Model name on that provider (e.g. 'z-ai/glm4.7')."},
+                },
+                "required": ["provider", "model"],
+                "description": (
+                    "Override model+provider for ALL subagents. When set, overrides the global "
+                    "delegation config. Per-task 'model' takes precedence over this."
+                ),
+            },
+            },
         "required": [],
     },
 }
@@ -2555,6 +2608,7 @@ registry.register(
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
         role=args.get("role"),
+        model=args.get("model"),
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,
