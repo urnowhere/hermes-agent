@@ -120,6 +120,17 @@ class _VikingClient:
         resp.raise_for_status()
         return resp.json()
 
+    def post_multipart(self, path: str, files: dict = None, data: dict = None, **kwargs) -> dict:
+        """POST multipart/form-data (for temp_upload)."""
+        headers = self._headers()
+        headers.pop("Content-Type", None)  # httpx sets it automatically for multipart
+        resp = self._httpx.post(
+            self._url(path), files=files or {}, data=data or {}, headers=headers,
+            timeout=_TIMEOUT, **kwargs
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     def health(self) -> bool:
         try:
             resp = self._httpx.get(
@@ -744,7 +755,36 @@ class OpenVikingMemoryProvider(MemoryProvider):
         if not url:
             return tool_error("url is required")
 
-        payload: Dict[str, Any] = {"path": url}
+        # Determine if this is a local file path
+        is_local_file = url.startswith("file://") or (url.startswith("/") and os.path.exists(url))
+
+        payload: Dict[str, Any] = {}
+
+        if is_local_file:
+            # Local files require temp_upload first
+            local_path = url[7:] if url.startswith("file://") else url
+            if not os.path.exists(local_path):
+                return tool_error(f"Local file not found: {local_path}")
+
+            # Step 1: temp_upload
+            filename = os.path.basename(local_path)
+            try:
+                upload_resp = self._client.post_multipart(
+                    "/api/v1/resources/temp_upload",
+                    files={"file": (filename, open(local_path, "rb"))},
+                )
+            except Exception as e:
+                return tool_error(f"temp_upload failed: {e}")
+
+            temp_file_id = upload_resp.get("result", {}).get("temp_file_id")
+            if not temp_file_id:
+                return tool_error(f"temp_upload returned no temp_file_id: {upload_resp}")
+
+            payload["temp_file_id"] = temp_file_id
+        else:
+            # Remote URL
+            payload["path"] = url
+
         if args.get("reason"):
             payload["reason"] = args["reason"]
 
