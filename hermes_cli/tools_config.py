@@ -58,7 +58,7 @@ CONFIGURABLE_TOOLSETS = [
     ("vision",          "👁️  Vision / Image Analysis",  "vision_analyze"),
     ("video",           "🎬 Video Analysis",            "video_analyze (requires video-capable model)"),
     ("image_gen",       "🎨 Image Generation",          "image_generate"),
-    ("moa",             "🧠 Mixture of Agents",         "mixture_of_agents"),
+    ("moa",             "🧠 Mixture of Agents",         "mixture_of_agents (edit roster/providers/reasoning under `moa:` in config.yaml)"),
     ("tts",             "🔊 Text-to-Speech",            "text_to_speech"),
     ("skills",          "📚 Skills",                    "list, view, manage"),
     ("todo",            "📋 Task Planning",             "todo"),
@@ -472,10 +472,9 @@ TOOL_CATEGORIES = {
 }
 
 # Simple env-var requirements for toolsets NOT in TOOL_CATEGORIES.
-# Used as a fallback for tools like vision/moa that just need an API key.
+# Used as a fallback for tools that still have a single fixed API-key backend.
 TOOLSET_ENV_REQUIREMENTS = {
     "vision":     [("OPENROUTER_API_KEY",   "https://openrouter.ai/keys")],
-    "moa":        [("OPENROUTER_API_KEY",   "https://openrouter.ai/keys")],
 }
 
 
@@ -1061,6 +1060,15 @@ def _toolset_has_keys(ts_key: str, config: dict = None) -> bool:
         except Exception:
             return False
 
+    if ts_key == "moa":
+        try:
+            from tools.mixture_of_agents_tool import get_moa_preflight_status
+
+            available, _hint = get_moa_preflight_status()
+            return available
+        except Exception:
+            return False
+
     if ts_key in {"web", "image_gen", "tts", "browser"}:
         features = get_nous_subscription_features(config)
         feature = features.features.get(ts_key)
@@ -1206,7 +1214,7 @@ def _configure_toolset(ts_key: str, config: dict):
     if cat:
         _configure_tool_category(ts_key, cat, config)
     else:
-        # Simple fallback for vision, moa, etc.
+        # Simple fallback for vision and other fixed-key toolsets.
         _configure_simple_requirements(ts_key)
 
 
