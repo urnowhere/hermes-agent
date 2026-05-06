@@ -15,6 +15,20 @@ import pytest
 from hermes_cli.main import _session_browse_picker
 
 
+class _RecordingSessionDB:
+    def __init__(self, rows=None):
+        self.rows = rows if rows is not None else []
+        self.calls = []
+        self.closed = False
+
+    def list_sessions_rich(self, **kwargs):
+        self.calls.append(kwargs)
+        return list(self.rows)
+
+    def close(self):
+        self.closed = True
+
+
 # ─── Sample session data ──────────────────────────────────────────────────────
 
 def _make_sessions(n=5):
@@ -449,6 +463,116 @@ class TestCmdSessionsBrowse:
                 result = _session_browse_picker(sessions)
 
         assert result == "s1"
+
+    def test_sessions_list_defaults_to_human_facing_mru_query(self, monkeypatch, capsys):
+        """Default list hides internal sources and sorts by actual activity."""
+        from hermes_cli import main as main_mod
+
+        db = _RecordingSessionDB([
+            {
+                "id": "cli_recent",
+                "source": "cli",
+                "title": "CLI Work",
+                "preview": "hello",
+                "last_active": time.time(),
+            }
+        ])
+        monkeypatch.setattr("hermes_state.SessionDB", lambda: db)
+        monkeypatch.setattr("hermes_cli.config.get_container_exec_info", lambda: None)
+        monkeypatch.setattr("sys.argv", ["hermes", "sessions", "list"])
+
+        main_mod.main()
+
+        assert db.calls == [{
+            "source": None,
+            "exclude_sources": ["tool", "cron", "tool-call audit"],
+            "limit": 20,
+            "order_by_last_active": True,
+        }]
+        assert "CLI Work" in capsys.readouterr().out
+
+    def test_sessions_list_source_filter_disables_default_exclude(self, monkeypatch, capsys):
+        """Explicit --source is honored even for normally hidden sources."""
+        from hermes_cli import main as main_mod
+
+        db = _RecordingSessionDB([
+            {
+                "id": "cron_recent",
+                "source": "cron",
+                "title": "Nightly",
+                "preview": "cron",
+                "last_active": time.time(),
+            }
+        ])
+        monkeypatch.setattr("hermes_state.SessionDB", lambda: db)
+        monkeypatch.setattr("hermes_cli.config.get_container_exec_info", lambda: None)
+        monkeypatch.setattr("sys.argv", ["hermes", "sessions", "list", "--source", "cron"])
+
+        main_mod.main()
+
+        assert db.calls == [{
+            "source": "cron",
+            "exclude_sources": None,
+            "limit": 20,
+            "order_by_last_active": True,
+        }]
+        assert "Nightly" in capsys.readouterr().out
+
+    def test_sessions_browse_defaults_to_human_facing_mru_query(self, monkeypatch, capsys):
+        """Browse uses the same human-facing MRU defaults as list."""
+        from hermes_cli import main as main_mod
+
+        db = _RecordingSessionDB([
+            {
+                "id": "tui_recent",
+                "source": "tui",
+                "title": "TUI Work",
+                "preview": "hello",
+                "last_active": time.time(),
+            }
+        ])
+        monkeypatch.setattr("hermes_state.SessionDB", lambda: db)
+        monkeypatch.setattr("hermes_cli.config.get_container_exec_info", lambda: None)
+        monkeypatch.setattr(main_mod, "_session_browse_picker", lambda sessions: None)
+        monkeypatch.setattr("sys.argv", ["hermes", "sessions", "browse"])
+
+        main_mod.main()
+
+        assert db.calls == [{
+            "source": None,
+            "exclude_sources": ["tool", "cron", "tool-call audit"],
+            "limit": 500,
+            "order_by_last_active": True,
+        }]
+        assert "Cancelled" in capsys.readouterr().out
+
+    def test_sessions_browse_source_filter_disables_default_exclude(self, monkeypatch, capsys):
+        """Explicit browse --source is honored for normally hidden sources."""
+        from hermes_cli import main as main_mod
+
+        db = _RecordingSessionDB([
+            {
+                "id": "cron_browse",
+                "source": "cron",
+                "title": "Cron Browse",
+                "preview": "cron",
+                "last_active": time.time(),
+            }
+        ])
+        monkeypatch.setattr("hermes_state.SessionDB", lambda: db)
+        monkeypatch.setattr("hermes_cli.config.get_container_exec_info", lambda: None)
+        monkeypatch.setattr(main_mod, "_session_browse_picker", lambda sessions: None)
+        monkeypatch.setattr("sys.argv", ["hermes", "sessions", "browse", "--source", "cron"])
+
+        main_mod.main()
+
+        assert db.calls == [{
+            "source": "cron",
+            "exclude_sources": None,
+            "limit": 500,
+            "order_by_last_active": True,
+        }]
+        assert "Cancelled" in capsys.readouterr().out
 
 
 # ─── Edge cases ──────────────────────────────────────────────────────────────

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from hermes_cli.main import _resolve_last_session
+from hermes_cli.main import _resolve_last_session, _resolve_session_by_name_or_id
 
 
 class _FakeDB:
@@ -155,3 +155,201 @@ def test_resolve_last_session_not_limited_to_newest_started_20(tmp_path, monkeyp
 
     monkeypatch.setattr("hermes_state.SessionDB", lambda: real_session_db(db_path=state_db))
     assert _resolve_last_session("cli") == target
+
+
+def test_resolve_session_by_partial_title_ignores_recent_cron_noise(tmp_path, monkeypatch):
+    import hermes_state
+
+    from pathlib import Path
+
+    state_db = Path(tmp_path / "state.db")
+    real_session_db = hermes_state.SessionDB
+    db = real_session_db(db_path=state_db)
+    try:
+        for i in range(30):
+            sid = f"cron_noise_{i:02d}"
+            db.create_session(sid, source="cron")
+            db.set_session_title(sid, f"Nightly automation {i}")
+
+        db.create_session("cli_named_target", source="cli")
+        db.set_session_title("cli_named_target", "Pokemon Agent Development")
+    finally:
+        db.close()
+
+    monkeypatch.setattr("hermes_state.SessionDB", lambda: real_session_db(db_path=state_db))
+
+    assert _resolve_session_by_name_or_id("Pokemon Agent") == "cli_named_target"
+
+
+def test_resolve_session_by_partial_title_does_not_return_cron_only_match(tmp_path, monkeypatch):
+    import hermes_state
+
+    from pathlib import Path
+
+    state_db = Path(tmp_path / "state.db")
+    real_session_db = hermes_state.SessionDB
+    db = real_session_db(db_path=state_db)
+    try:
+        db.create_session("cron_only_match", source="cron")
+        db.set_session_title("cron_only_match", "Nightly Search Report")
+    finally:
+        db.close()
+
+    monkeypatch.setattr("hermes_state.SessionDB", lambda: real_session_db(db_path=state_db))
+
+    assert _resolve_session_by_name_or_id("Nightly Search") is None
+
+
+def test_resolve_session_by_message_body_unique_human_match(tmp_path, monkeypatch):
+    import hermes_state
+
+    from pathlib import Path
+
+    state_db = Path(tmp_path / "state.db")
+    real_session_db = hermes_state.SessionDB
+    db = real_session_db(db_path=state_db)
+    try:
+        db.create_session("cli_body_match", source="cli")
+        db.set_session_title("cli_body_match", "Debug Notes")
+        db.append_message("cli_body_match", "user", "investigate zeta vector failure")
+        db.create_session("cron_body_noise", source="cron")
+        db.append_message("cron_body_noise", "user", "zeta vector automated report")
+    finally:
+        db.close()
+
+    monkeypatch.setattr("hermes_state.SessionDB", lambda: real_session_db(db_path=state_db))
+
+    assert _resolve_session_by_name_or_id("zeta vector") == "cli_body_match"
+
+
+def test_resolve_session_partial_title_projects_to_compression_tip(tmp_path, monkeypatch):
+    import hermes_state
+
+    from pathlib import Path
+
+    state_db = Path(tmp_path / "state.db")
+    real_session_db = hermes_state.SessionDB
+    db = real_session_db(db_path=state_db)
+    try:
+        db.create_session("compressed_root", source="cli")
+        db.set_session_title("compressed_root", "Compressed Search Work")
+        db.end_session("compressed_root", "compression")
+        db.create_session("compressed_child", source="cli", parent_session_id="compressed_root")
+        db.append_message("compressed_child", "user", "continued after compression")
+    finally:
+        db.close()
+
+    monkeypatch.setattr("hermes_state.SessionDB", lambda: real_session_db(db_path=state_db))
+
+    assert _resolve_session_by_name_or_id("Compressed Search") == "compressed_child"
+
+
+def test_resolve_session_partial_title_matches_projected_compression_tip(tmp_path, monkeypatch):
+    import hermes_state
+
+    from pathlib import Path
+
+    state_db = Path(tmp_path / "state.db")
+    real_session_db = hermes_state.SessionDB
+    db = real_session_db(db_path=state_db)
+    try:
+        db.create_session("projected_root", source="cli")
+        db.set_session_title("projected_root", "Raw Compression Root")
+        db.end_session("projected_root", "compression")
+        db.create_session("projected_child_visible", source="cli", parent_session_id="projected_root")
+        db.set_session_title("projected_child_visible", "Visible Continuation Title")
+        db.append_message("projected_child_visible", "user", "continued after compression")
+    finally:
+        db.close()
+
+    monkeypatch.setattr("hermes_state.SessionDB", lambda: real_session_db(db_path=state_db))
+
+    assert _resolve_session_by_name_or_id("Continuation Title") == "projected_child_visible"
+
+
+def test_resolve_session_partial_id_matches_projected_compression_tip(tmp_path, monkeypatch):
+    import hermes_state
+
+    from pathlib import Path
+
+    state_db = Path(tmp_path / "state.db")
+    real_session_db = hermes_state.SessionDB
+    db = real_session_db(db_path=state_db)
+    try:
+        db.create_session("partial_id_root", source="cli")
+        db.set_session_title("partial_id_root", "Root Title")
+        db.end_session("partial_id_root", "compression")
+        db.create_session("partial_id_child_visible", source="cli", parent_session_id="partial_id_root")
+        db.append_message("partial_id_child_visible", "user", "continued after compression")
+    finally:
+        db.close()
+
+    monkeypatch.setattr("hermes_state.SessionDB", lambda: real_session_db(db_path=state_db))
+
+    assert _resolve_session_by_name_or_id("id_child_vis") == "partial_id_child_visible"
+
+
+def test_resolve_session_body_match_not_unique_past_first_20_hits(tmp_path, monkeypatch):
+    import hermes_state
+
+    from pathlib import Path
+
+    state_db = Path(tmp_path / "state.db")
+    real_session_db = hermes_state.SessionDB
+    db = real_session_db(db_path=state_db)
+    try:
+        db.create_session("body_first_twenty", source="cli")
+        for _ in range(20):
+            db.append_message("body_first_twenty", "user", "ambiguousneedle repeated hit")
+        db.create_session("body_twenty_first", source="cli")
+        db.append_message("body_twenty_first", "user", "ambiguousneedle second session")
+    finally:
+        db.close()
+
+    monkeypatch.setattr("hermes_state.SessionDB", lambda: real_session_db(db_path=state_db))
+
+    assert _resolve_session_by_name_or_id("ambiguousneedle") is None
+
+
+def test_resolve_session_body_match_not_unique_past_body_match_limit(tmp_path, monkeypatch):
+    import hermes_state
+
+    from pathlib import Path
+
+    state_db = Path(tmp_path / "state.db")
+    real_session_db = hermes_state.SessionDB
+    db = real_session_db(db_path=state_db)
+    try:
+        db.create_session("body_first_limit", source="cli")
+        for _ in range(201):
+            db.append_message("body_first_limit", "user", "limitneedle repeated hit")
+        db.create_session("body_after_limit", source="cli")
+        db.append_message("body_after_limit", "user", "limitneedle second session")
+    finally:
+        db.close()
+
+    monkeypatch.setattr("hermes_state.SessionDB", lambda: real_session_db(db_path=state_db))
+
+    assert _resolve_session_by_name_or_id("limitneedle") is None
+
+
+def test_resolve_session_exact_id_and_title_still_work(tmp_path, monkeypatch):
+    import hermes_state
+
+    from pathlib import Path
+
+    state_db = Path(tmp_path / "state.db")
+    real_session_db = hermes_state.SessionDB
+    db = real_session_db(db_path=state_db)
+    try:
+        db.create_session("exact_id_target", source="cron")
+        db.set_session_title("exact_id_target", "Exact Cron Title")
+        db.create_session("exact_title_target", source="cli")
+        db.set_session_title("exact_title_target", "Exact Human Title")
+    finally:
+        db.close()
+
+    monkeypatch.setattr("hermes_state.SessionDB", lambda: real_session_db(db_path=state_db))
+
+    assert _resolve_session_by_name_or_id("exact_id_target") == "exact_id_target"
+    assert _resolve_session_by_name_or_id("Exact Human Title") == "exact_title_target"

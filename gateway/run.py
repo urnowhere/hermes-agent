@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import shlex
+import sqlite3
 import sys
 import signal
 import tempfile
@@ -10085,6 +10086,330 @@ class GatewayRunner:
             else:
                 return f"📌 Session: `{session_id}`\nNo title set. Usage: `/title My Session Name`"
 
+    _RESUME_EXCLUDE_SOURCES = ("tool", "cron", "tool-call audit")
+
+    @staticmethod
+    def _resume_escape_like(value: str) -> str:
+        return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+    @staticmethod
+    def _resume_preview(value: Any, limit: int = 90) -> str:
+        if value is None:
+            return ""
+        text = str(value).replace("\r", " ").replace("\n", " ")
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) > limit:
+            return text[: limit - 3].rstrip() + "..."
+        return text
+
+    def _resume_current_profile_name(self) -> str:
+        try:
+            from hermes_cli.profiles import get_active_profile_name
+            return get_active_profile_name()
+        except Exception:
+            return "default"
+
+    def _resume_profile_for_db_path(self, db_path: Path) -> str:
+        try:
+            from hermes_constants import get_default_hermes_root
+            root = get_default_hermes_root().resolve()
+            resolved = Path(db_path).resolve()
+            if resolved == root / "state.db":
+                return "default"
+            profiles_root = root / "profiles"
+            rel = resolved.relative_to(profiles_root)
+            if len(rel.parts) >= 2 and rel.parts[1] == "state.db":
+                return rel.parts[0]
+        except Exception:
+            pass
+        return self._resume_current_profile_name()
+
+    def _resume_profile_db_paths(self) -> List[Dict[str, Any]]:
+        """Return readable profile state DBs, with the live SessionDB first."""
+        current_db_path = Path(getattr(self._session_db, "db_path", "state.db"))
+        current_profile = self._resume_profile_for_db_path(current_db_path)
+        rows: List[Dict[str, Any]] = [
+            {
+                "profile": current_profile,
+                "path": current_db_path,
+                "current": True,
+            }
+        ]
+
+        try:
+            from hermes_constants import get_default_hermes_root
+            root = get_default_hermes_root()
+            current_resolved = current_db_path.resolve()
+            root_resolved = root.resolve()
+            try:
+                current_resolved.relative_to(root_resolved)
+                scan_profiles = True
+            except ValueError:
+                # Unit tests and custom db_path callers often use a temp DB.
+                # Do not accidentally scan the operator's real ~/.hermes then.
+                scan_profiles = False
+            if scan_profiles:
+                rows.append({"profile": "default", "path": root / "state.db", "current": False})
+                profiles_root = root / "profiles"
+                if profiles_root.is_dir():
+                    for entry in sorted(profiles_root.iterdir()):
+                        if entry.is_dir():
+                            rows.append({
+                                "profile": entry.name,
+                                "path": entry / "state.db",
+                                "current": False,
+                            })
+        except Exception as e:
+            logger.debug("Failed to enumerate profile state DBs for /resume: %s", e)
+
+        deduped: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in rows:
+            path = Path(row["path"])
+            try:
+                key = str(path.resolve())
+            except Exception:
+                key = str(path)
+            if key in seen or not path.exists():
+                continue
+            seen.add(key)
+            row = dict(row)
+            row["path"] = path
+            row["current"] = bool(row.get("current")) or key == str(current_db_path.resolve())
+            deduped.append(row)
+        return deduped
+
+    def _resume_open_readonly_conn(self, db_path: Path) -> Optional[sqlite3.Connection]:
+        try:
+            uri = f"file:{db_path.resolve()}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, timeout=1.0)
+            conn.row_factory = sqlite3.Row
+            return conn
+        except Exception as e:
+            logger.debug("Could not open profile state DB read-only (%s): %s", db_path, e)
+            return None
+
+    def _resume_query_conn(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        profile: str,
+        query: str = "",
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        exclude = list(self._RESUME_EXCLUDE_SOURCES)
+        exclude_sql = ",".join("?" for _ in exclude)
+        child_filter = (
+            "(s.parent_session_id IS NULL"
+            " OR EXISTS (SELECT 1 FROM sessions p"
+            "            WHERE p.id = s.parent_session_id"
+            "            AND p.end_reason = 'branched'"
+            "            AND s.started_at >= p.ended_at))"
+        )
+
+        if not query:
+            sql = f"""
+                SELECT s.id, s.title, s.source, s.started_at,
+                    COALESCE((SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = s.id), s.started_at) AS last_active,
+                    COALESCE((
+                        SELECT m.content FROM messages m
+                        WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                        ORDER BY m.timestamp, m.id LIMIT 1
+                    ), '') AS preview,
+                    'title' AS match_kind
+                FROM sessions s
+                WHERE s.title IS NOT NULL AND TRIM(s.title) != ''
+                  AND s.source NOT IN ({exclude_sql})
+                  AND {child_filter}
+                ORDER BY last_active DESC, s.started_at DESC, s.id DESC
+                LIMIT ?
+            """
+            params = [*exclude, limit]
+        else:
+            escaped = self._resume_escape_like(query)
+            like = f"%{escaped}%"
+            sql = f"""
+                WITH RECURSIVE visible_sessions AS (
+                    SELECT s.id, s.title, s.source, s.started_at
+                    FROM sessions s
+                    WHERE s.source NOT IN ({exclude_sql})
+                      AND {child_filter}
+                ),
+                chain(root_id, cur_id) AS (
+                    SELECT id, id FROM visible_sessions
+                    UNION ALL
+                    SELECT c.root_id, child.id
+                    FROM chain c
+                    JOIN sessions parent ON parent.id = c.cur_id
+                    JOIN sessions child ON child.parent_session_id = c.cur_id
+                    WHERE parent.end_reason = 'compression'
+                      AND child.started_at >= parent.ended_at
+                ),
+                title_matches AS (
+                    SELECT s.id, s.title, s.source, s.started_at,
+                        COALESCE((SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = s.id), s.started_at) AS last_active,
+                        COALESCE((
+                            SELECT m.content FROM messages m
+                            WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                            ORDER BY m.timestamp, m.id LIMIT 1
+                        ), '') AS preview,
+                        'title' AS match_kind,
+                        0 AS rank
+                    FROM visible_sessions s
+                    WHERE (s.title LIKE ? ESCAPE '\\' OR s.id LIKE ? ESCAPE '\\')
+                ),
+                body_matches AS (
+                    SELECT s.id, s.title, s.source, s.started_at,
+                        COALESCE(MAX(m.timestamp), s.started_at) AS last_active,
+                        COALESCE((
+                            SELECT mm.content FROM messages mm
+                            JOIN chain pc ON pc.cur_id = mm.session_id
+                            WHERE pc.root_id = s.id
+                              AND (mm.content LIKE ? ESCAPE '\\'
+                                   OR mm.tool_name LIKE ? ESCAPE '\\'
+                                   OR mm.tool_calls LIKE ? ESCAPE '\\')
+                            ORDER BY mm.timestamp DESC, mm.id DESC LIMIT 1
+                        ), '') AS preview,
+                        'body' AS match_kind,
+                        1 AS rank
+                    FROM visible_sessions s
+                    JOIN chain c ON c.root_id = s.id
+                    JOIN messages m ON m.session_id = c.cur_id
+                    WHERE (m.content LIKE ? ESCAPE '\\'
+                           OR m.tool_name LIKE ? ESCAPE '\\'
+                           OR m.tool_calls LIKE ? ESCAPE '\\')
+                    GROUP BY s.id
+                ),
+                combined AS (
+                    SELECT * FROM title_matches
+                    UNION ALL
+                    SELECT * FROM body_matches
+                    WHERE id NOT IN (SELECT id FROM title_matches)
+                )
+                SELECT * FROM combined
+                ORDER BY rank ASC, last_active DESC, started_at DESC, id DESC
+                LIMIT ?
+            """
+            params = [
+                *exclude,
+                like, like,
+                like, like, like,
+                like, like, like,
+                limit,
+            ]
+
+        try:
+            rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
+        except Exception as e:
+            logger.debug("Resume candidate query failed for profile %s: %s", profile, e)
+            return []
+
+        candidates: List[Dict[str, Any]] = []
+        for row in rows:
+            candidates.append({
+                "profile": profile,
+                "source": row.get("source") or "",
+                "id": row.get("id") or "",
+                "title": row.get("title") or "",
+                "preview": self._resume_preview(row.get("preview")),
+                "last_active": row.get("last_active") or row.get("started_at") or 0,
+                "match_kind": row.get("match_kind") or "",
+            })
+        return candidates
+
+    def _resume_collect_candidates(
+        self,
+        *,
+        query: str = "",
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        candidates: List[Dict[str, Any]] = []
+        for db_info in self._resume_profile_db_paths():
+            conn = self._resume_open_readonly_conn(db_info["path"])
+            if conn is None:
+                continue
+            try:
+                rows = self._resume_query_conn(
+                    conn,
+                    profile=db_info["profile"],
+                    query=query,
+                    limit=limit,
+                )
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            for row in rows:
+                row["current_profile"] = bool(db_info.get("current"))
+                row["db_path"] = str(db_info["path"])
+                candidates.append(row)
+
+        candidates.sort(
+            key=lambda c: (
+                0 if c.get("current_profile") else 1,
+                0 if c.get("match_kind") == "title" else 1,
+                -(float(c.get("last_active") or 0)),
+            )
+        )
+        return candidates[:limit]
+
+    def _resume_format_candidates(
+        self,
+        candidates: List[Dict[str, Any]],
+        *,
+        heading: str = "📋 **Resume Candidates**",
+        usage: str = "Run `/resume <session id>` or `/resume <exact title>` to switch.",
+    ) -> str:
+        lines = [heading, ""]
+        for c in candidates:
+            title = c.get("title") or "(untitled)"
+            preview = c.get("preview") or ""
+            preview_part = f"\n  preview: _{preview}_" if preview else ""
+            lines.append(
+                f"• **{title}**"
+                f"\n  profile: `{c.get('profile', '')}`"
+                f"  source: `{c.get('source', '')}`"
+                f"  id: `{c.get('id', '')}`"
+                f"{preview_part}"
+            )
+        lines.append("")
+        lines.append(usage)
+        return "\n".join(lines)
+
+    async def _resume_switch_current_profile(
+        self,
+        *,
+        source: SessionSource,
+        session_key: str,
+        target_id: str,
+        requested_name: str,
+    ) -> str:
+        try:
+            target_id = self._session_db.resolve_resume_session_id(target_id)
+        except Exception as e:
+            logger.debug("Failed to resolve resume continuation for %s: %s", target_id, e)
+
+        current_entry = self.session_store.get_or_create_session(source)
+        if current_entry.session_id == target_id:
+            title = self._session_db.get_session_title(target_id) or requested_name or target_id
+            return f"📌 Already on session **{title}**."
+
+        self._release_running_agent_state(session_key)
+
+        new_entry = self.session_store.switch_session(session_key, target_id)
+        if not new_entry:
+            return "Failed to switch session."
+        self._clear_session_boundary_security_state(session_key)
+        self._evict_cached_agent(session_key)
+
+        title = self._session_db.get_session_title(target_id) or requested_name or target_id
+        history = self.session_store.load_transcript(target_id)
+        msg_count = len([m for m in history if m.get("role") == "user"]) if history else 0
+        msg_part = f" ({msg_count} message{'s' if msg_count != 1 else ''})" if msg_count else ""
+
+        return f"↻ Resumed session **{title}**{msg_part}. Conversation restored."
+
     async def _handle_resume_command(self, event: MessageEvent) -> str:
         """Handle /resume command — switch to a previously-named session."""
         if not self._session_db:
@@ -10095,75 +10420,75 @@ class GatewayRunner:
         name = event.get_command_args().strip()
 
         if not name:
-            # List recent titled sessions for this user/platform
+            # List recent titled sessions across sources in the current
+            # profile, plus readable sibling profile DBs when available.
             try:
-                user_source = source.platform.value if source.platform else None
-                sessions = self._session_db.list_sessions_rich(
-                    source=user_source, limit=10
-                )
-                titled = [s for s in sessions if s.get("title")]
+                titled = self._resume_collect_candidates(limit=10)
                 if not titled:
                     return (
                         "No named sessions found.\n"
                         "Use `/title My Session` to name your current session, "
                         "then `/resume My Session` to return to it later."
                     )
-                lines = ["📋 **Named Sessions**\n"]
-                for s in titled[:10]:
-                    title = s["title"]
-                    preview = s.get("preview", "")[:40]
-                    preview_part = f" — _{preview}_" if preview else ""
-                    lines.append(f"• **{title}**{preview_part}")
-                lines.append("\nUsage: `/resume <session name>`")
-                return "\n".join(lines)
+                return self._resume_format_candidates(
+                    titled[:10],
+                    heading="📋 **Named Sessions**",
+                    usage="Usage: `/resume <session id or exact title>`",
+                )
             except Exception as e:
                 logger.debug("Failed to list titled sessions: %s", e)
                 return f"Could not list sessions: {e}"
 
-        # Resolve the name to a session ID.
-        target_id = self._session_db.resolve_session_by_title(name)
+        # Preserve current-profile exact ID/title/lineage behavior first.
+        target_id = None
+        try:
+            exact = self._session_db.get_session(name)
+            target_id = exact["id"] if exact else None
+        except Exception:
+            target_id = None
         if not target_id:
+            target_id = self._session_db.resolve_session_by_title(name)
+        if target_id:
+            return await self._resume_switch_current_profile(
+                source=source,
+                session_key=session_key,
+                target_id=target_id,
+                requested_name=name,
+            )
+
+        candidates = self._resume_collect_candidates(query=name, limit=10)
+        if not candidates:
             return (
                 f"No session found matching '**{name}**'.\n"
                 "Use `/resume` with no arguments to see available sessions."
             )
-        # Compression creates child continuations that hold the live transcript.
-        # Follow that chain so gateway /resume matches CLI behavior (#15000).
-        try:
-            target_id = self._session_db.resolve_resume_session_id(target_id)
-        except Exception as e:
-            logger.debug("Failed to resolve resume continuation for %s: %s", target_id, e)
 
-        # Check if already on that session
-        current_entry = self.session_store.get_or_create_session(source)
-        if current_entry.session_id == target_id:
-            return f"📌 Already on session **{name}**."
+        if len(candidates) == 1:
+            only = candidates[0]
+            if only.get("current_profile"):
+                return await self._resume_switch_current_profile(
+                    source=source,
+                    session_key=session_key,
+                    target_id=only["id"],
+                    requested_name=only.get("title") or name,
+                )
+            return self._resume_format_candidates(
+                candidates,
+                heading="📋 **Resume Candidate**",
+                usage=(
+                    "This match is in another profile, so this gateway cannot "
+                    "directly switch to that DB. Restart/use that profile and "
+                    f"run `/resume {only.get('id')}`."
+                ),
+            )
 
-        # Clear any running agent for this session key
-        self._release_running_agent_state(session_key)
-
-        # Switch the session entry to point at the old session
-        new_entry = self.session_store.switch_session(session_key, target_id)
-        if not new_entry:
-            return "Failed to switch session."
-        self._clear_session_boundary_security_state(session_key)
-
-        # Evict any cached agent for this session so the next message
-        # rebuilds with the correct session_id end-to-end — mirrors
-        # /branch and /reset. Without this, the cached AIAgent (and its
-        # memory provider, which cached `_session_id` during initialize())
-        # keeps writing into the wrong session's record. See #6672.
-        self._evict_cached_agent(session_key)
-
-        # Get the title for confirmation
-        title = self._session_db.get_session_title(target_id) or name
-
-        # Count messages for context
-        history = self.session_store.load_transcript(target_id)
-        msg_count = len([m for m in history if m.get("role") == "user"]) if history else 0
-        msg_part = f" ({msg_count} message{'s' if msg_count != 1 else ''})" if msg_count else ""
-
-        return f"↻ Resumed session **{title}**{msg_part}. Conversation restored."
+        return self._resume_format_candidates(
+            candidates,
+            usage=(
+                "Multiple sessions matched. I did not switch sessions. "
+                "Run `/resume <session id>` or `/resume <exact title>`."
+            ),
+        )
 
     async def _handle_branch_command(self, event: MessageEvent) -> str:
         """Handle /branch [name] — fork the current session into a new independent copy.

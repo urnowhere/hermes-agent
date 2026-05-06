@@ -39,6 +39,9 @@ def _make_runner(session_db=None, current_session_id="current_session_001",
     runner._voice_mode = {}
     runner._session_db = session_db
     runner._running_agents = {}
+    runner._running_agents_ts = {}
+    runner._agent_cache = {}
+    runner._agent_cache_lock = None
 
     # Compute the real session key if an event is provided
     session_key = build_session_key(event.source) if event else "agent:main:telegram:dm"
@@ -74,11 +77,11 @@ class TestHandleResumeCommand:
 
     @pytest.mark.asyncio
     async def test_list_named_sessions_when_no_arg(self, tmp_path):
-        """With no argument, lists recently titled sessions."""
+        """With no argument, lists recently titled sessions across sources."""
         from hermes_state import SessionDB
         db = SessionDB(db_path=tmp_path / "state.db")
         db.create_session("sess_001", "telegram")
-        db.create_session("sess_002", "telegram")
+        db.create_session("sess_002", "cli")
         db.set_session_title("sess_001", "Research")
         db.set_session_title("sess_002", "Coding")
 
@@ -87,8 +90,149 @@ class TestHandleResumeCommand:
         result = await runner._handle_resume_command(event)
         assert "Research" in result
         assert "Coding" in result
+        assert "telegram" in result
+        assert "cli" in result
+        assert "sess_001" in result
+        assert "sess_002" in result
         assert "Named Sessions" in result
         db.close()
+
+    @pytest.mark.asyncio
+    async def test_resume_partial_title_multiple_candidates_does_not_switch(self, tmp_path):
+        """Partial title matches return candidates without switching on ambiguity."""
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("alpha_session", "telegram")
+        db.set_session_title("alpha_session", "Research Alpha")
+        db.append_message("alpha_session", "user", "alpha details")
+        db.create_session("beta_session", "discord")
+        db.set_session_title("beta_session", "Research Beta")
+        db.append_message("beta_session", "user", "beta details")
+        db.create_session("current_session_001", "telegram")
+
+        event = _make_event(text="/resume Research")
+        runner = _make_runner(session_db=db, event=event)
+        result = await runner._handle_resume_command(event)
+
+        assert "Research Alpha" in result
+        assert "Research Beta" in result
+        assert "alpha_session" in result
+        assert "beta_session" in result
+        assert "session id" in result.lower()
+        runner.session_store.switch_session.assert_not_called()
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_resume_id_prefix_does_not_bypass_ambiguous_fallback(self, tmp_path):
+        """A unique ID prefix is listed with fallback matches instead of switching."""
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("abc_prefix_session", "telegram")
+        db.set_session_title("abc_prefix_session", "Prefix Match")
+        db.create_session("body_session", "discord")
+        db.set_session_title("body_session", "Body Match")
+        db.append_message("body_session", "user", "notes about abc rollout")
+        db.create_session("current_session_001", "telegram")
+
+        event = _make_event(text="/resume abc")
+        runner = _make_runner(session_db=db, event=event)
+        result = await runner._handle_resume_command(event)
+
+        assert "Prefix Match" in result
+        assert "Body Match" in result
+        assert "Multiple sessions matched" in result
+        runner.session_store.switch_session.assert_not_called()
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_resume_body_keyword_unique_candidate_switches(self, tmp_path):
+        """A unique body keyword fallback can switch to the matching session."""
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("needle_session", "discord")
+        db.set_session_title("needle_session", "Needle Work")
+        db.append_message("needle_session", "user", "investigate zeta-vector failure")
+        db.create_session("current_session_001", "telegram")
+
+        event = _make_event(text="/resume zeta-vector")
+        runner = _make_runner(
+            session_db=db,
+            current_session_id="current_session_001",
+            event=event,
+        )
+        result = await runner._handle_resume_command(event)
+
+        assert "Resumed" in result
+        assert "Needle Work" in result
+        call_args = runner.session_store.switch_session.call_args
+        assert call_args[0][1] == "needle_session"
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_resume_body_keyword_in_compression_child_switches_to_tip(self, tmp_path):
+        """Body fallback searches continuation children but resumes the live tip."""
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("compressed_root", "telegram")
+        db.set_session_title("compressed_root", "Compressed Search")
+        db.end_session("compressed_root", "compression")
+        db.create_session("compressed_child", "telegram", parent_session_id="compressed_root")
+        db.append_message("compressed_child", "user", "investigate kappa-vector regression")
+        db.create_session("current_session_001", "telegram")
+
+        event = _make_event(text="/resume kappa-vector")
+        runner = _make_runner(
+            session_db=db,
+            current_session_id="current_session_001",
+            event=event,
+        )
+        runner.session_store.load_transcript.side_effect = (
+            lambda session_id: [{"role": "user", "content": "investigate kappa-vector regression"}]
+            if session_id == "compressed_child"
+            else []
+        )
+
+        result = await runner._handle_resume_command(event)
+
+        assert "Resumed" in result
+        assert "Compressed Search" in result
+        call_args = runner.session_store.switch_session.call_args
+        assert call_args[0][1] == "compressed_child"
+        runner.session_store.load_transcript.assert_called_with("compressed_child")
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_resume_other_profile_candidate_does_not_switch(self, tmp_path, monkeypatch):
+        """Other-profile matches are listed with profile metadata, not DB-copied."""
+        from hermes_state import SessionDB
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        current_db = SessionDB(db_path=tmp_path / "state.db")
+        current_db.create_session("current_session_001", "telegram")
+
+        other_home = tmp_path / "profiles" / "work"
+        other_db = SessionDB(db_path=other_home / "state.db")
+        other_db.create_session("work_session", "slack")
+        other_db.set_session_title("work_session", "Work Search")
+        other_db.append_message("work_session", "user", "cross-profile epsilon notes")
+
+        event = _make_event(text="/resume epsilon")
+        runner = _make_runner(session_db=current_db, event=event)
+        result = await runner._handle_resume_command(event)
+
+        assert "Work Search" in result
+        assert "work" in result
+        assert "slack" in result
+        assert "work_session" in result
+        assert "profile" in result.lower()
+        assert "directly" in result.lower() or "直接" in result
+        runner.session_store.switch_session.assert_not_called()
+        other_db.close()
+        current_db.close()
 
     @pytest.mark.asyncio
     async def test_list_shows_usage_when_no_titled(self, tmp_path):

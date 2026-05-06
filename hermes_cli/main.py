@@ -745,6 +745,157 @@ def _exec_in_container(container_info: dict, cli_args: list):
     os.execvp(exec_cmd[0], exec_cmd)
 
 
+_HUMAN_SESSION_EXCLUDE_SOURCES = ("tool", "cron", "tool-call audit")
+_FUZZY_SESSION_SCAN_LIMIT = 1000
+_FUZZY_BODY_MATCH_LIMIT = 200
+_FUZZY_BODY_DISTINCT_SESSION_LIMIT = 2
+
+
+def _human_session_exclude_sources(source: Optional[str] = None) -> Optional[list[str]]:
+    """Default noisy sources hidden from human-facing session pickers."""
+    return None if source else list(_HUMAN_SESSION_EXCLUDE_SOURCES)
+
+
+def _project_resume_tip(db, session_id: Optional[str]) -> Optional[str]:
+    if not session_id:
+        return session_id
+    try:
+        return db.get_compression_tip(session_id) or session_id
+    except Exception:
+        return session_id
+
+
+def _resolve_human_session_body_matches(db, query: str, exclude: list[str]) -> list[str]:
+    """Return distinct projected human-facing resume IDs for body/tool matches."""
+    try:
+        sanitized = db._sanitize_fts5_query(query)
+    except Exception:
+        sanitized = query
+    if not sanitized:
+        return []
+
+    try:
+        exclude_sql = ""
+        params: list[object] = [sanitized]
+        if exclude:
+            placeholders = ",".join("?" for _ in exclude)
+            exclude_sql = f"AND s.source NOT IN ({placeholders})"
+            params.extend(exclude)
+        params.extend([_FUZZY_SESSION_SCAN_LIMIT, _FUZZY_BODY_DISTINCT_SESSION_LIMIT])
+
+        sql = f"""
+            WITH RECURSIVE
+            matched(seed_id) AS (
+                SELECT session_id
+                FROM (
+                    SELECT DISTINCT m.session_id
+                    FROM messages_fts
+                    JOIN messages m ON m.id = messages_fts.rowid
+                    JOIN sessions s ON s.id = m.session_id
+                    WHERE messages_fts MATCH ?
+                      {exclude_sql}
+                    LIMIT ?
+                )
+            ),
+            chain(seed_id, cur_id, depth) AS (
+                SELECT seed_id, seed_id, 0 FROM matched
+                UNION ALL
+                SELECT c.seed_id, child.id, c.depth + 1
+                FROM chain c
+                JOIN sessions parent ON parent.id = c.cur_id
+                JOIN sessions child ON child.parent_session_id = c.cur_id
+                WHERE parent.end_reason = 'compression'
+                  AND child.started_at >= parent.ended_at
+                  AND c.depth < 100
+            ),
+            projected(resume_id) AS (
+                SELECT c.cur_id
+                FROM chain c
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM sessions parent
+                    JOIN sessions child ON child.parent_session_id = parent.id
+                    WHERE parent.id = c.cur_id
+                      AND parent.end_reason = 'compression'
+                      AND child.started_at >= parent.ended_at
+                )
+            )
+            SELECT DISTINCT resume_id
+            FROM projected
+            WHERE resume_id IS NOT NULL
+            LIMIT ?
+        """
+        with db._lock:
+            rows = db._conn.execute(sql, params).fetchall()
+        return [str(row["resume_id"] if hasattr(row, "keys") else row[0]) for row in rows]
+    except Exception:
+        pass
+
+    try:
+        body_matches = db.search_messages(
+            query,
+            exclude_sources=exclude,
+            limit=_FUZZY_BODY_MATCH_LIMIT,
+        )
+    except Exception:
+        return []
+    seen: list[str] = []
+    for match in body_matches:
+        sid = str(match.get("session_id") or "")
+        projected = _project_resume_tip(db, sid)
+        if projected and projected not in seen:
+            seen.append(projected)
+            if len(seen) >= _FUZZY_BODY_DISTINCT_SESSION_LIMIT:
+                break
+    return seen
+
+
+def _resolve_human_session_fuzzy_match(db, query: str) -> Optional[str]:
+    """Resolve a unique human-facing partial title/id/body match."""
+    needle = (query or "").strip()
+    if not needle:
+        return None
+    needle_fold = needle.casefold()
+    exclude = list(_HUMAN_SESSION_EXCLUDE_SOURCES)
+
+    def _unique_projected(ids: list[str]) -> Optional[str]:
+        seen: list[str] = []
+        for sid in ids:
+            projected = _project_resume_tip(db, sid)
+            if projected and projected not in seen:
+                seen.append(projected)
+        return seen[0] if len(seen) == 1 else None
+
+    def _find_title_or_id_matches(*, project_compression_tips: bool) -> list[str]:
+        try:
+            sessions = db.list_sessions_rich(
+                exclude_sources=exclude,
+                limit=_FUZZY_SESSION_SCAN_LIMIT,
+                order_by_last_active=True,
+                project_compression_tips=project_compression_tips,
+            )
+        except Exception:
+            return []
+
+        matches: list[str] = []
+        for session in sessions:
+            title = str(session.get("title") or "")
+            sid = str(session.get("id") or "")
+            if needle_fold in title.casefold() or needle_fold in sid.casefold():
+                matches.append(sid)
+        return matches
+
+    title_or_id_matches = _find_title_or_id_matches(project_compression_tips=True)
+    if title_or_id_matches:
+        return _unique_projected(title_or_id_matches)
+
+    title_or_id_matches = _find_title_or_id_matches(project_compression_tips=False)
+    if title_or_id_matches:
+        return _unique_projected(title_or_id_matches)
+
+    return _unique_projected(_resolve_human_session_body_matches(db, needle, exclude))
+
+
 def _resolve_session_by_name_or_id(name_or_id: str) -> Optional[str]:
     """Resolve a session name (title) or ID to a session ID.
 
@@ -770,13 +921,10 @@ def _resolve_session_by_name_or_id(name_or_id: str) -> Optional[str]:
             # Try as title (with auto-latest for lineage)
             resolved_id = db.resolve_session_by_title(name_or_id)
 
-        if resolved_id:
-            # Project forward through compression chain so resumes land on
-            # the live tip instead of a dead compressed parent.
-            try:
-                resolved_id = db.get_compression_tip(resolved_id) or resolved_id
-            except Exception:
-                pass
+        if not resolved_id:
+            resolved_id = _resolve_human_session_fuzzy_match(db, name_or_id)
+
+        resolved_id = _project_resume_tip(db, resolved_id)
 
         db.close()
         return resolved_id
@@ -10123,13 +10271,16 @@ Examples:
 
         action = args.sessions_action
 
-        # Hide third-party tool sessions by default, but honour explicit --source
+        # Hide internal/noisy sessions by default, but honour explicit --source.
         _source = getattr(args, "source", None)
-        _exclude = None if _source else ["tool"]
+        _exclude = _human_session_exclude_sources(_source)
 
         if action == "list":
             sessions = db.list_sessions_rich(
-                source=args.source, exclude_sources=_exclude, limit=args.limit
+                source=args.source,
+                exclude_sources=_exclude,
+                limit=args.limit,
+                order_by_last_active=True,
             )
             if not sessions:
                 print("No sessions found.")
@@ -10235,9 +10386,12 @@ Examples:
         elif action == "browse":
             limit = getattr(args, "limit", 500) or 500
             source = getattr(args, "source", None)
-            _browse_exclude = None if source else ["tool"]
+            _browse_exclude = _human_session_exclude_sources(source)
             sessions = db.list_sessions_rich(
-                source=source, exclude_sources=_browse_exclude, limit=limit
+                source=source,
+                exclude_sources=_browse_exclude,
+                limit=limit,
+                order_by_last_active=True,
             )
             db.close()
             if not sessions:
