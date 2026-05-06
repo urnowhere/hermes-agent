@@ -5454,6 +5454,14 @@ class GatewayRunner:
                     exec_cmd = qcmd.get("command", "")
                     if exec_cmd:
                         try:
+                            from tools.approval import detect_dangerous_command
+
+                            is_dangerous, _, desc = detect_dangerous_command(exec_cmd)
+                            if is_dangerous:
+                                return (
+                                    f"Quick command '/{command}' blocked: {desc}. "
+                                    "Use the normal agent approval flow instead."
+                                )
                             proc = await asyncio.create_subprocess_shell(
                                 exec_cmd,
                                 stdout=asyncio.subprocess.PIPE,

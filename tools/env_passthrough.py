@@ -101,7 +101,14 @@ def register_env_passthrough(var_names: Iterable[str]) -> None:
 
 
 def _load_config_passthrough() -> frozenset[str]:
-    """Load ``tools.env_passthrough`` from config.yaml (cached)."""
+    """Load ``tools.env_passthrough`` from config.yaml (cached).
+
+    Config-based passthrough is intentionally subject to the same
+    Hermes-provider credential blocklist as skill-declared passthrough.
+    Otherwise ``terminal.env_passthrough`` could re-expose the exact
+    provider secrets that ``execute_code`` and local terminal backends
+    deliberately scrub from child processes.
+    """
     global _config_passthrough
     if _config_passthrough is not None:
         return _config_passthrough
@@ -114,7 +121,15 @@ def _load_config_passthrough() -> frozenset[str]:
         if isinstance(passthrough, list):
             for item in passthrough:
                 if isinstance(item, str) and item.strip():
-                    result.add(item.strip())
+                    name = item.strip()
+                    if _is_hermes_provider_credential(name):
+                        logger.warning(
+                            "env passthrough: refusing config allowlist entry %r "
+                            "because it is a Hermes-managed provider credential.",
+                            name,
+                        )
+                        continue
+                    result.add(name)
     except Exception as e:
         logger.debug("Could not read tools.env_passthrough from config: %s", e)
 
@@ -141,5 +156,4 @@ def get_all_passthrough() -> frozenset[str]:
 def clear_env_passthrough() -> None:
     """Reset the skill-scoped allowlist (e.g. on session reset)."""
     _get_allowed().clear()
-
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import getpass
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -131,15 +132,45 @@ def _install_dependencies(provider_name: str) -> None:
         dep_name = dep.get("name", "")
         check_cmd = dep.get("check", "")
         install_cmd = dep.get("install", "")
-        if check_cmd:
-            try:
-                subprocess.run(
-                    check_cmd, shell=True, capture_output=True, timeout=5
-                )
-            except Exception:
-                if install_cmd:
-                    print(f"\n  ⚠ '{dep_name}' not found. Install with:")
-                    print(f"    {install_cmd}")
+        if check_cmd and not _external_dependency_available(check_cmd):
+            if install_cmd:
+                print(f"\n  ⚠ '{dep_name}' not found. Install with:")
+                print(f"    {install_cmd}")
+
+
+def _external_dependency_available(check_cmd) -> bool:
+    """Return True when an external dependency probe succeeds.
+
+    ``plugin.yaml`` metadata is treated as data, not an arbitrary shell
+    script. Accept either a list/tuple argv or a plain string that can be
+    tokenized with ``shlex.split()``. Shell metacharacters are not
+    interpreted, which prevents plugin metadata from smuggling extra
+    commands via ``shell=True``.
+    """
+    import subprocess
+
+    argv: list[str]
+    if isinstance(check_cmd, (list, tuple)):
+        argv = [str(part).strip() for part in check_cmd if str(part).strip()]
+    elif isinstance(check_cmd, str):
+        raw = check_cmd.strip()
+        if not raw:
+            return True
+        try:
+            argv = shlex.split(raw)
+        except ValueError:
+            return False
+    else:
+        return False
+
+    if not argv:
+        return True
+
+    try:
+        result = subprocess.run(argv, capture_output=True, timeout=5)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def _get_available_providers() -> list:

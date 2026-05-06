@@ -2214,6 +2214,26 @@ def test_command_dispatch_exec_nonzero_surfaces_error(monkeypatch):
     assert "failed" in resp["error"]["message"]
 
 
+def test_command_dispatch_exec_blocks_dangerous_quick_command(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "_load_cfg",
+        lambda: {"quick_commands": {"nuke": {"type": "exec", "command": "rm -rf /tmp/demo"}}},
+    )
+    monkeypatch.setattr(
+        server.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not run")),
+    )
+
+    resp = server.handle_request(
+        {"id": "1", "method": "command.dispatch", "params": {"name": "nuke"}}
+    )
+
+    assert "error" in resp
+    assert "blocked" in resp["error"]["message"]
+
+
 def test_plugins_list_surfaces_loader_error(monkeypatch):
     with patch("hermes_cli.plugins.get_plugin_manager", side_effect=Exception("boom")):
         resp = server.handle_request(

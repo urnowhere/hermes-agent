@@ -5826,6 +5826,7 @@ def _update_via_zip(args):
     """
     import tempfile
     import zipfile
+    import stat
     from urllib.request import urlretrieve
 
     branch = "main"
@@ -5841,7 +5842,7 @@ def _update_via_zip(args):
 
         print("→ Extracting...")
         with zipfile.ZipFile(zip_path, "r") as zf:
-            # Validate paths to prevent zip-slip (path traversal)
+            # Validate paths to prevent zip-slip and reject symlink members.
             tmp_dir_real = os.path.realpath(tmp_dir)
             for member in zf.infolist():
                 member_path = os.path.realpath(os.path.join(tmp_dir, member.filename))
@@ -5852,7 +5853,22 @@ def _update_via_zip(args):
                     raise ValueError(
                         f"Zip-slip detected: {member.filename} escapes extraction directory"
                     )
-            zf.extractall(tmp_dir)
+                mode = (member.external_attr >> 16) & 0o170000
+                if stat.S_ISLNK(mode):
+                    raise ValueError(
+                        f"ZIP contains unsupported symlink member: {member.filename}"
+                    )
+
+            for member in zf.infolist():
+                target = os.path.join(tmp_dir, member.filename)
+                if member.is_dir():
+                    os.makedirs(target, exist_ok=True)
+                    continue
+                parent = os.path.dirname(target)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+                with zf.open(member, "r") as src, open(target, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
 
         # GitHub ZIPs extract to hermes-agent-<branch>/
         extracted = os.path.join(tmp_dir, f"hermes-agent-{branch}")

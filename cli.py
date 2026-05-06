@@ -6879,9 +6879,17 @@ class HermesCLI:
                 qcmd = quick_commands[base_cmd.lstrip("/")]
                 if qcmd.get("type") == "exec":
                     import subprocess
+                    from tools.approval import detect_dangerous_command
                     exec_cmd = qcmd.get("command", "")
                     if exec_cmd:
                         try:
+                            is_dangerous, _, desc = detect_dangerous_command(exec_cmd)
+                            if is_dangerous:
+                                self._console_print(
+                                    f"[bold red]Quick command blocked: {desc}. "
+                                    "Use the agent or terminal approval flow instead.[/]"
+                                )
+                                return True
                             result = subprocess.run(
                                 exec_cmd, shell=True, capture_output=True,
                                 text=True, timeout=30

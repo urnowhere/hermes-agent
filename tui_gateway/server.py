@@ -4385,8 +4385,18 @@ def _(rid, params: dict) -> dict:
     if name in qcmds:
         qc = qcmds[name]
         if qc.get("type") == "exec":
+            from tools.approval import detect_dangerous_command
+
+            exec_cmd = qc.get("command", "")
+            is_dangerous, _, desc = detect_dangerous_command(exec_cmd)
+            if is_dangerous:
+                return _err(
+                    rid,
+                    4017,
+                    f"quick command blocked: {desc}. use the agent approval flow instead.",
+                )
             r = subprocess.run(
-                qc.get("command", ""),
+                exec_cmd,
                 shell=True,
                 capture_output=True,
                 text=True,

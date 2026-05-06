@@ -127,6 +127,18 @@ class TestCLIQuickCommands:
         args = cli.console.print.call_args[0][0]
         assert "timed out" in args.lower()
 
+    def test_dangerous_exec_command_is_blocked(self):
+        cli = self._make_cli({"nuke": {"type": "exec", "command": "rm -rf /tmp/demo"}})
+
+        with patch("subprocess.run") as run:
+            result = cli.process_command("/nuke")
+
+        assert result is True
+        run.assert_not_called()
+        printed = self._printed_plain(cli.console.print.call_args[0][0])
+        assert "blocked" in printed.lower()
+        assert "recursive delete" in printed.lower()
+
 
 # ── Gateway tests ──────────────────────────────────────────────────────────
 
@@ -205,3 +217,21 @@ class TestGatewayQuickCommands:
         event = self._make_event("limits")
         result = await runner._handle_message(event)
         assert result == "ok"
+
+    @pytest.mark.asyncio
+    async def test_gateway_dangerous_exec_command_is_blocked(self):
+        from gateway.run import GatewayRunner
+
+        runner = GatewayRunner.__new__(GatewayRunner)
+        runner.config = {"quick_commands": {"nuke": {"type": "exec", "command": "rm -rf /tmp/demo"}}}
+        runner._running_agents = {}
+        runner._pending_messages = {}
+        runner._is_user_authorized = MagicMock(return_value=True)
+
+        event = self._make_event("nuke")
+        with patch("asyncio.create_subprocess_shell") as spawn:
+            result = await runner._handle_message(event)
+
+        spawn.assert_not_called()
+        assert result is not None
+        assert "blocked" in result.lower()
