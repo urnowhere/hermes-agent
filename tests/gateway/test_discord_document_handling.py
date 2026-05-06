@@ -134,6 +134,7 @@ def make_message(attachments: list, content: str = "") -> SimpleNamespace:
         created_at=datetime.now(timezone.utc),
         channel=FakeDMChannel(),
         author=SimpleNamespace(id=42, display_name="Tester", name="Tester"),
+        guild=None,
     )
 
 
