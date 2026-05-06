@@ -168,6 +168,7 @@ def test_save_config_set_supports_critical_bridged_keys():
     save_keys = _save_config_env_sync_keys()
     required = {
         "docker_run_as_host_user",
+        "docker_env",
         "docker_mount_cwd_to_workspace",
         "backend",
         "docker_image",
@@ -208,3 +209,23 @@ def test_docker_mount_cwd_to_workspace_is_bridged_everywhere():
     assert "docker_mount_cwd_to_workspace" in _gateway_env_map_keys()
     assert "docker_mount_cwd_to_workspace" in _save_config_env_sync_keys()
     assert "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE" in _terminal_tool_env_var_names()
+
+
+def test_docker_env_is_bridged_everywhere():
+    """terminal.docker_env must reach DockerEnvironment through TERMINAL_DOCKER_ENV."""
+    assert "docker_env" in _cli_env_map_keys()
+    assert "docker_env" in _gateway_env_map_keys()
+    assert "docker_env" in _save_config_env_sync_keys()
+    assert "TERMINAL_DOCKER_ENV" in _terminal_tool_env_var_names()
+
+
+def test_terminal_tool_reads_terminal_docker_env(monkeypatch):
+    """The downstream terminal config parser must preserve docker_env values."""
+    import tools.terminal_tool as tt
+
+    monkeypatch.setenv("TERMINAL_DOCKER_ENV", '{"HOME": "/root", "MY_VAR": "my_value"}')
+
+    assert tt._get_env_config()["docker_env"] == {
+        "HOME": "/root",
+        "MY_VAR": "my_value",
+    }

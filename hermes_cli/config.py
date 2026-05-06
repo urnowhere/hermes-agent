@@ -4725,6 +4725,7 @@ def set_config_value(key: str, value: str):
         "terminal.backend": "TERMINAL_ENV",
         "terminal.modal_mode": "TERMINAL_MODAL_MODE",
         "terminal.docker_image": "TERMINAL_DOCKER_IMAGE",
+        "terminal.docker_env": "TERMINAL_DOCKER_ENV",
         "terminal.singularity_image": "TERMINAL_SINGULARITY_IMAGE",
         "terminal.modal_image": "TERMINAL_MODAL_IMAGE",
         "terminal.daytona_image": "TERMINAL_DAYTONA_IMAGE",
