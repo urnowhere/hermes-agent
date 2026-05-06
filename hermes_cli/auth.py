@@ -4666,7 +4666,9 @@ def _minimax_oauth_login(
             client_id=pconfig.client_id,
             code_challenge=challenge, state=state,
         )
-        verification_url = str(code_data["verification_uri"])
+        verification_url = str(code_data["verification_uri"]).replace(
+            "https://www.minimax.io/", "https://platform.minimax.io/"
+        )
         user_code = str(code_data["user_code"])
 
         print()
@@ -4692,7 +4694,14 @@ def _minimax_oauth_login(
         )
 
     now = datetime.now(timezone.utc)
-    expires_in_s = int(token_data["expired_in"])
+    raw_expired = int(token_data["expired_in"])
+    import time as _time
+    now_ms = int(_time.time() * 1000)
+    if raw_expired > now_ms // 2:
+        # Looks like a unix-ms timestamp — convert to seconds-from-now
+        expires_in_s = max(1, int((raw_expired / 1000.0) - _time.time()))
+    else:
+        expires_in_s = raw_expired
     expires_at = now.timestamp() + expires_in_s
 
     auth_state = {
@@ -4768,7 +4777,13 @@ def _refresh_minimax_oauth_state(
             relogin_required=True,
         )
     now_dt = datetime.now(timezone.utc)
-    expires_in_s = int(payload["expired_in"])
+    raw_expired = int(payload["expired_in"])
+    import time as _time
+    now_ms = int(_time.time() * 1000)
+    if raw_expired > now_ms // 2:
+        expires_in_s = max(1, int((raw_expired / 1000.0) - _time.time()))
+    else:
+        expires_in_s = raw_expired
     new_state = dict(state)
     new_state.update({
         "access_token": payload["access_token"],
