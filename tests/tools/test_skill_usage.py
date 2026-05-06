@@ -604,3 +604,96 @@ def test_end_to_end_no_code_path_mutates_bundled_skill(skills_home):
     # The agent-created skill can still be mutated normally
     bump_view("mine")
     assert load_usage()["mine"]["view_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Concurrency — read-modify-write race protection (#18795)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="multiprocessing fcntl semantics differ on Windows; msvcrt path "
+    "is exercised by the unit-level _file_lock contract instead",
+)
+def test_concurrent_bumps_do_not_lose_updates(skills_home):
+    """Multiple processes bumping the same skill must not lose updates.
+
+    Pre-fix, the read-modify-write cycle in ``_mutate`` was unsynchronized:
+    two processes that loaded the file at the same time would each write
+    back ``count + 1`` and one update would be silently lost. This test
+    fans out to several real subprocesses (so ``fcntl.flock`` actually
+    serializes them — threads in the same process would not exercise the
+    bug or the fix) and asserts exact accounting.
+    """
+    import subprocess
+    import sys
+
+    from tools.skill_usage import (
+        bump_use,
+        get_record,
+        load_usage,
+        mark_agent_created,
+    )
+
+    skill_name = "concurrency-test-skill"
+    # ``_mutate`` is gated on is_agent_created; mark it once up front so
+    # the subprocesses' bumps actually persist.
+    mark_agent_created(skill_name)
+    assert load_usage()[skill_name]["created_by"] == "agent"
+
+    bumps_per_proc = 25
+    n_procs = 6
+    expected = bumps_per_proc * n_procs
+
+    repo_root = os.getcwd()  # tests run from hermes-agent root
+    script = (
+        "import sys, os; "
+        f"sys.path.insert(0, {repo_root!r}); "
+        "import tools.skill_usage as su; "
+        f"[su.bump_use({skill_name!r}) for _ in range({bumps_per_proc})]"
+    )
+
+    env = {**os.environ}
+    procs = [
+        subprocess.Popen([sys.executable, "-c", script], env=env)
+        for _ in range(n_procs)
+    ]
+    for p in procs:
+        rc = p.wait(timeout=60)
+        assert rc == 0, f"subprocess exited with {rc}"
+
+    rec = get_record(skill_name)
+    assert rec["use_count"] == expected, (
+        f"race regression: expected use_count={expected} after "
+        f"{n_procs} procs × {bumps_per_proc} bumps, got {rec['use_count']} "
+        "(lost updates implies the inter-process lock is missing)"
+    )
+
+
+def test_file_lock_is_a_noop_when_locking_unavailable(skills_home, monkeypatch):
+    """If neither fcntl nor msvcrt is importable, _file_lock must degrade
+    cleanly to a no-op so usage telemetry never crashes a tool call."""
+    import tools.skill_usage as su
+
+    monkeypatch.setattr(su, "fcntl", None)
+    monkeypatch.setattr(su, "msvcrt", None)
+
+    # Should not raise; should still allow the body to run.
+    with su._file_lock(skills_home / "skills" / ".usage.json"):
+        pass
+
+
+def test_file_lock_serializes_within_one_process(skills_home):
+    """A second acquire on the same lock from the same process should still
+    serialize (fcntl.flock with LOCK_EX is process-level on POSIX). Sanity
+    check that the helper actually acquires/releases — the regression test
+    above is the real teeth, this is just a smoke test."""
+    import tools.skill_usage as su
+
+    path = skills_home / "skills" / ".usage.json"
+    # Acquire and release twice in a row — must not deadlock or leak fds.
+    with su._file_lock(path):
+        pass
+    with su._file_lock(path):
+        pass

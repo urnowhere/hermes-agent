@@ -28,13 +28,86 @@ import json
 import logging
 import os
 import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from hermes_constants import get_hermes_home
 
+# fcntl is Unix-only; on Windows use msvcrt for file locking. Mirrors the
+# pattern in tools/memory_tool.py so a single read-modify-write cycle on
+# .usage.json is serialized across concurrent processes (#18795).
+msvcrt = None
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+    try:
+        import msvcrt
+    except ImportError:
+        pass
+
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _file_lock(path: Path):
+    """Acquire an exclusive inter-process lock on a sidecar lock file.
+
+    The lock is held for the duration of the context. ``path`` is the file
+    being protected; the lock itself lives at ``path + ".lock"`` so that
+    the protected file can still be replaced atomically via ``os.replace``.
+
+    On platforms without ``fcntl`` or ``msvcrt`` (or when the lock file
+    cannot be created), the lock degrades to a no-op so usage telemetry
+    never crashes a skill tool call — the file is best-effort by design
+    (see module docstring).
+    """
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        yield
+        return
+
+    if fcntl is None and msvcrt is None:
+        yield
+        return
+
+    if msvcrt and (not lock_path.exists() or lock_path.stat().st_size == 0):
+        try:
+            lock_path.write_text(" ", encoding="utf-8")
+        except OSError:
+            yield
+            return
+
+    try:
+        fd = open(lock_path, "r+" if msvcrt else "a+")
+    except OSError:
+        yield
+        return
+
+    try:
+        if fcntl:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        else:
+            fd.seek(0)
+            msvcrt.locking(fd.fileno(), msvcrt.LK_LOCK, 1)
+        yield
+    finally:
+        if fcntl:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        elif msvcrt:
+            try:
+                fd.seek(0)
+                msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+        fd.close()
 
 
 STATE_ACTIVE = "active"
@@ -328,13 +401,14 @@ def _mutate(skill_name: str, mutator) -> None:
     try:
         if not is_agent_created(skill_name):
             return
-        data = load_usage()
-        rec = data.get(skill_name)
-        if not isinstance(rec, dict):
-            rec = _empty_record()
-        mutator(rec)
-        data[skill_name] = rec
-        save_usage(data)
+        with _file_lock(_usage_file()):
+            data = load_usage()
+            rec = data.get(skill_name)
+            if not isinstance(rec, dict):
+                rec = _empty_record()
+            mutator(rec)
+            data[skill_name] = rec
+            save_usage(data)
     except Exception as e:
         logger.debug("skill_usage._mutate(%s) failed: %s", skill_name, e, exc_info=True)
 
@@ -404,10 +478,11 @@ def forget(skill_name: str) -> None:
     if not skill_name:
         return
     try:
-        data = load_usage()
-        if skill_name in data:
-            del data[skill_name]
-            save_usage(data)
+        with _file_lock(_usage_file()):
+            data = load_usage()
+            if skill_name in data:
+                del data[skill_name]
+                save_usage(data)
     except Exception as e:
         logger.debug("skill_usage.forget(%s) failed: %s", skill_name, e, exc_info=True)
 
