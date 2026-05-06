@@ -4339,6 +4339,16 @@ class AIAgent:
         if not messages:
             return
 
+        # Re-derive logs_dir from the current HERMES_HOME so that session
+        # files land in the active profile's directory even when the profile
+        # was switched after this agent was created (issue #16582).
+        current_home = get_hermes_home()
+        current_logs_dir = current_home / "sessions"
+        if current_logs_dir != self.logs_dir:
+            self.logs_dir = current_logs_dir
+            self.logs_dir.mkdir(parents=True, exist_ok=True)
+            self.session_log_file = self.logs_dir / f"session_{self.session_id}.json"
+
         try:
             # Clean assistant content for session logs
             cleaned = []
