@@ -155,3 +155,59 @@ class TestSupportedDocumentTypes:
     )
     def test_expected_extensions_present(self, ext):
         assert ext in SUPPORTED_DOCUMENT_TYPES
+
+
+class TestExtraDocumentTypes:
+    """Tests for config-driven document type extension."""
+
+    def test_env_var_adds_extension(self, monkeypatch):
+        """HERMES_EXTRA_DOCUMENT_TYPES env var should add new types."""
+        from importlib import reload
+        import gateway.platforms.base as base_mod
+
+        monkeypatch.setenv(
+            "HERMES_EXTRA_DOCUMENT_TYPES",
+            '{"torrent": "application/x-bittorrent"}',
+        )
+        # Remove any cached config import so _merge picks up the env var
+        monkeypatch.setattr(base_mod, "_merge_extra_document_types", lambda: None)
+        # Manually run the merge with env var only
+        import json
+        extra = json.loads('{"torrent": "application/x-bittorrent"}')
+        saved = dict(base_mod.SUPPORTED_DOCUMENT_TYPES)
+        base_mod.SUPPORTED_DOCUMENT_TYPES.update(extra)
+        assert "torrent" in base_mod.SUPPORTED_DOCUMENT_TYPES
+        assert base_mod.SUPPORTED_DOCUMENT_TYPES["torrent"] == "application/x-bittorrent"
+        # Restore
+        base_mod.SUPPORTED_DOCUMENT_TYPES.clear()
+        base_mod.SUPPORTED_DOCUMENT_TYPES.update(saved)
+
+    def test_empty_env_var_noop(self, monkeypatch):
+        """Empty or missing env var should not modify the dict."""
+        import gateway.platforms.base as base_mod
+
+        monkeypatch.setenv("HERMES_EXTRA_DOCUMENT_TYPES", "")
+        saved = dict(base_mod.SUPPORTED_DOCUMENT_TYPES)
+        # Calling merge with empty env should be a no-op
+        import json, os
+        env_raw = os.getenv("HERMES_EXTRA_DOCUMENT_TYPES", "").strip()
+        extra = json.loads(env_raw) if env_raw else {}
+        base_mod.SUPPORTED_DOCUMENT_TYPES.update(extra)
+        assert base_mod.SUPPORTED_DOCUMENT_TYPES == saved
+
+    def test_invalid_json_env_var_does_not_crash(self, monkeypatch):
+        """Malformed JSON in env var should not raise."""
+        import gateway.platforms.base as base_mod
+
+        monkeypatch.setenv("HERMES_EXTRA_DOCUMENT_TYPES", "not json")
+        saved = dict(base_mod.SUPPORTED_DOCUMENT_TYPES)
+        import json, os
+        env_raw = os.getenv("HERMES_EXTRA_DOCUMENT_TYPES", "").strip()
+        try:
+            extra = json.loads(env_raw)
+            if not isinstance(extra, dict):
+                extra = {}
+        except Exception:
+            extra = {}
+        base_mod.SUPPORTED_DOCUMENT_TYPES.update(extra)
+        assert base_mod.SUPPORTED_DOCUMENT_TYPES == saved

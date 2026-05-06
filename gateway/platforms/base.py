@@ -786,6 +786,49 @@ SUPPORTED_DOCUMENT_TYPES = {
 }
 
 
+def _merge_extra_document_types() -> None:
+    """Merge user-configured document types into the supported set.
+
+    Reads ``gateway.extra_document_types`` from config.yaml — a mapping of
+    file extension (e.g. ``.torrent``) to MIME type (e.g.
+    ``application/x-bittorrent``).  This lets users accept file types that
+    are not in the built-in list without patching source code.
+
+    Falls back to ``HERMES_EXTRA_DOCUMENT_TYPES`` (JSON string) environment
+    variable when config is unavailable.
+    """
+    extra = {}
+    # Prefer config.yaml
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        gateway_cfg = cfg.get("gateway", {}) if isinstance(cfg, dict) else {}
+        extra_raw = gateway_cfg.get("extra_document_types")
+        if isinstance(extra_raw, dict):
+            extra = extra_raw
+    except Exception:
+        pass
+
+    # Fallback: env var (JSON: {".torrent": "application/x-bittorrent"})
+    if not extra:
+        env_raw = os.getenv("HERMES_EXTRA_DOCUMENT_TYPES", "").strip()
+        if env_raw:
+            try:
+                import json
+                extra = json.loads(env_raw)
+                if not isinstance(extra, dict):
+                    extra = {}
+            except Exception:
+                pass
+
+    if extra:
+        SUPPORTED_DOCUMENT_TYPES.update(extra)
+        logger.debug("Merged extra document types: %s", list(extra.keys()))
+
+
+_merge_extra_document_types()
+
+
 def get_document_cache_dir() -> Path:
     """Return the document cache directory, creating it if it doesn't exist."""
     DOCUMENT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
