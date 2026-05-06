@@ -246,3 +246,55 @@ class TestGatewayPathFiresHooks:
 
         post_kwargs = next(kw for name, kw in captured if name == "post_approval_response")
         assert post_kwargs["choice"] == "timeout"
+
+    def test_notify_cb_failure_blocks_fast_without_waiting_for_timeout(
+        self, isolated_session, monkeypatch
+    ):
+        """Regression for #19731: when the gateway can't deliver the approval
+        request (e.g. APIServerAdapter.send returns SendResult(success=False)
+        because it has no push channel), the gateway-side notify_cb raises and
+        the approval flow must return BLOCKED immediately rather than blocking
+        the agent thread on event.wait() for the full gateway_timeout (5 min).
+        """
+        import threading
+
+        monkeypatch.delenv("HERMES_INTERACTIVE", raising=False)
+        monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+        monkeypatch.delenv("HERMES_EXEC_ASK", raising=False)
+        monkeypatch.setattr(approval_module, "_get_approval_mode", lambda: "manual")
+        # Use a deliberately long gateway_timeout: the test should finish in
+        # well under a second because notify_cb raises, not because the
+        # timeout fires. If the test takes anywhere near gateway_timeout,
+        # the fail-fast path is broken.
+        monkeypatch.setattr(
+            approval_module, "_get_approval_config", lambda: {"gateway_timeout": 60}
+        )
+
+        def failing_notify_cb(approval_data):
+            raise RuntimeError(
+                "approval delivery failed via APIServerAdapter: "
+                "API server uses HTTP request/response, not send()"
+            )
+
+        register_gateway_notify(isolated_session, failing_notify_cb)
+        result_holder = {}
+
+        def run_guard():
+            with patch("hermes_cli.plugins.invoke_hook", return_value=[]):
+                result_holder["result"] = check_all_command_guards(
+                    "rm -rf /tmp/test-notify-fail", "local",
+                )
+
+        t = threading.Thread(target=run_guard, daemon=True)
+        t.start()
+        # Generous join cap; the actual return path is synchronous after
+        # notify_cb raises, so this should complete in milliseconds.
+        t.join(timeout=5)
+        assert not t.is_alive(), "Agent thread hung after notify_cb raised"
+        unregister_gateway_notify(isolated_session)
+
+        result = result_holder["result"]
+        assert result["approved"] is False
+        assert "BLOCKED" in result["message"]
+        # Queue should be drained — no orphaned approval entries left behind.
+        assert isolated_session not in approval_module._gateway_queues
