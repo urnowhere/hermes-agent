@@ -105,7 +105,7 @@ _ANTHROPIC_OUTPUT_LIMITS = {
     "claude-3-sonnet":     4_096,
     "claude-3-haiku":      4_096,
     # Third-party Anthropic-compatible providers
-    "minimax":            131_072,
+    "minimax":             32_000,  # API limit is 40 000; use config override for more
     # Qwen models via DashScope Anthropic-compatible endpoint
     # DashScope enforces max_tokens ∈ [1, 65536]
     "qwen3":               65_536,

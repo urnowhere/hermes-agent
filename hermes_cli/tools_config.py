@@ -51,6 +51,7 @@ from hermes_cli.cli_output import (  # noqa: E402 — late import block
 # These map to keys in toolsets.py TOOLSETS dict.
 CONFIGURABLE_TOOLSETS = [
     ("web",             "🔍 Web Search & Scraping",    "web_search, web_extract"),
+    ("search",          "🔎 Web Search Only",          "web_search"),
     ("browser",         "🌐 Browser Automation",       "navigate, click, type, scroll"),
     ("terminal",        "💻 Terminal & Processes",      "terminal, process"),
     ("file",            "📁 File Operations",           "read, write, patch, search"),
@@ -811,15 +812,29 @@ def _get_platform_tools(
     include_default_mcp_servers: bool = True,
 ) -> Set[str]:
     """Resolve which individual toolset names are enabled for a platform."""
-    from toolsets import resolve_toolset, TOOLSETS
+    from toolsets import resolve_toolset, validate_toolset, TOOLSETS
 
     platform_toolsets = config.get("platform_toolsets") or {}
     toolset_names = platform_toolsets.get(platform)
+    used_implicit_default = False
 
     if toolset_names is None or not isinstance(toolset_names, list):
+        used_implicit_default = True
         plat_info = PLATFORMS.get(platform)
         if plat_info:
             default_ts = plat_info["default_toolset"]
+            if platform == "cli":
+                agent_cfg = config.get("agent") or {}
+                configured_default = agent_cfg.get("default_cli_toolset")
+                if isinstance(configured_default, str) and configured_default.strip():
+                    candidate = configured_default.strip()
+                    if validate_toolset(candidate):
+                        default_ts = candidate
+                    else:
+                        logger.warning(
+                            "Ignoring invalid agent.default_cli_toolset=%r",
+                            configured_default,
+                        )
         else:
             # Plugin platform — derive toolset name from platform key
             default_ts = f"hermes-{platform}"
@@ -832,6 +847,7 @@ def _get_platform_tools(
     configurable_keys = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS}
     plugin_ts_keys = _get_plugin_toolset_keys()
     platform_default_keys = {p["default_toolset"] for p in PLATFORMS.values()}
+    platform_default_keys |= {ts for ts in TOOLSETS if ts.startswith("hermes-")}
 
     # If the saved list contains any configurable keys directly, the user
     # has explicitly configured this platform — use direct membership.
@@ -859,6 +875,8 @@ def _get_platform_tools(
             ts_tools = set(resolve_toolset(ts_key))
             if ts_tools and ts_tools.issubset(all_tool_names):
                 enabled_toolsets.add(ts_key)
+        if "web" in enabled_toolsets:
+            enabled_toolsets.discard("search")
 
         default_off = set(_DEFAULT_OFF_TOOLSETS)
         # Legacy safety: if the platform's own name matches a default-off
@@ -886,7 +904,10 @@ def _get_platform_tools(
     # otherwise saving via `hermes tools` (which flips has_explicit_config
     # to True) silently drops them.
     _plat_info = PLATFORMS.get(platform)
-    _default_ts = _plat_info["default_toolset"] if _plat_info else f"hermes-{platform}"
+    if used_implicit_default and toolset_names:
+        _default_ts = toolset_names[0]
+    else:
+        _default_ts = _plat_info["default_toolset"] if _plat_info else f"hermes-{platform}"
     platform_tool_universe = set(resolve_toolset(_default_ts))
     configurable_tool_universe = set()
     for ck in configurable_keys:
@@ -988,6 +1009,8 @@ def _save_platform_tools(config: dict, platform: str, enabled_toolset_keys: Set[
     Preserves any non-configurable toolset entries (like MCP server names)
     that were already in the config for this platform.
     """
+    from toolsets import TOOLSETS
+
     config.setdefault("platform_toolsets", {})
 
     # Drop platform-scoped toolsets that don't apply here.  Prevents the
@@ -1007,6 +1030,7 @@ def _save_platform_tools(config: dict, platform: str, enabled_toolset_keys: Set[
     # These are "super" toolsets that resolve to ALL tools, so preserving them
     # would silently override the user's unchecked selections on the next read.
     platform_default_keys = {p["default_toolset"] for p in PLATFORMS.values()}
+    platform_default_keys |= {ts for ts in TOOLSETS if ts.startswith("hermes-")}
 
     # Get existing toolsets for this platform
     existing_toolsets = cfg_get(config, "platform_toolsets", platform, default=[])

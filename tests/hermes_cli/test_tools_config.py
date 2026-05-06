@@ -70,17 +70,55 @@ def test_get_platform_tools_uses_default_when_platform_not_configured():
 
     enabled = _get_platform_tools(config, "cli")
 
-    assert enabled
-    assert enabled.isdisjoint(_DEFAULT_OFF_TOOLSETS)
+    assert enabled == {"search", "terminal", "file", "skills", "todo", "memory", "session_search"}
 
 
 def test_configurable_toolsets_include_messaging():
     assert any(ts_key == "messaging" for ts_key, _, _ in CONFIGURABLE_TOOLSETS)
 
+def test_configurable_toolsets_include_search_only():
+    assert any(ts_key == "search" for ts_key, _, _ in CONFIGURABLE_TOOLSETS)
+
 def test_get_platform_tools_default_telegram_includes_messaging():
     enabled = _get_platform_tools({}, "telegram")
 
     assert "messaging" in enabled
+
+
+def test_get_platform_tools_can_use_lite_cli_default():
+    config = {}
+
+    enabled = _get_platform_tools(config, "cli")
+
+    assert {"search", "terminal", "file", "skills", "todo", "memory", "session_search"}.issubset(enabled)
+    assert "browser" not in enabled
+    assert "image_gen" not in enabled
+    assert "messaging" not in enabled
+    assert "cronjob" not in enabled
+
+
+def test_get_platform_tools_can_restore_full_cli_default():
+    config = {"agent": {"default_cli_toolset": "hermes-cli"}}
+
+    enabled = _get_platform_tools(config, "cli")
+
+    assert "web" in enabled
+    assert "browser" in enabled
+    assert "cronjob" in enabled
+    assert "search" not in enabled
+
+
+def test_explicit_cli_platform_toolsets_override_lite_default():
+    config = {
+        "agent": {"default_cli_toolset": "hermes-lite"},
+        "platform_toolsets": {"cli": ["web"]},
+    }
+
+    enabled = _get_platform_tools(config, "cli")
+
+    assert "web" in enabled
+    assert "terminal" not in enabled
+    assert "file" not in enabled
 
 
 def test_get_platform_tools_homeassistant_platform_keeps_homeassistant_toolset():
@@ -107,7 +145,7 @@ def test_get_platform_tools_homeassistant_toolset_enabled_for_cron_when_hass_tok
     assert "moa" not in cron_enabled
 
     cli_enabled = _get_platform_tools({}, "cli")
-    assert "homeassistant" in cli_enabled
+    assert "homeassistant" not in cli_enabled
 
 
 def test_get_platform_tools_homeassistant_toolset_off_for_cron_when_hass_token_missing(monkeypatch):
@@ -808,7 +846,7 @@ def test_get_platform_tools_second_pass_skips_fully_claimed_toolsets():
     """Toolsets whose tools are fully covered by configurable keys should NOT
     be added by the second pass (prevents 'search', 'hermes-acp' noise).
     """
-    enabled = _get_platform_tools({}, "cli")
+    enabled = _get_platform_tools({"agent": {"default_cli_toolset": "hermes-cli"}}, "cli")
 
     assert "search" not in enabled
 
