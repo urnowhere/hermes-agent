@@ -377,6 +377,16 @@ For cloud sandbox backends, persistence is filesystem-oriented. `TERMINAL_LIFETI
 | `MATRIX_AUTO_THREAD` | Auto-create threads for room messages (default: `true`) |
 | `MATRIX_DM_MENTION_THREADS` | Create a thread when bot is `@mentioned` in a DM (default: `false`) |
 | `MATRIX_RECOVERY_KEY` | Recovery key for cross-signing verification after device key rotation. Recommended for E2EE setups with cross-signing enabled. |
+| `XMPP_JID` | Bot Jabber ID (e.g. `hermes@example.org`) — required to enable the XMPP platform |
+| `XMPP_PASSWORD` | XMPP account password (sent over STARTTLS only — TLS is mandatory) |
+| `XMPP_HOST` | Override SRV lookup if the server hostname differs from the JID domain (optional) |
+| `XMPP_PORT` | Server port (default: `5222` STARTTLS, or `5223` for direct TLS) |
+| `XMPP_MUC_ROOMS` | Comma-separated MUC (group room) JIDs to join (e.g. `dev@conference.example.org/hermes`). The optional `/nick` suffix overrides `XMPP_MUC_NICK` per room. |
+| `XMPP_MUC_NICK` | Default nickname when joining MUC rooms without an explicit `/nick` suffix |
+| `XMPP_HOME_CHANNEL` | JID where cron jobs deliver results by default (DM JID or MUC room JID) |
+| `XMPP_HOME_CHANNEL_NAME` | Display name for the XMPP home channel |
+| `XMPP_ALLOWED_USERS` | Comma-separated **bare JIDs** allowed to DM the bot (e.g. `you@example.org`). MUC (group chat) access is gated by room membership in `XMPP_MUC_ROOMS`, not this list — joining the room *is* the access decision. |
+| `XMPP_ALLOW_ALL_USERS` | Bypass DM allow-list and MUC checks (`true`/`false`, default: `false`). Dev only. |
 | `HASS_TOKEN` | Home Assistant Long-Lived Access Token (enables HA platform + tools) |
 | `HASS_URL` | Home Assistant URL (default: `http://homeassistant.local:8123`) |
 | `WEBHOOK_ENABLED` | Enable the webhook platform adapter (`true`/`false`) |

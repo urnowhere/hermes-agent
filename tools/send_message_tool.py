@@ -629,6 +629,8 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             result = await _send_whatsapp(pconfig.extra, chat_id, chunk)
         elif platform == Platform.SIGNAL:
             result = await _send_signal(pconfig.extra, chat_id, chunk)
+        elif platform == Platform.XMPP:
+            result = await _send_xmpp(pconfig, chat_id, chunk)
         elif platform == Platform.EMAIL:
             result = await _send_email(pconfig.extra, chat_id, chunk)
         elif platform == Platform.SMS:
@@ -1281,6 +1283,27 @@ async def _send_email(extra, chat_id, message):
         return {"success": True, "platform": "email", "chat_id": chat_id}
     except Exception as e:
         return _error(f"Email send failed: {e}")
+
+
+async def _send_xmpp(pconfig, chat_id, message):
+    """Send a single XMPP message by spinning up a one-shot adapter.
+
+    Used by cron jobs and the send_message_tool when no gateway adapter is
+    already running. Heavy for chat use, but cheap relative to startup of
+    most other one-shot platform sends.
+    """
+    try:
+        from gateway.platforms.xmpp import send_xmpp_message
+    except ImportError as exc:
+        return _error(f"XMPP module unavailable: {exc}")
+    try:
+        result = await send_xmpp_message(pconfig, chat_id, message)
+        if result.get("success"):
+            return {"success": True, "platform": "xmpp", "chat_id": chat_id,
+                    "message_id": result.get("message_id")}
+        return _error(f"XMPP send failed: {result.get('error')}")
+    except Exception as exc:
+        return _error(f"XMPP send failed: {exc}")
 
 
 async def _send_sms(auth_token, chat_id, message):
