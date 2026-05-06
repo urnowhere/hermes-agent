@@ -414,7 +414,7 @@ export const zh: Translations = {
   },
 
   language: {
-    switchTo: "切换到英文",
+    switchTo: "切换到{language}",
   },
 
   theme: {

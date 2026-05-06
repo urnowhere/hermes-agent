@@ -49,6 +49,12 @@ The `web` extra pulls in FastAPI/Uvicorn; `pty` pulls in `ptyprocess` (POSIX) or
 
 When you run `hermes dashboard` without the dependencies, it will tell you what to install. If the frontend hasn't been built yet and `npm` is available, it builds automatically on first launch.
 
+## Language
+
+The dashboard UI includes built-in localization for English, Chinese, and Korean. Use the language switcher in the sidebar footer to cycle through available languages. The selection is saved in browser `localStorage` under `hermes-locale`, so each browser keeps its own preference.
+
+On first load, the dashboard also checks the browser language and selects Korean automatically for `ko` / `ko-KR` browsers, Chinese for `zh` browsers, and English otherwise.
+
 ## Pages
 
 ### Status

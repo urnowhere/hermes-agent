@@ -1,32 +1,43 @@
-import { createContext, useContext, useState, useCallback, type ReactNode } from "react";
+import { useState, useCallback, type ReactNode } from "react";
 import type { Locale, Translations } from "./types";
+import { I18nContext, type I18nContextValue } from "./i18n-context";
 import { en } from "./en";
 import { zh } from "./zh";
+import { ko } from "./ko";
 
-const TRANSLATIONS: Record<Locale, Translations> = { en, zh };
+const LOCALES: readonly Locale[] = ["en", "zh", "ko"];
+const TRANSLATIONS: Record<Locale, Translations> = { en, zh, ko };
 const STORAGE_KEY = "hermes-locale";
+
+function isLocale(value: unknown): value is Locale {
+  return typeof value === "string" && (LOCALES as readonly string[]).includes(value);
+}
+
+function getBrowserLocale(): Locale | null {
+  if (typeof navigator === "undefined") return null;
+
+  const languages = [...(navigator.languages ?? [])];
+  if (navigator.language) languages.push(navigator.language);
+
+  for (const language of languages) {
+    const normalized = language.toLowerCase();
+    if (normalized.startsWith("ko")) return "ko";
+    if (normalized.startsWith("zh")) return "zh";
+    if (normalized.startsWith("en")) return "en";
+  }
+
+  return null;
+}
 
 function getInitialLocale(): Locale {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored === "en" || stored === "zh") return stored;
+    if (isLocale(stored)) return stored;
   } catch {
     // SSR or privacy mode
   }
-  return "en";
+  return getBrowserLocale() ?? "en";
 }
-
-interface I18nContextValue {
-  locale: Locale;
-  setLocale: (l: Locale) => void;
-  t: Translations;
-}
-
-const I18nContext = createContext<I18nContextValue>({
-  locale: "en",
-  setLocale: () => {},
-  t: en,
-});
 
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>(getInitialLocale);
@@ -51,8 +62,4 @@ export function I18nProvider({ children }: { children: ReactNode }) {
       {children}
     </I18nContext.Provider>
   );
-}
-
-export function useI18n() {
-  return useContext(I18nContext);
 }
