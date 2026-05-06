@@ -427,6 +427,9 @@ class GatewayConfig:
     # STT settings
     stt_enabled: bool = True  # Whether to auto-transcribe inbound voice messages
 
+    # Video processing settings
+    video_processing: dict = field(default_factory=lambda: {"enabled": True, "max_size_mb": 500, "ffmpeg_path": "ffmpeg"})
+
     # Session isolation in shared chats
     group_sessions_per_user: bool = True  # Isolate group/channel sessions per participant when user IDs are available
     thread_sessions_per_user: bool = False  # When False (default), threads are shared across all participants
@@ -591,6 +594,10 @@ class GatewayConfig:
         except (TypeError, ValueError):
             session_store_max_age_days = 90
 
+        video_processing = data.get("video_processing", {})
+        if not isinstance(video_processing, dict):
+            video_processing = {}
+
         return cls(
             platforms=platforms,
             default_reset_policy=default_policy,
@@ -606,6 +613,7 @@ class GatewayConfig:
             unauthorized_dm_behavior=unauthorized_dm_behavior,
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
             session_store_max_age_days=session_store_max_age_days,
+            video_processing=video_processing,
         )
 
     def get_unauthorized_dm_behavior(self, platform: Optional[Platform] = None) -> str:
@@ -1010,6 +1018,11 @@ def load_gateway_config() -> GatewayConfig:
             _home / "config.yaml",
             e,
         )
+
+    # Video processing: read from config.yaml, default to enabled.
+    vp_cfg = yaml_cfg.get("video_processing")
+    if isinstance(vp_cfg, dict):
+        gw_data["video_processing"] = vp_cfg
 
     config = GatewayConfig.from_dict(gw_data)
 
