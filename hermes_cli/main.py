@@ -9558,6 +9558,19 @@ Examples:
         help="Skip confirmation prompt (needed in TUI mode)",
     )
 
+    skills_scan = skills_subparsers.add_parser(
+        "scan", help="Run a skill security scan without installing"
+    )
+    skills_scan.add_argument(
+        "identifier",
+        help="Skill identifier, skill directory, or direct path to SKILL.md",
+    )
+    skills_scan.add_argument(
+        "--source",
+        default="local",
+        help="Source label used for local trust resolution (default: local)",
+    )
+
     skills_inspect = skills_subparsers.add_parser(
         "inspect", help="Preview a skill without installing"
     )
