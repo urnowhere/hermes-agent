@@ -816,6 +816,7 @@ DEFAULT_CONFIG = {
         "persistent_output_max_lines": 200,
         "inline_diffs": True,     # Show inline diff previews for write actions (write_file, patch, skill_manage)
         "show_cost": False,       # Show $ cost in the status bar (off by default)
+        "terminal_title": True,   # Update terminal tab/window title with agent state (thinking, tool, idle+cwd)
         "skin": "default",
         # UI language for static user-facing messages (approval prompts, a
         # handful of gateway slash-command replies).  Does NOT affect agent
