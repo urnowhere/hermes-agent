@@ -2727,6 +2727,7 @@ def resolve_vision_provider_client(
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
     async_mode: bool = False,
+    main_runtime: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[str], Optional[Any], Optional[str]]:
     """Resolve the client actually used for vision tasks.
 
@@ -2777,8 +2778,9 @@ def resolve_vision_provider_client(
         #   2. OpenRouter  (vision-capable aggregator fallback)
         #   3. Nous Portal (vision-capable aggregator fallback)
         #   4. Stop
-        main_provider = _read_main_provider()
-        main_model = _read_main_model()
+        runtime = _normalize_main_runtime(main_runtime)
+        main_provider = runtime.get("provider", "") or _read_main_provider()
+        main_model = runtime.get("model", "") or _read_main_model()
         if main_provider and main_provider not in ("auto", ""):
             vision_model = _PROVIDER_VISION_MODELS.get(main_provider, main_model)
             if main_provider == "nous":
@@ -3516,6 +3518,7 @@ def call_llm(
             base_url=resolved_base_url or base_url,
             api_key=resolved_api_key or api_key,
             async_mode=False,
+            main_runtime=main_runtime,
         )
         if client is None and resolved_provider != "auto" and not resolved_base_url:
             logger.warning(
@@ -3526,6 +3529,7 @@ def call_llm(
                 provider="auto",
                 model=resolved_model,
                 async_mode=False,
+                main_runtime=main_runtime,
             )
         if client is None:
             raise RuntimeError(
@@ -3679,6 +3683,7 @@ def call_llm(
                         provider=resolved_provider,
                         model=final_model,
                         async_mode=False,
+                        main_runtime=main_runtime,
                     )[1:]
                     if task == "vision"
                     else _get_cached_client(
@@ -3820,6 +3825,7 @@ async def async_call_llm(
     model: str = None,
     base_url: str = None,
     api_key: str = None,
+    main_runtime: Optional[Dict[str, Any]] = None,
     messages: list,
     temperature: float = None,
     max_tokens: int = None,
@@ -3843,6 +3849,7 @@ async def async_call_llm(
             base_url=resolved_base_url or base_url,
             api_key=resolved_api_key or api_key,
             async_mode=True,
+            main_runtime=main_runtime,
         )
         if client is None and resolved_provider != "auto" and not resolved_base_url:
             logger.warning(
@@ -3853,6 +3860,7 @@ async def async_call_llm(
                 provider="auto",
                 model=resolved_model,
                 async_mode=True,
+                main_runtime=main_runtime,
             )
         if client is None:
             raise RuntimeError(
@@ -3984,6 +3992,7 @@ async def async_call_llm(
                         provider=resolved_provider,
                         model=final_model,
                         async_mode=True,
+                        main_runtime=main_runtime,
                     )
                 else:
                     retry_client, retry_model = _get_cached_client(
