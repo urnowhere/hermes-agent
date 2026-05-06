@@ -7962,11 +7962,16 @@ class HermesCLI:
         completion = agent.session_completion_tokens
         total = agent.session_total_tokens
 
-        compressor = agent.context_compressor
-        last_prompt = compressor.last_prompt_tokens
-        ctx_len = compressor.context_length
-        pct = min(100, (last_prompt / ctx_len * 100)) if ctx_len else 0
-        compressions = compressor.compression_count
+        compressor = getattr(agent, "context_compressor", None)
+        if compressor is not None:
+            last_prompt = int(getattr(compressor, "last_prompt_tokens", 0) or 0)
+            ctx_len = int(getattr(compressor, "context_length", 0) or 0)
+            pct = min(100.0, (last_prompt / ctx_len * 100)) if ctx_len else 0.0
+            compressions = int(getattr(compressor, "compression_count", 0) or 0)
+            ctx_summary = f"{last_prompt:,} / {ctx_len:,} ({pct:.0f}%)"
+        else:
+            compressions = 0
+            ctx_summary = f"{int(prompt or total or 0):,} prompt tokens (no compressor)"
 
         msg_count = len(self.conversation_history)
         cost_result = estimate_usage_cost(
@@ -8004,7 +8009,7 @@ class HermesCLI:
         else:
             print(f"  Total cost:              {'n/a':>10}")
         print(f"  {'─' * 40}")
-        print(f"  Current context:  {last_prompt:,} / {ctx_len:,} ({pct:.0f}%)")
+        print(f"  Current context:  {ctx_summary}")
         print(f"  Messages:         {msg_count}")
         print(f"  Compressions:     {compressions}")
         if cost_result.status == "unknown":

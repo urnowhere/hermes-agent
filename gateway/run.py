@@ -10380,12 +10380,16 @@ class GatewayRunner:
                 pass
 
             # Context window and compressions
-            ctx = agent.context_compressor
-            if ctx.last_prompt_tokens:
-                pct = min(100, ctx.last_prompt_tokens / ctx.context_length * 100) if ctx.context_length else 0
-                lines.append(f"Context: {ctx.last_prompt_tokens:,} / {ctx.context_length:,} ({pct:.0f}%)")
-            if ctx.compression_count:
-                lines.append(f"Compressions: {ctx.compression_count}")
+            ctx = getattr(agent, "context_compressor", None)
+            if ctx is not None:
+                last_prompt = int(getattr(ctx, "last_prompt_tokens", 0) or 0)
+                ctx_len = int(getattr(ctx, "context_length", 0) or 0)
+                if last_prompt:
+                    pct = min(100, last_prompt / ctx_len * 100) if ctx_len else 0
+                    lines.append(f"Context: {last_prompt:,} / {ctx_len:,} ({pct:.0f}%)")
+                comp_count = int(getattr(ctx, "compression_count", 0) or 0)
+                if comp_count:
+                    lines.append(f"Compressions: {comp_count}")
 
             if account_lines:
                 lines.append("")
