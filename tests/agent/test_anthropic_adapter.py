@@ -1093,6 +1093,105 @@ class TestBuildAnthropicKwargs:
         assert kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
         assert kwargs["output_config"] == {"effort": "max"}
 
+    def test_anthropic_model_family_overrides_adaptive_detection(self):
+        # Opaque endpoint ids (third-party aliases, Bedrock application
+        # inference profiles, etc.) don't contain ``4-6`` /
+        # ``4-7`` substrings, so the bare substring probe returns False and
+        # Hermes sends the legacy ``thinking.type=enabled + budget_tokens``
+        # payload.  Bedrock-routed Anthropic endpoints reject that with::
+        #
+        #     "thinking.type.enabled" is not supported for this model. Use
+        #     "thinking.type.adaptive" and "output_config.effort" ...
+        #
+        # The ``anthropic_model_family`` override lets the adapter dispatch
+        # capability logic against a declared family string even when the
+        # real model id is opaque, so adaptive thinking still fires.
+        kwargs = build_anthropic_kwargs(
+            model="ep-opaque-test-id",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=None,
+            max_tokens=4096,
+            reasoning_config={"enabled": True, "effort": "high"},
+            anthropic_model_family="claude-opus-4-6",
+        )
+        assert kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
+        assert kwargs["output_config"] == {"effort": "high"}
+        assert "budget_tokens" not in kwargs["thinking"]
+        assert "temperature" not in kwargs
+        # Wire-level model string stays the opaque endpoint id — the family
+        # hint never leaks onto the request.
+        assert kwargs["model"] == "ep-opaque-test-id"
+
+    def test_anthropic_model_family_without_hint_uses_legacy_thinking(self):
+        # Same opaque id as above, without the family hint — falls back to
+        # the pre-fix behavior (legacy ``type=enabled`` + budget_tokens),
+        # which is what a Bedrock-routed endpoint would 400 on.  Locked in
+        # to show the override is what changes behavior.
+        kwargs = build_anthropic_kwargs(
+            model="ep-opaque-test-id",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=None,
+            max_tokens=4096,
+            reasoning_config={"enabled": True, "effort": "high"},
+        )
+        assert kwargs["thinking"]["type"] == "enabled"
+        assert "budget_tokens" in kwargs["thinking"]
+        assert "output_config" not in kwargs
+
+    def test_anthropic_model_family_preserves_xhigh_for_4_7(self):
+        # Family hint also drives the xhigh downgrade decision.  A 4.7-level
+        # family preserves xhigh; a 4.6-level family downgrades to max.
+        kwargs_47 = build_anthropic_kwargs(
+            model="ep-mystery-endpoint",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=None,
+            max_tokens=4096,
+            reasoning_config={"enabled": True, "effort": "xhigh"},
+            anthropic_model_family="claude-opus-4-7",
+        )
+        assert kwargs_47["output_config"] == {"effort": "xhigh"}
+        kwargs_46 = build_anthropic_kwargs(
+            model="ep-mystery-endpoint",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=None,
+            max_tokens=4096,
+            reasoning_config={"enabled": True, "effort": "xhigh"},
+            anthropic_model_family="claude-opus-4-6",
+        )
+        assert kwargs_46["output_config"] == {"effort": "max"}
+
+    def test_anthropic_model_family_empty_string_ignored(self):
+        # Defensive: an empty/whitespace family string should not change
+        # behavior (no accidental ``_effective_model_id("")`` short-circuit).
+        kwargs = build_anthropic_kwargs(
+            model="claude-opus-4-6",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=None,
+            max_tokens=4096,
+            reasoning_config={"enabled": True, "effort": "high"},
+            anthropic_model_family="   ",
+        )
+        assert kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
+        assert kwargs["output_config"] == {"effort": "high"}
+
+    def test_anthropic_transport_forwards_model_family(self):
+        # End-to-end at the transport layer: the Anthropic transport's
+        # ``build_kwargs`` accepts ``anthropic_model_family`` via its
+        # ``**params`` surface and forwards it to ``build_anthropic_kwargs``.
+        from agent.transports import get_transport
+        transport = get_transport("anthropic_messages")
+        kwargs = transport.build_kwargs(
+            model="ep-opaque-test-id",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=None,
+            max_tokens=4096,
+            reasoning_config={"enabled": True, "effort": "medium"},
+            anthropic_model_family="claude-opus-4-6",
+        )
+        assert kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
+        assert kwargs["output_config"] == {"effort": "medium"}
+        assert kwargs["model"] == "ep-opaque-test-id"
+
     def test_opus_4_7_strips_sampling_params(self):
         # Opus 4.7 returns 400 on non-default temperature/top_p/top_k.
         # build_anthropic_kwargs must strip them as a safety net even if an

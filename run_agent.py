@@ -1984,12 +1984,34 @@ class AIAgent:
                                         )
                         break
 
+        # Optional Anthropic model family hint — resolved from custom_providers.
+        # Lets opaque endpoint ids (e.g. ``ep-XXXX``, Bedrock application
+        # inference profiles, etc.) declare which Anthropic family they route
+        # to, so capability/substring checks in the Anthropic adapter
+        # (adaptive thinking, sampling-param stripping, output-token limits)
+        # still fire against the right family.
+        self._anthropic_model_family: Optional[str] = None
+        if _custom_providers:
+            _target = self.base_url.rstrip("/") if self.base_url else ""
+            for _cp_entry in _custom_providers:
+                if not isinstance(_cp_entry, dict):
+                    continue
+                _cp_url = (_cp_entry.get("base_url") or "").rstrip("/")
+                if _target and _cp_url == _target:
+                    _cp_models = _cp_entry.get("models", {})
+                    if isinstance(_cp_models, dict):
+                        _cp_model_cfg = _cp_models.get(self.model, {})
+                        if isinstance(_cp_model_cfg, dict):
+                            _cp_family = _cp_model_cfg.get("anthropic_model_family")
+                            if isinstance(_cp_family, str) and _cp_family.strip():
+                                self._anthropic_model_family = _cp_family.strip()
+                    break
+
         # Persist for reuse on switch_model / fallback activation. Must come
         # AFTER the custom_providers branch so per-model overrides aren't lost.
         self._config_context_length = _config_context_length
 
         self._ensure_lmstudio_runtime_loaded(_config_context_length)
-
 
 
         # Select context engine: config-driven (like memory providers).
@@ -8451,6 +8473,7 @@ class AIAgent:
                 base_url=getattr(self, "_anthropic_base_url", None),
                 fast_mode=(self.request_overrides or {}).get("speed") == "fast",
                 drop_context_1m_beta=bool(getattr(self, "_oauth_1m_beta_disabled", False)),
+                anthropic_model_family=getattr(self, "_anthropic_model_family", None),
             )
 
         # AWS Bedrock native Converse API — bypasses the OpenAI client entirely.
@@ -10502,7 +10525,8 @@ class AIAgent:
                     _ant_kw = _tsum.build_kwargs(model=self.model, messages=api_messages, tools=None,
                                    max_tokens=self.max_tokens, reasoning_config=self.reasoning_config,
                                    is_oauth=self._is_anthropic_oauth,
-                                   preserve_dots=self._anthropic_preserve_dots())
+                                   preserve_dots=self._anthropic_preserve_dots(),
+                                   anthropic_model_family=getattr(self, "_anthropic_model_family", None))
                     summary_response = self._anthropic_messages_create(_ant_kw)
                     _summary_result = _tsum.normalize_response(summary_response, strip_tool_prefix=self._is_anthropic_oauth)
                     final_response = (_summary_result.content or "").strip()
@@ -10532,7 +10556,8 @@ class AIAgent:
                     _ant_kw2 = _tretry.build_kwargs(model=self.model, messages=api_messages, tools=None,
                                     is_oauth=self._is_anthropic_oauth,
                                     max_tokens=self.max_tokens, reasoning_config=self.reasoning_config,
-                                    preserve_dots=self._anthropic_preserve_dots())
+                                    preserve_dots=self._anthropic_preserve_dots(),
+                                    anthropic_model_family=getattr(self, "_anthropic_model_family", None))
                     retry_response = self._anthropic_messages_create(_ant_kw2)
                     _retry_result = _tretry.normalize_response(retry_response, strip_tool_prefix=self._is_anthropic_oauth)
                     final_response = (_retry_result.content or "").strip()
