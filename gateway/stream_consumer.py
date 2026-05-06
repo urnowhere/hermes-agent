@@ -42,6 +42,7 @@ class StreamConsumerConfig:
     """Runtime config for a single stream consumer instance."""
     edit_interval: float = 1.0
     buffer_threshold: int = 40
+    min_chunk_chars: int = 1
     cursor: str = " ▉"
     buffer_only: bool = False
     # When >0, the final edit for a streamed response is delivered as a
@@ -123,6 +124,9 @@ class GatewayStreamConsumer:
         self._flood_strikes = 0         # Consecutive flood-control edit failures
         self._current_edit_interval = self.cfg.edit_interval  # Adaptive backoff
         self._final_response_sent = False
+        self._placeholder_active = False
+        self._placeholder_text = ""
+        self._external_edit_active = False
         # Cache adapter lifecycle capability: only platforms that need an
         # explicit finalize call (e.g. DingTalk AI Cards) force us to make
         # a redundant final edit.  Everyone else keeps the fast path.
@@ -146,6 +150,21 @@ class GatewayStreamConsumer:
         """True when the stream consumer delivered the final assistant reply."""
         return self._final_response_sent
 
+    @property
+    def placeholder_active(self) -> bool:
+        """True when an initial placeholder bubble is still awaiting real content."""
+        return (
+            self._placeholder_active
+            and self._message_id not in (None, "__no_edit__")
+        )
+
+    @property
+    def message_id(self) -> Optional[str]:
+        """Return the current editable message id, if any."""
+        if self._message_id in (None, "__no_edit__"):
+            return None
+        return self._message_id
+
     def on_segment_break(self) -> None:
         """Finalize the current stream segment and start a fresh message."""
         self._queue.put(_NEW_SEGMENT)
@@ -165,6 +184,13 @@ class GatewayStreamConsumer:
         except Exception:
             logger.debug("on_new_message callback error", exc_info=True)
 
+    def _clear_placeholder(self) -> None:
+        self._placeholder_active = False
+        self._placeholder_text = ""
+
+    def _clear_external_edit(self) -> None:
+        self._external_edit_active = False
+
     def _reset_segment_state(self, *, preserve_no_edit: bool = False) -> None:
         if preserve_no_edit and self._message_id == "__no_edit__":
             return
@@ -174,6 +200,8 @@ class GatewayStreamConsumer:
         self._last_sent_text = ""
         self._fallback_final_send = False
         self._fallback_prefix = ""
+        self._clear_placeholder()
+        self._clear_external_edit()
 
     def on_delta(self, text: str) -> None:
         """Thread-safe callback — called from the agent's worker thread.
@@ -190,6 +218,56 @@ class GatewayStreamConsumer:
     def finish(self) -> None:
         """Signal that the stream is complete."""
         self._queue.put(_DONE)
+
+    def note_external_edit(self, text: str) -> None:
+        """Sync state after another gateway path edited the same bubble."""
+        cleaned = self._clean_for_display(text)
+        if not cleaned.strip():
+            return
+        self._already_sent = True
+        self._last_sent_text = cleaned
+        self._external_edit_active = True
+
+    async def prime_placeholder(self, text: str = "") -> bool:
+        """Create an initial placeholder bubble before the first real delta arrives."""
+        if self._message_id is not None or self._already_sent:
+            return False
+        placeholder = self._clean_for_display(text)
+        try:
+            result = await self.adapter.send(
+                chat_id=self.chat_id,
+                content=placeholder,
+                metadata=self.metadata,
+            )
+        except Exception as e:
+            logger.debug("Placeholder prime failed: %s", e)
+            return False
+        if not getattr(result, "success", False):
+            return False
+        if not result.message_id:
+            self._edit_supported = False
+            self._fallback_prefix = self._visible_prefix()
+            self._fallback_final_send = True
+            self._message_id = "__no_edit__"
+            self._already_sent = True
+            self._last_sent_text = placeholder
+            return False
+        self._message_id = result.message_id
+        self._message_created_ts = time.monotonic()
+        self._already_sent = True
+        self._last_sent_text = placeholder
+        self._placeholder_active = True
+        self._placeholder_text = placeholder
+        return True
+
+    async def replace_placeholder(self, text: str) -> bool:
+        """Replace an initial placeholder bubble with the final response."""
+        if not self.placeholder_active:
+            return False
+        ok = await self._send_or_edit(text, finalize=True)
+        if ok:
+            self._final_response_sent = True
+        return ok
 
     # ── Think-block filtering ────────────────────────────────────────
     # Models like MiniMax emit inline <think>...</think> blocks in their
@@ -334,6 +412,7 @@ class GatewayStreamConsumer:
                 # Decide whether to flush an edit
                 now = time.monotonic()
                 elapsed = now - self._last_edit_time
+                pending_chars = self._pending_visible_chars()
                 should_edit = (
                     got_done
                     or got_segment_break
@@ -341,9 +420,13 @@ class GatewayStreamConsumer:
                 )
                 if not self.cfg.buffer_only:
                     should_edit = should_edit or (
-                        (elapsed >= self._current_edit_interval
-                            and self._accumulated)
-                        or len(self._accumulated) >= self.cfg.buffer_threshold
+                        self._accumulated and (
+                            pending_chars >= self.cfg.buffer_threshold
+                            or (
+                                elapsed >= self._current_edit_interval
+                                and pending_chars >= max(1, self.cfg.min_chunk_chars)
+                            )
+                        )
                     )
 
                 current_update_visible = False
@@ -566,6 +649,13 @@ class GatewayStreamConsumer:
             prefix = prefix[:-len(self.cfg.cursor)]
         return self._clean_for_display(prefix)
 
+    def _pending_visible_chars(self) -> int:
+        """Return how many newly visible chars have not been flushed yet."""
+        prefix = self._visible_prefix()
+        if prefix and self._accumulated.startswith(prefix):
+            return len(self._accumulated) - len(prefix)
+        return len(self._accumulated)
+
     def _continuation_text(self, final_text: str) -> str:
         """Return only the part of final_text the user has not already seen."""
         prefix = self._fallback_prefix or self._visible_prefix()
@@ -634,6 +724,8 @@ class GatewayStreamConsumer:
                         pass
                 self._already_sent = True
                 self._final_response_sent = True
+                self._clear_placeholder()
+                self._clear_external_edit()
                 return
 
         raw_limit = getattr(self.adapter, "MAX_MESSAGE_LENGTH", 4096)
@@ -692,6 +784,8 @@ class GatewayStreamConsumer:
         self._final_response_sent = True
         self._last_sent_text = chunks[-1]
         self._fallback_prefix = ""
+        self._clear_placeholder()
+        self._clear_external_edit()
 
     def _is_flood_error(self, result) -> bool:
         """Check if a SendResult failure is due to flood control / rate limiting."""
@@ -852,6 +946,8 @@ class GatewayStreamConsumer:
         self._already_sent = True
         self._last_sent_text = text
         self._final_response_sent = True
+        self._clear_placeholder()
+        self._clear_external_edit()
         return True
 
     async def _send_or_edit(self, text: str, *, finalize: bool = False) -> bool:
@@ -896,6 +992,7 @@ class GatewayStreamConsumer:
         try:
             if self._message_id is not None:
                 if self._edit_supported:
+                    previous_sent_text = self._last_sent_text
                     # Skip if text is identical to what we last sent.
                     # Exception: adapters that require an explicit finalize
                     # call (REQUIRES_EDIT_FINALIZE) must still receive the
@@ -932,6 +1029,12 @@ class GatewayStreamConsumer:
                     if result.success:
                         self._already_sent = True
                         self._last_sent_text = text
+                        if self._external_edit_active and text != previous_sent_text:
+                            self._notify_new_message()
+                            self._clear_external_edit()
+                        if self._placeholder_active and text != self._placeholder_text:
+                            self._notify_new_message()
+                            self._clear_placeholder()
                         # Successful edit — reset flood strike counter
                         self._flood_strikes = 0
                         return True
@@ -996,6 +1099,10 @@ class GatewayStreamConsumer:
                         self._edit_supported = False
                     self._already_sent = True
                     self._last_sent_text = text
+                    self._clear_external_edit()
+                    if self._placeholder_active and text != self._placeholder_text:
+                        self._notify_new_message()
+                        self._clear_placeholder()
                     if not result.message_id:
                         self._fallback_prefix = self._visible_prefix()
                         self._fallback_final_send = True
