@@ -14390,11 +14390,59 @@ class GatewayRunner:
                                 "Queued follow-up for session %s: final stream delivery not confirmed; sending first response before continuing.",
                                 session_key or "?",
                             )
+                            # Extract MEDIA:<path> tags so files are delivered
+                            # natively instead of appearing as raw text labels.
+                            # Mirrors the base path in platforms/base.py L2724.
+                            media_files, first_response = adapter.extract_media(first_response)
+                            images, text_content = adapter.extract_images(first_response)
+                            text_content = text_content.replace("[[audio_as_voice]]", "").strip()
+                            text_content = re.sub(r"MEDIA:\s*\S+", "", text_content).strip()
+                            local_files, text_content = adapter.extract_local_files(text_content)
                             await adapter.send(
                                 source.chat_id,
-                                first_response,
+                                text_content,
                                 metadata=_status_thread_metadata,
                             )
+                            # Deliver extracted images
+                            for image_url, alt_text in (images or []):
+                                try:
+                                    await adapter.send_image(
+                                        chat_id=source.chat_id,
+                                        image_url=image_url,
+                                        caption=alt_text,
+                                        metadata=_status_thread_metadata,
+                                    )
+                                except Exception as img_e:
+                                    logger.warning(
+                                        "Failed to deliver queue image %s: %s",
+                                        image_url, img_e,
+                                    )
+                            # Deliver extracted local files (bare paths)
+                            for local_path in (local_files or []):
+                                try:
+                                    await adapter.send_document(
+                                        chat_id=source.chat_id,
+                                        file_path=local_path,
+                                        metadata=_status_thread_metadata,
+                                    )
+                                except Exception as doc_e:
+                                    logger.warning(
+                                        "Failed to deliver queue file %s: %s",
+                                        local_path, doc_e,
+                                    )
+                            # Deliver extracted media files (PDFs, images, etc.)
+                            for media_path, _is_voice in media_files:
+                                try:
+                                    await adapter.send_document(
+                                        chat_id=source.chat_id,
+                                        file_path=media_path,
+                                        metadata=_status_thread_metadata,
+                                    )
+                                except Exception as media_e:
+                                    logger.warning(
+                                        "Failed to deliver queue media %s: %s",
+                                        media_path, media_e,
+                                    )
                         except Exception as e:
                             logger.warning("Failed to send first response before queued message: %s", e)
                     elif first_response:
