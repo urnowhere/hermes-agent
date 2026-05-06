@@ -171,6 +171,7 @@ scripts/run_tests.sh
 - 📚 [Skills Hub](https://agentskills.io)
 - 🐛 [Issues](https://github.com/NousResearch/hermes-agent/issues)
 - 🔌 [HermesClaw](https://github.com/AaronWong1999/hermesclaw) — Community WeChat bridge: Run Hermes Agent and OpenClaw on the same WeChat account.
+- 🌐 [hermes-multitenancy](https://github.com/eggyrooch-blip/hermes-multitenancy) — Community Feishu multi-tenant router: One Feishu bot serving N users, each routed to their own profile (independent SOUL, sessions, memories). Plugin only — zero patches to hermes-agent.
 
 ---
 
