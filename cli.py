@@ -2412,6 +2412,9 @@ class HermesCLI:
         self._last_ctrl_c_time = 0
         self._clarify_state = None
         self._clarify_freetext = False
+        # Incognito mode: when True, subsequent turns are not persisted to
+        # state.db or sessions/*.jsonl. Toggled via /incognito slash command.
+        self._incognito_mode = False
         self._clarify_deadline = 0
         self._sudo_state = None
         self._sudo_deadline = 0
@@ -6841,6 +6844,8 @@ class HermesCLI:
             self._handle_agents_command()
         elif canonical == "background":
             self._handle_background_command(cmd_original)
+        elif canonical == "incognito":
+            self._handle_incognito_command(cmd_original)
         elif canonical == "queue":
             # Extract prompt after "/queue " or "/q "
             parts = cmd_original.split(None, 1)
@@ -7145,6 +7150,52 @@ class HermesCLI:
         thread = threading.Thread(target=run_background, daemon=True, name=f"bg-task-{task_id}")
         self._background_tasks[task_id] = thread
         thread.start()
+
+    def _handle_incognito_command(self, cmd: str):
+        """Handle /incognito [on|off|status] — toggle ephemeral persistence.
+
+        When ON, subsequent turns in the current REPL session are NOT persisted
+        to state.db or sessions/*.jsonl. Useful as a scratchpad for adversarial
+        testing / probing where you don't want probes to contaminate Elena's
+        memory or auto-reflection. Toggle OFF to resume normal persistence.
+        """
+        parts = cmd.strip().split(maxsplit=1)
+        sub = parts[1].strip().lower() if len(parts) > 1 else ""
+
+        if sub == "status":
+            state = "🔒 ON" if self._incognito_mode else "🔓 OFF"
+            _cprint(f"  Incognito mode: {state}")
+            return
+
+        if sub == "on":
+            desired = True
+        elif sub == "off":
+            desired = False
+        elif sub == "":
+            desired = not self._incognito_mode
+        else:
+            _cprint("  Usage: /incognito [on|off|status]")
+            _cprint("  (no argument toggles the current state)")
+            return
+
+        if desired == self._incognito_mode:
+            current = "ON" if self._incognito_mode else "OFF"
+            _cprint(f"  Incognito mode already {current}.")
+            return
+
+        self._incognito_mode = desired
+        if self.agent is not None:
+            try:
+                self.agent.persist_session = not desired
+            except Exception as e:
+                _cprint(f"  ⚠ Warning: could not flip agent.persist_session: {e}")
+
+        if desired:
+            _cprint("  🔒 Incognito ON — subsequent turns will NOT be persisted.")
+            _cprint("     Elena won't recall these turns; Reflexión cron won't see them.")
+            _cprint("     Toggle back with /incognito or /incognito off.")
+        else:
+            _cprint("  🔓 Incognito OFF — persistence resumed for subsequent turns.")
 
     @staticmethod
     def _try_launch_chrome_debug(port: int, system: str) -> bool:

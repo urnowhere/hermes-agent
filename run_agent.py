@@ -3788,6 +3788,7 @@ class AIAgent:
                 msg["content"] = override
 
     def _persist_session(self, messages: List[Dict], conversation_history: List[Dict] = None):
+        if not getattr(self, "persist_session", True): return
         """Save session state to both JSON log and SQLite on any exit path.
 
         Ensures conversations are never lost, even on errors or early returns.
@@ -4746,6 +4747,12 @@ class AIAgent:
         backend must not block the user from seeing their response.
         """
         if interrupted:
+            return
+        # Incognito uses ``persist_session = False`` as the session-wide
+        # contract for leaving no durable trace. Honor that here too so
+        # external memory providers (e.g. Hindsight auto_retain) do not
+        # ingest turns that were intentionally marked ephemeral.
+        if not getattr(self, "persist_session", True):
             return
         if not (self._memory_manager and final_response and original_user_message):
             return
@@ -9511,6 +9518,11 @@ class AIAgent:
                 current_session_id=self.session_id,
             )
         elif function_name == "memory":
+            if not getattr(self, "persist_session", True):
+                return json.dumps({
+                    "success": False,
+                    "error": "Incognito mode is ON — durable memory writes are disabled for this session."
+                }, ensure_ascii=False)
             target = function_args.get("target", "memory")
             from tools.memory_tool import memory_tool as _memory_tool
             result = _memory_tool(
@@ -9536,6 +9548,11 @@ class AIAgent:
                     pass
             return result
         elif self._memory_manager and self._memory_manager.has_tool(function_name):
+            if not getattr(self, "persist_session", True) and function_name.endswith("_retain"):
+                return json.dumps({
+                    "success": False,
+                    "error": "Incognito mode is ON — external memory retention is disabled for this session."
+                }, ensure_ascii=False)
             return self._memory_manager.handle_tool_call(function_name, function_args)
         elif function_name == "clarify":
             from tools.clarify_tool import clarify_tool as _clarify_tool
@@ -10118,29 +10135,35 @@ class AIAgent:
                 if self._should_emit_quiet_tool_messages():
                     self._vprint(f"  {_get_cute_tool_message_impl('session_search', function_args, tool_duration, result=function_result)}")
             elif function_name == "memory":
-                target = function_args.get("target", "memory")
-                from tools.memory_tool import memory_tool as _memory_tool
-                function_result = _memory_tool(
-                    action=function_args.get("action"),
-                    target=target,
-                    content=function_args.get("content"),
-                    old_text=function_args.get("old_text"),
-                    store=self._memory_store,
-                )
-                # Bridge: notify external memory provider of built-in memory writes
-                if self._memory_manager and function_args.get("action") in ("add", "replace"):
-                    try:
-                        self._memory_manager.on_memory_write(
-                            function_args.get("action", ""),
-                            target,
-                            function_args.get("content", ""),
-                            metadata=self._build_memory_write_metadata(
-                                task_id=effective_task_id,
-                                tool_call_id=getattr(tool_call, "id", None),
-                            ),
-                        )
-                    except Exception:
-                        pass
+                if not getattr(self, "persist_session", True):
+                    function_result = json.dumps({
+                        "success": False,
+                        "error": "Incognito mode is ON — durable memory writes are disabled for this session."
+                    }, ensure_ascii=False)
+                else:
+                    target = function_args.get("target", "memory")
+                    from tools.memory_tool import memory_tool as _memory_tool
+                    function_result = _memory_tool(
+                        action=function_args.get("action"),
+                        target=target,
+                        content=function_args.get("content"),
+                        old_text=function_args.get("old_text"),
+                        store=self._memory_store,
+                    )
+                    # Bridge: notify external memory provider of built-in memory writes
+                    if self._memory_manager and function_args.get("action") in ("add", "replace"):
+                        try:
+                            self._memory_manager.on_memory_write(
+                                function_args.get("action", ""),
+                                target,
+                                function_args.get("content", ""),
+                                metadata=self._build_memory_write_metadata(
+                                    task_id=effective_task_id,
+                                    tool_call_id=getattr(tool_call, "id", None),
+                                ),
+                            )
+                        except Exception:
+                            pass
                 tool_duration = time.time() - tool_start_time
                 if self._should_emit_quiet_tool_messages():
                     self._vprint(f"  {_get_cute_tool_message_impl('memory', function_args, tool_duration, result=function_result)}")
@@ -10205,27 +10228,36 @@ class AIAgent:
             elif self._memory_manager and self._memory_manager.has_tool(function_name):
                 # Memory provider tools (hindsight_retain, honcho_search, etc.)
                 # These are not in the tool registry — route through MemoryManager.
-                spinner = None
-                if self._should_emit_quiet_tool_messages() and self._should_start_quiet_spinner():
-                    face = random.choice(KawaiiSpinner.get_waiting_faces())
-                    emoji = _get_tool_emoji(function_name)
-                    preview = _build_tool_preview(function_name, function_args) or function_name
-                    spinner = KawaiiSpinner(f"{face} {emoji} {preview}", spinner_type='dots', print_fn=self._print_fn)
-                    spinner.start()
-                _mem_result = None
-                try:
-                    function_result = self._memory_manager.handle_tool_call(function_name, function_args)
-                    _mem_result = function_result
-                except Exception as tool_error:
-                    function_result = json.dumps({"error": f"Memory tool '{function_name}' failed: {tool_error}"})
-                    logger.error("memory_manager.handle_tool_call raised for %s: %s", function_name, tool_error, exc_info=True)
-                finally:
+                if not getattr(self, "persist_session", True) and function_name.endswith("_retain"):
+                    function_result = json.dumps({
+                        "success": False,
+                        "error": "Incognito mode is ON — external memory retention is disabled for this session."
+                    }, ensure_ascii=False)
                     tool_duration = time.time() - tool_start_time
-                    cute_msg = _get_cute_tool_message_impl(function_name, function_args, tool_duration, result=_mem_result)
-                    if spinner:
-                        spinner.stop(cute_msg)
-                    elif self._should_emit_quiet_tool_messages():
-                        self._vprint(f"  {cute_msg}")
+                    if self._should_emit_quiet_tool_messages():
+                        self._vprint(f"  {_get_cute_tool_message_impl(function_name, function_args, tool_duration, result=function_result)}")
+                else:
+                    spinner = None
+                    if self._should_emit_quiet_tool_messages() and self._should_start_quiet_spinner():
+                        face = random.choice(KawaiiSpinner.get_waiting_faces())
+                        emoji = _get_tool_emoji(function_name)
+                        preview = _build_tool_preview(function_name, function_args) or function_name
+                        spinner = KawaiiSpinner(f"{face} {emoji} {preview}", spinner_type='dots', print_fn=self._print_fn)
+                        spinner.start()
+                    _mem_result = None
+                    try:
+                        function_result = self._memory_manager.handle_tool_call(function_name, function_args)
+                        _mem_result = function_result
+                    except Exception as tool_error:
+                        function_result = json.dumps({"error": f"Memory tool '{function_name}' failed: {tool_error}"})
+                        logger.error("memory_manager.handle_tool_call raised for %s: %s", function_name, tool_error, exc_info=True)
+                    finally:
+                        tool_duration = time.time() - tool_start_time
+                        cute_msg = _get_cute_tool_message_impl(function_name, function_args, tool_duration, result=_mem_result)
+                        if spinner:
+                            spinner.stop(cute_msg)
+                        elif self._should_emit_quiet_tool_messages():
+                            self._vprint(f"  {cute_msg}")
             elif self.quiet_mode:
                 spinner = None
                 if self._should_emit_quiet_tool_messages() and self._should_start_quiet_spinner():
