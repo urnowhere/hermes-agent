@@ -38,7 +38,7 @@ from typing import Any, Dict
 # ``tool_output`` in config.yaml.
 DEFAULT_MAX_BYTES = 50_000       # terminal_tool.MAX_OUTPUT_CHARS
 DEFAULT_MAX_LINES = 2000         # file_operations.MAX_LINES
-DEFAULT_MAX_LINE_LENGTH = 2000   # file_operations.MAX_LINE_LENGTH
+DEFAULT_MAX_LINE_LENGTH = 10_000  # file_operations.MAX_LINE_LENGTH
 
 
 def _coerce_positive_int(value: Any, default: int) -> int:
