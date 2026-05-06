@@ -12928,8 +12928,10 @@ class GatewayRunner:
         # - Slack DM threading needs event_message_id fallback (reply thread)
         # - Telegram uses message_thread_id only for forum topics; passing a
         #   normal DM/group message id as thread_id causes send failures
+        # - Mattermost top-level channel posts need the source message id as a
+        #   synthetic root so progress/status/media stay in the new thread.
         # - Other platforms should use explicit source.thread_id only
-        if source.platform == Platform.SLACK:
+        if source.platform in (Platform.SLACK, Platform.MATTERMOST):
             _progress_thread_id = source.thread_id or event_message_id
         else:
             _progress_thread_id = source.thread_id

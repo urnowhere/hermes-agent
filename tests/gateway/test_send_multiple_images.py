@@ -393,6 +393,20 @@ class TestMattermostMultiImage:
         sizes = [len(c.args[1]["file_ids"]) for c in adapter._api_post.await_args_list]
         assert sizes == [5, 2]
 
+    def test_metadata_thread_id_sets_root_id(self, adapter, tmp_path):
+        """Batched Mattermost media posts must stay in the originating thread."""
+        p = tmp_path / "img.png"
+        p.write_bytes(b"\x89PNG" + b"\x00" * 20)
+
+        _run(adapter.send_multiple_images(
+            "channel123",
+            [(f"file://{p}", "")],
+            metadata={"thread_id": "root_post"},
+        ))
+
+        payload = adapter._api_post.await_args.args[1]
+        assert payload["root_id"] == "root_post"
+
     def test_empty_noop(self, adapter):
         _run(adapter.send_multiple_images("channel123", []))
         adapter._api_post.assert_not_called()

@@ -40,6 +40,23 @@ def _platform_name(platform) -> str:
     return str(value or "").lower()
 
 
+def _thread_metadata_for_event(event) -> dict | None:
+    """Return outbound thread metadata for an inbound platform event.
+
+    Most platforms only use an explicit source.thread_id. Mattermost needs the
+    top-level post id as a synthetic root so progress/media/error messages sent
+    after the first reply still stay in the thread that Hermes starts.
+    """
+    thread_id = getattr(getattr(event, "source", None), "thread_id", None)
+    if thread_id:
+        return {"thread_id": thread_id}
+    platform = _platform_name(getattr(getattr(event, "source", None), "platform", ""))
+    message_id = getattr(event, "message_id", None)
+    if platform == "mattermost" and message_id:
+        return {"thread_id": message_id}
+    return None
+
+
 def should_send_media_as_audio(platform, ext: str, is_voice: bool = False) -> bool:
     """Return True when a media file should use the platform's audio sender.
 
@@ -2485,7 +2502,7 @@ class BasePlatformAdapter(ABC):
         current_guard = self._active_sessions.get(session_key)
         command_guard = asyncio.Event()
         self._active_sessions[session_key] = command_guard
-        thread_meta = {"thread_id": event.source.thread_id} if event.source.thread_id else None
+        thread_meta = _thread_metadata_for_event(event)
 
         try:
             response = await self._message_handler(event)
@@ -2605,7 +2622,7 @@ class BasePlatformAdapter(ABC):
                     self.name, cmd, session_key,
                 )
                 try:
-                    _thread_meta = {"thread_id": event.source.thread_id} if event.source.thread_id else None
+                    _thread_meta = _thread_metadata_for_event(event)
                     response = await self._message_handler(event)
                     _text, _eph_ttl = self._unwrap_ephemeral(response)
                     if _text:
@@ -2710,7 +2727,7 @@ class BasePlatformAdapter(ABC):
         self._active_sessions[session_key] = interrupt_event
         
         # Start continuous typing indicator (refreshes every 2 seconds)
-        _thread_metadata = {"thread_id": event.source.thread_id} if event.source.thread_id else None
+        _thread_metadata = _thread_metadata_for_event(event)
         _keep_typing_kwargs = {"metadata": _thread_metadata}
         try:
             _keep_typing_sig = inspect.signature(self._keep_typing)
@@ -3020,7 +3037,7 @@ class BasePlatformAdapter(ABC):
             try:
                 error_type = type(e).__name__
                 error_detail = str(e)[:300] if str(e) else "no details available"
-                _thread_metadata = {"thread_id": event.source.thread_id} if event.source.thread_id else None
+                _thread_metadata = _thread_metadata_for_event(event)
                 await self.send(
                     chat_id=event.source.chat_id,
                     content=(

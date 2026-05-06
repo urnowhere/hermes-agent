@@ -1,4 +1,5 @@
 """Tests for Mattermost platform adapter."""
+import asyncio
 import json
 import os
 import time
@@ -206,6 +207,52 @@ class TestMattermostSend:
         assert payload["root_id"] == "root_post"
 
     @pytest.mark.asyncio
+    async def test_send_uses_metadata_thread_id(self):
+        """Gateway follow-up sends pass thread context via metadata.thread_id."""
+        self.adapter._reply_mode = "thread"
+
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={"id": "post456"})
+        mock_resp.text = AsyncMock(return_value="")
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=False)
+
+        self.adapter._session.post = MagicMock(return_value=mock_resp)
+
+        result = await self.adapter.send(
+            "channel_1", "Progress", metadata={"thread_id": "root_from_meta"}
+        )
+
+        assert result.success is True
+        payload = self.adapter._session.post.call_args[1]["json"]
+        assert payload["root_id"] == "root_from_meta"
+
+    @pytest.mark.asyncio
+    async def test_send_prefers_metadata_thread_id_over_reply_to(self):
+        self.adapter._reply_mode = "thread"
+
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={"id": "post456"})
+        mock_resp.text = AsyncMock(return_value="")
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=False)
+
+        self.adapter._session.post = MagicMock(return_value=mock_resp)
+
+        result = await self.adapter.send(
+            "channel_1",
+            "Reply!",
+            reply_to="child_post",
+            metadata={"thread_id": "root_post"},
+        )
+
+        assert result.success is True
+        payload = self.adapter._session.post.call_args[1]["json"]
+        assert payload["root_id"] == "root_post"
+
+    @pytest.mark.asyncio
     async def test_send_without_thread_no_root_id(self):
         """When reply_mode is 'off', reply_to should NOT set root_id."""
         self.adapter._reply_mode = "off"
@@ -377,6 +424,135 @@ class TestMattermostWebSocketParsing:
         assert self.adapter.handle_message.called
         msg_event = self.adapter.handle_message.call_args[0][0]
         assert msg_event.source.thread_id == "root_post_123"
+
+    @pytest.mark.asyncio
+    async def test_top_level_channel_post_uses_post_id_as_thread_id(self):
+        """Top-level channel posts must create independent threaded sessions."""
+        post_data = {
+            "id": "root_post_456",
+            "user_id": "user_123",
+            "channel_id": "chan_456",
+            "message": "@bot_user_id New root thread",
+        }
+        event = {
+            "event": "posted",
+            "data": {
+                "post": json.dumps(post_data),
+                "channel_type": "O",
+                "sender_name": "@alice",
+            },
+        }
+
+        await self.adapter._handle_ws_event(event)
+        assert self.adapter.handle_message.called
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert msg_event.source.thread_id == "root_post_456"
+
+    @pytest.mark.asyncio
+    async def test_top_level_channel_posts_get_distinct_session_keys(self):
+        """Two simultaneous root posts in one channel must not share a guard."""
+        from gateway.session import build_session_key
+
+        events = []
+        for post_id in ("root_a", "root_b"):
+            self.adapter.handle_message.reset_mock()
+            post_data = {
+                "id": post_id,
+                "user_id": "user_123",
+                "channel_id": "chan_456",
+                "message": "@bot_user_id Parallel root thread",
+            }
+            await self.adapter._handle_ws_event({
+                "event": "posted",
+                "data": {
+                    "post": json.dumps(post_data),
+                    "channel_type": "O",
+                    "sender_name": "@alice",
+                },
+            })
+            events.append(self.adapter.handle_message.call_args[0][0])
+
+        key_a = build_session_key(events[0].source)
+        key_b = build_session_key(events[1].source)
+        assert key_a != key_b
+        assert key_a.endswith(":root_a")
+        assert key_b.endswith(":root_b")
+
+    @pytest.mark.asyncio
+    async def test_top_level_channel_posts_start_parallel_session_tasks(self):
+        """Separate Mattermost root posts should process concurrently, not queue."""
+        from gateway.session import build_session_key
+
+        adapter = _make_adapter()
+        adapter._bot_user_id = "bot_user_id"
+        adapter._bot_username = "hermes-bot"
+        started = []
+        release = asyncio.Event()
+
+        async def slow_handler(event):
+            started.append(event)
+            await release.wait()
+            return None
+
+        adapter.set_message_handler(slow_handler)
+
+        try:
+            for post_id in ("root_a", "root_b"):
+                post_data = {
+                    "id": post_id,
+                    "user_id": "user_123",
+                    "channel_id": "chan_456",
+                    "message": "@bot_user_id Parallel root thread",
+                }
+                await adapter._handle_ws_event({
+                    "event": "posted",
+                    "data": {
+                        "post": json.dumps(post_data),
+                        "channel_type": "O",
+                        "sender_name": "@alice",
+                    },
+                })
+
+            # Let both background tasks enter the slow handler.
+            for _ in range(20):
+                if len(started) == 2:
+                    break
+                await asyncio.sleep(0.01)
+
+            assert len(started) == 2
+            key_a = build_session_key(started[0].source)
+            key_b = build_session_key(started[1].source)
+            assert key_a != key_b
+            assert key_a in adapter._active_sessions
+            assert key_b in adapter._active_sessions
+            assert not adapter._pending_messages
+        finally:
+            release.set()
+            await asyncio.sleep(0.05)
+
+    @pytest.mark.asyncio
+    async def test_dm_top_level_post_does_not_synthesize_thread_id(self):
+        """DMs keep their existing session behavior unless Mattermost supplies root_id."""
+        post_data = {
+            "id": "dm_post",
+            "user_id": "user_123",
+            "channel_id": "dm_chan",
+            "message": "DM message",
+        }
+        event = {
+            "event": "posted",
+            "data": {
+                "post": json.dumps(post_data),
+                "channel_type": "D",
+                "sender_name": "@alice",
+            },
+        }
+
+        await self.adapter._handle_ws_event(event)
+        assert self.adapter.handle_message.called
+        msg_event = self.adapter.handle_message.call_args[0][0]
+        assert msg_event.source.chat_type == "dm"
+        assert msg_event.source.thread_id is None
 
     @pytest.mark.asyncio
     async def test_invalid_post_json_ignored(self):
