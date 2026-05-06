@@ -114,6 +114,9 @@ COMMAND_REGISTRY: list[CommandDef] = [
                cli_only=True),
     CommandDef("model", "Switch model for this session", "Configuration",
                aliases=("provider",), args_hint="[model] [--provider name] [--global]"),
+    CommandDef("doctor", "Diagnose stale/frozen interactive chat sessions",
+               "Configuration", cli_only=True, args_hint="chat [--stacks] [--recover --pid <pid>] [--force]",
+               subcommands=("chat",)),
     CommandDef("gquota", "Show Google Gemini Code Assist quota usage", "Info",
                cli_only=True),
 

@@ -1,6 +1,9 @@
 """Tests for hermes_cli.doctor."""
 
+import contextlib
+import io
 import os
+import signal
 import sys
 import types
 import io
@@ -14,6 +17,122 @@ import hermes_cli.doctor as doctor
 import hermes_cli.gateway as gateway_cli
 from hermes_cli import doctor as doctor_mod
 from hermes_cli.doctor import _has_provider_env_config
+from hermes_cli.commands import resolve_command
+
+
+class TestChatDoctorProcessListing:
+    def test_command_matcher_handles_macos_linux_entrypoint_edges(self):
+        positives = [
+            "/opt/homebrew/bin/hermes",
+            "/usr/local/bin/hermes --profile sim",
+            "hermes --profile sim chat",
+            "hermes chat --profile sim",
+            "/usr/bin/python3 -m hermes_cli.main",
+            "/usr/bin/python3 -m hermes_cli.main --profile sim",
+            "/usr/bin/python3 -m hermes_cli.main chat",
+            "python /repo/cli.py",
+            "python /repo/cli.py chat",
+        ]
+        negatives = [
+            "hermes doctor chat",
+            "hermes --profile sim doctor chat",
+            "/usr/bin/python3 -m hermes_cli.main doctor chat",
+            "python /repo/cli.py setup",
+            "python -m pytest tests/hermes_cli/test_doctor.py",
+            "not-hermes chat",
+        ]
+
+        for command in positives:
+            assert doctor_mod._is_hermes_chat_command(command), command
+        for command in negatives:
+            assert not doctor_mod._is_hermes_chat_command(command), command
+
+    def test_doctor_chat_is_registered_as_cli_slash_command(self):
+        cmd = resolve_command("doctor")
+
+        assert cmd is not None
+        assert cmd.cli_only is True
+        assert "chat" in cmd.subcommands
+
+    def test_lists_only_interactive_hermes_chat_processes(self, monkeypatch):
+        ps_output = """
+          101     1 ttys001   01:02:03 /usr/bin/python -m hermes_cli.main chat
+          102     1 ??        00:00:10 /usr/bin/python -m hermes_cli.main doctor chat
+          103     1 ttys002      12:34 hermes chat --profile sim
+          104     1 ttys003      00:07 python cli.py
+          105     1 ttys004      00:07 python -m pytest tests
+        """
+
+        def fake_run(cmd, **kwargs):
+            assert cmd[:2] == ["ps", "-axo"]
+            return SimpleNamespace(returncode=0, stdout=ps_output, stderr="")
+
+        monkeypatch.setattr(doctor_mod.subprocess, "run", fake_run)
+        monkeypatch.setattr(doctor_mod, "_cwd_for_pid", lambda pid: f"/tmp/p{pid}")
+        monkeypatch.setattr(doctor_mod, "_stack_hint_for_pid", lambda pid: "prompt_toolkit/input wait" if pid == 101 else "")
+
+        processes = doctor_mod.list_hermes_chat_processes(include_stacks=True)
+
+        assert [p.pid for p in processes] == [101, 103, 104]
+        assert processes[0].tty == "ttys001"
+        assert processes[0].cwd == "/tmp/p101"
+        assert processes[0].stack_hint == "prompt_toolkit/input wait"
+
+    def test_chat_doctor_default_prints_instructions_without_recovery(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(
+            doctor_mod,
+            "list_hermes_chat_processes",
+            lambda include_stacks=False: [
+                doctor_mod.ChatProcess(
+                    pid=123,
+                    ppid=1,
+                    tty="ttys001",
+                    elapsed="00:05",
+                    command="hermes chat",
+                    cwd="/Users/me/project",
+                    stack_hint="",
+                )
+            ],
+        )
+        monkeypatch.setattr(doctor_mod.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = doctor_mod.run_chat_doctor(Namespace(recover=False, pid=[], stacks=False, force=False))
+
+        out = buf.getvalue()
+        assert code == 0
+        assert "123" in out
+        assert "hermes doctor chat --recover --pid 123" in out
+        assert sent == []
+
+    def test_chat_doctor_recover_requires_explicit_pid(self, monkeypatch):
+        monkeypatch.setattr(doctor_mod, "list_hermes_chat_processes", lambda include_stacks=False: [])
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = doctor_mod.run_chat_doctor(Namespace(recover=True, pid=[], stacks=False, force=False))
+
+        assert code == 2
+        assert "requires --pid" in buf.getvalue()
+
+    def test_chat_doctor_recover_sends_soft_interrupt_only_to_requested_pid(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr(
+            doctor_mod,
+            "list_hermes_chat_processes",
+            lambda include_stacks=False: [
+                doctor_mod.ChatProcess(123, 1, "ttys001", "00:05", "hermes chat", "/tmp", ""),
+                doctor_mod.ChatProcess(456, 1, "ttys002", "00:06", "hermes chat", "/tmp", ""),
+            ],
+        )
+        monkeypatch.setattr(doctor_mod.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+
+        code = doctor_mod.run_chat_doctor(Namespace(recover=True, pid=[123], stacks=False, force=False))
+
+        assert code == 0
+        assert sent == [(123, signal.SIGINT)]
 
 
 class TestDoctorPlatformHints:

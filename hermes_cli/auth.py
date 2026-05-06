@@ -703,12 +703,24 @@ class AuthError(RuntimeError):
         self.relogin_required = relogin_required
 
 
+def is_openai_codex_only_policy() -> bool:
+    """Return True when config requests the local Codex CLI-only policy."""
+    config = read_raw_config()
+    return (config.get("codex") or {}).get("policy") == "openai-codex-only"
+
+
 def format_auth_error(error: Exception) -> str:
     """Map auth failures to concise user-facing guidance."""
     if not isinstance(error, AuthError):
         return str(error)
 
     if error.relogin_required:
+        if error.provider == "openai-codex" and is_openai_codex_only_policy():
+            return (
+                f"{error} Hermes-native Codex auth needs re-login. "
+                "For project work, use `hermes-task \"<task>\"` because it runs through the verified Codex CLI account. "
+                "To repair interactive `hermes chat`, run `hermes auth add openai-codex` in a local terminal."
+            )
         return f"{error} Run `hermes model` to re-authenticate."
 
     if error.code == "subscription_required":

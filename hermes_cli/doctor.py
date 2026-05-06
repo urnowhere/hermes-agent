@@ -5,10 +5,13 @@ Diagnoses issues with Hermes Agent setup.
 """
 
 import os
+import signal
+import shlex
 import sys
 import subprocess
 import shutil
 import importlib.util
+from dataclasses import dataclass
 from pathlib import Path
 
 from hermes_cli.config import get_project_root, get_hermes_home, get_env_path
@@ -18,6 +21,19 @@ from hermes_constants import display_hermes_home
 PROJECT_ROOT = get_project_root()
 HERMES_HOME = get_hermes_home()
 _DHH = display_hermes_home()  # user-facing display path (e.g. ~/.hermes or ~/.hermes/profiles/coder)
+
+
+@dataclass(frozen=True)
+class ChatProcess:
+    """A live Hermes interactive chat-like process found by doctor chat."""
+
+    pid: int
+    ppid: int
+    tty: str
+    elapsed: str
+    command: str
+    cwd: str = ""
+    stack_hint: str = ""
 
 # Load environment variables from ~/.hermes/.env so API key checks work
 _env_path = get_env_path()
@@ -54,6 +70,23 @@ _PROVIDER_ENV_HINTS = (
     "OPENCODE_GO_API_KEY",
     "XIAOMI_API_KEY",
     "TOKENHUB_API_KEY",
+)
+
+_NON_OPENAI_PROVIDER_ENV_KEYS = (
+    "OPENROUTER_API_KEY",
+    "KIMI_CODE_API_KEY",
+    "KIMI_API_KEY",
+    "KIMI_CN_API_KEY",
+    "MOONSHOT_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "GLM_API_KEY",
+    "ZAI_API_KEY",
+    "Z_AI_API_KEY",
+    "DASHSCOPE_API_KEY",
+    "MINIMAX_API_KEY",
+    "MINIMAX_CN_API_KEY",
+    "DEEPSEEK_API_KEY",
 )
 
 
@@ -94,6 +127,47 @@ def _termux_browser_setup_steps(node_installed: bool) -> list[str]:
 def _has_provider_env_config(content: str) -> bool:
     """Return True when ~/.hermes/.env contains provider auth/base URL settings."""
     return any(key in content for key in _PROVIDER_ENV_HINTS)
+
+
+
+def _primary_codex_home_for_doctor() -> Path | None:
+    """Read the non-secret account ledger and return the primary CODEX_HOME."""
+    try:
+        import json
+
+        ledger_path = HERMES_HOME / "account-ledger.json"
+        ledger = json.loads(ledger_path.read_text())
+        accounts = ledger.get("accounts") or {}
+        for account in accounts.values():
+            if account.get("status") == "primary" and account.get("codex_home"):
+                return Path(account["codex_home"]).expanduser()
+    except Exception:
+        return None
+    return None
+
+
+def _codex_cli_login_status(codex_home: Path | None = None) -> tuple[bool, str]:
+    """Check Codex CLI subscription login without exposing token material."""
+    if not shutil.which("codex"):
+        return False, "codex CLI not found"
+
+    env = os.environ.copy()
+    if codex_home is not None:
+        env["CODEX_HOME"] = str(codex_home)
+
+    try:
+        result = subprocess.run(
+            ["codex", "login", "status"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except Exception as exc:
+        return False, str(exc)
+
+    output = ((result.stdout or "") + (result.stderr or "")).strip()
+    return result.returncode == 0 and "Logged in" in output, output or f"exit {result.returncode}"
 
 
 def _honcho_is_configured_for_doctor() -> bool:
@@ -141,6 +215,258 @@ def _apply_doctor_tool_availability_overrides(available: list[str], unavailable:
             continue
         updated_unavailable.append(item)
     return updated_available, updated_unavailable
+
+
+def _is_hermes_chat_command(command: str) -> bool:
+    """Return True for interactive Hermes chat entrypoints, not doctor/tests."""
+    text = " ".join(command.split())
+    if not text:
+        return False
+    lowered = text.lower()
+    if "pytest" in lowered:
+        return False
+    try:
+        argv = shlex.split(text)
+    except ValueError:
+        argv = text.split()
+
+    if not argv:
+        return False
+
+    chat_subcommands = {"chat"}
+    non_chat_subcommands = {
+        "acp", "auth", "backup", "claw", "completion", "config", "cron",
+        "dashboard", "debug", "doctor", "dump", "gateway", "honcho",
+        "hooks", "import", "insights", "login", "logout", "logs", "mcp",
+        "memory", "model", "pairing", "plugins", "profile", "sessions",
+        "setup", "skills", "status", "tools", "uninstall", "update",
+        "version", "webhook", "whatsapp",
+    }
+
+    def _first_command_after(index: int) -> str | None:
+        options_with_values = {
+            "-c", "--continue", "-m", "--model", "-p", "--profile",
+            "--provider", "-r", "--resume", "-s", "--skills", "--source",
+            "-t", "--toolsets",
+        }
+        i = index
+        while i < len(argv):
+            token = argv[i]
+            if token == "--":
+                i += 1
+                continue
+            if token.startswith("-"):
+                opt = token.split("=", 1)[0]
+                i += 2 if opt in options_with_values and "=" not in token else 1
+                continue
+            return token.lower()
+        return None
+
+    def _is_python_token(token: str) -> bool:
+        return Path(token).name.lower().startswith(("python", "python3"))
+
+    for i, token in enumerate(argv):
+        basename = Path(token).name.lower()
+        if basename == "hermes":
+            subcommand = _first_command_after(i + 1)
+            # Bare `hermes` defaults to interactive chat. `hermes chat` is
+            # explicit interactive chat. Other subcommands are intentionally
+            # excluded so `hermes doctor chat` never reports itself.
+            return subcommand is None or subcommand in chat_subcommands
+
+        if basename == "cli.py":
+            subcommand = _first_command_after(i + 1)
+            return subcommand is None or subcommand in chat_subcommands
+
+        if _is_python_token(token):
+            if i + 2 < len(argv) and argv[i + 1] == "-m" and argv[i + 2] == "hermes_cli.main":
+                subcommand = _first_command_after(i + 3)
+                return subcommand is None or subcommand in chat_subcommands
+            if i + 1 < len(argv) and Path(argv[i + 1]).name.lower() == "cli.py":
+                subcommand = _first_command_after(i + 2)
+                return subcommand is None or subcommand in chat_subcommands
+
+    # Fallback for truncated ps command lines. Be conservative: include common
+    # chat entrypoints only when no known non-chat subcommand appears.
+    if any(f" {sub} " in f" {lowered} " for sub in non_chat_subcommands):
+        return False
+    return "hermes_cli.main chat" in lowered
+
+
+def _parse_ps_chat_processes(ps_output: str, *, include_stacks: bool = False) -> list[ChatProcess]:
+    """Parse `ps -axo pid,ppid,tty,etime,command` output into chat processes."""
+    processes: list[ChatProcess] = []
+    for raw_line in ps_output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 4)
+        if len(parts) < 5:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        tty, elapsed, command = parts[2], parts[3], parts[4]
+        if not _is_hermes_chat_command(command):
+            continue
+        processes.append(
+            ChatProcess(
+                pid=pid,
+                ppid=ppid,
+                tty=tty,
+                elapsed=elapsed,
+                command=command,
+                cwd=_cwd_for_pid(pid),
+                stack_hint=_stack_hint_for_pid(pid) if include_stacks else "",
+            )
+        )
+    return processes
+
+
+def _cwd_for_pid(pid: int) -> str:
+    """Best-effort CWD lookup for a process without requiring privileges."""
+    proc_cwd = Path(f"/proc/{pid}/cwd")
+    try:
+        if proc_cwd.exists():
+            return str(proc_cwd.resolve())
+    except Exception:
+        pass
+
+    if shutil.which("lsof"):
+        try:
+            result = subprocess.run(
+                ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            for line in (result.stdout or "").splitlines():
+                if line.startswith("n") and len(line) > 1:
+                    return line[1:]
+        except Exception:
+            pass
+
+    if shutil.which("pwdx"):
+        try:
+            result = subprocess.run(
+                ["pwdx", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            output = (result.stdout or "").strip()
+            if ": " in output:
+                return output.split(": ", 1)[1]
+        except Exception:
+            pass
+
+    return "unknown"
+
+
+def _stack_hint_for_pid(pid: int) -> str:
+    """Return a compact macOS stack hint when sampling tools are available."""
+    if sys.platform != "darwin" or not shutil.which("sample"):
+        return ""
+    try:
+        result = subprocess.run(
+            ["sample", str(pid), "1", "1"],
+            capture_output=True,
+            text=True,
+            timeout=4,
+        )
+    except Exception:
+        return ""
+
+    output = (result.stdout or "") + (result.stderr or "")
+    interesting = []
+    needles = ("prompt_toolkit", "input", "readline", "select", "poll", "thread")
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if any(needle in stripped.lower() for needle in needles):
+            interesting.append(stripped)
+        if len(interesting) >= 3:
+            break
+    return " | ".join(interesting)
+
+
+def list_hermes_chat_processes(*, include_stacks: bool = False) -> list[ChatProcess]:
+    """List active local Hermes interactive chat processes."""
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,tty=,etime=,command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    return _parse_ps_chat_processes(result.stdout or "", include_stacks=include_stacks)
+
+
+def run_chat_doctor(args) -> int:
+    """Diagnose and optionally soft-recover stale interactive chat sessions."""
+    recover = bool(getattr(args, "recover", False))
+    requested_pids = [int(pid) for pid in (getattr(args, "pid", None) or [])]
+    include_stacks = bool(getattr(args, "stacks", False))
+    force = bool(getattr(args, "force", False))
+
+    print(color("◆ Hermes Chat Doctor", Colors.CYAN, Colors.BOLD))
+    print("Lists local interactive chat processes and gives safe stale-session recovery steps.")
+    print()
+
+    processes = list_hermes_chat_processes(include_stacks=include_stacks)
+    if processes:
+        print(f"Found {len(processes)} active Hermes chat process(es):")
+        print(f"  {'PID':>7} {'TTY':<10} {'ELAPSED':<12} {'CWD':<34} COMMAND")
+        for proc in processes:
+            cwd = proc.cwd if len(proc.cwd) <= 34 else "…" + proc.cwd[-33:]
+            print(f"  {proc.pid:>7} {proc.tty:<10} {proc.elapsed:<12} {cwd:<34} {proc.command}")
+            if proc.stack_hint:
+                print(f"          stack: {proc.stack_hint}")
+    else:
+        print("No active Hermes interactive chat processes found.")
+
+    print()
+    print("Safe recovery guidance:")
+    print("  1) Return to the chat terminal and press Ctrl+C once; wait a few seconds.")
+    print("  2) If the prompt does not return, start a fresh terminal and run `hermes doctor chat`.")
+    print("  3) Use explicit soft recovery only for the PID you recognize:")
+    example_pid = requested_pids[0] if requested_pids else (processes[0].pid if processes else "<pid>")
+    print(f"     hermes doctor chat --recover --pid {example_pid}")
+    print("  4) Forced termination is intentionally not default. Use `--force` only after soft recovery fails.")
+
+    if not recover:
+        return 0
+
+    if not requested_pids:
+        print()
+        print("Recovery requires --pid so doctor never interrupts every chat by accident.")
+        return 2
+
+    known = {proc.pid: proc for proc in processes}
+    signal_to_send = signal.SIGTERM if force else signal.SIGINT
+    signal_name = "SIGTERM" if force else "SIGINT"
+    print()
+    for pid in requested_pids:
+        if pid not in known:
+            print(f"Skipping PID {pid}: not an active Hermes chat process from this scan.")
+            continue
+        try:
+            os.kill(pid, signal_to_send)
+            print(f"Sent {signal_name} to Hermes chat PID {pid} ({known[pid].tty}).")
+        except ProcessLookupError:
+            print(f"PID {pid} already exited.")
+        except PermissionError:
+            print(f"Permission denied sending {signal_name} to PID {pid}.")
+        except Exception as exc:
+            print(f"Could not send {signal_name} to PID {pid}: {exc}")
+    return 0
 
 
 def check_ok(text: str, detail: str = ""):
@@ -270,7 +596,10 @@ def _build_apikey_providers_list() -> list:
 
 def run_doctor(args):
     """Run diagnostic checks."""
+    from hermes_cli.auth import is_openai_codex_only_policy
+
     should_fix = getattr(args, 'fix', False)
+    openai_only_policy = is_openai_codex_only_policy()
 
     # Doctor runs from the interactive CLI, so CLI-gated tool availability
     # checks (like cronjob management) should see the same context as `hermes`.
@@ -638,50 +967,61 @@ def run_doctor(args):
     print()
     print(color("◆ Auth Providers", Colors.CYAN, Colors.BOLD))
 
-    try:
-        from hermes_cli.auth import (
-            get_nous_auth_status,
-            get_codex_auth_status,
-            get_gemini_oauth_auth_status,
-            get_minimax_oauth_auth_status,
-        )
-
-        nous_status = get_nous_auth_status()
-        if nous_status.get("logged_in"):
-            check_ok("Nous Portal auth", "(logged in)")
+    if openai_only_policy:
+        primary_codex_home = _primary_codex_home_for_doctor()
+        codex_logged_in, codex_detail = _codex_cli_login_status(primary_codex_home)
+        if codex_logged_in:
+            detail = f"(logged in via CODEX_HOME={primary_codex_home})" if primary_codex_home else "(logged in)"
+            check_ok("OpenAI Codex CLI auth", detail)
         else:
-            check_warn("Nous Portal auth", "(not logged in)")
+            detail = f"({codex_detail})" if codex_detail else "(not logged in)"
+            check_warn("OpenAI Codex CLI auth", detail)
+        check_ok("Auth policy", "(Hermes-native Nous/Gemini/OpenAI OAuth skipped)")
+    else:
+        try:
+            from hermes_cli.auth import (
+                get_nous_auth_status,
+                get_codex_auth_status,
+                get_gemini_oauth_auth_status,
+                get_minimax_oauth_auth_status,
+            )
 
-        codex_status = get_codex_auth_status()
-        if codex_status.get("logged_in"):
-            check_ok("OpenAI Codex auth", "(logged in)")
-        else:
-            check_warn("OpenAI Codex auth", "(not logged in)")
-            if codex_status.get("error"):
-                check_info(codex_status["error"])
+            nous_status = get_nous_auth_status()
+            if nous_status.get("logged_in"):
+                check_ok("Nous Portal auth", "(logged in)")
+            else:
+                check_warn("Nous Portal auth", "(not logged in)")
 
-        gemini_status = get_gemini_oauth_auth_status()
-        if gemini_status.get("logged_in"):
-            email = gemini_status.get("email") or ""
-            project = gemini_status.get("project_id") or ""
-            pieces = []
-            if email:
-                pieces.append(email)
-            if project:
-                pieces.append(f"project={project}")
-            suffix = f" ({', '.join(pieces)})" if pieces else ""
-            check_ok("Google Gemini OAuth", f"(logged in{suffix})")
-        else:
-            check_warn("Google Gemini OAuth", "(not logged in)")
+            codex_status = get_codex_auth_status()
+            if codex_status.get("logged_in"):
+                check_ok("OpenAI Codex auth", "(logged in)")
+            else:
+                check_warn("OpenAI Codex auth", "(not logged in)")
+                if codex_status.get("error"):
+                    check_info(codex_status["error"])
 
-        minimax_status = get_minimax_oauth_auth_status()
-        if minimax_status.get("logged_in"):
-            region = minimax_status.get("region", "global")
-            check_ok("MiniMax OAuth", f"(logged in, region={region})")
-        else:
-            check_warn("MiniMax OAuth", "(not logged in)")
-    except Exception as e:
-        check_warn("Auth provider status", f"(could not check: {e})")
+            gemini_status = get_gemini_oauth_auth_status()
+            if gemini_status.get("logged_in"):
+                email = gemini_status.get("email") or ""
+                project = gemini_status.get("project_id") or ""
+                pieces = []
+                if email:
+                    pieces.append(email)
+                if project:
+                    pieces.append(f"project={project}")
+                suffix = f" ({', '.join(pieces)})" if pieces else ""
+                check_ok("Google Gemini OAuth", f"(logged in{suffix})")
+            else:
+                check_warn("Google Gemini OAuth", "(not logged in)")
+
+            minimax_status = get_minimax_oauth_auth_status()
+            if minimax_status.get("logged_in"):
+                region = minimax_status.get("region", "global")
+                check_ok("MiniMax OAuth", f"(logged in, region={region})")
+            else:
+                check_warn("MiniMax OAuth", "(not logged in)")
+        except Exception as e:
+            check_warn("Auth provider status", f"(could not check: {e})")
 
     if _safe_which("codex"):
         check_ok("codex CLI")
@@ -1089,6 +1429,11 @@ def run_doctor(args):
     # =========================================================================
     print()
     print(color("◆ API Connectivity", Colors.CYAN, Colors.BOLD))
+
+    if openai_only_policy:
+        for _env_key in _NON_OPENAI_PROVIDER_ENV_KEYS:
+            os.environ.pop(_env_key, None)
+        check_ok("OpenAI Codex policy", "(non-OpenAI provider checks skipped)")
     
     openrouter_key = os.getenv("OPENROUTER_API_KEY")
     if openrouter_key:
@@ -1120,7 +1465,7 @@ def run_doctor(args):
         except Exception as e:
             print(f"\r  {color('✗', Colors.RED)} OpenRouter API {color(f'({e})', Colors.DIM)}                ")
             issues.append("Check network connectivity")
-    else:
+    elif not openai_only_policy:
         check_warn("OpenRouter API", "(not configured)")
     
     from hermes_cli.auth import get_anthropic_key
@@ -1295,6 +1640,16 @@ def run_doctor(args):
         
         available, unavailable = check_tool_availability()
         available, unavailable = _apply_doctor_tool_availability_overrides(available, unavailable)
+        if openai_only_policy:
+            _blocked_tool_envs = set(_NON_OPENAI_PROVIDER_ENV_KEYS)
+            _filtered_unavailable = []
+            for _tool in unavailable:
+                _tool_name = str(_tool.get("name") or _tool.get("id") or "").lower()
+                _envs = set(_tool.get("missing_vars") or _tool.get("env_vars") or [])
+                if _tool_name in {"moa", "vision"} or (_envs & _blocked_tool_envs):
+                    continue
+                _filtered_unavailable.append(_tool)
+            unavailable = _filtered_unavailable
         
         for tid in available:
             info = TOOLSET_REQUIREMENTS.get(tid, {})
@@ -1310,7 +1665,7 @@ def run_doctor(args):
 
         # Count disabled tools with API key requirements
         api_disabled = [u for u in unavailable if (u.get("missing_vars") or u.get("env_vars"))]
-        if api_disabled:
+        if api_disabled and not openai_only_policy:
             issues.append("Run 'hermes setup' to configure missing API keys for full tool access")
     except Exception as e:
         check_warn("Could not check tool availability", f"({e})")

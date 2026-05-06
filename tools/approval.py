@@ -643,6 +643,15 @@ def prompt_dangerous_approval(command: str, description: str,
             print()
             sys.stdout.flush()
 
+            # In interactive Hermes chat, prompt_toolkit owns stdin.  If the
+            # CLI approval callback is missing/failed, falling back to a raw
+            # input() thread races prompt_toolkit for fd 0 and can leave the
+            # chat apparently frozen/stale.  Fail closed instead of stealing
+            # the terminal.
+            if os.environ.get("HERMES_INTERACTIVE") == "1" or os.environ.get("HERMESINTERACTIVE") == "1":
+                print("      ✗ Approval UI unavailable in interactive chat - denying command")
+                return "deny"
+
             result = {"choice": ""}
 
             def get_input():

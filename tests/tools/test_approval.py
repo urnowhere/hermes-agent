@@ -589,6 +589,14 @@ class TestFullCommandAlwaysShown:
             result = prompt_dangerous_approval(short_cmd, "recursive delete")
         assert result == "deny"
 
+    def test_interactive_chat_without_callback_denies_without_raw_input(self):
+        """prompt_toolkit owns stdin in Hermes chat; fallback input() must not steal it."""
+        for env_name in ("HERMES_INTERACTIVE", "HERMESINTERACTIVE"):
+            with mock_patch.dict("os.environ", {env_name: "1"}, clear=True):
+                with mock_patch("builtins.input", side_effect=AssertionError("input() should not be called")):
+                    result = prompt_dangerous_approval("rm -rf /tmp", "recursive delete")
+            assert result == "deny"
+
 
 class TestForkBombDetection:
     """The fork bomb regex must match the classic :(){ :|:& };: pattern."""

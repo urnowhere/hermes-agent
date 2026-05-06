@@ -5291,6 +5291,11 @@ def cmd_hooks(args):
 
 def cmd_doctor(args):
     """Check configuration and dependencies."""
+    if getattr(args, "doctor_subject", None) == "chat":
+        from hermes_cli.doctor import run_chat_doctor
+
+        raise SystemExit(run_chat_doctor(args))
+
     from hermes_cli.doctor import run_doctor
 
     run_doctor(args)
@@ -9270,6 +9275,37 @@ def main():
     )
     doctor_parser.add_argument(
         "--fix", action="store_true", help="Attempt to fix issues automatically"
+    )
+    doctor_subparsers = doctor_parser.add_subparsers(dest="doctor_subject")
+    doctor_chat_parser = doctor_subparsers.add_parser(
+        "chat",
+        help="Diagnose and recover stale interactive chat sessions",
+        description=(
+            "List active Hermes chat PIDs, TTY, CWD, elapsed time, optional stack hints, "
+            "and safe stale-session recovery instructions."
+        ),
+    )
+    doctor_chat_parser.add_argument(
+        "--stacks",
+        action="store_true",
+        help="Try to include compact stack hints when supported by the platform",
+    )
+    doctor_chat_parser.add_argument(
+        "--recover",
+        action="store_true",
+        help="Explicitly send a soft interrupt (SIGINT) to the selected chat PID(s)",
+    )
+    doctor_chat_parser.add_argument(
+        "--pid",
+        action="append",
+        type=int,
+        default=[],
+        help="Hermes chat PID to recover; repeat for multiple PIDs",
+    )
+    doctor_chat_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="With --recover, send SIGTERM instead of the default soft SIGINT",
     )
     doctor_parser.set_defaults(func=cmd_doctor)
 

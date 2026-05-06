@@ -60,7 +60,8 @@ hermes gateway      # Start the messaging gateway (Telegram, Discord, etc.)
 hermes setup        # Run the full setup wizard (configures everything at once)
 hermes claw migrate # Migrate from OpenClaw (if coming from OpenClaw)
 hermes update       # Update to the latest version
-hermes doctor       # Diagnose any issues
+hermes doctor       # Diagnose setup issues
+hermes doctor chat  # Diagnose stale/frozen interactive chat sessions safely
 ```
 
 📖 **[Full documentation →](https://hermes-agent.nousresearch.com/docs/)**
@@ -82,6 +83,22 @@ Hermes has two entry points: start the terminal UI with `hermes`, or run the gat
 | Platform-specific status | `/platforms` | `/status`, `/sethome` |
 
 For the full command lists, see the [CLI guide](https://hermes-agent.nousresearch.com/docs/user-guide/cli) and the [Messaging Gateway guide](https://hermes-agent.nousresearch.com/docs/user-guide/messaging).
+
+### Recovering a stale interactive chat
+
+If an interactive `hermes`/`hermes chat` terminal appears frozen, run this from another terminal:
+
+```bash
+hermes doctor chat
+```
+
+It lists active chat PIDs, TTY, CWD, elapsed time, and safe recovery steps. It does not interrupt or kill anything by default. To explicitly recover a process you recognize, use soft recovery:
+
+```bash
+hermes doctor chat --recover --pid <pid>
+```
+
+This sends `SIGINT` (like Ctrl+C). Forced `SIGTERM` recovery requires the additional `--force` flag and should only be used after soft recovery fails.
 
 ---
 

@@ -6737,6 +6737,10 @@ class HermesCLI:
             self._handle_resume_command(cmd_original)
         elif canonical == "model":
             self._handle_model_switch(cmd_original)
+        elif canonical == "provider":
+            self._show_model_and_providers()
+        elif canonical == "doctor":
+            self._handle_doctor_command(cmd_original)
         elif canonical == "gquota":
             self._handle_gquota_command(cmd_original)
 
@@ -6994,6 +6998,37 @@ class HermesCLI:
                     _cprint(f"{_DIM}{_ACCENT}Type /help for available commands{_RST}")
         
         return True
+
+    def _handle_doctor_command(self, cmd: str):
+        """Handle /doctor chat inside an interactive CLI session."""
+        import argparse
+        import shlex
+
+        try:
+            parts = shlex.split(cmd)
+        except ValueError as exc:
+            _cprint(f"  Usage error: {exc}")
+            return
+
+        if len(parts) < 2 or parts[1].lower() != "chat":
+            _cprint("  Usage: /doctor chat [--stacks] [--recover --pid <pid>] [--force]")
+            _cprint("  Full setup diagnostics are available from another terminal: hermes doctor")
+            return
+
+        parser = argparse.ArgumentParser(prog="/doctor chat", add_help=False)
+        parser.add_argument("--stacks", action="store_true")
+        parser.add_argument("--recover", action="store_true")
+        parser.add_argument("--pid", action="append", type=int, default=[])
+        parser.add_argument("--force", action="store_true")
+        try:
+            args = parser.parse_args(parts[2:])
+        except SystemExit:
+            _cprint("  Usage: /doctor chat [--stacks] [--recover --pid <pid>] [--force]")
+            return
+
+        from hermes_cli.doctor import run_chat_doctor
+
+        run_chat_doctor(args)
     
     def _handle_background_command(self, cmd: str):
         """Handle /background <prompt> — run a prompt in a separate background session.

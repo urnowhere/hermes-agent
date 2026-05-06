@@ -12,6 +12,51 @@ from hermes_cli.auth import AuthError, get_provider_auth_state, resolve_nous_run
 
 
 # =============================================================================
+# format_auth_error: provider-specific guidance
+# =============================================================================
+
+
+def test_format_auth_error_uses_codex_policy_guidance(monkeypatch):
+    import hermes_cli.auth as auth
+
+    monkeypatch.setattr(
+        auth,
+        "read_raw_config",
+        lambda: {"codex": {"policy": "openai-codex-only"}},
+    )
+    message = auth.format_auth_error(
+        AuthError(
+            "Codex token refresh failed: session revoked.",
+            provider="openai-codex",
+            code="invalid_grant",
+            relogin_required=True,
+        )
+    )
+
+    assert "Hermes-native Codex auth needs re-login" in message
+    assert "hermes-task" in message
+    assert "hermes auth add openai-codex" in message
+    assert "hermes model" not in message
+
+
+def test_format_auth_error_keeps_default_relogin_guidance_without_codex_policy(monkeypatch):
+    import hermes_cli.auth as auth
+
+    monkeypatch.setattr(auth, "read_raw_config", lambda: {})
+    message = auth.format_auth_error(
+        AuthError(
+            "Codex token refresh failed: session revoked.",
+            provider="openai-codex",
+            code="invalid_grant",
+            relogin_required=True,
+        )
+    )
+
+    assert message.endswith("Run `hermes model` to re-authenticate.")
+    assert "hermes-task" not in message
+
+
+# =============================================================================
 # _resolve_verify: CA bundle path validation
 # =============================================================================
 
