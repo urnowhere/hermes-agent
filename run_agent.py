@@ -89,6 +89,10 @@ class _OpenAIProxy:
 
 OpenAI = _OpenAIProxy()
 
+# OpenRouter provider.sort valid values — used to guard against invalid
+# config values reaching the OpenRouter API (issue #20586).
+_VALID_PROVIDER_SORT_VALUES = frozenset({"price", "throughput", "latency"})
+
 # Load .env from ~/.hermes/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
 from hermes_cli.env_loader import load_hermes_dotenv
@@ -8537,7 +8541,23 @@ class AIAgent:
         if self.providers_order:
             _prefs["order"] = self.providers_order
         if self.provider_sort:
-            _prefs["sort"] = self.provider_sort
+            _sort_val = self.provider_sort
+            if isinstance(_sort_val, str) and _sort_val in _VALID_PROVIDER_SORT_VALUES:
+                _prefs["sort"] = _sort_val
+            elif isinstance(_sort_val, dict):
+                _by = _sort_val.get("by")
+                if isinstance(_by, str) and _by in _VALID_PROVIDER_SORT_VALUES:
+                    _prefs["sort"] = _sort_val
+                else:
+                    logger.warning(
+                        "Ignoring invalid provider_routing.sort dict (missing/ invalid 'by'): %s",
+                        _sort_val,
+                    )
+            else:
+                logger.warning(
+                    "Ignoring invalid provider_routing.sort value: %r",
+                    _sort_val,
+                )
         if self.provider_require_parameters:
             _prefs["require_parameters"] = True
         if self.provider_data_collection:
@@ -10487,7 +10507,18 @@ class AIAgent:
                 if self.providers_order:
                     provider_preferences["order"] = self.providers_order
                 if self.provider_sort:
-                    provider_preferences["sort"] = self.provider_sort
+                    _sort_val = self.provider_sort
+                    if isinstance(_sort_val, str) and _sort_val in _VALID_PROVIDER_SORT_VALUES:
+                        provider_preferences["sort"] = _sort_val
+                    elif isinstance(_sort_val, dict):
+                        _by = _sort_val.get("by")
+                        if isinstance(_by, str) and _by in _VALID_PROVIDER_SORT_VALUES:
+                            provider_preferences["sort"] = _sort_val
+                    else:
+                        logger.warning(
+                            "Ignoring invalid provider_routing.sort value in summary: %r",
+                            _sort_val,
+                        )
                 if provider_preferences and (
                     (self.provider or "").strip().lower() == "openrouter"
                     or self._is_openrouter_url()
