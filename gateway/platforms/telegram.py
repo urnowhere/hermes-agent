@@ -527,7 +527,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 self._background_tasks.add(probe)
                 probe.add_done_callback(self._background_tasks.discard)
         except Exception as retry_err:
-            logger.warning("[%s] Telegram polling reconnect failed: %s", self.name, retry_err)
+            logger.warning("[%s] Telegram polling reconnect failed: %s", self.name, retry_err, exc_info=True)
             # start_polling failed — polling is dead and no further error
             # callbacks will fire, so schedule the next retry ourselves.
             if not self.has_fatal_error:
@@ -1485,7 +1485,7 @@ class TelegramAdapter(BasePlatformAdapter):
             )
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
-            logger.warning("[%s] send_update_prompt failed: %s", self.name, e)
+            logger.warning("[%s] send_update_prompt failed: %s", self.name, e, exc_info=True)
             return SendResult(success=False, error=str(e))
 
     async def send_exec_approval(
@@ -1549,7 +1549,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
-            logger.warning("[%s] send_exec_approval failed: %s", self.name, e)
+            logger.warning("[%s] send_exec_approval failed: %s", self.name, e, exc_info=True)
             return SendResult(success=False, error=str(e))
 
     async def send_slash_confirm(
@@ -1665,7 +1665,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
-            logger.warning("[%s] send_model_picker failed: %s", self.name, e)
+            logger.warning("[%s] send_model_picker failed: %s", self.name, e, exc_info=True)
             return SendResult(success=False, error=str(e))
 
     _MODEL_PAGE_SIZE = 8
@@ -1819,7 +1819,7 @@ class TelegramAdapter(BasePlatformAdapter):
             try:
                 result_text = await callback(chat_id, model_id, provider_slug)
             except Exception as exc:
-                logger.error("Model picker switch failed: %s", exc)
+                logger.error("Model picker switch failed: %s", exc, exc_info=True)
                 result_text = f"Error switching model: {exc}"
 
             # Edit message to show confirmation, remove buttons
@@ -1971,7 +1971,7 @@ class TelegramAdapter(BasePlatformAdapter):
                         count, session_key, choice, user_display,
                     )
                 except Exception as exc:
-                    logger.error("Failed to resolve gateway approval from Telegram button: %s", exc)
+                    logger.error("Failed to resolve gateway approval from Telegram button: %s", exc, exc_info=True)
             return
 
         # --- Slash-confirm callbacks (sc:choice:confirm_id) ---
@@ -2078,7 +2078,7 @@ class TelegramAdapter(BasePlatformAdapter):
             logger.info("Telegram update prompt answered '%s' by user %s",
                         answer, getattr(query.from_user, "id", "unknown"))
         except Exception as exc:
-            logger.error("Failed to write update response from callback: %s", exc)
+            logger.error("Failed to write update response from callback: %s", exc, exc_info=True)
 
     def _missing_media_path_error(self, label: str, path: str) -> str:
         """Build an actionable file-not-found error for gateway MEDIA delivery.
