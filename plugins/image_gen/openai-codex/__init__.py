@@ -165,6 +165,15 @@ def _collect_image_b64(client: Any, *, prompt: str, size: str, quality: str) -> 
     """Stream a Codex Responses image_generation call and return the b64 image."""
     image_b64: Optional[str] = None
 
+    # No ``tool_choice`` is sent: the chatgpt.com/backend-api/codex backend
+    # rejects every shape we have for forcing the hosted ``image_generation``
+    # tool. ``{"type": "allowed_tools", "mode": "required", "tools": [{"type":
+    # "image_generation"}]}`` (and the simpler ``{"type": "image_generation"}``
+    # form) both 400 with ``Tool choice 'image_generation' not found in 'tools'
+    # parameter`` — the backend looks up tool_choice as a *function* name and
+    # never recognizes hosted-tool entries. Letting the host model decide is
+    # the only shape Codex currently accepts; the ``instructions`` above are
+    # what nudge it toward the tool. See issue #19505.
     with client.responses.stream(
         model=_CODEX_CHAT_MODEL,
         store=False,
@@ -183,11 +192,6 @@ def _collect_image_b64(client: Any, *, prompt: str, size: str, quality: str) -> 
             "background": "opaque",
             "partial_images": 1,
         }],
-        tool_choice={
-            "type": "allowed_tools",
-            "mode": "required",
-            "tools": [{"type": "image_generation"}],
-        },
     ) as stream:
         for event in stream:
             event_type = getattr(event, "type", "")
