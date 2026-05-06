@@ -22,13 +22,16 @@ from hermes_cli.auth import (
     PROVIDER_REGISTRY,
     _auth_store_lock,
     _codex_access_token_is_expiring,
+    _codex_use_cli_auth_enabled,
     _decode_jwt_claims,
+    _read_codex_cli_auth_payload,
     _load_auth_store,
     _load_provider_state,
     _resolve_kimi_base_url,
     _resolve_zai_base_url,
     _save_auth_store,
     _save_provider_state,
+    _write_codex_cli_tokens,
     read_credential_pool,
     write_credential_pool,
 )
@@ -796,6 +799,15 @@ class CredentialPool:
         # _seed_from_singletons() on the next load_pool() sees fresh state
         # instead of re-seeding stale/consumed tokens.
         self._sync_device_code_entry_to_auth_store(updated)
+        if self.provider == "openai-codex" and entry.source == "codex-cli-auth" and updated.refresh_token:
+            try:
+                _write_codex_cli_tokens(
+                    updated.access_token,
+                    updated.refresh_token,
+                    last_refresh=updated.last_refresh,
+                )
+            except Exception as wexc:
+                logger.debug("Failed to write refreshed Codex CLI token from pool: %s", wexc)
         return updated
 
     def _entry_needs_refresh(self, entry: PooledCredential) -> bool:
@@ -1348,6 +1360,27 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> Tup
         # the Hermes auth store.  Without this gate the removal is instantly
         # undone on the next load_pool() call.
         if _is_suppressed(provider, "device_code"):
+            return changed, active_sources
+
+        if _codex_use_cli_auth_enabled():
+            cli_payload = _read_codex_cli_auth_payload(allow_expired=True)
+            cli_tokens = cli_payload.get("tokens") if isinstance(cli_payload, dict) else None
+            if isinstance(cli_tokens, dict) and cli_tokens.get("access_token"):
+                active_sources.add("codex-cli-auth")
+                changed |= _upsert_entry(
+                    entries,
+                    provider,
+                    "codex-cli-auth",
+                    {
+                        "source": "codex-cli-auth",
+                        "auth_type": AUTH_TYPE_OAUTH,
+                        "access_token": cli_tokens.get("access_token", ""),
+                        "refresh_token": cli_tokens.get("refresh_token"),
+                        "base_url": "https://chatgpt.com/backend-api/codex",
+                        "last_refresh": cli_payload.get("last_refresh") if isinstance(cli_payload, dict) else None,
+                        "label": label_from_token(cli_tokens.get("access_token", ""), "codex-cli-auth"),
+                    },
+                )
             return changed, active_sources
 
         state = _load_provider_state(auth_store, "openai-codex")

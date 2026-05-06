@@ -15,6 +15,7 @@ from hermes_cli.auth import (
     PROVIDER_REGISTRY,
     _read_codex_tokens,
     _save_codex_tokens,
+    _write_codex_cli_tokens,
     _import_codex_cli_tokens,
     _login_openai_codex,
     get_codex_auth_status,
@@ -182,6 +183,75 @@ def test_codex_tokens_not_written_to_shared_file(tmp_path, monkeypatch):
     # Hermes auth store should have the tokens
     data = _read_codex_tokens()
     assert data["tokens"]["access_token"] == "hermes-at"
+
+
+def test_write_codex_cli_tokens_preserves_existing_payload(tmp_path, monkeypatch):
+    codex_home = tmp_path / "codex-cli"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    auth_path = codex_home / "auth.json"
+    auth_path.write_text(json.dumps({
+        "tokens": {"access_token": "old-at", "refresh_token": "old-rt", "extra": "keep"},
+        "custom": "preserve",
+    }))
+
+    _write_codex_cli_tokens("new-at", "new-rt", last_refresh="2026-04-13T00:00:00Z")
+
+    payload = json.loads(auth_path.read_text())
+    assert payload["tokens"]["access_token"] == "new-at"
+    assert payload["tokens"]["refresh_token"] == "new-rt"
+    assert payload["tokens"]["extra"] == "keep"
+    assert payload["custom"] == "preserve"
+    assert payload["last_refresh"] == "2026-04-13T00:00:00Z"
+    assert (auth_path.stat().st_mode & 0o777) == 0o600
+
+
+def test_resolve_codex_runtime_credentials_can_use_codex_cli_auth(tmp_path, monkeypatch):
+    hermes_home = tmp_path / "hermes"
+    codex_home = tmp_path / "codex-cli"
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    codex_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    (hermes_home / "config.yaml").write_text(yaml.safe_dump({
+        "providers": {"openai-codex": {"use_cli_auth": True}},
+    }))
+    (codex_home / "auth.json").write_text(json.dumps({
+        "tokens": {"access_token": "cli-at", "refresh_token": "cli-rt"},
+        "last_refresh": "2026-04-12T00:00:00Z",
+    }))
+
+    creds = resolve_codex_runtime_credentials()
+
+    assert creds["api_key"] == "cli-at"
+    assert creds["source"] == "codex-cli-auth"
+    assert creds["auth_store"] == str(codex_home / "auth.json")
+
+
+def test_resolve_codex_cli_auth_refreshes_and_writes_back(tmp_path, monkeypatch):
+    hermes_home = tmp_path / "hermes"
+    codex_home = tmp_path / "codex-cli"
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    codex_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("HERMES_CODEX_USE_CLI_AUTH", "1")
+    expiring_token = _jwt_with_exp(int(time.time()) - 10)
+    (codex_home / "auth.json").write_text(json.dumps({
+        "tokens": {"access_token": expiring_token, "refresh_token": "old-rt"},
+    }))
+    monkeypatch.setattr("hermes_cli.auth.refresh_codex_oauth_pure", lambda *a, **kw: {
+        "access_token": "new-at",
+        "refresh_token": "new-rt",
+        "last_refresh": "2026-04-13T00:00:00Z",
+    })
+
+    creds = resolve_codex_runtime_credentials()
+
+    assert creds["api_key"] == "new-at"
+    payload = json.loads((codex_home / "auth.json").read_text())
+    assert payload["tokens"]["access_token"] == "new-at"
+    assert payload["tokens"]["refresh_token"] == "new-rt"
 
 
 def test_resolve_returns_hermes_auth_store_source(tmp_path, monkeypatch):

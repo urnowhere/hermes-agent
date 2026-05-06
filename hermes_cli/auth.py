@@ -2407,6 +2407,104 @@ def _save_codex_tokens(tokens: Dict[str, str], last_refresh: str = None) -> None
         _save_auth_store(auth_store)
 
 
+def _codex_cli_auth_path() -> Path:
+    codex_home = os.getenv("CODEX_HOME", "").strip()
+    if not codex_home:
+        codex_home = str(Path.home() / ".codex")
+    return Path(codex_home).expanduser() / "auth.json"
+
+
+def _config_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return None
+
+
+def _codex_use_cli_auth_enabled() -> bool:
+    """Return True when Codex should use the Codex CLI auth file directly."""
+    env_value = _config_bool(os.getenv("HERMES_CODEX_USE_CLI_AUTH"))
+    if env_value is not None:
+        return env_value
+    try:
+        raw = read_raw_config()
+        providers = raw.get("providers")
+        provider_cfg = providers.get("openai-codex") if isinstance(providers, dict) else None
+        if isinstance(provider_cfg, dict):
+            cfg_value = _config_bool(provider_cfg.get("use_cli_auth"))
+            if cfg_value is not None:
+                return cfg_value
+            auth_source = str(provider_cfg.get("auth_source") or "").strip().lower()
+            if auth_source in {"codex-cli", "cli", "shared"}:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _read_codex_cli_auth_payload(*, allow_expired: bool = False) -> Optional[Dict[str, Any]]:
+    """Read Codex CLI auth.json and return tokens plus metadata."""
+    auth_path = _codex_cli_auth_path()
+    if not auth_path.is_file():
+        return None
+    try:
+        payload = json.loads(auth_path.read_text())
+        tokens = payload.get("tokens")
+        if not isinstance(tokens, dict):
+            return None
+        access_token = tokens.get("access_token")
+        refresh_token = tokens.get("refresh_token")
+        if not access_token or not refresh_token:
+            return None
+        if not allow_expired and _codex_access_token_is_expiring(access_token, 0):
+            logger.debug(
+                "Codex CLI tokens at %s are expired — skipping import.", auth_path,
+            )
+            return None
+        return {
+            "tokens": dict(tokens),
+            "last_refresh": payload.get("last_refresh"),
+            "auth_path": str(auth_path),
+        }
+    except Exception:
+        return None
+
+
+def _write_codex_cli_tokens(
+    access_token: str,
+    refresh_token: str,
+    *,
+    last_refresh: Optional[str] = None,
+) -> None:
+    """Write rotated Codex OAuth tokens back to the Codex CLI auth file."""
+    auth_path = _codex_cli_auth_path()
+    auth_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        payload = json.loads(auth_path.read_text()) if auth_path.is_file() else {}
+        if not isinstance(payload, dict):
+            payload = {}
+    except Exception:
+        payload = {}
+    tokens = payload.get("tokens")
+    if not isinstance(tokens, dict):
+        tokens = {}
+    tokens["access_token"] = access_token
+    tokens["refresh_token"] = refresh_token
+    payload["tokens"] = tokens
+    if last_refresh:
+        payload["last_refresh"] = last_refresh
+    auth_path.write_text(json.dumps(payload, indent=2) + "\n")
+    try:
+        auth_path.chmod(0o600)
+    except OSError:
+        pass
+
+
 def refresh_codex_oauth_pure(
     access_token: str,
     refresh_token: str,
@@ -2538,32 +2636,88 @@ def _import_codex_cli_tokens() -> Optional[Dict[str, str]]:
     Returns tokens dict if valid and not expired, None otherwise.
     Does NOT write to the shared file.
     """
-    codex_home = os.getenv("CODEX_HOME", "").strip()
-    if not codex_home:
-        codex_home = str(Path.home() / ".codex")
-    auth_path = Path(codex_home).expanduser() / "auth.json"
-    if not auth_path.is_file():
+    payload = _read_codex_cli_auth_payload(allow_expired=False)
+    if not payload:
         return None
-    try:
-        payload = json.loads(auth_path.read_text())
-        tokens = payload.get("tokens")
-        if not isinstance(tokens, dict):
-            return None
-        access_token = tokens.get("access_token")
-        refresh_token = tokens.get("refresh_token")
-        if not access_token or not refresh_token:
-            return None
-        # Reject expired tokens — importing stale tokens from ~/.codex/
-        # that can't be refreshed leaves the user stuck with "Login successful!"
-        # but no working credentials.
-        if _codex_access_token_is_expiring(access_token, 0):
-            logger.debug(
-                "Codex CLI tokens at %s are expired — skipping import.", auth_path,
-            )
-            return None
-        return dict(tokens)
-    except Exception:
-        return None
+    return dict(payload["tokens"])
+
+
+def _refresh_codex_cli_auth_tokens(
+    tokens: Dict[str, str],
+    timeout_seconds: float,
+) -> Dict[str, str]:
+    refreshed = refresh_codex_oauth_pure(
+        str(tokens.get("access_token", "") or ""),
+        str(tokens.get("refresh_token", "") or ""),
+        timeout_seconds=timeout_seconds,
+    )
+    updated_tokens = dict(tokens)
+    updated_tokens["access_token"] = refreshed["access_token"]
+    updated_tokens["refresh_token"] = refreshed["refresh_token"]
+    _write_codex_cli_tokens(
+        refreshed["access_token"],
+        refreshed["refresh_token"],
+        last_refresh=refreshed.get("last_refresh"),
+    )
+    return updated_tokens
+
+
+def _resolve_codex_cli_runtime_credentials(
+    *,
+    force_refresh: bool,
+    refresh_if_expiring: bool,
+    refresh_skew_seconds: int,
+) -> Dict[str, Any]:
+    payload = _read_codex_cli_auth_payload(allow_expired=True)
+    if not payload:
+        raise AuthError(
+            "Codex CLI credentials were not found. Run `codex` to sign in, or disable providers.openai-codex.use_cli_auth.",
+            provider="openai-codex",
+            code="codex_cli_auth_missing",
+            relogin_required=True,
+        )
+
+    tokens = dict(payload["tokens"])
+    access_token = str(tokens.get("access_token", "") or "").strip()
+    refresh_timeout_seconds = float(os.getenv("HERMES_CODEX_REFRESH_TIMEOUT_SECONDS", "20"))
+
+    should_refresh = bool(force_refresh)
+    if (not should_refresh) and refresh_if_expiring:
+        should_refresh = _codex_access_token_is_expiring(access_token, refresh_skew_seconds)
+    if should_refresh:
+        with _auth_store_lock(timeout_seconds=max(float(AUTH_LOCK_TIMEOUT_SECONDS), refresh_timeout_seconds + 5.0)):
+            payload = _read_codex_cli_auth_payload(allow_expired=True)
+            if not payload:
+                raise AuthError(
+                    "Codex CLI credentials disappeared while refreshing.",
+                    provider="openai-codex",
+                    code="codex_cli_auth_missing",
+                    relogin_required=True,
+                )
+            tokens = dict(payload["tokens"])
+            access_token = str(tokens.get("access_token", "") or "").strip()
+            should_refresh = bool(force_refresh)
+            if (not should_refresh) and refresh_if_expiring:
+                should_refresh = _codex_access_token_is_expiring(access_token, refresh_skew_seconds)
+            if should_refresh:
+                tokens = _refresh_codex_cli_auth_tokens(tokens, refresh_timeout_seconds)
+                access_token = str(tokens.get("access_token", "") or "").strip()
+                payload = _read_codex_cli_auth_payload(allow_expired=True) or payload
+
+    base_url = (
+        os.getenv("HERMES_CODEX_BASE_URL", "").strip().rstrip("/")
+        or DEFAULT_CODEX_BASE_URL
+    )
+
+    return {
+        "provider": "openai-codex",
+        "base_url": base_url,
+        "api_key": access_token,
+        "source": "codex-cli-auth",
+        "last_refresh": payload.get("last_refresh"),
+        "auth_store": payload.get("auth_path"),
+        "auth_mode": "chatgpt",
+    }
 
 
 def resolve_codex_runtime_credentials(
@@ -2573,6 +2727,13 @@ def resolve_codex_runtime_credentials(
     refresh_skew_seconds: int = CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
 ) -> Dict[str, Any]:
     """Resolve runtime credentials from Hermes's own Codex token store."""
+    if _codex_use_cli_auth_enabled():
+        return _resolve_codex_cli_runtime_credentials(
+            force_refresh=force_refresh,
+            refresh_if_expiring=refresh_if_expiring,
+            refresh_skew_seconds=refresh_skew_seconds,
+        )
+
     data = _read_codex_tokens()
     tokens = dict(data["tokens"])
     access_token = str(tokens.get("access_token", "") or "").strip()
@@ -3745,6 +3906,27 @@ def get_codex_auth_status() -> Dict[str, Any]:
     Checks the credential pool first (where `hermes auth` stores credentials),
     then falls back to the legacy provider state.
     """
+    if _codex_use_cli_auth_enabled():
+        auth_path = _codex_cli_auth_path()
+        try:
+            creds = resolve_codex_runtime_credentials()
+            return {
+                "logged_in": True,
+                "auth_store": str(auth_path),
+                "last_refresh": creds.get("last_refresh"),
+                "auth_mode": creds.get("auth_mode"),
+                "source": creds.get("source"),
+                "api_key": creds.get("api_key"),
+            }
+        except AuthError as exc:
+            return {
+                "logged_in": False,
+                "auth_store": str(auth_path),
+                "error": str(exc),
+                "code": exc.code,
+                "relogin_required": exc.relogin_required,
+            }
+
     # Check credential pool first — this is where `hermes auth` and
     # `hermes model` store device_code tokens.
     try:
@@ -4302,6 +4484,16 @@ def _login_openai_codex(
     """OpenAI Codex login via device code flow. Tokens stored in ~/.hermes/auth.json."""
 
     del args, pconfig  # kept for parity with other provider login helpers
+
+    if _codex_use_cli_auth_enabled():
+        existing = resolve_codex_runtime_credentials()
+        config_path = _update_config_for_provider("openai-codex", existing.get("base_url", DEFAULT_CODEX_BASE_URL))
+        print()
+        print("Login successful!")
+        print(f"  Auth state: {existing.get('auth_store') or _codex_cli_auth_path()}")
+        print("  Source: Codex CLI auth.json")
+        print(f"  Config updated: {config_path} (model.provider=openai-codex)")
+        return
 
     # Check for existing Hermes-owned credentials
     if not force_new_login:
