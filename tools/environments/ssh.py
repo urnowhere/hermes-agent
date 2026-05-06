@@ -179,12 +179,20 @@ class SSHEnvironment(BaseEnvironment):
 
         # Symlink staging avoids fragile GNU tar --transform rules.
         with tempfile.TemporaryDirectory(prefix="hermes-ssh-bulk-") as staging:
+            tar_entries: list[str] = []
             for host_path, remote_path in files:
-                staged = os.path.join(staging, remote_path.lstrip("/"))
+                tar_entry = remote_path.lstrip("/")
+                staged = os.path.join(staging, tar_entry)
                 os.makedirs(os.path.dirname(staged), exist_ok=True)
                 os.symlink(os.path.abspath(host_path), staged)
+                tar_entries.append(tar_entry)
 
-            tar_cmd = ["tar", "-chf", "-", "-C", staging, "."]
+            manifest_path = os.path.join(staging, ".hermes-tar-entries")
+            with open(manifest_path, "w", encoding="utf-8") as manifest:
+                manifest.write("\n".join(tar_entries))
+                manifest.write("\n")
+
+            tar_cmd = ["tar", "--no-xattrs", "-chf", "-", "-C", staging, "-T", manifest_path]
             ssh_cmd = self._build_ssh_command()
             # --no-overwrite-dir prevents tar from overwriting the mode of
             # existing directories (e.g. /home/<user>) with the staging
@@ -192,8 +200,10 @@ class SSHEnvironment(BaseEnvironment):
             # dirs which breaks sshd StrictModes (refuses authorized_keys).
             ssh_cmd.append("tar xf - --no-overwrite-dir -C /")
 
+            tar_env = os.environ.copy()
+            tar_env["COPYFILE_DISABLE"] = "1"
             tar_proc = subprocess.Popen(
-                tar_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                tar_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=tar_env
             )
             try:
                 ssh_proc = subprocess.Popen(

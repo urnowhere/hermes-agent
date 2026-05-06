@@ -162,9 +162,12 @@ class TestSSHBulkUpload:
 
         # tar: create, dereference symlinks, to stdout
         assert tar_cmd[0] == "tar"
+        assert "--no-xattrs" in tar_cmd
         assert "-chf" in tar_cmd
         assert "-" in tar_cmd  # stdout
         assert "-C" in tar_cmd
+        assert "-T" in tar_cmd
+        assert "." not in tar_cmd
 
         # ssh: extract from stdin at /, preserving existing dir modes (#17767)
         ssh_str = " ".join(ssh_cmd)
@@ -173,6 +176,54 @@ class TestSSHBulkUpload:
         assert "--no-overwrite-dir" in ssh_str
         assert "-C /" in ssh_str
         assert "testuser@example.com" in ssh_str
+
+    def test_tar_pipe_uses_manifest_and_disables_macos_metadata(self, mock_env, tmp_path):
+        """Archive only file entries and suppress macOS xattr/copyfile metadata."""
+        f1 = tmp_path / "x.txt"
+        f1.write_text("x")
+        f2 = tmp_path / "y.txt"
+        f2.write_text("y")
+
+        files = [
+            (str(f1), "/home/testuser/.hermes/cache/x.txt"),
+            (str(f2), "/home/testuser/.hermes/skills/y.txt"),
+        ]
+
+        tar_calls = []
+
+        def capture_popen(cmd, **kwargs):
+            if cmd[0] == "tar":
+                manifest_path = cmd[cmd.index("-T") + 1]
+                tar_calls.append(
+                    {
+                        "cmd": cmd,
+                        "env": kwargs.get("env", {}),
+                        "manifest": Path(manifest_path).read_text(),
+                    }
+                )
+            mock = MagicMock()
+            mock.stdout = MagicMock()
+            mock.returncode = 0
+            mock.poll.return_value = 0
+            mock.communicate.return_value = (b"", b"")
+            mock.stderr = MagicMock()
+            mock.stderr.read.return_value = b""
+            return mock
+
+        with patch.object(subprocess, "run",
+                          return_value=subprocess.CompletedProcess([], 0)), \
+             patch.object(subprocess, "Popen", side_effect=capture_popen):
+            mock_env._ssh_bulk_upload(files)
+
+        assert len(tar_calls) == 1
+        assert tar_calls[0]["env"]["COPYFILE_DISABLE"] == "1"
+        assert "--no-xattrs" in tar_calls[0]["cmd"]
+        assert "-T" in tar_calls[0]["cmd"]
+        assert "." not in tar_calls[0]["cmd"]
+        assert tar_calls[0]["manifest"].splitlines() == [
+            "home/testuser/.hermes/cache/x.txt",
+            "home/testuser/.hermes/skills/y.txt",
+        ]
 
     def test_mkdir_failure_raises(self, mock_env, tmp_path):
         """mkdir failure should raise RuntimeError before tar pipe."""
@@ -443,7 +494,7 @@ class TestSSHBulkUploadWiring:
 
         monkeypatch.setattr(ssh_env, "FileSyncManager", FakeSyncManager)
 
-        env = SSHEnvironment(host="h", user="u")
+        SSHEnvironment(host="h", user="u")
 
         assert "bulk_upload_fn" in captured_kwargs
         assert captured_kwargs["bulk_upload_fn"] is not None
