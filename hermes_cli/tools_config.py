@@ -299,6 +299,32 @@ TOOL_CATEGORIES = {
                     {"key": "FIRECRAWL_API_URL", "prompt": "Your Firecrawl instance URL (e.g., http://localhost:3002)"},
                 ],
             },
+            {
+                "name": "SearXNG",
+                "badge": "free · self-hosted",
+                "tag": "Metasearch — point at any SearXNG instance",
+                "web_backend": "searxng",
+                "env_vars": [
+                    {"key": "SEARXNG_BASE_URL", "prompt": "SearXNG base URL (e.g., http://localhost:8080)"},
+                ],
+            },
+            {
+                "name": "Brave Search (Free Tier)",
+                "badge": "free tier",
+                "tag": "Brave Search API on the free tier",
+                "web_backend": "brave-free",
+                "env_vars": [
+                    {"key": "BRAVE_FREE_KEY", "prompt": "Brave Search API key", "url": "https://brave.com/search/api/"},
+                ],
+            },
+            {
+                "name": "DuckDuckGo (ddgs)",
+                "badge": "free · no key",
+                "tag": "DuckDuckGo via the ddgs Python library — ratelimited",
+                "web_backend": "ddgs",
+                "env_vars": [],
+                "pip_install": "ddgs",
+            },
         ],
     },
     "image_gen": {

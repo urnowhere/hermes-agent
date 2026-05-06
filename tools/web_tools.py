@@ -126,17 +126,23 @@ def _get_backend() -> str:
     keys manually without running setup.
     """
     configured = (_load_web_config().get("backend") or "").lower().strip()
-    if configured in ("parallel", "firecrawl", "tavily", "exa"):
+    if configured in ("parallel", "firecrawl", "tavily", "exa",
+                       "searxng", "brave-free", "ddgs"):
         return configured
 
     # Fallback for manual / legacy config — pick the highest-priority
     # available backend. Firecrawl also counts as available when the managed
     # tool gateway is configured for Nous subscribers.
+    # Free-tier backends (searxng / brave-free / ddgs) are tried last so
+    # paid configurations are unaffected by their presence.
     backend_candidates = (
         ("firecrawl", _has_env("FIRECRAWL_API_KEY") or _has_env("FIRECRAWL_API_URL") or _is_tool_gateway_ready()),
         ("parallel", _has_env("PARALLEL_API_KEY")),
         ("tavily", _has_env("TAVILY_API_KEY")),
         ("exa", _has_env("EXA_API_KEY")),
+        ("searxng", _has_searxng_config()),
+        ("brave-free", _has_brave_free_config()),
+        ("ddgs", _has_ddgs_available()),
     )
     for backend, available in backend_candidates:
         if available:
@@ -155,6 +161,12 @@ def _is_backend_available(backend: str) -> bool:
         return check_firecrawl_api_key()
     if backend == "tavily":
         return _has_env("TAVILY_API_KEY")
+    if backend == "searxng":
+        return _has_searxng_config()
+    if backend == "brave-free":
+        return _has_brave_free_config()
+    if backend == "ddgs":
+        return _has_ddgs_available()
     return False
 
 # ─── Firecrawl Client ────────────────────────────────────────────────────────
@@ -997,6 +1009,120 @@ def _exa_extract(urls: List[str]) -> List[Dict[str, Any]]:
     return results
 
 
+# ─── SearXNG / Brave / ddgs backends ─────────────────────────────────────────
+# Tried last in the fallback chain so paid backends are unaffected.
+
+def _has_searxng_config() -> bool:
+    return bool(os.getenv("SEARXNG_BASE_URL", "").strip())
+
+
+def _has_brave_free_config() -> bool:
+    return bool(os.getenv("BRAVE_FREE_KEY", "").strip())
+
+
+def _has_ddgs_available() -> bool:
+    try:
+        import ddgs  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _searxng_search(query: str, limit: int = 5) -> dict:
+    import httpx
+    base = os.getenv("SEARXNG_BASE_URL", "").rstrip("/")
+    if not base:
+        raise RuntimeError("SEARXNG_BASE_URL not configured")
+    r = httpx.get(
+        f"{base}/search",
+        params={"q": query, "format": "json"},
+        timeout=20.0,
+        headers={"Accept": "application/json"},
+    )
+    r.raise_for_status()
+    data = r.json()
+    web_results = []
+    for i, item in enumerate(data.get("results", [])[:limit]):
+        web_results.append({
+            "title": item.get("title", "") or "",
+            "url": item.get("url", "") or "",
+            "description": item.get("content", "") or "",
+            "position": i + 1,
+        })
+    return {"success": True, "data": {"web": web_results}}
+
+
+def _brave_free_search(query: str, limit: int = 5) -> dict:
+    import httpx
+    api_key = os.getenv("BRAVE_FREE_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("BRAVE_FREE_KEY not configured")
+    r = httpx.get(
+        "https://api.search.brave.com/res/v1/web/search",
+        headers={"X-Subscription-Token": api_key, "Accept": "application/json"},
+        params={"q": query, "count": min(max(limit, 1), 20)},
+        timeout=20.0,
+    )
+    r.raise_for_status()
+    data = r.json()
+    web_results = []
+    for i, item in enumerate(data.get("web", {}).get("results", [])[:limit]):
+        web_results.append({
+            "title": item.get("title", "") or "",
+            "url": item.get("url", "") or "",
+            "description": item.get("description", "") or "",
+            "position": i + 1,
+        })
+    return {"success": True, "data": {"web": web_results}}
+
+
+def _ddgs_search(query: str, limit: int = 5) -> dict:
+    try:
+        from ddgs import DDGS  # type: ignore
+    except ImportError:
+        raise RuntimeError("ddgs package not installed; pip install ddgs")
+    web_results: list = []
+    with DDGS() as d:
+        for i, r in enumerate(d.text(query, max_results=limit)):
+            web_results.append({
+                "title": r.get("title", "") or "",
+                "url": r.get("href", "") or r.get("url", "") or "",
+                "description": r.get("body", "") or "",
+                "position": i + 1,
+            })
+            if i + 1 >= limit:
+                break
+    return {"success": True, "data": {"web": web_results}}
+
+
+def _lynx_extract(urls: List[str]) -> List[Dict[str, Any]]:
+    """Extract via the ``lynx`` text browser. Requires lynx on PATH.
+
+    Used as the extract path when the active backend is searxng / brave-free / ddgs.
+    """
+    import shutil
+    import subprocess as _sp
+    if not shutil.which("lynx"):
+        raise RuntimeError("lynx not installed (apt install lynx OR brew install lynx)")
+    out: List[Dict[str, Any]] = []
+    for url in urls[:5]:
+        try:
+            proc = _sp.run(
+                ["lynx", "-dump", "-nolist", "-width", "120", url],
+                capture_output=True, text=True, timeout=30,
+            )
+            text = (proc.stdout or "").strip()
+            out.append({
+                "url": url,
+                "title": "",
+                "content": text,
+                "char_count": len(text),
+            })
+        except Exception as e:
+            out.append({"url": url, "title": "", "content": "", "error": str(e)})
+    return out
+
+
 # ─── Parallel Search & Extract Helpers ────────────────────────────────────────
 
 def _parallel_search(query: str, limit: int = 5) -> dict:
@@ -1165,6 +1291,36 @@ def web_search_tool(query: str, limit: int = 5) -> str:
             _debug.save()
             return result_json
 
+        if backend == "searxng":
+            logger.info("SearXNG search: '%s' (limit: %d)", query, limit)
+            response_data = _searxng_search(query, limit)
+            debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
+            result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
+            debug_call_data["final_response_size"] = len(result_json)
+            _debug.log_call("web_search_tool", debug_call_data)
+            _debug.save()
+            return result_json
+
+        if backend == "brave-free":
+            logger.info("Brave free search: '%s' (limit: %d)", query, limit)
+            response_data = _brave_free_search(query, limit)
+            debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
+            result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
+            debug_call_data["final_response_size"] = len(result_json)
+            _debug.log_call("web_search_tool", debug_call_data)
+            _debug.save()
+            return result_json
+
+        if backend == "ddgs":
+            logger.info("DuckDuckGo (ddgs) search: '%s' (limit: %d)", query, limit)
+            response_data = _ddgs_search(query, limit)
+            debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
+            result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
+            debug_call_data["final_response_size"] = len(result_json)
+            _debug.log_call("web_search_tool", debug_call_data)
+            _debug.save()
+            return result_json
+
         logger.info("Searching the web for: '%s' (limit: %d)", query, limit)
 
         response = _get_firecrawl_client().search(
@@ -1299,6 +1455,10 @@ async def web_extract_tool(
                     "include_images": False,
                 })
                 results = _normalize_tavily_documents(raw, fallback_url=safe_urls[0] if safe_urls else "")
+            elif backend in ("searxng", "brave-free", "ddgs"):
+                # Free-tier search backends use lynx for content extraction.
+                logger.info("lynx extract (free-tier backend %s): %d URL(s)", backend, len(safe_urls))
+                results = _lynx_extract(safe_urls)
             else:
                 # ── Firecrawl extraction ──
                 # Determine requested formats for Firecrawl v2
