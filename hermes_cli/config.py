@@ -863,7 +863,7 @@ DEFAULT_CONFIG = {
     # limit (OpenAI 4096, xAI 15000, MiniMax 10000, ElevenLabs 5k-40k model-aware,
     # Gemini 5000, Edge 5000, Mistral 4000, NeuTTS/KittenTTS 2000).
     "tts": {
-        "provider": "edge",  # "edge" (free) | "elevenlabs" (premium) | "openai" | "xai" | "minimax" | "mistral" | "gemini" | "neutts" (local) | "kittentts" (local) | "piper" (local)
+        "provider": "edge",  # "edge" (free) | "elevenlabs" (premium) | "openai" | "xai" | "minimax" | "mistral" | "gemini" | "neutts" (local) | "kittentts" (local) | "piper" (local) | "voicebox" (local)
         "edge": {
             "voice": "en-US-AriaNeural",
             # Popular: AriaNeural, JennyNeural, AndrewNeural, BrianNeural, SoniaNeural
@@ -905,6 +905,16 @@ DEFAULT_CONFIG = {
             # "noise_w_scale": 0.8,
             # "volume": 1.0,
             # "normalize_audio": True,
+        },
+        "voicebox": {
+            "base_url": "http://127.0.0.1:17493",
+            "profile_id": "",
+            "engine": "kokoro",
+            "model_size": None,
+            "max_chunk_chars": 800,
+            "crossfade_ms": 50,
+            "normalize": True,
+            "language": "en",
         },
     },
     

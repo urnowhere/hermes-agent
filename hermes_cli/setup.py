@@ -1096,6 +1096,7 @@ def _setup_tts_provider(config: dict):
         "gemini": "Google Gemini TTS",
         "neutts": "NeuTTS",
         "kittentts": "KittenTTS",
+        "voicebox": "Voicebox (local TTS)",
     }
     current_label = provider_labels.get(current_provider, current_provider)
 
@@ -1120,9 +1121,10 @@ def _setup_tts_provider(config: dict):
             "Google Gemini TTS (30 prebuilt voices, prompt-controllable, needs API key)",
             "NeuTTS (local on-device, free, ~300MB model download)",
             "KittenTTS (local on-device, free, lightweight ~25-80MB ONNX)",
+            "Voicebox (local-first cloned/preset voices — no API key needed)",
         ]
     )
-    providers.extend(["edge", "elevenlabs", "openai", "xai", "minimax", "mistral", "gemini", "neutts", "kittentts"])
+    providers.extend(["edge", "elevenlabs", "openai", "xai", "minimax", "mistral", "gemini", "neutts", "kittentts", "voicebox"])
     choices.append(f"Keep current ({current_label})")
     keep_current_idx = len(choices) - 1
     idx = prompt_choice("Select TTS provider:", choices, keep_current_idx)
@@ -1270,6 +1272,53 @@ def _setup_tts_provider(config: dict):
             else:
                 print_info("Skipping install. Set tts.provider to 'kittentts' after installing manually.")
                 selected = "edge"
+
+    elif selected == "voicebox":
+        import requests
+        vb_url = prompt("Voicebox base URL", default="http://127.0.0.1:17493").strip()
+        if not vb_url:
+            vb_url = "http://127.0.0.1:17493"
+        vb_url = vb_url.rstrip("/")
+        try:
+            resp = requests.get(f"{vb_url}/profiles", timeout=5)
+            if resp.status_code == 200:
+                profiles = resp.json()
+                if isinstance(profiles, list) and profiles:
+                    print()
+                    print_info("Available Voicebox profiles:")
+                    for i, p in enumerate(profiles):
+                        name = p.get("name", "Unknown")
+                        pid = p.get("id", "")
+                        default_engine = p.get("default_engine", "")
+                        print(f"  {i + 1}. {name} (engine: {default_engine}) — {pid}")
+                    print()
+                    profile_idx = prompt_choice("Select a profile:", [p.get("name", "Unknown") for p in profiles], 0)
+                    selected_profile = profiles[profile_idx]
+                    profile_id = selected_profile.get("id", "")
+                    default_engine = selected_profile.get("default_engine", "kokoro")
+                else:
+                    print_warning("Voicebox returned no profiles.")
+                    profile_id = ""
+                    default_engine = "kokoro"
+            else:
+                print_warning(f"Voicebox returned HTTP {resp.status_code}. Is the server running?")
+                profile_id = ""
+                default_engine = "kokoro"
+        except Exception as e:
+            print_warning(f"Could not reach Voicebox at {vb_url}: {e}")
+            profile_id = ""
+            default_engine = "kokoro"
+
+        engine = prompt("Voicebox engine", default=default_engine).strip() or "kokoro"
+        if "tts" not in config:
+            config["tts"] = {}
+        config["tts"]["voicebox"] = {
+            "base_url": vb_url,
+            "profile_id": profile_id,
+            "engine": engine,
+        }
+        save_config(config)
+        print_success(f"Voicebox configured: {vb_url} (engine: {engine})")
 
     # Save the selection
     if "tts" not in config:

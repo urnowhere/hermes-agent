@@ -149,6 +149,12 @@ DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1"
 DEFAULT_GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
 DEFAULT_GEMINI_TTS_VOICE = "Kore"
 DEFAULT_GEMINI_TTS_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+DEFAULT_VOICEBOX_BASE_URL = "http://127.0.0.1:17493"
+DEFAULT_VOICEBOX_ENGINE = "kokoro"
+DEFAULT_VOICEBOX_MAX_CHUNK_CHARS = 800
+DEFAULT_VOICEBOX_CROSSFADE_MS = 50
+DEFAULT_VOICEBOX_LANGUAGE = "en"
+DEFAULT_VOICEBOX_POLL_TIMEOUT = 120
 # PCM output specs for Gemini TTS (fixed by the API)
 GEMINI_TTS_SAMPLE_RATE = 24000
 GEMINI_TTS_CHANNELS = 1
@@ -178,6 +184,7 @@ PROVIDER_MAX_TEXT_LENGTH: Dict[str, int] = {
     "neutts": 2000,       # local model, quality falls off on long text
     "kittentts": 2000,    # local 25MB model
     "piper": 5000,        # local VITS model, phoneme-based; practical cap
+    "voicebox": 50000,    # per API schema maxLength for text field
 }
 
 # ElevenLabs caps vary by model_id. https://elevenlabs.io/docs/overview/models
@@ -324,6 +331,7 @@ BUILTIN_TTS_PROVIDERS = frozenset({
     "neutts",
     "kittentts",
     "piper",
+    "voicebox",
 })
 
 DEFAULT_COMMAND_TTS_TIMEOUT_SECONDS = 120
@@ -1219,6 +1227,138 @@ def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]
 
 
 # ===========================================================================
+# Provider: Voicebox (local TTS server)
+# ===========================================================================
+
+def _check_voicebox_available(tts_config: Dict[str, Any]) -> bool:
+    """Check if the configured Voicebox server is reachable."""
+    import requests
+    vb_config = _get_provider_section(tts_config, "voicebox")
+    base_url = str(vb_config.get("base_url") or DEFAULT_VOICEBOX_BASE_URL).strip().rstrip("/")
+    try:
+        resp = requests.get(f"{base_url}/profiles", timeout=5)
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def _generate_voicebox(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
+    """Generate audio using a local Voicebox TTS server.
+
+    Voicebox uses an async polling API:
+      1. POST /generate to submit the job
+      2. GET /history/{id} to poll until completed/failed
+      3. GET /audio/{id} to download the WAV output
+
+    The caller handles conversion to MP3 / Opus afterward.
+    """
+    import requests
+
+    vb_config = _get_provider_section(tts_config, "voicebox")
+    base_url = str(vb_config.get("base_url") or DEFAULT_VOICEBOX_BASE_URL).strip().rstrip("/")
+    profile_id = str(vb_config.get("profile_id", "")).strip()
+    if not profile_id:
+        raise ValueError(
+            "Voicebox profile_id is not configured. "
+            "Run 'hermes setup tts' or set tts.voicebox.profile_id in config.yaml."
+        )
+
+    engine = str(vb_config.get("engine") or DEFAULT_VOICEBOX_ENGINE).strip() or DEFAULT_VOICEBOX_ENGINE
+    max_chunk_chars = int(vb_config.get("max_chunk_chars", DEFAULT_VOICEBOX_MAX_CHUNK_CHARS))
+    crossfade_ms = int(vb_config.get("crossfade_ms", DEFAULT_VOICEBOX_CROSSFADE_MS))
+    normalize = bool(vb_config.get("normalize", True))
+    language = str(vb_config.get("language") or DEFAULT_VOICEBOX_LANGUAGE).strip() or DEFAULT_VOICEBOX_LANGUAGE
+
+    # Submit generation job
+    payload: Dict[str, Any] = {
+        "profile_id": profile_id,
+        "text": text,
+        "language": language,
+        "engine": engine,
+        "max_chunk_chars": max_chunk_chars,
+        "crossfade_ms": crossfade_ms,
+        "normalize": normalize,
+    }
+    # Omit null optional fields to keep the payload clean
+    for optional_key in ("model_size", "seed", "instruct", "personality", "effects_chain"):
+        value = vb_config.get(optional_key)
+        if value is not None:
+            payload[optional_key] = value
+
+    resp = requests.post(
+        f"{base_url}/generate",
+        headers={"Content-Type": "application/json"},
+        json=payload,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    job = resp.json()
+    generation_id = job.get("id")
+    if not generation_id:
+        raise RuntimeError(f"Voicebox /generate did not return an id: {job}")
+
+    # Poll for completion
+    poll_timeout = int(vb_config.get("poll_timeout", DEFAULT_VOICEBOX_POLL_TIMEOUT))
+    poll_interval = 1.0
+    elapsed = 0.0
+    while elapsed < poll_timeout:
+        status_resp = requests.get(f"{base_url}/history/{generation_id}", timeout=10)
+        status_resp.raise_for_status()
+        status_data = status_resp.json()
+        status = status_data.get("status", "").lower()
+        if status == "completed":
+            break
+        if status in ("failed", "error"):
+            error_msg = status_data.get("error") or "unknown error"
+            raise RuntimeError(f"Voicebox generation failed: {error_msg}")
+        import time
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+    else:
+        raise RuntimeError(f"Voicebox generation timed out after {poll_timeout}s")
+
+    # Download audio (WAV)
+    audio_resp = requests.get(f"{base_url}/audio/{generation_id}", timeout=30)
+    audio_resp.raise_for_status()
+
+    # Write WAV to a temp path, then convert if needed
+    wav_path = output_path
+    if not output_path.lower().endswith(".wav"):
+        wav_path = output_path.rsplit(".", 1)[0] + ".wav"
+
+    with open(wav_path, "wb") as f:
+        f.write(audio_resp.content)
+
+    # Convert to target format (same pattern as NeuTTS/Gemini)
+    if wav_path != output_path:
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg:
+            if output_path.lower().endswith(".ogg"):
+                cmd = [
+                    ffmpeg, "-i", wav_path,
+                    "-acodec", "libopus", "-ac", "1",
+                    "-b:a", "64k", "-vbr", "off",
+                    "-y", "-loglevel", "error",
+                    output_path,
+                ]
+            else:
+                cmd = [ffmpeg, "-i", wav_path, "-y", "-loglevel", "error", output_path]
+            result = subprocess.run(cmd, capture_output=True, timeout=30)
+            if result.returncode != 0:
+                stderr = result.stderr.decode("utf-8", errors="ignore")[:300]
+                raise RuntimeError(f"ffmpeg conversion failed: {stderr}")
+            os.remove(wav_path)
+        else:
+            logger.warning(
+                "ffmpeg not found; writing raw WAV to %s (extension may be misleading)",
+                output_path,
+            )
+            os.rename(wav_path, output_path)
+
+    return output_path
+
+
+# ===========================================================================
 # NeuTTS (local, on-device TTS via neutts_cli)
 # ===========================================================================
 
@@ -1701,6 +1841,10 @@ def text_to_speech_tool(
             logger.info("Generating speech with Piper (local)...")
             _generate_piper_tts(text, file_str, tts_config)
 
+        elif provider == "voicebox":
+            logger.info("Generating speech with Voicebox (local TTS server)...")
+            _generate_voicebox(text, file_str, tts_config)
+
         else:
             # Default: Edge TTS (free), with NeuTTS as local fallback
             edge_available = True
@@ -1794,7 +1938,7 @@ def text_to_speech_tool(
 # ===========================================================================
 # Requirements check
 # ===========================================================================
-def check_tts_requirements() -> bool:
+def check_tts_requirements(tts_config: Optional[Dict[str, Any]] = None) -> bool:
     """
     Check if at least one TTS provider is available.
 
@@ -1842,6 +1986,8 @@ def check_tts_requirements() -> bool:
     if _check_kittentts_available():
         return True
     if _check_piper_available():
+        return True
+    if _check_voicebox_available(tts_config or {}):
         return True
     return False
 
