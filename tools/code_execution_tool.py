@@ -47,6 +47,16 @@ import uuid
 _IS_WINDOWS = platform.system() == "Windows"
 from typing import Any, Dict, List, Optional
 
+# 2026-05-05: redact secrets from tool-arg previews before they enter logs/UI.
+# Closes the PAT-leak gap where args_preview captured raw GitHub PATs in curl
+# commands. redact_sensitive_text(force=True) bypasses the global enable flag
+# because args_preview is a security boundary that must never expose tokens.
+try:
+    from agent.redact import redact_sensitive_text
+except ImportError:  # pragma: no cover — keep tool importable in trimmed envs
+    def redact_sensitive_text(text, *, force=False, code_file=False):
+        return text
+
 # Availability gate: UDS requires a POSIX OS
 logger = logging.getLogger(__name__)
 
@@ -433,7 +443,7 @@ def _rpc_server_loop(
                 call_duration = time.monotonic() - call_start
 
                 # Log for observability
-                args_preview = str(tool_args)[:80]
+                args_preview = redact_sensitive_text(str(tool_args), force=True)[:80]
                 tool_call_log.append({
                     "tool": tool_name,
                     "args_preview": args_preview,
@@ -708,7 +718,7 @@ def _rpc_poll_loop(
                     call_duration = time.monotonic() - call_start
                     tool_call_log.append({
                         "tool": tool_name,
-                        "args_preview": str(tool_args)[:80],
+                        "args_preview": redact_sensitive_text(str(tool_args), force=True)[:80],
                         "duration": round(call_duration, 2),
                     })
 
