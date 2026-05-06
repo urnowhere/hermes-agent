@@ -8826,21 +8826,9 @@ class GatewayRunner:
 
     async def _handle_rollback_command(self, event: MessageEvent) -> str:
         """Handle /rollback command — list or restore filesystem checkpoints."""
-        from tools.checkpoint_manager import CheckpointManager, format_checkpoint_list
+        from tools.checkpoint_manager import format_checkpoint_list
 
-        # Read checkpoint config from config.yaml
-        cp_cfg = {}
-        try:
-            import yaml as _y
-            _cfg_path = _hermes_home / "config.yaml"
-            if _cfg_path.exists():
-                with open(_cfg_path, encoding="utf-8") as _f:
-                    _data = _y.safe_load(_f) or {}
-                cp_cfg = _data.get("checkpoints", {})
-                if isinstance(cp_cfg, bool):
-                    cp_cfg = {"enabled": cp_cfg}
-        except Exception:
-            pass
+        cp_cfg = self._load_checkpoint_config()
 
         if not cp_cfg.get("enabled", False):
             return (
@@ -8848,10 +8836,7 @@ class GatewayRunner:
                 "Enable in config.yaml:\n```\ncheckpoints:\n  enabled: true\n```"
             )
 
-        mgr = CheckpointManager(
-            enabled=True,
-            max_snapshots=cp_cfg.get("max_snapshots", 50),
-        )
+        mgr = self._build_checkpoint_manager(cp_cfg)
 
         cwd = os.getenv("TERMINAL_CWD", str(Path.home()))
         arg = event.get_command_args().strip()
@@ -8882,6 +8867,63 @@ class GatewayRunner:
                 f"A pre-rollback snapshot was saved automatically."
             )
         return f"❌ {result['error']}"
+
+    @staticmethod
+    def _load_checkpoint_config() -> dict:
+        """Read checkpoint settings from config.yaml."""
+        cp_cfg = {}
+        try:
+            import yaml as _y
+
+            _cfg_path = _hermes_home / "config.yaml"
+            if _cfg_path.exists():
+                with open(_cfg_path, encoding="utf-8") as _f:
+                    _data = _y.safe_load(_f) or {}
+                cp_cfg = _data.get("checkpoints", {})
+                if isinstance(cp_cfg, bool):
+                    cp_cfg = {"enabled": cp_cfg}
+        except Exception:
+            pass
+        return cp_cfg if isinstance(cp_cfg, dict) else {}
+
+    @staticmethod
+    def _build_checkpoint_manager(cp_cfg: dict):
+        """Construct a checkpoint manager for gateway-triggered snapshots."""
+        from tools.checkpoint_manager import CheckpointManager
+
+        return CheckpointManager(
+            enabled=True,
+            max_snapshots=cp_cfg.get("max_snapshots", 50),
+        )
+
+    def _checkpoint_tool_start(
+        self,
+        _tool_call_id: Optional[str],
+        function_name: str,
+        function_args: Optional[dict],
+    ) -> None:
+        """Mirror CLI checkpoint snapshots for gateway file-mutating tools."""
+        if function_name not in ("write_file", "patch"):
+            return
+
+        cp_cfg = self._load_checkpoint_config()
+        if not cp_cfg.get("enabled", False):
+            return
+
+        try:
+            file_path = str((function_args or {}).get("path") or "").strip()
+            if not file_path:
+                return
+            mgr = self._build_checkpoint_manager(cp_cfg)
+            work_dir = mgr.get_working_dir_for_path(file_path)
+            mgr.ensure_checkpoint(work_dir, f"before {function_name}")
+        except Exception as exc:
+            logger.debug(
+                "Gateway checkpoint hook failed for %s(%s): %s",
+                function_name,
+                (function_args or {}).get("path"),
+                exc,
+            )
 
     async def _handle_background_command(self, event: MessageEvent) -> str:
         """Handle /background <prompt> — run a prompt in a separate background session.
@@ -13402,6 +13444,7 @@ class GatewayRunner:
             # Per-message state — callbacks and reasoning config change every
             # turn and must not be baked into the cached agent constructor.
             agent.tool_progress_callback = progress_callback if tool_progress_enabled else None
+            agent.tool_start_callback = self._checkpoint_tool_start
             agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None
             agent.stream_delta_callback = _stream_delta_cb
             agent.interim_assistant_callback = _interim_assistant_cb if _want_interim_messages else None
