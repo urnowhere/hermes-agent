@@ -1,0 +1,5 @@
+name: muninn
+version: 1.0.0
+description: "Muninn semantic memory — Disco Elysium architecture with peer activation, facet routing, and dreaming consolidation."
+pip_dependencies:
+  - httpx
