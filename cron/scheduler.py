@@ -27,7 +27,7 @@ except ImportError:
     except ImportError:
         msvcrt = None
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 # Add parent directory to path for imports BEFORE repo-level imports.
 # Without this, standalone invocations (e.g. after `hermes update` reloads
@@ -1007,6 +1007,8 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     if prompt is None:
         logger.info("Job '%s': script produced no output, skipping AI call.", job_name)
         return True, "", SILENT_MARKER, None
+    _invoked_at: Optional[float] = _hermes_now().timestamp()
+    _skill_outcome: Optional[Tuple[bool, Optional[str]]] = None
     origin = _resolve_origin(job)
     _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -1363,12 +1365,43 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
 """
         
         logger.info("Job '%s' completed successfully", job_name)
+        # Bug C fix (Pass 2 v2 follow-up, 2026-05-04): the agent-side
+        # `success` flag captures "agent returned a non-FATAL response"
+        # but NOT "the actual cron work happened". For Build #87 telemetry
+        # to be honest, scan the captured output/response for known
+        # scaffolding-failure markers and downgrade the skill outcome to
+        # FALSE when any fire. This pollutes the cron's `last_status`
+        # less than raising — the agent did respond — but keeps the EMA
+        # comparison honest.
+        _failure_markers = (
+            "skill not found, skipping",
+            "Skill(s) not found and skipped",
+            "Blocked: script path resolves outside",
+            "permission denied",
+            "security check failed",
+        )
+        _scan_blob = (output or "") + "\n" + (final_response or "")
+        _hit_marker = next(
+            (m for m in _failure_markers if m.lower() in _scan_blob.lower()),
+            None,
+        )
+        if _hit_marker:
+            logger.warning(
+                "Job '%s': scaffolding failure detected in output (%r) — "
+                "downgrading skill outcome to failure for telemetry honesty.",
+                job_name, _hit_marker,
+            )
+            _skill_outcome = (False, f"scaffolding failure: {_hit_marker}"[:200])
+        else:
+            _skill_outcome = (True, "complete")
         return True, output, final_response, None
-        
+
     except Exception as e:
         error_msg = f"{type(e).__name__}: {str(e)}"
         logger.exception("Job '%s' failed: %s", job_name, error_msg)
-        
+        # error_msg is always a non-empty f-string here; slice unconditionally.
+        _skill_outcome = (False, error_msg[:200])
+
         output = f"""# Cron Job: {job_name} (FAILED)
 
 **Job ID:** {job_id}
@@ -1401,6 +1434,71 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         for _var_name in _cron_delivery_vars:
             _VAR_MAP[_var_name].set("")
         if _session_db:
+            # Skill-invocation EMA hook (build #87): one row per
+            # skill listed on this cron job, with cost/duration/tokens
+            # sourced from the agent session row. Slash-command and
+            # ad-hoc skill_view calls are not tracked here in v1.
+            if _skill_outcome is not None and _invoked_at is not None:
+                _job_skills = [
+                    str(_s).strip() for _s in (job.get("skills") or [])
+                    if str(_s).strip()
+                ]
+                if _job_skills:
+                    try:
+                        _completed_at = _hermes_now().timestamp()
+                        _sess = _session_db.get_session(_cron_session_id) or {}
+                        _success_flag, _end_reason_val = _skill_outcome
+                        _duration = _completed_at - _invoked_at
+                        # P2.1 — multi-skill cost split. When a cron loads
+                        # >1 skill, the underlying agent run is shared and
+                        # the session-row cost is therefore SHARED. Splitting
+                        # evenly avoids each skill's ema_cost_per_call double-
+                        # counting the same dollars. Single-skill crons (the
+                        # current analyzer pattern) get exclusive attribution
+                        # unchanged. v2 candidate: introduce an `attribution`
+                        # column to make this explicit per-row.
+                        _n_skills = max(1, len(_job_skills))
+                        _split = lambda v: (
+                            (v / _n_skills) if _n_skills > 1 and v is not None
+                            else v
+                        )
+                        _split_int = lambda v: (
+                            (int(v) // _n_skills) if _n_skills > 1
+                            else int(v)
+                        )
+                        _shared_cost = _split(_sess.get("estimated_cost_usd"))
+                        _shared_in = _split_int(_sess.get("input_tokens") or 0)
+                        _shared_out = _split_int(_sess.get("output_tokens") or 0)
+                        _shared_cr = _split_int(_sess.get("cache_read_tokens") or 0)
+                        _shared_cw = _split_int(_sess.get("cache_write_tokens") or 0)
+                        for _sn in _job_skills:
+                            _session_db.record_skill_invocation(
+                                skill_name=_sn,
+                                invoked_at=_invoked_at,
+                                session_id=_cron_session_id,
+                                cron_id=job_id,
+                                completed_at=_completed_at,
+                                duration_seconds=_duration,
+                                model=_sess.get("model"),
+                                provider=_sess.get("billing_provider"),
+                                input_tokens=_shared_in,
+                                output_tokens=_shared_out,
+                                cache_read_tokens=_shared_cr,
+                                cache_write_tokens=_shared_cw,
+                                estimated_cost_usd=_shared_cost,
+                                success=_success_flag,
+                                end_reason=_end_reason_val,
+                            )
+                    except (Exception, KeyboardInterrupt) as e:
+                        # Build #87 telemetry foundation: a silent failure here
+                        # means the dashboard goes blank with no signal of
+                        # the regression. Surface at WARNING so the operator
+                        # sees it; keep the swallow so a broken writer can't
+                        # fail a cron run.
+                        logger.warning(
+                            "Job '%s': failed to record skill invocations: %s",
+                            job_id, e, exc_info=True,
+                        )
             try:
                 _session_db.end_session(_cron_session_id, "cron_complete")
             except (Exception, KeyboardInterrupt) as e:
