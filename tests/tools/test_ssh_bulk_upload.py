@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -10,6 +11,17 @@ import pytest
 from tools.environments import ssh as ssh_env
 from tools.environments.file_sync import quoted_mkdir_command, unique_parent_dirs
 from tools.environments.ssh import SSHEnvironment
+
+
+def _has_gnu_tar() -> bool:
+    """Return True iff `tar` on PATH is GNU tar (needed for --keep-directory-symlink)."""
+    try:
+        out = subprocess.run(
+            ["tar", "--version"], capture_output=True, text=True, timeout=5
+        )
+        return out.returncode == 0 and "GNU tar" in out.stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
 
 
 def _mock_proc(*, returncode=0, poll_return=0, communicate_return=(b"", b""),
@@ -167,10 +179,12 @@ class TestSSHBulkUpload:
         assert "-C" in tar_cmd
 
         # ssh: extract from stdin at /, preserving existing dir modes (#17767)
+        # and existing directory symlinks (e.g. ~/.hermes -> /data/hermes).
         ssh_str = " ".join(ssh_cmd)
         assert "ssh" in ssh_str
         assert "tar xf -" in ssh_str
         assert "--no-overwrite-dir" in ssh_str
+        assert "--keep-directory-symlink" in ssh_str
         assert "-C /" in ssh_str
         assert "testuser@example.com" in ssh_str
 
@@ -517,3 +531,74 @@ class TestSSHBulkUploadEdgeCases:
 
         mock_tar.kill.assert_called_once()
         mock_tar.wait.assert_called_once()
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="tar pipe is POSIX-only")
+@pytest.mark.skipif(not _has_gnu_tar(),
+                    reason="--keep-directory-symlink requires GNU tar >= 1.32")
+class TestSSHBulkUploadDirectorySymlinkPreservation:
+    """Regression test for the ~/.hermes directory-symlink clobber bug.
+
+    The production extract uses two flags: --no-overwrite-dir (mode
+    protection) and --keep-directory-symlink (symlink protection).
+    This test exercises the second flag against a real tar binary.
+
+    Without --keep-directory-symlink, a directory entry in the archive
+    whose path on the destination resolves to an existing symlink-to-
+    directory causes GNU tar to unlink the symlink and create a real
+    directory there — wiping the link target.
+    """
+
+    @pytest.mark.parametrize("extra_flags,symlink_should_survive", [
+        (["--no-overwrite-dir", "--keep-directory-symlink"], True),
+        (["--no-overwrite-dir"],                              False),
+    ])
+    def test_directory_symlink_preserved(self, tmp_path, extra_flags,
+                                         symlink_should_survive):
+        # Layout:
+        #   tmp_path/dest/foo/bar  -> tmp_path/real_target  (directory symlink)
+        #   tar archive contains:  foo/bar/inside.txt  (file inside the symlinked dir)
+        # Extract into tmp_path/dest with `extra_flags`.
+        # With production flags: dest/foo/bar must remain a symlink and
+        # inside.txt must land in real_target/.
+        # Without --keep-directory-symlink: the symlink is replaced by a
+        # real directory (this is the bug being fixed).
+        real_target = tmp_path / "real_target"
+        real_target.mkdir()
+        dest = tmp_path / "dest"
+        (dest / "foo").mkdir(parents=True)
+        os.symlink(real_target, dest / "foo" / "bar")
+
+        staging = tmp_path / "staging"
+        (staging / "foo" / "bar").mkdir(parents=True)
+        (staging / "foo" / "bar" / "inside.txt").write_text("payload")
+
+        tar_c = subprocess.Popen(
+            ["tar", "-cf", "-", "-C", str(staging), "."],
+            stdout=subprocess.PIPE,
+        )
+        try:
+            extract = subprocess.run(
+                ["tar", "xf", "-", *extra_flags, "-C", str(dest)],
+                stdin=tar_c.stdout, capture_output=True, timeout=10,
+            )
+        finally:
+            tar_c.stdout.close()
+            tar_c.wait(timeout=5)
+        assert extract.returncode == 0, extract.stderr.decode(errors="replace")
+
+        link_path = dest / "foo" / "bar"
+        assert link_path.exists(), "extraction destination must still exist"
+        if symlink_should_survive:
+            assert link_path.is_symlink(), (
+                "production flags must preserve the directory symlink"
+            )
+            assert (real_target / "inside.txt").read_text() == "payload", (
+                "file must be written through the symlink to the real target"
+            )
+        else:
+            assert not link_path.is_symlink(), (
+                "negative case: without --keep-directory-symlink, the "
+                "symlink should have been replaced (proves the bug is real)"
+            )

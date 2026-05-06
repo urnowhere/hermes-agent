@@ -186,11 +186,16 @@ class SSHEnvironment(BaseEnvironment):
 
             tar_cmd = ["tar", "-chf", "-", "-C", staging, "."]
             ssh_cmd = self._build_ssh_command()
-            # --no-overwrite-dir prevents tar from overwriting the mode of
-            # existing directories (e.g. /home/<user>) with the staging
-            # directory's mode.  Without this, a umask 002 produces 0775
-            # dirs which breaks sshd StrictModes (refuses authorized_keys).
-            ssh_cmd.append("tar xf - --no-overwrite-dir -C /")
+            # Two flags, two distinct concerns — keep both:
+            #   --no-overwrite-dir: don't overwrite the mode of existing
+            #     real directories (e.g. /home/<user>). umask 002 → 0775
+            #     breaks sshd StrictModes (refuses authorized_keys).
+            #   --keep-directory-symlink: when a path in the archive
+            #     resolves to an existing symlink-to-directory on the
+            #     remote (e.g. ~/.hermes -> /data/hermes), write through
+            #     the symlink instead of unlinking it and creating a real
+            #     directory. Requires GNU tar >= 1.32.
+            ssh_cmd.append("tar xf - --no-overwrite-dir --keep-directory-symlink -C /")
 
             tar_proc = subprocess.Popen(
                 tar_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
