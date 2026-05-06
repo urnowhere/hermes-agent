@@ -102,6 +102,28 @@ function terminalLineHeightForWidth(layoutWidthPx: number): number {
   return layoutWidthPx < 1024 ? 1.02 : 1.15;
 }
 
+function isVisualViewportScaled(): boolean {
+  return (window.visualViewport?.scale ?? 1) > 1.01;
+}
+
+function shouldLetBrowserHandleWheel(ev: WheelEvent): boolean {
+  if (ev.ctrlKey || ev.metaKey || isVisualViewportScaled()) return true;
+
+  const scrollingElement =
+    document.scrollingElement ?? document.documentElement;
+  const canPanHorizontally =
+    scrollingElement.scrollWidth > scrollingElement.clientWidth;
+  const isHorizontalPan = Math.abs(ev.deltaX) > Math.abs(ev.deltaY);
+
+  return canPanHorizontally && isHorizontalPan;
+}
+
+function keepBrowserViewportWheelOutOfTerminal(ev: WheelEvent): void {
+  if (shouldLetBrowserHandleWheel(ev)) {
+    ev.stopPropagation();
+  }
+}
+
 export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -298,7 +320,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
           // original keydown event's activation. Log to aid debugging.
           console.warn("[dashboard clipboard] OSC 52 write failed:", err.message);
         });
-      } catch (e) {
+      } catch {
         console.warn("[dashboard clipboard] malformed OSC 52 payload");
       }
       return true;
@@ -364,6 +386,13 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     term.loadAddon(new WebLinksAddon());
 
     term.open(host);
+    term.attachCustomWheelEventHandler(
+      (ev) => !shouldLetBrowserHandleWheel(ev),
+    );
+    host.addEventListener("wheel", keepBrowserViewportWheelOutOfTerminal, {
+      capture: true,
+      passive: true,
+    });
 
     // WebGL draws from a texture atlas sized with device pixels. On phones and
     // in DevTools device mode that often produces *visually* much larger cells
@@ -605,6 +634,9 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         "scroll",
         scheduleSyncTerminalMetrics,
       );
+      host.removeEventListener("wheel", keepBrowserViewportWheelOutOfTerminal, {
+        capture: true,
+      });
       ro.disconnect();
       if (hostSyncRaf) cancelAnimationFrame(hostSyncRaf);
       if (settleRaf1) cancelAnimationFrame(settleRaf1);

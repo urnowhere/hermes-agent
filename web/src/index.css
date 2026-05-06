@@ -87,7 +87,7 @@ html {
   letter-spacing: var(--theme-letter-spacing);
   height: 100dvh;
   max-height: 100dvh;
-  overflow: hidden;
+  overflow: auto;
 }
 
 body {
@@ -95,7 +95,7 @@ body {
   min-height: 0;
   height: 100%;
   margin: 0;
-  overflow: hidden;
+  overflow: auto;
 }
 
 code, kbd, pre, samp, .font-mono, .font-mono-ui {
@@ -114,7 +114,7 @@ code, kbd, pre, samp, .font-mono, .font-mono-ui {
   min-height: 0;
   height: 100%;
   max-height: 100%;
-  overflow: hidden;
+  overflow: visible;
 }
 
 /* Nousnet's hermes-agent layout bumps `small` and `code` to readable
@@ -226,4 +226,3 @@ code { font-size: 0.875rem; }
 :root[style*="--theme-asset-bg:"] .theme-default-filler {
   display: none;
 }
-
