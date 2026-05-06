@@ -8966,8 +8966,8 @@ class AIAgent:
         }
 
     @staticmethod
-    def _tool_batch_all_end_turn(tool_calls) -> bool:
-        """Return True when every tool in the batch can legally end the turn."""
+    def _tool_batch_has_end_turn(tool_calls) -> bool:
+        """Return True when any tool in the batch can legally end the turn."""
         if not tool_calls:
             return False
         from tools.registry import registry
@@ -8975,9 +8975,9 @@ class AIAgent:
         for tool_call in tool_calls:
             function = getattr(tool_call, "function", None)
             name = getattr(function, "name", None)
-            if not name or not registry.is_end_turn(name):
-                return False
-        return True
+            if name and registry.is_end_turn(name):
+                return True
+        return False
 
     def _needs_thinking_reasoning_pad(self) -> bool:
         """Return True when the active provider enforces reasoning_content echo-back.
@@ -13514,7 +13514,7 @@ class AIAgent:
                     # flag so it can fire again if the model goes empty on
                     # a LATER tool round.
                     self._post_tool_empty_retried = False
-                    self._last_tool_calls_all_end_turn = self._tool_batch_all_end_turn(
+                    self._last_tool_calls_all_end_turn = self._tool_batch_has_end_turn(
                         assistant_message.tool_calls
                     )
 
