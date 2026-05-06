@@ -1550,6 +1550,22 @@ OPTIONAL_ENV_VARS = {
         "category": "provider",
         "advanced": True,
     },
+    "CROFAI_API_KEY": {
+        "description": "CrofAI API key",
+        "prompt": "CrofAI API key",
+        "url": "https://crof.ai/",
+        "password": True,
+        "category": "provider",
+        "advanced": True,
+    },
+    "CROFAI_BASE_URL": {
+        "description": "CrofAI base URL override",
+        "prompt": "CrofAI base URL (leave empty for default)",
+        "url": None,
+        "password": False,
+        "category": "provider",
+        "advanced": True,
+    },
     "MINIMAX_API_KEY": {
         "description": "MiniMax API key (international)",
         "prompt": "MiniMax API key",
