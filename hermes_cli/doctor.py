@@ -1195,9 +1195,28 @@ def run_doctor(args):
             _label = _pname.ljust(20)
             # Some providers (like MiniMax) don't support /models endpoint
             if not _supports_health_check:
-                print(f"  {color('✓', Colors.GREEN)} {_label} {color('(key configured)', Colors.DIM)}")
+                sys.stdout.write(f"  {color('✓', Colors.GREEN)} {_label} {color('(key configured)', Colors.DIM)}\n")
                 continue
-            print(f"  Checking {_pname} API...", end="", flush=True)
+            # Alibaba dedicated-tier endpoints (Token Plan / Coding Plan)
+            # — token-plan.<region>.maas.aliyuncs.com and
+            #   coding-intl.dashscope.aliyuncs.com — don't expose /models.
+            _base_for_skip = os.getenv(_base_env, "") if _base_env else ""
+            _default_for_skip = _default_url or ""
+            _alibaba_dedicated_hosts = ("maas.aliyuncs.com",)
+            _alibaba_dedicated_prefixes = ("coding-intl.", "coding.")
+            def _is_alibaba_dedicated(url: str) -> bool:
+                if not url:
+                    return False
+                if any(base_url_host_matches(url, h) for h in _alibaba_dedicated_hosts):
+                    return True
+                from urllib.parse import urlparse
+                host = (urlparse(url if "://" in url else f"//{url}").hostname or "").lower()
+                return any(host.startswith(p) for p in _alibaba_dedicated_prefixes)
+            if _is_alibaba_dedicated(_base_for_skip) or _is_alibaba_dedicated(_default_for_skip):
+                sys.stdout.write(f"  {color('✓', Colors.GREEN)} {_label} {color('(key configured — dedicated plan, /models n/a)', Colors.DIM)}\n")
+                continue
+            sys.stdout.write(f"  Checking {_pname} API...")
+            sys.stdout.flush()
             try:
                 import httpx
                 _base = os.getenv(_base_env, "") if _base_env else ""
@@ -1220,6 +1239,12 @@ def run_doctor(args):
                 }
                 if base_url_host_matches(_base, "api.kimi.com"):
                     _headers["User-Agent"] = "claude-code/0.1.0"
+                # Google AI Studio (Gemini) rejects Bearer auth for API keys —
+                # it only accepts OAuth tokens via Authorization. API keys must
+                # be passed via x-goog-api-key header (or ?key= query param).
+                if base_url_host_matches(_url or "", "generativelanguage.googleapis.com"):
+                    _headers.pop("Authorization", None)
+                    _headers["x-goog-api-key"] = _key
                 _resp = httpx.get(
                     _url,
                     headers=_headers,
