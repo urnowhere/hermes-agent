@@ -90,6 +90,7 @@ COMMON_LOCAL_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")
 
 GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 OPENAI_BASE_URL = os.getenv("STT_OPENAI_BASE_URL", "https://api.openai.com/v1")
+OPENAI_TIMEOUT = float(os.getenv("STT_OPENAI_TIMEOUT", "30"))
 XAI_STT_BASE_URL = os.getenv("XAI_STT_BASE_URL", "https://api.x.ai/v1")
 
 SUPPORTED_FORMATS = {".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm", ".ogg", ".aac", ".flac"}
@@ -594,7 +595,7 @@ def _transcribe_groq(file_path: str, model_name: str) -> Dict[str, Any]:
 def _transcribe_openai(file_path: str, model_name: str) -> Dict[str, Any]:
     """Transcribe using OpenAI Whisper API (paid)."""
     try:
-        api_key, base_url = _resolve_openai_audio_client_config()
+        api_key, base_url, timeout = _resolve_openai_audio_client_config()
     except ValueError as exc:
         return {
             "success": False,
@@ -612,7 +613,12 @@ def _transcribe_openai(file_path: str, model_name: str) -> Dict[str, Any]:
 
     try:
         from openai import OpenAI, APIError, APIConnectionError, APITimeoutError
-        client = OpenAI(api_key=api_key, base_url=base_url, timeout=30, max_retries=0)
+        client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout,
+            max_retries=0,
+        )
         try:
             with open(file_path, "rb") as audio_file:
                 transcription = client.audio.transcriptions.create(
@@ -868,18 +874,18 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
     }
 
 
-def _resolve_openai_audio_client_config() -> tuple[str, str]:
+def _resolve_openai_audio_client_config() -> tuple[str, str, float]:
     """Return direct OpenAI audio config or a managed gateway fallback."""
     stt_config = _load_stt_config()
     openai_cfg = stt_config.get("openai", {})
     cfg_api_key = openai_cfg.get("api_key", "")
     cfg_base_url = openai_cfg.get("base_url", "")
     if cfg_api_key:
-        return cfg_api_key, (cfg_base_url or OPENAI_BASE_URL)
+        return cfg_api_key, (cfg_base_url or OPENAI_BASE_URL), OPENAI_TIMEOUT
 
     direct_api_key = resolve_openai_audio_api_key()
     if direct_api_key:
-        return direct_api_key, OPENAI_BASE_URL
+        return direct_api_key, OPENAI_BASE_URL, OPENAI_TIMEOUT
 
     managed_gateway = resolve_managed_tool_gateway("openai-audio")
     if managed_gateway is None:
@@ -888,8 +894,10 @@ def _resolve_openai_audio_client_config() -> tuple[str, str]:
             message += ", and the managed OpenAI audio gateway is unavailable"
         raise ValueError(message)
 
-    return managed_gateway.nous_user_token, urljoin(
-        f"{managed_gateway.gateway_origin.rstrip('/')}/", "v1"
+    return (
+        managed_gateway.nous_user_token,
+        urljoin(f"{managed_gateway.gateway_origin.rstrip('/')}/", "v1"),
+        OPENAI_TIMEOUT,
     )
 
 

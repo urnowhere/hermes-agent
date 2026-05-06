@@ -5,6 +5,7 @@ dispatch.  All external dependencies (faster_whisper, openai) are mocked.
 """
 
 import json
+import importlib
 import os
 import tempfile
 from pathlib import Path
@@ -21,6 +22,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def _clear_openai_env(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("STT_OPENAI_TIMEOUT", raising=False)
 
 
 class TestGetProvider:
@@ -168,6 +170,21 @@ class TestTranscribeOpenAI:
         assert result["success"] is False
         assert "VOICE_TOOLS_OPENAI_KEY" in result["error"]
 
+    def test_resolve_client_config_includes_timeout(self, monkeypatch):
+        monkeypatch.setenv("VOICE_TOOLS_OPENAI_KEY", "sk-test")
+        monkeypatch.setenv("STT_OPENAI_TIMEOUT", "95.5")
+
+        from tools import transcription_tools
+        transcription_tools = importlib.reload(transcription_tools)
+        try:
+            api_key, base_url, timeout = transcription_tools._resolve_openai_audio_client_config()
+            assert api_key == "sk-test"
+            assert base_url == "https://api.openai.com/v1"
+            assert timeout == 95.5
+        finally:
+            monkeypatch.delenv("STT_OPENAI_TIMEOUT", raising=False)
+            importlib.reload(transcription_tools)
+
     def test_successful_transcription(self, monkeypatch, tmp_path):
         monkeypatch.setenv("VOICE_TOOLS_OPENAI_KEY", "sk-test")
         audio_file = tmp_path / "test.ogg"
@@ -177,12 +194,35 @@ class TestTranscribeOpenAI:
         mock_client.audio.transcriptions.create.return_value = "Hello from OpenAI"
 
         with patch("tools.transcription_tools._HAS_OPENAI", True), \
-             patch("openai.OpenAI", return_value=mock_client):
+             patch("openai.OpenAI", return_value=mock_client) as mock_openai:
             from tools.transcription_tools import _transcribe_openai
             result = _transcribe_openai(str(audio_file), "whisper-1")
 
         assert result["success"] is True
         assert result["transcript"] == "Hello from OpenAI"
+        assert mock_openai.call_args.kwargs["timeout"] == 30.0
+
+    def test_openai_timeout_env_override(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("VOICE_TOOLS_OPENAI_KEY", "sk-test")
+        monkeypatch.setenv("STT_OPENAI_TIMEOUT", "95.5")
+        audio_file = tmp_path / "test.ogg"
+        audio_file.write_bytes(b"fake audio")
+
+        mock_client = MagicMock()
+        mock_client.audio.transcriptions.create.return_value = "Hello from OpenAI"
+
+        from tools import transcription_tools
+        transcription_tools = importlib.reload(transcription_tools)
+        try:
+            with patch.object(transcription_tools, "_HAS_OPENAI", True), \
+                 patch("openai.OpenAI", return_value=mock_client) as mock_openai:
+                result = transcription_tools._transcribe_openai(str(audio_file), "whisper-1")
+
+            assert result["success"] is True
+            assert mock_openai.call_args.kwargs["timeout"] == 95.5
+        finally:
+            monkeypatch.delenv("STT_OPENAI_TIMEOUT", raising=False)
+            importlib.reload(transcription_tools)
 
 
 # ---------------------------------------------------------------------------
