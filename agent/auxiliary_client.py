@@ -1707,7 +1707,9 @@ def _is_payment_error(exc: Exception) -> bool:
     if status in (402, 429, None):
         if any(kw in err_lower for kw in ("credits", "insufficient funds",
                                            "can only afford", "billing",
-                                           "payment required")):
+                                           "payment required",
+                                           "usage_limit_reached",
+                                           "usage limit")):
             return True
     return False
 
@@ -1885,6 +1887,28 @@ def _refresh_provider_credentials(provider: str) -> bool:
     return False
 
 
+def _read_config_fallback_providers() -> List[Dict[str, Any]]:
+    """Read user-configured fallback providers from config.yaml.
+
+    Reads both ``fallback_providers`` (list) and the legacy ``fallback_model``
+    (single-entry dict), returning a combined list of valid entries.
+    """
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        entries = cfg.get("fallback_providers") or []
+        result = [
+            p for p in entries
+            if isinstance(p, dict) and p.get("provider") and p.get("model")
+        ]
+        fb = cfg.get("fallback_model")
+        if isinstance(fb, dict) and fb.get("provider") and fb.get("model"):
+            result.append(fb)
+        return result
+    except Exception:
+        return []
+
+
 def _try_payment_fallback(
     failed_provider: str,
     task: str = None,
@@ -1924,6 +1948,29 @@ def _try_payment_fallback(
             )
             return client, model, label
         tried.append(label)
+
+    # Also try user-configured fallback_providers (config.yaml fallback_providers list).
+    # These are checked after the standard chain because they require specific API keys
+    # that the standard chain entries may also satisfy.
+    for fb_entry in _read_config_fallback_providers():
+        fb_provider = str(fb_entry.get("provider", "")).strip()
+        fb_model = str(fb_entry.get("model", "")).strip()
+        _fb_lower = fb_provider.lower()
+        if not fb_provider or _fb_lower in skip_labels or _alias_to_label.get(_fb_lower, _fb_lower) in skip_chain_labels:
+            tried.append(fb_provider)
+            continue
+        try:
+            fb_client, fb_resolved = resolve_provider_client(fb_provider, fb_model)
+        except Exception:
+            tried.append(fb_provider)
+            continue
+        if fb_client is not None:
+            logger.info(
+                "Auxiliary %s: %s on %s — falling back to config fallback_providers entry %s (%s)",
+                task or "call", reason, failed_provider, fb_provider, fb_resolved or fb_model,
+            )
+            return fb_client, fb_resolved or fb_model, fb_provider
+        tried.append(fb_provider)
 
     logger.warning(
         "Auxiliary %s: %s on %s and no fallback available (tried: %s)",

@@ -24,6 +24,7 @@ from agent.auxiliary_client import (
     _normalize_aux_provider,
     _try_payment_fallback,
     _resolve_auto,
+    _read_config_fallback_providers,
 )
 
 
@@ -789,6 +790,88 @@ class TestIsPaymentError:
         exc = Exception("connection reset")
         assert _is_payment_error(exc) is False
 
+    def test_429_usage_limit_reached_type(self):
+        """429 with 'usage_limit_reached' type should be treated as a payment error."""
+        exc = Exception(
+            "Error code: 429 - {'error': {'type': 'usage_limit_reached', "
+            "'message': 'The usage limit has been reached', 'plan_type': 'plus'}}"
+        )
+        exc.status_code = 429
+        assert _is_payment_error(exc) is True
+
+    def test_429_usage_limit_phrase(self):
+        """'usage limit' phrasing from other providers should be treated as payment error."""
+        exc = Exception("429: usage limit exceeded for this billing period")
+        exc.status_code = 429
+        assert _is_payment_error(exc) is True
+
+    def test_429_plain_rate_limit_still_not_payment(self):
+        """Standard rate-limit 429 without limit/credit keywords must stay False."""
+        exc = Exception("Rate limit exceeded, please slow down")
+        exc.status_code = 429
+        assert _is_payment_error(exc) is False
+
+
+class TestReadConfigFallbackProviders:
+    """_read_config_fallback_providers reads fallback_providers from config."""
+
+    def test_returns_valid_entries(self):
+        cfg = {
+            "fallback_providers": [
+                {"provider": "deepseek-v4", "model": "deepseek-v4-flash"},
+                {"provider": "my-provider", "model": "my-model"},
+            ]
+        }
+        with patch("agent.auxiliary_client.load_config", return_value=cfg, create=True), \
+             patch("hermes_cli.config.load_config", return_value=cfg):
+            result = _read_config_fallback_providers()
+        assert len(result) == 2
+        assert result[0]["provider"] == "deepseek-v4"
+
+    def test_skips_entries_without_provider_or_model(self):
+        cfg = {
+            "fallback_providers": [
+                {"provider": "ok-provider", "model": "ok-model"},
+                {"model": "no-provider"},
+                {"provider": "no-model"},
+                {},
+            ]
+        }
+        with patch("hermes_cli.config.load_config", return_value=cfg):
+            result = _read_config_fallback_providers()
+        assert len(result) == 1
+        assert result[0]["provider"] == "ok-provider"
+
+    def test_returns_empty_on_missing_key(self):
+        with patch("hermes_cli.config.load_config", return_value={}):
+            result = _read_config_fallback_providers()
+        assert result == []
+
+    def test_returns_empty_on_load_error(self):
+        with patch("hermes_cli.config.load_config", side_effect=Exception("no config")):
+            result = _read_config_fallback_providers()
+        assert result == []
+
+    def test_includes_legacy_fallback_model(self):
+        cfg = {
+            "fallback_providers": [],
+            "fallback_model": {"provider": "openrouter", "model": "anthropic/claude-sonnet-4"},
+        }
+        with patch("hermes_cli.config.load_config", return_value=cfg):
+            result = _read_config_fallback_providers()
+        assert len(result) == 1
+        assert result[0]["provider"] == "openrouter"
+        assert result[0]["model"] == "anthropic/claude-sonnet-4"
+
+    def test_ignores_malformed_fallback_model(self):
+        cfg = {
+            "fallback_providers": [],
+            "fallback_model": {"provider": "openrouter"},  # missing model
+        }
+        with patch("hermes_cli.config.load_config", return_value=cfg):
+            result = _read_config_fallback_providers()
+        assert result == []
+
 
 class TestIsRateLimitError:
     """_is_rate_limit_error detects 429 rate-limit errors warranting fallback."""
@@ -917,6 +1000,53 @@ class TestTryPaymentFallback:
         assert client is None
         assert model is None
         assert label == ""
+
+    def test_falls_back_to_config_fallback_providers_when_standard_chain_empty(self):
+        """When standard chain yields nothing, try config fallback_providers."""
+        mock_client = MagicMock()
+        fb_entries = [{"provider": "deepseek-v4", "model": "deepseek-v4-flash"}]
+        with patch("agent.auxiliary_client._try_openrouter", return_value=(None, None)), \
+             patch("agent.auxiliary_client._try_nous", return_value=(None, None)), \
+             patch("agent.auxiliary_client._try_custom_endpoint", return_value=(None, None)), \
+             patch("agent.auxiliary_client._try_codex", return_value=(None, None)), \
+             patch("agent.auxiliary_client._resolve_api_key_provider", return_value=(None, None)), \
+             patch("agent.auxiliary_client._read_main_provider", return_value="openai-codex"), \
+             patch("agent.auxiliary_client._read_config_fallback_providers", return_value=fb_entries), \
+             patch("agent.auxiliary_client.resolve_provider_client",
+                   return_value=(mock_client, "deepseek-v4-flash")):
+            client, model, label = _try_payment_fallback("openai-codex", task="compression")
+        assert client is mock_client
+        assert model == "deepseek-v4-flash"
+        assert label == "deepseek-v4"
+
+    def test_skips_config_fallback_provider_matching_failed_provider(self):
+        """Don't retry the same provider (or its alias) that already failed."""
+        mock_client = MagicMock()
+        wrong_client = MagicMock()
+        # "codex" failed → skip_chain_labels contains "openai-codex" via alias mapping.
+        # A config entry with provider="openai-codex" must therefore be skipped.
+        fb_entries = [
+            {"provider": "openai-codex", "model": "gpt-5-codex"},  # alias match — must skip
+            {"provider": "deepseek", "model": "deepseek-v4-flash"},  # different — must succeed
+        ]
+
+        def _fake_resolve(provider, model):
+            if provider == "openai-codex":
+                return (wrong_client, "gpt-5-codex")
+            return (mock_client, "deepseek-v4-flash")
+
+        with patch("agent.auxiliary_client._try_openrouter", return_value=(None, None)), \
+             patch("agent.auxiliary_client._try_nous", return_value=(None, None)), \
+             patch("agent.auxiliary_client._try_custom_endpoint", return_value=(None, None)), \
+             patch("agent.auxiliary_client._try_codex", return_value=(None, None)), \
+             patch("agent.auxiliary_client._resolve_api_key_provider", return_value=(None, None)), \
+             patch("agent.auxiliary_client._read_main_provider", return_value="codex"), \
+             patch("agent.auxiliary_client._read_config_fallback_providers", return_value=fb_entries), \
+             patch("agent.auxiliary_client.resolve_provider_client", side_effect=_fake_resolve):
+            client, model, label = _try_payment_fallback("codex", task="compression")
+        assert client is mock_client
+        assert model == "deepseek-v4-flash"
+        assert label == "deepseek"
 
 
 class TestCallLlmPaymentFallback:
