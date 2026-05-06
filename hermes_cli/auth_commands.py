@@ -425,6 +425,24 @@ def auth_list_command(args) -> None:
         print()
 
 
+def auth_switch_command(args) -> None:
+    provider = _normalize_provider(getattr(args, "provider", ""))
+    target = getattr(args, "target", None)
+    pool = load_pool(provider)
+    index, matched, error = pool.resolve_target(target)
+    if matched is None or index is None:
+        raise SystemExit(f"{error} Provider: {provider}.")
+    active = pool.activate_index(index)
+    if active is None:
+        raise SystemExit(f'No credential matching "{target}" for provider {provider}.')
+    print(f"Switched {provider} active credential to #{1} ({active.label})")
+    strategy = get_pool_strategy(provider)
+    if strategy in {STRATEGY_ROUND_ROBIN, STRATEGY_RANDOM}:
+        print(
+            f"Note: {provider} uses {strategy}; explicit active ordering may be overridden by that selection strategy."
+        )
+
+
 def auth_remove_command(args) -> None:
     provider = _normalize_provider(getattr(args, "provider", ""))
     target = getattr(args, "target", None)
@@ -701,6 +719,9 @@ def auth_command(args) -> None:
         return
     if action == "remove":
         auth_remove_command(args)
+        return
+    if action == "switch":
+        auth_switch_command(args)
         return
     if action == "reset":
         auth_reset_command(args)
