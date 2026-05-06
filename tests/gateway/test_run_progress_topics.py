@@ -422,6 +422,21 @@ class CommentaryAgent:
         }
 
 
+class LifecycleStatusAgent:
+    def __init__(self, **kwargs):
+        self.status_callback = kwargs.get("status_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        if self.status_callback:
+            self.status_callback("lifecycle", "Primary model failed — switching to fallback.")
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
 class PreviewedResponseAgent:
     def __init__(self, **kwargs):
         self.interim_assistant_callback = kwargs.get("interim_assistant_callback")
@@ -626,6 +641,37 @@ async def test_run_agent_tool_progress_does_not_control_interim_commentary(monke
 
     assert result.get("already_sent") is not True
     assert not any(call["content"] == "I'll inspect the repo first." for call in adapter.sent)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_surfaces_lifecycle_messages_by_default(monkeypatch, tmp_path):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        LifecycleStatusAgent,
+        session_id="sess-lifecycle-default-on",
+    )
+
+    await asyncio.sleep(0)
+
+    assert result.get("final_response") == "done"
+    assert any("switching to fallback" in call["content"] for call in adapter.sent)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_suppresses_lifecycle_messages_when_disabled(monkeypatch, tmp_path):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        LifecycleStatusAgent,
+        session_id="sess-lifecycle-disabled",
+        config_data={"display": {"lifecycle_messages": False}},
+    )
+
+    await asyncio.sleep(0)
+
+    assert result.get("final_response") == "done"
+    assert not any("switching to fallback" in call["content"] for call in adapter.sent)
 
 
 @pytest.mark.asyncio

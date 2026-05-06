@@ -1,5 +1,4 @@
 """Tests for gateway.display_config — per-platform display/verbosity resolver."""
-import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +52,12 @@ class TestResolveDisplaySetting:
         config = {}
         # Unknown platform, no config → global default "all"
         assert resolve_display_setting(config, "unknown_platform", "tool_progress") == "all"
+
+    def test_lifecycle_messages_default_on(self):
+        """Lifecycle status messages are shown unless explicitly disabled."""
+        from gateway.display_config import resolve_display_setting
+
+        assert resolve_display_setting({}, "telegram", "lifecycle_messages") is True
 
     def test_fallback_parameter_used_last(self):
         """Explicit fallback is used when nothing else matches."""
@@ -156,6 +161,13 @@ class TestYAMLNormalisation:
         config = {"display": {"platforms": {"telegram": {"show_reasoning": "true"}}}}
         assert resolve_display_setting(config, "telegram", "show_reasoning") is True
 
+    def test_lifecycle_messages_string_false(self):
+        """String 'false' is normalised to bool False."""
+        from gateway.display_config import resolve_display_setting
+
+        config = {"display": {"platforms": {"telegram": {"lifecycle_messages": "false"}}}}
+        assert resolve_display_setting(config, "telegram", "lifecycle_messages") is False
+
     def test_tool_preview_length_string(self):
         """String numbers are normalised to int."""
         from gateway.display_config import resolve_display_setting
@@ -255,7 +267,7 @@ class TestConfigMigration:
         import hermes_cli.config as cfg_mod
         importlib.reload(cfg_mod)
 
-        result = cfg_mod.migrate_config(interactive=False, quiet=True)
+        cfg_mod.migrate_config(interactive=False, quiet=True)
         # Re-read config
         updated = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         platforms = updated.get("display", {}).get("platforms", {})

@@ -12801,6 +12801,10 @@ class GatewayRunner:
                 default=True,
             )
         )
+        lifecycle_messages_enabled = (
+            source.platform != Platform.WEBHOOK
+            and bool(resolve_display_setting(user_config, platform_key, "lifecycle_messages", True))
+        )
         
         # Queue for progress messages (thread-safe)
         progress_queue = queue.Queue() if tool_progress_enabled else None
@@ -13413,7 +13417,7 @@ class GatewayRunner:
             agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None
             agent.stream_delta_callback = _stream_delta_cb
             agent.interim_assistant_callback = _interim_assistant_cb if _want_interim_messages else None
-            agent.status_callback = _status_callback_sync
+            agent.status_callback = _status_callback_sync if lifecycle_messages_enabled else None
             agent.reasoning_config = reasoning_config
             agent.service_tier = self._service_tier
             agent.request_overrides = turn_route.get("request_overrides") or {}
