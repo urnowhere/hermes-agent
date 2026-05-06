@@ -12811,6 +12811,8 @@ class GatewayRunner:
         # several tools exceed the threshold.
         long_tool_hint_fired = [False]
         _LONG_TOOL_THRESHOLD_S = 30.0
+        tool_call_count = [0]  # Total tool calls observed
+        _progress_start_ts = [0.0]  # Wall-clock start of tool activity
 
         def progress_callback(event_type: str, tool_name: str = None, preview: str = None, args: dict = None, **kwargs):
             """Callback invoked by agent on tool lifecycle events."""
@@ -12871,6 +12873,9 @@ class GatewayRunner:
             if progress_mode == "new" and tool_name == last_tool[0]:
                 return
             last_tool[0] = tool_name
+            tool_call_count[0] += 1
+            if _progress_start_ts[0] == 0.0:
+                _progress_start_ts[0] = time.monotonic()
             
             # Build progress message with primary argument preview
             from agent.display import get_tool_emoji
@@ -13102,6 +13107,10 @@ class GatewayRunner:
                             break
                     # Final edit with all remaining tools (only if editing works)
                     if can_edit and progress_lines and progress_msg_id:
+                        # Append a summary footer: tool count + elapsed time
+                        if tool_call_count[0] > 0 and _progress_start_ts[0] > 0:
+                            elapsed = time.monotonic() - _progress_start_ts[0]
+                            progress_lines.append(f"⏳ {tool_call_count[0]} tools · {elapsed:.0f}s")
                         full_text = "\n".join(progress_lines)
                         try:
                             await adapter.edit_message(
