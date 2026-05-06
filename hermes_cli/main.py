@@ -9762,7 +9762,27 @@ Examples:
             )
             cmd_info["setup_fn"](plugin_parser)
     except Exception as _exc:
-        logging.getLogger(__name__).debug("Plugin CLI discovery failed: %s", _exc)
+        logging.getLogger(__name__).debug("Memory plugin CLI discovery failed: %s", _exc)
+
+    try:
+        from hermes_cli.plugins import discover_plugins, get_plugin_manager
+
+        discover_plugins()
+        for cmd_info in get_plugin_manager()._cli_commands.values():
+            name = cmd_info["name"]
+            if name in getattr(subparsers, "choices", {}):
+                continue
+            plugin_parser = subparsers.add_parser(
+                name,
+                help=cmd_info.get("help", "Plugin command"),
+                description=cmd_info.get("description", ""),
+                formatter_class=__import__("argparse").RawDescriptionHelpFormatter,
+            )
+            cmd_info["setup_fn"](plugin_parser)
+            if cmd_info.get("handler_fn") and plugin_parser.get_default("func") is None:
+                plugin_parser.set_defaults(func=cmd_info["handler_fn"])
+    except Exception as _exc:
+        logging.getLogger(__name__).debug("General plugin CLI discovery failed: %s", _exc)
 
     # =========================================================================
     # curator command — background skill maintenance
