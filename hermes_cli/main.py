@@ -7089,6 +7089,11 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     print(f"  {stderr.splitlines()[0]}")
             sys.exit(1)
 
+        # Show fetch progress (git sends progress to stderr)
+        if fetch_result.stderr.strip():
+            for line in fetch_result.stderr.strip().splitlines():
+                print(f"  {line}")
+
         # Get current branch (returns literal "HEAD" when detached)
         result = subprocess.run(
             git_cmd + ["rev-parse", "--abbrev-ref", "HEAD"],
@@ -7120,15 +7125,9 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 check=True,
             )
         else:
-            auto_stash_ref = _stash_local_changes_if_needed(git_cmd, PROJECT_ROOT)
+            auto_stash_ref = None
 
-        prompt_for_restore = (
-            auto_stash_ref is not None
-            and not assume_yes
-            and (gateway_mode or (sys.stdin.isatty() and sys.stdout.isatty()))
-        )
-
-        # Check if there are updates
+        # Check if there are updates before stashing on main
         result = subprocess.run(
             git_cmd + ["rev-list", f"HEAD..origin/{branch}", "--count"],
             cwd=PROJECT_ROOT,
@@ -7137,6 +7136,16 @@ def _cmd_update_impl(args, gateway_mode: bool):
             check=True,
         )
         commit_count = int(result.stdout.strip())
+
+        # Only stash on main when there are actual updates to pull
+        if auto_stash_ref is None and commit_count > 0:
+            auto_stash_ref = _stash_local_changes_if_needed(git_cmd, PROJECT_ROOT)
+
+        prompt_for_restore = (
+            auto_stash_ref is not None
+            and not assume_yes
+            and (gateway_mode or (sys.stdin.isatty() and sys.stdout.isatty()))
+        )
 
         if commit_count == 0:
             _invalidate_update_cache()

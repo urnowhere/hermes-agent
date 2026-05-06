@@ -615,3 +615,83 @@ def test_cmd_update_skips_stash_restore_when_reset_fails(monkeypatch, tmp_path, 
 
     out = capsys.readouterr().out
     assert "preserved in stash" in out
+
+# ---------------------------------------------------------------------------
+# Regression: issue #3523 — no stash on main when already up to date,
+# and fetch progress output is shown
+# ---------------------------------------------------------------------------
+
+def test_cmd_update_no_stash_when_on_main_and_already_up_to_date(monkeypatch, tmp_path, capsys):
+    """When on main with no updates, no stash should be created (#3523)."""
+    _setup_update_mocks(monkeypatch, tmp_path)
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+
+    stash_calls = []
+    original_stash = hermes_main._stash_local_changes_if_needed
+
+    def tracking_stash(*a, **kw):
+        stash_calls.append(1)
+        return None
+
+    monkeypatch.setattr(hermes_main, "_stash_local_changes_if_needed", tracking_stash)
+
+    side_effect, _ = _make_update_side_effect(current_branch="main", commit_count="0")
+    monkeypatch.setattr(hermes_main.subprocess, "run", side_effect)
+
+    hermes_main.cmd_update(SimpleNamespace())
+
+    # Stash should NOT have been called when there are no updates on main
+    assert len(stash_calls) == 0
+
+    out = capsys.readouterr().out
+    assert "Already up to date" in out
+
+
+def test_cmd_update_stash_called_when_on_main_with_updates(monkeypatch, tmp_path):
+    """When on main with updates, stash should be called to protect local changes."""
+    _setup_update_mocks(monkeypatch, tmp_path)
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+
+    stash_calls = []
+    original_stash = hermes_main._stash_local_changes_if_needed
+
+    def tracking_stash(*a, **kw):
+        stash_calls.append(1)
+        return None
+
+    monkeypatch.setattr(hermes_main, "_stash_local_changes_if_needed", tracking_stash)
+
+    side_effect, _ = _make_update_side_effect(current_branch="main", commit_count="3")
+    monkeypatch.setattr(hermes_main.subprocess, "run", side_effect)
+
+    hermes_main.cmd_update(SimpleNamespace())
+
+    # Stash SHOULD have been called when there are updates on main
+    assert len(stash_calls) == 1
+
+
+def test_cmd_update_shows_fetch_progress_output(monkeypatch, tmp_path, capsys):
+    """Fetch stderr (progress output) should be printed to the user (#3523)."""
+    _setup_update_mocks(monkeypatch, tmp_path)
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+
+    def fake_run(cmd, **kwargs):
+        joined = " ".join(str(c) for c in cmd)
+        if "fetch" in joined and "origin" in joined:
+            return SimpleNamespace(
+                stdout="",
+                stderr="remote: Counting objects: 100% (42/42)\nremote: Total 42 (delta 0), reused 0 (delta 0)\n",
+                returncode=0,
+            )
+        if "rev-parse" in joined and "--abbrev-ref" in joined:
+            return SimpleNamespace(stdout="main\n", stderr="", returncode=0)
+        if "rev-list" in joined:
+            return SimpleNamespace(stdout="0\n", stderr="", returncode=0)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(hermes_main.subprocess, "run", fake_run)
+
+    hermes_main.cmd_update(SimpleNamespace())
+
+    out = capsys.readouterr().out
+    assert "Counting objects" in out
