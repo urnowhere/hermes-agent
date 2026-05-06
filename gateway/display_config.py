@@ -34,6 +34,8 @@ _GLOBAL_DEFAULTS: dict[str, Any] = {
     "tool_progress": "all",
     "show_reasoning": False,
     "tool_preview_length": 0,
+    "tool_progress_max_lines": 0,  # 0 = unlimited
+    "tool_progress_single_message": False,
     "streaming": None,  # None = follow top-level streaming config
 }
 
@@ -49,6 +51,8 @@ _TIER_HIGH = {
     "tool_progress": "all",
     "show_reasoning": False,
     "tool_preview_length": 40,
+    "tool_progress_max_lines": 0,
+    "tool_progress_single_message": False,
     "streaming": None,  # follow global
 }
 
@@ -56,6 +60,8 @@ _TIER_MEDIUM = {
     "tool_progress": "new",
     "show_reasoning": False,
     "tool_preview_length": 40,
+    "tool_progress_max_lines": 0,
+    "tool_progress_single_message": False,
     "streaming": None,
 }
 
@@ -63,6 +69,8 @@ _TIER_LOW = {
     "tool_progress": "off",
     "show_reasoning": False,
     "tool_preview_length": 40,
+    "tool_progress_max_lines": 0,
+    "tool_progress_single_message": False,
     "streaming": False,
 }
 
@@ -70,6 +78,8 @@ _TIER_MINIMAL = {
     "tool_progress": "off",
     "show_reasoning": False,
     "tool_preview_length": 0,
+    "tool_progress_max_lines": 0,
+    "tool_progress_single_message": False,
     "streaming": False,
 }
 
@@ -193,4 +203,13 @@ def _normalise(setting: str, value: Any) -> Any:
             return int(value)
         except (TypeError, ValueError):
             return 0
+    if setting == "tool_progress_max_lines":
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
+    if setting == "tool_progress_single_message":
+        if isinstance(value, str):
+            return value.lower() in ("true", "1", "yes", "on")
+        return bool(value)
     return value

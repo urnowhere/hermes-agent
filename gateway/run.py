@@ -807,6 +807,139 @@ def _platform_config_key(platform: "Platform") -> str:
     return "cli" if platform == Platform.LOCAL else platform.value
 
 
+def _trim_tool_progress_lines(lines: list[str], max_lines: int | None) -> list[str]:
+    """Return only the latest tool-progress lines when a positive cap is set."""
+    try:
+        cap = int(max_lines or 0)
+    except (TypeError, ValueError):
+        cap = 0
+    if cap <= 0 or len(lines) <= cap:
+        return list(lines)
+    return list(lines[-cap:])
+
+
+def _append_tool_progress_line(progress_lines: list[str], msg: str, *, max_lines: int | None) -> None:
+    """Append a rendered tool-progress line and enforce the configured cap."""
+    progress_lines.append(msg)
+    progress_lines[:] = _trim_tool_progress_lines(progress_lines, max_lines)
+
+
+def _reset_tool_progress_state(
+    progress_lines: list[str],
+    last_progress_msg: list[str | None],
+    repeat_count: list[int],
+    *,
+    single_message: bool,
+) -> bool:
+    """Reset per-bubble tool-progress state unless single-message mode is enabled."""
+    if single_message:
+        return False
+    progress_lines[:] = []
+    last_progress_msg[0] = None
+    repeat_count[0] = 0
+    return True
+
+
+def _resolve_tool_progress_max_lines(user_config: dict, platform_key: str) -> int:
+    """Resolve display.platforms.<platform>.tool_progress_max_lines, then global fallback."""
+    display_cfg = user_config.get("display") or {}
+    platforms = display_cfg.get("platforms") or {}
+    plat_cfg = platforms.get(platform_key) if isinstance(platforms, dict) else None
+    raw = None
+    if isinstance(plat_cfg, dict):
+        raw = plat_cfg.get("tool_progress_max_lines")
+    if raw is None:
+        raw = display_cfg.get("tool_progress_max_lines")
+    try:
+        return max(0, int(raw or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _resolve_tool_progress_cleanup(user_config: dict, platform_key: str) -> bool:
+    """Resolve whether completed tool-progress messages should be deleted."""
+    display_cfg = user_config.get("display") or {}
+    platforms = display_cfg.get("platforms") or {}
+    plat_cfg = platforms.get(platform_key) if isinstance(platforms, dict) else None
+    sentinel = object()
+    raw = sentinel
+    if isinstance(plat_cfg, dict):
+        raw = plat_cfg.get("tool_progress_cleanup", sentinel)
+    if raw is sentinel:
+        raw = display_cfg.get("tool_progress_cleanup", False)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    if isinstance(raw, str):
+        value = raw.strip().lower()
+        if value in {"1", "true", "yes", "on"}:
+            return True
+        if value in {"0", "false", "no", "off"}:
+            return False
+    return False
+
+
+async def _delete_tool_progress_message(adapter, chat_id: str, message_id: str | None, *, enabled: bool) -> bool:
+    """Best-effort deletion for a completed gateway tool-progress message."""
+    if not enabled or not adapter or not message_id:
+        return False
+    delete_fn = getattr(adapter, "delete_message", None)
+    if delete_fn is None:
+        return False
+    try:
+        deleted = bool(await delete_fn(chat_id=chat_id, message_id=message_id))
+        if deleted:
+            logger.info("tool-progress cleanup deleted message %s", message_id)
+        return deleted
+    except Exception as exc:
+        logger.debug("tool-progress cleanup failed for message %s: %s", message_id, exc)
+        return False
+
+
+async def _delete_tool_progress_messages(adapter, chat_id: str, message_ids: list[str], *, enabled: bool) -> int:
+    """Best-effort deletion for every temporary tool-progress message bubble."""
+    deleted = 0
+    seen = set()
+    for message_id in list(message_ids):
+        if not message_id or message_id in seen:
+            continue
+        seen.add(message_id)
+        if await _delete_tool_progress_message(adapter, chat_id, message_id, enabled=enabled):
+            deleted += 1
+    return deleted
+
+
+async def _finish_tool_progress_task(progress_task, progress_queue, *, timeout: float = 3.0) -> None:
+    """Ask the progress sender to drain, delete its temporary bubble, and exit.
+
+    Cancelling the task first skips normal queue processing on some event-loop
+    interleavings, so completed runs use an explicit finish sentinel and only
+    fall back to cancellation if the sender does not exit promptly.
+    """
+    if not progress_task:
+        return
+    if progress_task.done():
+        return
+    if progress_queue is not None:
+        try:
+            progress_queue.put(("__finish__",))
+        except Exception:
+            pass
+    try:
+        await asyncio.wait_for(progress_task, timeout=timeout)
+        return
+    except asyncio.TimeoutError:
+        progress_task.cancel()
+    except asyncio.CancelledError:
+        progress_task.cancel()
+        raise
+    try:
+        await progress_task
+    except asyncio.CancelledError:
+        pass
+
+
 def _load_gateway_config() -> dict:
     """Load and parse ~/.hermes/config.yaml, returning {} on any error.
 
@@ -12791,6 +12924,16 @@ class GatewayRunner:
         # so each progress line would be sent as a separate message.
         from gateway.config import Platform
         tool_progress_enabled = progress_mode != "off" and source.platform != Platform.WEBHOOK
+        progress_max_lines = _resolve_tool_progress_max_lines(user_config, platform_key)
+        progress_cleanup = _resolve_tool_progress_cleanup(user_config, platform_key)
+        progress_single_message = bool(
+            resolve_display_setting(
+                user_config,
+                platform_key,
+                "tool_progress_single_message",
+                False,
+            )
+        )
         # Natural assistant status messages are intentionally independent from
         # tool progress and token streaming. Users can keep tool_progress quiet
         # in chat platforms while opting into concise mid-turn updates.
@@ -12957,9 +13100,28 @@ class GatewayRunner:
 
             progress_lines = []      # Accumulated tool lines
             progress_msg_id = None   # ID of the progress message to edit
+            progress_msg_ids = []    # All temporary progress bubbles sent during this run
             can_edit = True          # False once an edit fails (platform doesn't support it)
             _last_edit_ts = 0.0      # Throttle edits to avoid Telegram flood control
             _PROGRESS_EDIT_INTERVAL = 1.5  # Minimum seconds between edits
+
+            async def _cleanup_progress_message() -> None:
+                nonlocal progress_msg_id, progress_msg_ids
+                if await _delete_tool_progress_messages(
+                    adapter,
+                    source.chat_id,
+                    progress_msg_ids,
+                    enabled=progress_cleanup,
+                ):
+                    progress_msg_id = None
+                    progress_msg_ids = []
+
+            def _track_progress_send_result(result) -> None:
+                nonlocal progress_msg_id
+                if result.success and result.message_id:
+                    progress_msg_id = result.message_id
+                    if result.message_id not in progress_msg_ids:
+                        progress_msg_ids.append(result.message_id)
 
             while True:
                 try:
@@ -12969,6 +13131,7 @@ class GatewayRunner:
                                 progress_queue.get_nowait()
                             except Exception:
                                 break
+                        await _cleanup_progress_message()
                         return
 
                     raw = progress_queue.get_nowait()
@@ -12989,6 +13152,23 @@ class GatewayRunner:
                     except Exception:
                         pass
 
+                    # Explicit graceful shutdown: the run completed. Leave no
+                    # permanent tool-progress bubble behind when cleanup is
+                    # enabled; this is more reliable than depending on task
+                    # cancellation timing.
+                    if isinstance(raw, tuple) and len(raw) >= 1 and raw[0] == "__finish__":
+                        if can_edit and progress_lines and progress_msg_id:
+                            try:
+                                await adapter.edit_message(
+                                    chat_id=source.chat_id,
+                                    message_id=progress_msg_id,
+                                    content="\n".join(progress_lines),
+                                )
+                            except Exception:
+                                pass
+                        await _cleanup_progress_message()
+                        return
+
                     # Handle dedup messages: update last line with repeat counter
                     if isinstance(raw, tuple) and len(raw) == 3 and raw[0] == "__dedup__":
                         _, base_msg, count = raw
@@ -13004,14 +13184,17 @@ class GatewayRunner:
                         # order. Mirrors GatewayStreamConsumer.on_segment_break
                         # on the content side. (Issue: tool + content
                         # linearization regression after PR #7885.)
-                        progress_msg_id = None
-                        progress_lines = []
-                        last_progress_msg[0] = None
-                        repeat_count[0] = 0
+                        if _reset_tool_progress_state(
+                            progress_lines,
+                            last_progress_msg,
+                            repeat_count,
+                            single_message=progress_single_message,
+                        ):
+                            progress_msg_id = None
                         continue
                     else:
                         msg = raw
-                        progress_lines.append(msg)
+                        _append_tool_progress_line(progress_lines, msg, max_lines=progress_max_lines)
 
                     # Throttle edits: batch rapid tool updates into fewer
                     # API calls to avoid hitting Telegram flood control.
@@ -13027,6 +13210,7 @@ class GatewayRunner:
                         continue
 
                     if not _run_still_current():
+                        await _cleanup_progress_message()
                         return
 
                     if can_edit and progress_msg_id is not None:
@@ -13048,7 +13232,8 @@ class GatewayRunner:
                                     adapter.name,
                                 )
                             can_edit = False
-                            await adapter.send(chat_id=source.chat_id, content=msg, metadata=_progress_metadata)
+                            result = await adapter.send(chat_id=source.chat_id, content=msg, metadata=_progress_metadata)
+                            _track_progress_send_result(result)
                     else:
                         if can_edit:
                             # First tool: send all accumulated text as new message
@@ -13057,8 +13242,7 @@ class GatewayRunner:
                         else:
                             # Editing unsupported: send just this line
                             result = await adapter.send(chat_id=source.chat_id, content=msg, metadata=_progress_metadata)
-                        if result.success and result.message_id:
-                            progress_msg_id = result.message_id
+                        _track_progress_send_result(result)
 
                     _last_edit_ts = time.monotonic()
 
@@ -13082,7 +13266,7 @@ class GatewayRunner:
                                 # Content-bubble marker during drain: close off
                                 # the current progress bubble and start a fresh
                                 # one for any tool lines that arrived after.
-                                if can_edit and progress_lines and progress_msg_id:
+                                if not progress_single_message and can_edit and progress_lines and progress_msg_id:
                                     _pending_text = "\n".join(progress_lines)
                                     try:
                                         await adapter.edit_message(
@@ -13092,12 +13276,15 @@ class GatewayRunner:
                                         )
                                     except Exception:
                                         pass
-                                progress_msg_id = None
-                                progress_lines = []
-                                last_progress_msg[0] = None
-                                repeat_count[0] = 0
+                                if _reset_tool_progress_state(
+                                    progress_lines,
+                                    last_progress_msg,
+                                    repeat_count,
+                                    single_message=progress_single_message,
+                                ):
+                                    progress_msg_id = None
                             else:
-                                progress_lines.append(raw)
+                                _append_tool_progress_line(progress_lines, raw, max_lines=progress_max_lines)
                         except Exception:
                             break
                     # Final edit with all remaining tools (only if editing works)
@@ -13111,6 +13298,7 @@ class GatewayRunner:
                             )
                         except Exception:
                             pass
+                    await _cleanup_progress_message()
                     return
                 except Exception as e:
                     logger.error("Progress message error: %s", e)
@@ -14438,9 +14626,19 @@ class GatewayRunner:
                     channel_prompt=next_channel_prompt,
                 )
         finally:
-            # Stop progress sender, interrupt monitor, and notification task
+            cleanup_cancelled = False
+            # Stop progress sender gracefully first so it can drain queued tool
+            # lines and delete the temporary progress message before the final
+            # reply is delivered. Falling straight to cancel races cleanup.
+            # If this parent task is cancelled during graceful cleanup, defer
+            # re-raising until critical sibling tasks and running-agent state
+            # have been cleaned up. Otherwise cancellation can strand monitors
+            # and leave the session marked busy.
             if progress_task:
-                progress_task.cancel()
+                try:
+                    await _finish_tool_progress_task(progress_task, progress_queue)
+                except asyncio.CancelledError:
+                    cleanup_cancelled = True
             interrupt_monitor.cancel()
             _notify_task.cancel()
 
@@ -14476,6 +14674,8 @@ class GatewayRunner:
                         await task
                     except asyncio.CancelledError:
                         pass
+            if cleanup_cancelled:
+                raise asyncio.CancelledError
 
         # If streaming already delivered the response, mark it so the
         # caller's send() is skipped (avoiding duplicate messages).

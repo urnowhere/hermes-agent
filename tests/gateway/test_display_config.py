@@ -1,5 +1,4 @@
 """Tests for gateway.display_config — per-platform display/verbosity resolver."""
-import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +162,20 @@ class TestYAMLNormalisation:
         config = {"display": {"platforms": {"slack": {"tool_preview_length": "80"}}}}
         assert resolve_display_setting(config, "slack", "tool_preview_length") == 80
 
+    def test_tool_progress_max_lines_string(self):
+        """String max line counts are normalised to non-negative int."""
+        from gateway.display_config import resolve_display_setting
+
+        config = {"display": {"platforms": {"telegram": {"tool_progress_max_lines": "5"}}}}
+        assert resolve_display_setting(config, "telegram", "tool_progress_max_lines") == 5
+
+    def test_tool_progress_single_message_string(self):
+        """String single-message setting is normalised to bool."""
+        from gateway.display_config import resolve_display_setting
+
+        config = {"display": {"platforms": {"telegram": {"tool_progress_single_message": "true"}}}}
+        assert resolve_display_setting(config, "telegram", "tool_progress_single_message") is True
+
     def test_platform_override_false_tool_progress(self):
         """Per-platform bare off → normalised."""
         from gateway.display_config import resolve_display_setting
@@ -255,7 +268,7 @@ class TestConfigMigration:
         import hermes_cli.config as cfg_mod
         importlib.reload(cfg_mod)
 
-        result = cfg_mod.migrate_config(interactive=False, quiet=True)
+        cfg_mod.migrate_config(interactive=False, quiet=True)
         # Re-read config
         updated = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         platforms = updated.get("display", {}).get("platforms", {})
