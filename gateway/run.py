@@ -6327,7 +6327,7 @@ class GatewayRunner:
                 run_generation=run_generation,
                 event_message_id=event.message_id,
                 channel_prompt=event.channel_prompt,
-                profile_name=_profile_name,
+                profile_name=profile_name,
             )
 
             # Stop persistent typing indicator now that the agent is done
