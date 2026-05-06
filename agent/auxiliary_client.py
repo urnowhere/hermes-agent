@@ -815,10 +815,12 @@ class AsyncCodexAuxiliaryClient:
 class _AnthropicCompletionsAdapter:
     """OpenAI-client-compatible adapter for Anthropic Messages API."""
 
-    def __init__(self, real_client: Any, model: str, is_oauth: bool = False):
+    def __init__(self, real_client: Any, model: str, is_oauth: bool = False,
+                 anthropic_model_family: Optional[str] = None):
         self._client = real_client
         self._model = model
         self._is_oauth = is_oauth
+        self._anthropic_model_family = anthropic_model_family
 
     def create(self, **kwargs) -> Any:
         from agent.anthropic_adapter import build_anthropic_kwargs
@@ -849,6 +851,7 @@ class _AnthropicCompletionsAdapter:
             reasoning_config=None,
             tool_choice=normalized_tool_choice,
             is_oauth=self._is_oauth,
+            anthropic_model_family=self._anthropic_model_family,
         )
         # Opus 4.7+ rejects any non-default temperature/top_p/top_k; only set
         # temperature for models that still accept it. build_anthropic_kwargs
@@ -904,9 +907,13 @@ class _AnthropicChatShim:
 class AnthropicAuxiliaryClient:
     """OpenAI-client-compatible wrapper over a native Anthropic client."""
 
-    def __init__(self, real_client: Any, model: str, api_key: str, base_url: str, is_oauth: bool = False):
+    def __init__(self, real_client: Any, model: str, api_key: str, base_url: str,
+                 is_oauth: bool = False, anthropic_model_family: Optional[str] = None):
         self._real_client = real_client
-        adapter = _AnthropicCompletionsAdapter(real_client, model, is_oauth=is_oauth)
+        adapter = _AnthropicCompletionsAdapter(
+            real_client, model, is_oauth=is_oauth,
+            anthropic_model_family=anthropic_model_family,
+        )
         self.chat = _AnthropicChatShim(adapter)
         self.api_key = api_key
         self.base_url = base_url
@@ -1544,8 +1551,32 @@ def _try_custom_endpoint() -> Tuple[Optional[Any], Optional[str]]:
                 "anthropic SDK is not installed — falling back to OpenAI-wire."
             )
             return OpenAI(api_key=custom_key, base_url=_clean_base, **_extra), model
+        # Look up anthropic_model_family override from custom_providers config.
+        # Lets opaque endpoint ids (ep-XXX, Bedrock app inference profiles) declare
+        # which Claude family they route to for capability/substring probes.
+        family_hint: Optional[str] = None
+        try:
+            from hermes_cli.config import get_compatible_custom_providers, load_config
+            _cfg = load_config()
+            _normalized_base = (custom_base or "").rstrip("/").lower()
+            for _cp in get_compatible_custom_providers(_cfg):
+                _cp_url = str(_cp.get("base_url") or "").rstrip("/").lower()
+                if _cp_url and _cp_url == _normalized_base:
+                    _models = _cp.get("models") or {}
+                    if isinstance(_models, dict):
+                        _mc = _models.get(model) or {}
+                        if isinstance(_mc, dict):
+                            _fam = _mc.get("anthropic_model_family")
+                            if isinstance(_fam, str) and _fam.strip():
+                                family_hint = _fam.strip()
+                    break
+        except Exception as _family_err:  # noqa: BLE001
+            logger.debug("auxiliary_client: family lookup skipped: %s", _family_err)
         return (
-            AnthropicAuxiliaryClient(real_client, model, custom_key, custom_base, is_oauth=False),
+            AnthropicAuxiliaryClient(
+                real_client, model, custom_key, custom_base,
+                is_oauth=False, anthropic_model_family=family_hint,
+            ),
             model,
         )
     # URL-based anthropic detection for custom endpoints that didn't set

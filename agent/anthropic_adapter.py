@@ -194,6 +194,24 @@ def _resolve_anthropic_messages_max_tokens(
     )
 
 
+def _effective_model_id(model: str, family_hint: Optional[str]) -> str:
+    """Return the model string to use for capability/substring checks.
+
+    When ``family_hint`` is set (via custom_providers config), we use it
+    in place of the real model id for capability probes.  This lets opaque
+    endpoint identifiers (e.g. AWS Bedrock application inference profiles,
+    third-party endpoint ids like ``ep-XXXX``) declare which Anthropic
+    model family they route to, so adapter logic gated on substrings like
+    ``4-6`` / ``4-7`` still fires correctly.
+
+    The hint only affects local branching inside this adapter; the real
+    ``model`` string is still what gets sent on the wire.
+    """
+    if family_hint and isinstance(family_hint, str) and family_hint.strip():
+        return family_hint.strip()
+    return model
+
+
 def _supports_adaptive_thinking(model: str) -> bool:
     """Return True for Claude 4.6+ models that support adaptive thinking."""
     return any(v in model for v in _ADAPTIVE_THINKING_SUBSTRINGS)
@@ -1762,6 +1780,7 @@ def build_anthropic_kwargs(
     base_url: str | None = None,
     fast_mode: bool = False,
     drop_context_1m_beta: bool = False,
+    anthropic_model_family: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build kwargs for anthropic.messages.create().
 
@@ -1807,12 +1826,19 @@ def build_anthropic_kwargs(
     anthropic_tools = convert_tools_to_anthropic(tools) if tools else []
 
     model = normalize_model_name(model, preserve_dots=preserve_dots)
+    # ``model_for_checks`` is the string used for capability/substring probes
+    # below — when ``anthropic_model_family`` is set (e.g. via a custom
+    # provider config that routes through an opaque endpoint id such as
+    # ``ep-XXXX`` or a Bedrock application inference profile), we
+    # dispatch adapter logic against the declared family instead of the
+    # opaque id.  The actual ``model`` string still goes on the wire.
+    model_for_checks = _effective_model_id(model, anthropic_model_family)
     # effective_max_tokens = output cap for this call (≠ total context window)
     # Use the resolver helper so non-positive values (negative ints,
     # fractional floats, NaN, non-numeric) fail locally with a clear error
     # rather than 400-ing at the Anthropic API. See openclaw/openclaw#66664.
     effective_max_tokens = _resolve_anthropic_messages_max_tokens(
-        max_tokens, model, context_length=context_length
+        max_tokens, model_for_checks, context_length=context_length
     )
 
     # Clamp output cap to fit inside the total context window.
@@ -1911,10 +1937,10 @@ def build_anthropic_kwargs(
     # 4.6 behavior and preserving the activity-feed UX during long tool runs.
     _is_kimi_coding = _is_kimi_family_endpoint(base_url, model)
     if reasoning_config and isinstance(reasoning_config, dict) and not _is_kimi_coding:
-        if reasoning_config.get("enabled") is not False and "haiku" not in model.lower():
+        if reasoning_config.get("enabled") is not False and "haiku" not in model_for_checks.lower():
             effort = str(reasoning_config.get("effort", "medium")).lower()
             budget = THINKING_BUDGET.get(effort, 8000)
-            if _supports_adaptive_thinking(model):
+            if _supports_adaptive_thinking(model_for_checks):
                 kwargs["thinking"] = {
                     "type": "adaptive",
                     "display": "summarized",
@@ -1922,7 +1948,7 @@ def build_anthropic_kwargs(
                 adaptive_effort = ADAPTIVE_EFFORT_MAP.get(effort, "medium")
                 # Downgrade xhigh→max on models that don't list xhigh as a
                 # supported level (Opus/Sonnet 4.6). Opus 4.7+ keeps xhigh.
-                if adaptive_effort == "xhigh" and not _supports_xhigh_effort(model):
+                if adaptive_effort == "xhigh" and not _supports_xhigh_effort(model_for_checks):
                     adaptive_effort = "max"
                 kwargs["output_config"] = {
                     "effort": adaptive_effort,
@@ -1935,10 +1961,10 @@ def build_anthropic_kwargs(
 
     # ── Strip sampling params on 4.7+ ─────────────────────────────────
     # Opus 4.7 rejects any non-default temperature/top_p/top_k with a 400.
-    # Callers (auxiliary_client, etc.) may set these for older models;
-    # drop them here as a safety net so upstream 4.6 → 4.7 migrations
-    # don't require coordinated edits everywhere.
-    if _forbids_sampling_params(model):
+    # Callers (auxiliary_client, flush_memories, etc.) may set these for
+    # older models; drop them here as a safety net so upstream 4.6 → 4.7
+    # migrations don't require coordinated edits everywhere.
+    if _forbids_sampling_params(model_for_checks):
         for _sampling_key in ("temperature", "top_p", "top_k"):
             kwargs.pop(_sampling_key, None)
 
