@@ -859,6 +859,17 @@ class TestCompletion:
         script = generate_zsh_completion()
         assert "_hermes" in script
 
+    def test_zsh_completion_registers_via_compdef_not_direct_call(self):
+        # Regression: when the script is loaded via `eval "$(hermes completion zsh)"`
+        # in .zshrc, a trailing `_hermes "$@"` invokes `_arguments` outside a
+        # completion context, raising `_arguments:comparguments: can only be called
+        # from completion function`. The correct pattern registers the function
+        # with `compdef _hermes hermes` so zsh calls it only during completion.
+        # See issue #6122.
+        script = generate_zsh_completion()
+        assert "compdef _hermes hermes" in script
+        assert '_hermes "$@"' not in script
+
 
 # ===================================================================
 # TestGetProfilesRoot / TestGetDefaultHermesHome (internal helpers)
