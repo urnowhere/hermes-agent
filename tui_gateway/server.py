@@ -5677,10 +5677,14 @@ def _(rid, params: dict) -> dict:
             return _ok(rid, {"status": "recording"})
 
         # action == "stop"
-        from hermes_cli.voice import stop_continuous
+        from hermes_cli.voice import stop_continuous_and_transcribe
 
-        stop_continuous()
-        return _ok(rid, {"status": "stopped"})
+        _voice_emit("voice.status", {"state": "transcribing"})
+        transcript = stop_continuous_and_transcribe()
+        if transcript:
+            _voice_emit("voice.transcript", {"text": transcript})
+        _voice_emit("voice.status", {"state": "idle"})
+        return _ok(rid, {"status": "stopped", "transcript": transcript or ""})
     except ImportError:
         return _err(
             rid, 5025, "voice module not available — install audio dependencies"

@@ -470,6 +470,71 @@ def stop_continuous() -> None:
             pass
 
 
+def stop_continuous_and_transcribe() -> Optional[str]:
+    """Stop the active continuous loop and return the last captured transcript.
+
+    This mirrors the user-facing Ctrl+B *stop* behavior in the TUI: keep the
+    current utterance, transcribe it, and hand the text back to the caller.
+    If no speech was captured, returns ``None``.
+    """
+    global _continuous_active, _continuous_on_transcript
+    global _continuous_on_status, _continuous_on_silent_limit
+    global _continuous_recorder, _continuous_no_speech_count
+
+    with _continuous_lock:
+        if not _continuous_active:
+            return None
+        _continuous_active = False
+        rec = _continuous_recorder
+        on_status = _continuous_on_status
+        _continuous_on_transcript = None
+        _continuous_on_status = None
+        _continuous_on_silent_limit = None
+        _continuous_no_speech_count = 0
+
+    if on_status:
+        try:
+            on_status("transcribing")
+        except Exception:
+            pass
+
+    wav_path = None
+    transcript: Optional[str] = None
+    if rec is not None:
+        try:
+            wav_path = rec.stop()
+        except Exception as e:
+            logger.warning("failed to stop recorder for transcribe: %s", e)
+
+    # Audible "recording stopped" cue (CLI parity: same 660 Hz × 2 the
+    # silence-auto-stop path plays).
+    _play_beep(frequency=660, count=2)
+
+    if wav_path:
+        try:
+            result = transcribe_recording(wav_path)
+            success = bool(result.get("success"))
+            text = (result.get("transcript") or "").strip()
+            if success and text and not is_whisper_hallucination(text):
+                transcript = text
+        except Exception as e:
+            logger.warning("continuous stop transcription failed: %s", e)
+        finally:
+            try:
+                if os.path.isfile(wav_path):
+                    os.unlink(wav_path)
+            except Exception:
+                pass
+
+    if on_status:
+        try:
+            on_status("idle")
+        except Exception:
+            pass
+
+    return transcript
+
+
 def is_continuous_active() -> bool:
     """Whether a continuous voice loop is currently running."""
     with _continuous_lock:
