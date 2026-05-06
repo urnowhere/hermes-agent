@@ -384,6 +384,73 @@ def test_cmd_update_succeeds_with_extras(monkeypatch, tmp_path):
     assert ".[all]" in install_cmds[0]
 
 
+def test_cmd_update_uses_uv_sync_locked_when_lockfile_exists(monkeypatch, tmp_path):
+    """With uv.lock present, update should sync the locked env instead of editable reinstall."""
+    _setup_update_mocks(monkeypatch, tmp_path)
+    (tmp_path / "uv.lock").write_text("version = 1\n")
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+
+    recorded = []
+
+    def fake_run(cmd, **kwargs):
+        recorded.append((cmd, kwargs))
+        if cmd == ["git", "fetch", "origin"]:
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+        if cmd == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return SimpleNamespace(stdout="main\n", stderr="", returncode=0)
+        if cmd == ["git", "rev-list", "HEAD..origin/main", "--count"]:
+            return SimpleNamespace(stdout="1\n", stderr="", returncode=0)
+        if cmd == ["git", "pull", "origin", "main"]:
+            return SimpleNamespace(stdout="Updating\n", stderr="", returncode=0)
+        if cmd == ["/usr/bin/uv", "sync", "--all-extras", "--locked"]:
+            assert kwargs["cwd"] == tmp_path
+            assert kwargs["check"] is True
+            assert kwargs["env"]["VIRTUAL_ENV"] == str(tmp_path / "venv")
+            assert kwargs["env"]["UV_PROJECT_ENVIRONMENT"] == str(tmp_path / "venv")
+            return SimpleNamespace(returncode=0)
+        if "pip" in cmd and "install" in cmd:
+            raise AssertionError(f"unexpected editable reinstall: {cmd}")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(hermes_main.subprocess, "run", fake_run)
+
+    hermes_main.cmd_update(SimpleNamespace())
+
+    sync_cmds = [cmd for cmd, _ in recorded if cmd == ["/usr/bin/uv", "sync", "--all-extras", "--locked"]]
+    assert sync_cmds == [["/usr/bin/uv", "sync", "--all-extras", "--locked"]]
+
+
+def test_cmd_update_falls_back_when_uv_sync_locked_fails(monkeypatch, tmp_path, capsys):
+    """A failed lockfile sync should keep the existing editable reinstall fallback."""
+    _setup_update_mocks(monkeypatch, tmp_path)
+    (tmp_path / "uv.lock").write_text("version = 1\n")
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+
+    recorded = []
+
+    def fake_run(cmd, **kwargs):
+        recorded.append(cmd)
+        if cmd == ["git", "fetch", "origin"]:
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+        if cmd == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return SimpleNamespace(stdout="main\n", stderr="", returncode=0)
+        if cmd == ["git", "rev-list", "HEAD..origin/main", "--count"]:
+            return SimpleNamespace(stdout="1\n", stderr="", returncode=0)
+        if cmd == ["git", "pull", "origin", "main"]:
+            return SimpleNamespace(stdout="Updating\n", stderr="", returncode=0)
+        if cmd == ["/usr/bin/uv", "sync", "--all-extras", "--locked"]:
+            raise CalledProcessError(returncode=1, cmd=cmd)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(hermes_main.subprocess, "run", fake_run)
+
+    hermes_main.cmd_update(SimpleNamespace())
+
+    assert ["/usr/bin/uv", "sync", "--all-extras", "--locked"] in recorded
+    assert any(cmd == ["/usr/bin/uv", "pip", "install", "-e", ".[all]", "--quiet"] for cmd in recorded)
+    assert "uv lockfile sync failed" in capsys.readouterr().out
+
+
 # ---------------------------------------------------------------------------
 # ff-only fallback to reset --hard on diverged history
 # ---------------------------------------------------------------------------

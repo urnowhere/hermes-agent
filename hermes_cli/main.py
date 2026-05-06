@@ -5896,15 +5896,32 @@ def _update_via_zip(args):
             f"  ✓ Cleared {removed} stale __pycache__ director{'y' if removed == 1 else 'ies'}"
         )
 
-    # Reinstall Python dependencies. Prefer .[all], but if one optional extra
-    # breaks on this machine, keep base deps and reinstall the remaining extras
-    # individually so update does not silently strip working capabilities.
+    # Reinstall Python dependencies. Prefer syncing from uv.lock when uv is
+    # available so the update phase leaves the environment in the exact state
+    # that a later `uv run hermes` expects. Fall back to the older editable
+    # reinstall path when the lockfile sync is unavailable or fails.
     print("→ Updating Python dependencies...")
-
     uv_bin = shutil.which("uv")
     if uv_bin:
-        uv_env = {**os.environ, "VIRTUAL_ENV": str(PROJECT_ROOT / "venv")}
-        _install_python_dependencies_with_optional_fallback([uv_bin, "pip"], env=uv_env)
+        uv_env = {
+            **os.environ,
+            "VIRTUAL_ENV": str(PROJECT_ROOT / "venv"),
+            "UV_PROJECT_ENVIRONMENT": str(PROJECT_ROOT / "venv"),
+        }
+        lockfile = PROJECT_ROOT / "uv.lock"
+        if lockfile.exists():
+            try:
+                subprocess.run(
+                    [uv_bin, "sync", "--all-extras", "--locked"],
+                    cwd=PROJECT_ROOT,
+                    check=True,
+                    env=uv_env,
+                )
+            except subprocess.CalledProcessError:
+                print("⚠ uv lockfile sync failed, falling back to editable reinstall...")
+                _install_python_dependencies_with_optional_fallback([uv_bin, "pip"], env=uv_env)
+        else:
+            _install_python_dependencies_with_optional_fallback([uv_bin, "pip"], env=uv_env)
     else:
         # Use sys.executable to explicitly call the venv's pip module,
         # avoiding PEP 668 'externally-managed-environment' errors on Debian/Ubuntu.
@@ -7242,16 +7259,32 @@ def _cmd_update_impl(args, gateway_mode: bool):
         if is_fork and branch == "main":
             _sync_with_upstream_if_needed(git_cmd, PROJECT_ROOT)
 
-        # Reinstall Python dependencies. Prefer .[all], but if one optional extra
-        # breaks on this machine, keep base deps and reinstall the remaining extras
-        # individually so update does not silently strip working capabilities.
+        # Reinstall Python dependencies. Prefer syncing from uv.lock when uv is
+        # available so the update phase leaves the environment in the exact state
+        # that a later `uv run hermes` expects. Fall back to the older editable
+        # reinstall path when the lockfile sync is unavailable or fails.
         print("→ Updating Python dependencies...")
         uv_bin = shutil.which("uv")
         if uv_bin:
-            uv_env = {**os.environ, "VIRTUAL_ENV": str(PROJECT_ROOT / "venv")}
-            _install_python_dependencies_with_optional_fallback(
-                [uv_bin, "pip"], env=uv_env
-            )
+            uv_env = {
+                **os.environ,
+                "VIRTUAL_ENV": str(PROJECT_ROOT / "venv"),
+                "UV_PROJECT_ENVIRONMENT": str(PROJECT_ROOT / "venv"),
+            }
+            lockfile = PROJECT_ROOT / "uv.lock"
+            if lockfile.exists():
+                try:
+                    subprocess.run(
+                        [uv_bin, "sync", "--all-extras", "--locked"],
+                        cwd=PROJECT_ROOT,
+                        check=True,
+                        env=uv_env,
+                    )
+                except subprocess.CalledProcessError:
+                    print("⚠ uv lockfile sync failed, falling back to editable reinstall...")
+                    _install_python_dependencies_with_optional_fallback([uv_bin, "pip"], env=uv_env)
+            else:
+                _install_python_dependencies_with_optional_fallback([uv_bin, "pip"], env=uv_env)
         else:
             # Use sys.executable to explicitly call the venv's pip module,
             # avoiding PEP 668 'externally-managed-environment' errors on Debian/Ubuntu.
