@@ -9760,7 +9760,9 @@ class GatewayRunner:
             return True
         import time as _time
         now = _time.monotonic()
-        last = self._telegram_capability_hint_ts.get(chat_id, 0.0)
+        last = self._telegram_capability_hint_ts.get(
+            chat_id, now - self._TELEGRAM_CAPABILITY_HINT_COOLDOWN_S
+        )
         if now - last < self._TELEGRAM_CAPABILITY_HINT_COOLDOWN_S:
             return False
         self._telegram_capability_hint_ts[chat_id] = now

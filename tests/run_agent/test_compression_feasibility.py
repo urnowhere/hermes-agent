@@ -87,6 +87,51 @@ def test_auto_corrects_threshold_when_aux_context_below_threshold(mock_get_clien
     assert agent.context_compressor.threshold_tokens == 80_000
 
 
+@patch("agent.model_metadata.get_model_context_length", return_value=80_000)
+@patch("agent.auxiliary_client.get_text_auxiliary_client")
+def test_auto_corrects_absolute_override_persistently(
+    mock_get_client,
+    mock_ctx_len,
+):
+    """Auto-correction must lower an absolute threshold override too.
+
+    Otherwise update_model() would later recompute from the stale too-high
+    override and undo the session feasibility correction.
+    """
+    agent = _make_agent(main_context=200_000, threshold_percent=0.50)
+    with patch("agent.context_compressor.get_model_context_length", return_value=200_000):
+        agent.context_compressor = ContextCompressor(
+            "test-main-model",
+            threshold_percent=0.50,
+            quiet_mode=True,
+            threshold_tokens_override=180_000,
+        )
+
+    mock_client = MagicMock()
+    mock_client.base_url = "https://openrouter.ai/api/v1"
+    mock_client.api_key = "sk-aux"
+    mock_get_client.return_value = (mock_client, "google/gemini-3-flash-preview")
+
+    messages = []
+    agent._emit_status = lambda msg: messages.append(msg)
+
+    agent._check_compression_model_feasibility()
+
+    assert len(messages) == 1
+    assert "180,000" in messages[0]
+    assert agent.context_compressor.threshold_tokens_override == 80_000
+    assert agent.context_compressor.threshold_tokens == 80_000
+    assert agent.context_compressor.threshold_percent == pytest.approx(0.40)
+
+    agent.context_compressor.update_model(
+        "test-main-model-2",
+        context_length=200_000,
+    )
+
+    assert agent.context_compressor.threshold_tokens_override == 80_000
+    assert agent.context_compressor.threshold_tokens == 80_000
+
+
 @patch("agent.model_metadata.get_model_context_length", return_value=32_768)
 @patch("agent.auxiliary_client.get_text_auxiliary_client")
 def test_rejects_aux_below_minimum_context(mock_get_client, mock_ctx_len):

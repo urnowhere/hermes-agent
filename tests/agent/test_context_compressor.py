@@ -1039,6 +1039,34 @@ class TestSummaryTargetRatio:
         # 50% of 200K = 100K, which is above the 64K floor
         assert c.threshold_tokens == 100_000
 
+    def test_explicit_threshold_tokens_override_is_honored(self):
+        """An explicit absolute threshold should override the percentage rule."""
+        with patch("agent.context_compressor.get_model_context_length", return_value=1_050_000):
+            c = ContextCompressor(
+                model="test",
+                quiet_mode=True,
+                threshold_percent=0.40,
+                threshold_tokens_override=180_000,
+            )
+        assert c.threshold_percent == 0.40
+        assert c.threshold_tokens_override == 180_000
+        assert c.threshold_tokens == 180_000
+        assert c.tail_token_budget == int(180_000 * c.summary_target_ratio)
+
+    def test_explicit_threshold_tokens_override_survives_model_update(self):
+        """Absolute thresholds should persist across model switches/fallbacks."""
+        with patch("agent.context_compressor.get_model_context_length", return_value=1_050_000):
+            c = ContextCompressor(
+                model="test",
+                quiet_mode=True,
+                threshold_percent=0.40,
+                threshold_tokens_override=180_000,
+            )
+        c.update_model("fallback-model", 400_000)
+        assert c.threshold_tokens_override == 180_000
+        assert c.threshold_tokens == 180_000
+        assert c.tail_token_budget == int(180_000 * c.summary_target_ratio)
+
     def test_default_protect_last_n_is_20(self):
         """Default protect_last_n should be 20."""
         with patch("agent.context_compressor.get_model_context_length", return_value=100_000):
