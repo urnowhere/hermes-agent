@@ -346,6 +346,21 @@ def _try_resolve_from_custom_pool(
         return None
 
 
+def _attach_custom_provider_max_tokens(
+    result: Dict[str, Any], entry: Dict[str, Any]
+) -> None:
+    """Copy a positive int ``max_tokens`` from a custom-provider config entry.
+
+    Centralises the validation so all three provider lookup paths
+    (providers-dict-by-key, providers-dict-by-display-name, legacy
+    custom_providers list) honour the same per-entry override and reject
+    bogus values (strings, zero, negative) the same way.  See issue #20004.
+    """
+    raw = entry.get("max_tokens")
+    if isinstance(raw, int) and raw > 0:
+        result["max_tokens"] = raw
+
+
 def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, Any]]:
     requested_norm = _normalize_custom_provider_name(requested_provider or "")
     if not requested_norm or requested_norm == "custom":
@@ -410,6 +425,7 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                     api_mode = _parse_api_mode(entry.get("api_mode") or entry.get("transport"))
                     if api_mode:
                         result["api_mode"] = api_mode
+                    _attach_custom_provider_max_tokens(result, entry)
                     return result
             # Also check the 'name' field if present
             display_name = entry.get("name", "")
@@ -428,6 +444,7 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                         api_mode = _parse_api_mode(entry.get("api_mode") or entry.get("transport"))
                         if api_mode:
                             result["api_mode"] = api_mode
+                        _attach_custom_provider_max_tokens(result, entry)
                         return result
 
     # Fall back to custom_providers: list (legacy format)
@@ -474,9 +491,13 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
         model_name = str(entry.get("model", "") or "").strip()
         if model_name:
             result["model"] = model_name
+        _attach_custom_provider_max_tokens(result, entry)
         return result
 
     return None
+
+
+
 
 
 def _resolve_named_custom_runtime(
@@ -528,6 +549,12 @@ def _resolve_named_custom_runtime(
         model_name = custom_provider.get("model")
         if model_name:
             pool_result["model"] = model_name
+        # Same story for max_tokens: the credential pool can't read the
+        # config-side per-provider override, so lift it onto the pool
+        # result here.  Without this, a pool-backed custom provider would
+        # silently fall back to the global model.max_tokens / provider
+        # default and ignore the user's per-endpoint cap (#20004).
+        _attach_custom_provider_max_tokens(pool_result, custom_provider)
         return pool_result
 
     api_key_candidates = [
@@ -552,6 +579,7 @@ def _resolve_named_custom_runtime(
     # provider name differs from the actual model string the API expects.
     if custom_provider.get("model"):
         result["model"] = custom_provider["model"]
+    _attach_custom_provider_max_tokens(result, custom_provider)
     return result
 
 
