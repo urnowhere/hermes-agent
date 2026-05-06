@@ -1021,6 +1021,130 @@ class TestWhatsAppIdentifierPublicHelpers:
         assert canonical_whatsapp_identifier("") == ""
 
 
+class TestProfileScopedSessionKeys:
+    """Regression coverage for #12099.
+
+    ``build_session_key`` previously hardcoded the ``agent:main`` prefix,
+    so multi-profile deployments collided on the same key namespace.  The
+    fix threads the active profile through — ``"default"`` keeps the
+    legacy ``agent:main`` prefix (backcompat with existing sessions and
+    external memory-provider namespaces), named profiles get
+    ``agent:<profile>``.
+    """
+
+    # --- backward-compat canaries (must still pass after the fix) ----
+
+    def test_default_profile_preserves_agent_main_prefix_dm(self):
+        source = SessionSource(
+            platform=Platform.TELEGRAM, chat_id="99", chat_type="dm"
+        )
+        assert build_session_key(source, profile="default") == "agent:main:telegram:dm:99"
+
+    def test_default_profile_preserves_agent_main_prefix_group(self):
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="guild-123",
+            chat_type="group",
+            user_id="alice",
+        )
+        assert (
+            build_session_key(source, profile="default")
+            == "agent:main:discord:group:guild-123:alice"
+        )
+
+    def test_none_profile_resolves_via_active_profile(self):
+        """profile=None must consult hermes_cli.profiles.get_active_profile_name."""
+        source = SessionSource(
+            platform=Platform.TELEGRAM, chat_id="99", chat_type="dm"
+        )
+        with patch("hermes_cli.profiles.get_active_profile_name", return_value="default"):
+            assert build_session_key(source) == "agent:main:telegram:dm:99"
+
+    # --- new behaviour: named profiles get their own prefix ----------
+
+    def test_named_profile_gets_distinct_prefix_dm(self):
+        source = SessionSource(
+            platform=Platform.TELEGRAM, chat_id="99", chat_type="dm"
+        )
+        assert (
+            build_session_key(source, profile="coder") == "agent:coder:telegram:dm:99"
+        )
+
+    def test_named_profile_gets_distinct_prefix_group_thread(self):
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="-1002285219667",
+            chat_type="group",
+            thread_id="17585",
+        )
+        assert (
+            build_session_key(source, profile="coder")
+            == "agent:coder:telegram:group:-1002285219667:17585"
+        )
+
+    def test_named_profile_resolved_from_env(self):
+        """profile=None + non-default active profile produces the named prefix."""
+        source = SessionSource(
+            platform=Platform.WECOM, chat_id="wx-99", chat_type="dm"
+        )
+        with patch("hermes_cli.profiles.get_active_profile_name", return_value="coder"):
+            key = build_session_key(source)
+        assert key == "agent:coder:wecom:dm:wx-99"
+
+    # --- the collision the reporter described ------------------------
+
+    def test_two_profiles_do_not_collide_on_same_chat_id(self):
+        """#12099 repro: same chat_id across two profiles must not collide."""
+        source = SessionSource(
+            platform=Platform.TELEGRAM, chat_id="99", chat_type="dm"
+        )
+        key_main = build_session_key(source, profile="default")
+        key_coder = build_session_key(source, profile="coder")
+        assert key_main != key_coder
+        assert key_main.startswith("agent:main:")
+        assert key_coder.startswith("agent:coder:")
+
+    def test_explicit_profile_overrides_active_profile(self):
+        """Explicit profile= argument wins over the HERMES_HOME-derived default."""
+        source = SessionSource(
+            platform=Platform.TELEGRAM, chat_id="99", chat_type="dm"
+        )
+        with patch("hermes_cli.profiles.get_active_profile_name", return_value="coder"):
+            assert (
+                build_session_key(source, profile="default")
+                == "agent:main:telegram:dm:99"
+            )
+
+    def test_custom_profile_value_flows_through(self):
+        """get_active_profile_name returns 'custom' for unrecognized HERMES_HOME
+        paths; build_session_key should surface that as agent:custom:... ."""
+        source = SessionSource(
+            platform=Platform.TELEGRAM, chat_id="99", chat_type="dm"
+        )
+        with patch("hermes_cli.profiles.get_active_profile_name", return_value="custom"):
+            assert build_session_key(source) == "agent:custom:telegram:dm:99"
+
+    def test_active_profile_resolution_failure_falls_back_to_default(self):
+        """Any exception from ``get_active_profile_name`` — ``ImportError``,
+        ``OSError`` from a missing ``HERMES_HOME``, or anything else — must
+        degrade gracefully to the legacy ``agent:main`` prefix rather than
+        propagate and break session-key construction for every inbound
+        message."""
+        source = SessionSource(
+            platform=Platform.TELEGRAM, chat_id="99", chat_type="dm"
+        )
+        with patch(
+            "hermes_cli.profiles.get_active_profile_name",
+            side_effect=ImportError("simulated"),
+        ):
+            assert build_session_key(source) == "agent:main:telegram:dm:99"
+        with patch(
+            "hermes_cli.profiles.get_active_profile_name",
+            side_effect=RuntimeError("HERMES_HOME missing"),
+        ):
+            assert build_session_key(source) == "agent:main:telegram:dm:99"
+
+
 class TestSessionStoreEntriesAttribute:
     """Regression: /reset must access _entries, not _sessions."""
 

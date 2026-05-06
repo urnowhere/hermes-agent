@@ -591,10 +591,35 @@ def is_shared_multi_user_session(
     return not group_sessions_per_user
 
 
+def _resolve_session_key_prefix(profile: Optional[str]) -> str:
+    """Resolve the leading ``agent:<scope>`` component of a session key.
+
+    The ``"default"`` profile maps to the legacy ``agent:main`` prefix so
+    that existing sessions (and sessions recorded by external memory
+    providers like Honcho / RetainDB / ByteRover, which consume this key
+    as a namespace) remain reachable after this change.  Named profiles
+    produce ``agent:<profile_name>`` so two profiles pointing at the same
+    memory backend no longer collide.  See #12099.
+    """
+    if profile is None:
+        try:
+            from hermes_cli.profiles import get_active_profile_name
+            profile = get_active_profile_name()
+        except Exception:
+            # hermes_cli may be unavailable in narrow unit-test contexts;
+            # fall through to the legacy default so keys stay stable.
+            profile = "default"
+
+    if not profile or profile == "default":
+        return "agent:main"
+    return f"agent:{profile}"
+
+
 def build_session_key(
     source: SessionSource,
     group_sessions_per_user: bool = True,
     thread_sessions_per_user: bool = False,
+    profile: Optional[str] = None,
 ) -> str:
     """Build a deterministic session key from a message source.
 
@@ -618,7 +643,18 @@ def build_session_key(
       - Without participant identifiers, or when isolation is disabled, messages fall back to one
         shared session per chat.
       - Without identifiers, messages fall back to one session per platform/chat_type.
+
+    Profile scoping:
+      - When ``profile`` is ``None`` (default), the active profile is resolved
+        from ``HERMES_HOME`` via ``hermes_cli.profiles.get_active_profile_name``.
+      - The ``"default"`` profile keeps the legacy ``agent:main`` prefix for
+        backward compatibility — existing sessions and external memory
+        namespaces continue to resolve.  Named profiles produce
+        ``agent:<profile>:...`` so multi-profile deployments no longer share
+        a namespace.  See #12099.
     """
+    prefix = _resolve_session_key_prefix(profile)
+
     platform = source.platform.value
     if source.chat_type == "dm":
         dm_chat_id = source.chat_id
@@ -627,11 +663,11 @@ def build_session_key(
 
         if dm_chat_id:
             if source.thread_id:
-                return f"agent:main:{platform}:dm:{dm_chat_id}:{source.thread_id}"
-            return f"agent:main:{platform}:dm:{dm_chat_id}"
+                return f"{prefix}:{platform}:dm:{dm_chat_id}:{source.thread_id}"
+            return f"{prefix}:{platform}:dm:{dm_chat_id}"
         if source.thread_id:
-            return f"agent:main:{platform}:dm:{source.thread_id}"
-        return f"agent:main:{platform}:dm"
+            return f"{prefix}:{platform}:dm:{source.thread_id}"
+        return f"{prefix}:{platform}:dm"
 
     participant_id = source.user_id_alt or source.user_id
     if participant_id and source.platform == Platform.WHATSAPP:
@@ -639,7 +675,7 @@ def build_session_key(
         # single group member gets two isolated per-user sessions when the
         # bridge reshuffles alias forms.
         participant_id = canonical_whatsapp_identifier(str(participant_id)) or participant_id
-    key_parts = ["agent:main", platform, source.chat_type]
+    key_parts = [prefix, platform, source.chat_type]
 
     if source.chat_id:
         key_parts.append(source.chat_id)
