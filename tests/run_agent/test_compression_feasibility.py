@@ -208,6 +208,41 @@ def test_feasibility_check_ignores_invalid_context_length(mock_get_client, mock_
     )
 
 
+@patch("agent.model_metadata.get_model_context_length", return_value=1_050_000)
+@patch("agent.auxiliary_client.get_text_auxiliary_client")
+def test_feasibility_check_reuses_main_context_override_for_same_aux_model(
+    mock_get_client, mock_ctx_len
+):
+    """When compression auto-selects the same deployment as the main model,
+    reuse model.context_length so Azure deployment aliases do not fall back.
+    """
+    agent = _make_agent(main_context=1_050_000, threshold_percent=0.50)
+    agent.model = ""
+    agent.provider = "custom"
+    agent.base_url = "https://example.cognitiveservices.azure.com/openai/v1/"
+    agent._config_model_default = "gpt55"
+    agent._config_context_length = 1_050_000
+    agent._aux_compression_context_length_config = None
+
+    mock_client = MagicMock()
+    mock_client.base_url = "https://example.cognitiveservices.azure.com/openai/v1/"
+    mock_client.api_key = "sk-azure"
+    mock_get_client.return_value = (mock_client, "gpt55")
+
+    messages = []
+    agent._emit_status = lambda msg: messages.append(msg)
+    agent._check_compression_model_feasibility()
+
+    assert messages == []
+    mock_ctx_len.assert_called_once_with(
+        "gpt55",
+        base_url="https://example.cognitiveservices.azure.com/openai/v1/",
+        api_key="sk-azure",
+        config_context_length=1_050_000,
+        provider="custom",
+    )
+
+
 def test_init_feasibility_check_uses_aux_context_override_from_config():
     """Real AIAgent init should cache and forward auxiliary.compression.context_length."""
 

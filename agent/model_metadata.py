@@ -288,6 +288,8 @@ def _is_custom_endpoint(base_url: str) -> bool:
 _URL_TO_PROVIDER: Dict[str, str] = {
     "api.openai.com": "openai",
     "chatgpt.com": "openai",
+    "openai.azure.com": "openai",
+    "cognitiveservices.azure.com": "openai",
     "api.anthropic.com": "anthropic",
     "api.z.ai": "zai",
     "open.bigmodel.cn": "zai",
@@ -317,17 +319,6 @@ _URL_TO_PROVIDER: Dict[str, str] = {
     "tokenhub.tencentmaas.com": "tencent-tokenhub",
     "ollama.com": "ollama-cloud",
 }
-
-# Auto-extend with hostnames derived from provider profiles.
-# Any provider with a base_url not already in the map gets added automatically.
-try:
-    from providers import list_providers as _list_providers
-    for _pp in _list_providers():
-        _host = _pp.get_hostname()
-        if _host and _host not in _URL_TO_PROVIDER:
-            _URL_TO_PROVIDER[_host] = _pp.name
-except Exception:
-    pass
 
 
 def _infer_provider_from_url(base_url: str) -> Optional[str]:

@@ -1463,17 +1463,6 @@ class AIAgent:
                 elif base_url_host_matches(effective_base, "chatgpt.com"):
                     from agent.auxiliary_client import _codex_cloudflare_headers
                     client_kwargs["default_headers"] = _codex_cloudflare_headers(api_key)
-                elif "default_headers" not in client_kwargs:
-                    # Fall back to profile.default_headers for providers that
-                    # declare custom headers (e.g. Vercel AI Gateway attribution,
-                    # Kimi User-Agent on non-kimi.com endpoints).
-                    try:
-                        from providers import get_provider_profile as _gpf
-                        _ph = _gpf(self.provider)
-                        if _ph and _ph.default_headers:
-                            client_kwargs["default_headers"] = dict(_ph.default_headers)
-                    except Exception:
-                        pass
             else:
                 # No explicit creds — use the centralized provider router
                 from agent.auxiliary_client import resolve_provider_client
@@ -1904,8 +1893,10 @@ class AIAgent:
         # Read explicit context_length override from model config
         _model_cfg = _agent_cfg.get("model", {})
         if isinstance(_model_cfg, dict):
+            _config_model_default = str(_model_cfg.get("default") or "")
             _config_context_length = _model_cfg.get("context_length")
         else:
+            _config_model_default = ""
             _config_context_length = None
         if _config_context_length is not None:
             try:
@@ -1987,6 +1978,7 @@ class AIAgent:
         # Persist for reuse on switch_model / fallback activation. Must come
         # AFTER the custom_providers branch so per-model overrides aren't lost.
         self._config_context_length = _config_context_length
+        self._config_model_default = _config_model_default
 
         self._ensure_lmstudio_runtime_loaded(_config_context_length)
 
@@ -2693,12 +2685,27 @@ class AIAgent:
 
             aux_base_url = str(getattr(client, "base_url", ""))
             aux_api_key = str(getattr(client, "api_key", ""))
+            aux_config_context_length = getattr(self, "_aux_compression_context_length_config", None)
+            if aux_config_context_length is None:
+                try:
+                    from agent.model_metadata import _normalize_base_url
+
+                    main_model = getattr(self, "model", "") or getattr(self, "_config_model_default", "")
+                    same_aux_as_main = (
+                        aux_model == main_model
+                        and _normalize_base_url(aux_base_url)
+                        == _normalize_base_url(getattr(self, "base_url", ""))
+                    )
+                except Exception:
+                    same_aux_as_main = False
+                if same_aux_as_main:
+                    aux_config_context_length = getattr(self, "_config_context_length", None)
 
             aux_context = get_model_context_length(
                 aux_model,
                 base_url=aux_base_url,
                 api_key=aux_api_key,
-                config_context_length=getattr(self, "_aux_compression_context_length_config", None),
+                config_context_length=aux_config_context_length,
                 # Each model must be resolved with its own provider so that
                 # provider-specific paths (e.g. Bedrock static table, OpenRouter API)
                 # are invoked for the correct client, not inherited from the main model.
@@ -6283,19 +6290,7 @@ class AIAgent:
                 self._client_kwargs.get("api_key", "")
             )
         else:
-            # No URL-specific headers — check profile.default_headers before clearing.
-            _ph_headers = None
-            try:
-                from providers import get_provider_profile as _gpf2
-                _ph2 = _gpf2(self.provider)
-                if _ph2 and _ph2.default_headers:
-                    _ph_headers = dict(_ph2.default_headers)
-            except Exception:
-                pass
-            if _ph_headers:
-                self._client_kwargs["default_headers"] = _ph_headers
-            else:
-                self._client_kwargs.pop("default_headers", None)
+            self._client_kwargs.pop("default_headers", None)
 
     def _swap_credential(self, entry) -> None:
         runtime_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
@@ -8528,7 +8523,7 @@ class AIAgent:
             _omit_temp = False
             _fixed_temp = None
 
-        # Provider preferences (OpenRouter-style)
+        # Provider preferences (OpenRouter-specific)
         _prefs: Dict[str, Any] = {}
         if self.providers_allowed:
             _prefs["only"] = self.providers_allowed
@@ -8543,16 +8538,16 @@ class AIAgent:
         if self.provider_data_collection:
             _prefs["data_collection"] = self.provider_data_collection
 
-        # Claude max-output override on aggregators
+        # Anthropic max output for Claude on OpenRouter/Nous
         _ant_max = None
         if (_is_or or _is_nous) and "claude" in (self.model or "").lower():
             try:
                 from agent.anthropic_adapter import _get_anthropic_max_output
                 _ant_max = _get_anthropic_max_output(self.model)
             except Exception:
-                pass
+                pass  # fail open — let the proxy pick its default
 
-        # Qwen session metadata
+        # Qwen session metadata precomputed here (promptId is per-call random)
         _qwen_meta = None
         if _is_qwen:
             _qwen_meta = {
@@ -8560,44 +8555,8 @@ class AIAgent:
                 "promptId": str(uuid.uuid4()),
             }
 
-        # ── Provider profile path (registered providers) ───────────────────
-        # Profiles handle per-provider quirks via hooks. When a profile is
-        # found, delegate fully; otherwise fall through to the legacy flag path.
-        try:
-            from providers import get_provider_profile
-            _profile = get_provider_profile(self.provider)
-        except Exception:
-            _profile = None
-
-        if _profile:
-            _ephemeral_out = getattr(self, "_ephemeral_max_output_tokens", None)
-            if _ephemeral_out is not None:
-                self._ephemeral_max_output_tokens = None
-
-            return _ct.build_kwargs(
-                model=self.model,
-                messages=api_messages,
-                tools=self.tools,
-                base_url=self.base_url,
-                timeout=self._resolved_api_call_timeout(),
-                max_tokens=self.max_tokens,
-                ephemeral_max_output_tokens=_ephemeral_out,
-                max_tokens_param_fn=self._max_tokens_param,
-                reasoning_config=self.reasoning_config,
-                request_overrides=self.request_overrides,
-                session_id=getattr(self, "session_id", None),
-                provider_profile=_profile,
-                ollama_num_ctx=self._ollama_num_ctx,
-                # Context forwarded to profile hooks:
-                provider_preferences=_prefs or None,
-                anthropic_max_output=_ant_max,
-                supports_reasoning=self._supports_reasoning_extra_body(),
-                qwen_session_metadata=_qwen_meta,
-            )
-
-        # ── Legacy flag path ────────────────────────────────────────────
-        # Reached only when get_provider_profile() returns None — i.e. a
-        # completely unknown provider not in providers/ registry.
+        # Ephemeral max output override — consume immediately so the next
+        # turn doesn't inherit it.
         _ephemeral_out = getattr(self, "_ephemeral_max_output_tokens", None)
         if _ephemeral_out is not None:
             self._ephemeral_max_output_tokens = None

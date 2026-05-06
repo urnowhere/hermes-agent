@@ -603,6 +603,43 @@ class TestGetModelContextLength:
 
         assert result == 65536
 
+    @patch("agent.model_metadata.fetch_endpoint_model_metadata")
+    def test_azure_cognitive_services_url_is_known_openai_provider(self, mock_endpoint_fetch):
+        """Azure Cognitive Services OpenAI-compatible endpoints are not
+        arbitrary custom endpoints.
+
+        Deployment names such as ``gpt55`` may not fuzzy-match the catalog
+        model name (``gpt-5.5``), so Sam's configured ``model.context_length``
+        must be honored and the resolver must not probe/fallback as unknown
+        custom before reaching explicit config handling.
+        """
+        result = get_model_context_length(
+            "gpt55",
+            base_url="https://smynk-mol8vpof-eastus2.cognitiveservices.azure.com/openai/v1/",
+            provider="custom",
+            config_context_length=1_050_000,
+        )
+
+        assert result == 1_050_000
+        mock_endpoint_fetch.assert_not_called()
+
+    @patch("agent.model_metadata.fetch_model_metadata")
+    @patch("agent.model_metadata.fetch_endpoint_model_metadata")
+    def test_azure_cognitive_services_url_does_not_probe_as_unknown_custom(
+        self, mock_endpoint_fetch, mock_fetch
+    ):
+        """Known Azure OpenAI hosts should skip arbitrary custom /models probing."""
+        mock_fetch.return_value = {}
+
+        result = get_model_context_length(
+            "unknown-azure-deployment",
+            base_url="https://example.cognitiveservices.azure.com/openai/v1/",
+            provider="custom",
+        )
+
+        assert result == CONTEXT_PROBE_TIERS[0]
+        mock_endpoint_fetch.assert_not_called()
+
     @patch("agent.model_metadata.fetch_model_metadata")
     def test_config_context_length_zero_is_ignored(self, mock_fetch):
         """config_context_length=0 should be treated as unset."""
