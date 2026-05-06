@@ -252,6 +252,7 @@ def make_adapter(platform: Platform, runner=None):
     adapter.send_typing = AsyncMock()
 
     adapter.set_message_handler(runner._handle_message)
+    adapter.set_pre_message_handler(runner._pre_handle_message)
     runner.adapters[platform_key] = adapter
 
     return adapter
@@ -405,6 +406,7 @@ def _make_discord_adapter_wired(runner=None):
     adapter.send = AsyncMock(return_value=SendResult(success=True, message_id="e2e-resp-1"))
     adapter.send_typing = AsyncMock()
     adapter.set_message_handler(runner._handle_message)
+    adapter.set_pre_message_handler(runner._pre_handle_message)
     runner.adapters[Platform.DISCORD] = adapter
 
     return adapter, runner

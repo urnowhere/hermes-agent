@@ -18,7 +18,6 @@ from gateway.platforms.base import MessageEvent
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -132,17 +131,10 @@ async def test_internal_event_bypasses_authorization(monkeypatch, tmp_path):
 
     monkeypatch.setattr(GatewayRunner, "_is_user_authorized", tracking_auth)
 
-    # Stop execution before the agent runner so the test doesn't block in
-    # run_in_executor.  Auth check happens before _handle_message_with_agent.
-    async def _raise(*_a, **_kw):
-        raise RuntimeError("sentinel — stop here")
-    monkeypatch.setattr(GatewayRunner, "_handle_message_with_agent", _raise)
+    # _pre_handle_message is the gate that checks internal flag before auth
+    result = await runner._pre_handle_message(event)
 
-    try:
-        await runner._handle_message(event)
-    except RuntimeError:
-        pass  # Expected sentinel
-
+    assert result is not None, "Internal events should pass the pre-check"
     assert not auth_called, (
         "_is_user_authorized should NOT be called for internal events"
     )
@@ -183,17 +175,11 @@ async def test_internal_event_does_not_trigger_pairing(monkeypatch, tmp_path):
 
     runner.pairing_store.generate_code = tracking_generate
 
-    # Stop execution before the agent runner so the test doesn't block in
-    # run_in_executor.  Pairing check happens before _handle_message_with_agent.
-    async def _raise(*_a, **_kw):
-        raise RuntimeError("sentinel — stop here")
-    monkeypatch.setattr(GatewayRunner, "_handle_message_with_agent", _raise)
+    # _pre_handle_message should return True for internal events without
+    # calling any auth/pairing code.
+    result = await runner._pre_handle_message(event)
 
-    try:
-        await runner._handle_message(event)
-    except RuntimeError:
-        pass  # Expected sentinel
-
+    assert result is not None, "Internal events should pass the pre-check"
     assert not generate_called, (
         "Pairing code should NOT be generated for internal events"
     )
@@ -307,9 +293,9 @@ async def test_none_user_id_skips_pairing(monkeypatch, tmp_path):
         internal=False,
     )
 
-    result = await runner._handle_message(event)
+    result = await runner._pre_handle_message(event)
 
-    # Should return None (dropped) and NOT send any pairing message
+    # Should return False (dropped) and NOT send any pairing message
     assert result is None
     assert adapter.send.await_count == 0
 
@@ -344,8 +330,9 @@ async def test_none_user_id_does_not_generate_pairing_code(monkeypatch, tmp_path
     )
     event = MessageEvent(text="anonymous", source=source, internal=False)
 
-    await runner._handle_message(event)
+    result = await runner._pre_handle_message(event)
 
+    assert result is None
     assert not generate_called, (
         "Pairing code should NOT be generated for messages with user_id=None"
     )
@@ -392,9 +379,9 @@ async def test_non_internal_event_without_user_triggers_pairing(monkeypatch, tmp
         internal=False,
     )
 
-    result = await runner._handle_message(event)
+    result = await runner._pre_handle_message(event)
 
-    # Should return None (unauthorized) and send pairing message
+    # Should return False (unauthorized) and send pairing message
     assert result is None
     assert adapter.send.await_count == 1
     sent_text = adapter.send.await_args.args[1]

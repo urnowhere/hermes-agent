@@ -363,7 +363,7 @@ async def test_unauthorized_dm_pairs_by_default(monkeypatch):
     runner, adapter = _make_runner(Platform.WHATSAPP, config)
     runner.pairing_store.generate_code.return_value = "ABC12DEF"
 
-    result = await runner._handle_message(
+    result = await runner._pre_handle_message(
         _make_event(
             Platform.WHATSAPP,
             "15551234567@s.whatsapp.net",
@@ -394,7 +394,7 @@ async def test_unauthorized_whatsapp_dm_can_be_ignored(monkeypatch):
     )
     runner, adapter = _make_runner(Platform.WHATSAPP, config)
 
-    result = await runner._handle_message(
+    result = await runner._pre_handle_message(
         _make_event(
             Platform.WHATSAPP,
             "15551234567@s.whatsapp.net",
@@ -417,7 +417,7 @@ async def test_rate_limited_user_gets_no_response(monkeypatch):
     runner, adapter = _make_runner(Platform.WHATSAPP, config)
     runner.pairing_store._is_rate_limited.return_value = True
 
-    result = await runner._handle_message(
+    result = await runner._pre_handle_message(
         _make_event(
             Platform.WHATSAPP,
             "15551234567@s.whatsapp.net",
@@ -441,7 +441,7 @@ async def test_rejection_message_records_rate_limit(monkeypatch):
     runner, adapter = _make_runner(Platform.WHATSAPP, config)
     runner.pairing_store.generate_code.return_value = None  # triggers rejection
 
-    result = await runner._handle_message(
+    result = await runner._pre_handle_message(
         _make_event(
             Platform.WHATSAPP,
             "15551234567@s.whatsapp.net",
@@ -466,7 +466,7 @@ async def test_global_ignore_suppresses_pairing_reply(monkeypatch):
     )
     runner, adapter = _make_runner(Platform.TELEGRAM, config)
 
-    result = await runner._handle_message(
+    result = await runner._pre_handle_message(
         _make_event(
             Platform.TELEGRAM,
             "12345",
@@ -500,8 +500,8 @@ async def test_signal_with_allowlist_ignores_unauthorized_dm(monkeypatch):
     )
     runner, adapter = _make_runner(Platform.SIGNAL, config)
 
-    result = await runner._handle_message(
-        _make_event(Platform.SIGNAL, "+15559999999", "+15559999999")  # not in allowlist
+    result = await runner._pre_handle_message(
+        _make_event(Platform.SIGNAL, "+155****9999", "+155****9999")  # not in allowlist
     )
 
     assert result is None
@@ -520,7 +520,7 @@ async def test_telegram_with_allowlist_ignores_unauthorized_dm(monkeypatch):
     )
     runner, adapter = _make_runner(Platform.TELEGRAM, config)
 
-    result = await runner._handle_message(
+    result = await runner._pre_handle_message(
         _make_event(Platform.TELEGRAM, "999999999", "999999999")
     )
 
@@ -540,8 +540,8 @@ async def test_global_allowlist_ignores_unauthorized_dm(monkeypatch):
     )
     runner, adapter = _make_runner(Platform.SIGNAL, config)
 
-    result = await runner._handle_message(
-        _make_event(Platform.SIGNAL, "+15559999999", "+15559999999")
+    result = await runner._pre_handle_message(
+        _make_event(Platform.SIGNAL, "+155****9999", "+155****9999")
     )
 
     assert result is None
@@ -561,8 +561,8 @@ async def test_no_allowlist_still_pairs_by_default(monkeypatch):
     runner, adapter = _make_runner(Platform.SIGNAL, config)
     runner.pairing_store.generate_code.return_value = "PAIR1234"
 
-    result = await runner._handle_message(
-        _make_event(Platform.SIGNAL, "+15559999999", "+15559999999")
+    result = await runner._pre_handle_message(
+        _make_event(Platform.SIGNAL, "+155****9999", "+155****9999")
     )
 
     assert result is None

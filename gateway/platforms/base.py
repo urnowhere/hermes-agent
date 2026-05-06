@@ -1218,6 +1218,7 @@ class BasePlatformAdapter(ABC):
         self.config = config
         self.platform = platform
         self._message_handler: Optional[MessageHandler] = None
+        self._pre_message_handler: Optional[Callable[[MessageEvent], Awaitable[Optional[MessageEvent]]]] = None
         self._running = False
         self._fatal_error_code: Optional[str] = None
         self._fatal_error_message: Optional[str] = None
@@ -1391,6 +1392,22 @@ class BasePlatformAdapter(ABC):
         an optional response string.
         """
         self._message_handler = handler
+
+    def set_pre_message_handler(self, handler: Callable[[MessageEvent], Awaitable[Optional[MessageEvent]]]) -> None:
+        """
+        Set a pre-check handler that gates whether the processing pipeline
+        should run at all.
+
+        Called in ``_process_message_background`` *before*
+        ``on_processing_start``.  If it returns ``False`` the entire
+        pipeline (hooks + message handler) is skipped — no reactions,
+        no typing indicators, no agent dispatch.
+
+        The gateway sets this to perform authorization, plugin gating,
+        and other early-return checks that must not trigger visible
+        processing-lifecycle side effects (e.g. Discord 👀 reactions).
+        """
+        self._pre_message_handler = handler
 
     def set_busy_session_handler(self, handler: Optional[Callable[[MessageEvent, str], Awaitable[bool]]]) -> None:
         """Set an optional handler for messages arriving during active sessions."""
@@ -2708,24 +2725,13 @@ class BasePlatformAdapter(ABC):
         # Fall back to a new Event only if the entry was removed externally.
         interrupt_event = self._active_sessions.get(session_key) or asyncio.Event()
         self._active_sessions[session_key] = interrupt_event
-        
-        # Start continuous typing indicator (refreshes every 2 seconds)
-        _thread_metadata = {"thread_id": event.source.thread_id} if event.source.thread_id else None
-        _keep_typing_kwargs = {"metadata": _thread_metadata}
-        try:
-            _keep_typing_sig = inspect.signature(self._keep_typing)
-        except (TypeError, ValueError):
-            _keep_typing_sig = None
-        if _keep_typing_sig is None or "stop_event" in _keep_typing_sig.parameters:
-            _keep_typing_kwargs["stop_event"] = interrupt_event
-        typing_task = asyncio.create_task(
-            self._keep_typing(
-                event.source.chat_id,
-                **_keep_typing_kwargs,
-            )
-        )
+
+        typing_task = None  # Created after pre-check gate passes
+        processing_started = False
 
         async def _stop_typing_task() -> None:
+            if typing_task is None:
+                return
             typing_task.cancel()
             try:
                 await asyncio.wait_for(asyncio.shield(typing_task), timeout=0.5)
@@ -2734,9 +2740,41 @@ class BasePlatformAdapter(ABC):
                 # typing task is already cancelled; if the parent task is also
                 # cancelling, let this message-processing task unwind now.
                 pass
-        
+
         try:
+            # ── Pre-check gate ──────────────────────────────────────────
+            # Run the pre-message handler (set by GatewayRunner) BEFORE any
+            # visible processing-lifecycle side effects (reactions, typing).
+            # If it returns None the entire pipeline is skipped — no
+            # on_processing_start/complete hooks, no agent dispatch.
+            # This keeps authorization, plugin gating, and other early-return
+            # checks from triggering reactions on messages that will never be
+            # processed.
+            if self._pre_message_handler is not None:
+                event = await self._pre_message_handler(event)
+                if event is None:
+                    return
+
+            # Start continuous typing indicator (refreshes every 2 seconds).
+            # Only launched AFTER authorization passes — unauthorized users
+            # never see a typing indicator
+            _thread_metadata = {"thread_id": event.source.thread_id} if event.source.thread_id else None
+            _keep_typing_kwargs = {"metadata": _thread_metadata}
+            try:
+                _keep_typing_sig = inspect.signature(self._keep_typing)
+            except (TypeError, ValueError):
+                _keep_typing_sig = None
+            if _keep_typing_sig is None or "stop_event" in _keep_typing_sig.parameters:
+                _keep_typing_kwargs["stop_event"] = interrupt_event
+            typing_task = asyncio.create_task(
+                self._keep_typing(
+                    event.source.chat_id,
+                    **_keep_typing_kwargs,
+                )
+            )
+
             await self._run_processing_hook("on_processing_start", event)
+            processing_started = True
 
             # Call the handler (this can take a while with tool calls)
             response = await self._message_handler(event)
@@ -3007,14 +3045,16 @@ class BasePlatformAdapter(ABC):
                 return  # Drain task owns the session now.
                 
         except asyncio.CancelledError:
-            current_task = asyncio.current_task()
-            outcome = ProcessingOutcome.CANCELLED
-            if current_task is None or current_task not in self._expected_cancelled_tasks:
-                outcome = ProcessingOutcome.FAILURE
-            await self._run_processing_hook("on_processing_complete", event, outcome)
+            if processing_started:
+                current_task = asyncio.current_task()
+                outcome = ProcessingOutcome.CANCELLED
+                if current_task is None or current_task not in self._expected_cancelled_tasks:
+                    outcome = ProcessingOutcome.FAILURE
+                await self._run_processing_hook("on_processing_complete", event, outcome)
             raise
         except Exception as e:
-            await self._run_processing_hook("on_processing_complete", event, ProcessingOutcome.FAILURE)
+            if processing_started:
+                await self._run_processing_hook("on_processing_complete", event, ProcessingOutcome.FAILURE)
             logger.error("[%s] Error handling message: %s", self.name, e, exc_info=True)
             # Send the error to the user so they aren't left with radio silence
             try:

@@ -192,15 +192,6 @@ class SignalAdapter(BasePlatformAdapter):
         group_allowed_str = os.getenv("SIGNAL_GROUP_ALLOWED_USERS", "")
         self.group_allow_from = set(_parse_comma_list(group_allowed_str))
 
-        # DM allowlist — mirrors SIGNAL_ALLOWED_USERS checked by run.py.
-        # Stored here so the reaction hooks can skip unauthorized senders
-        # (reactions fire before run.py's auth gate, so without this check
-        # every inbound DM from any contact gets a 👀 reaction).
-        # "*" means all users allowed (open mode); empty means no restriction
-        # recorded at adapter level (run.py still enforces auth separately).
-        dm_allowed_str = os.getenv("SIGNAL_ALLOWED_USERS", "*")
-        self.dm_allow_from = set(_parse_comma_list(dm_allowed_str))
-
         # HTTP client
         self.client: Optional[httpx.AsyncClient] = None
 
@@ -1440,21 +1431,9 @@ class SignalAdapter(BasePlatformAdapter):
         return (author, ts)
 
     def _reactions_enabled(self, event: "MessageEvent" = None) -> bool:
-        """Check if message reactions are enabled for this event.
-
-        Two gates:
-        1. SIGNAL_REACTIONS env var — set to false/0/no to disable globally.
-        2. DM allowlist — if SIGNAL_ALLOWED_USERS is set, only react to
-           messages from senders in that list.  This prevents unauthorized
-           contacts from seeing the 👀 reaction (which fires before run.py's
-           auth gate and would otherwise reveal that a bot is listening).
-        """
+        """Check if message reactions are enabled for this event."""
         if os.getenv("SIGNAL_REACTIONS", "true").lower() in ("false", "0", "no"):
             return False
-        if event is not None:
-            sender = getattr(getattr(event, "source", None), "user_id", None)
-            if sender and "*" not in self.dm_allow_from and sender not in self.dm_allow_from:
-                return False
         return True
 
     async def on_processing_start(self, event: MessageEvent) -> None:

@@ -2933,6 +2933,7 @@ class GatewayRunner:
             
             # Set up message + fatal error handlers
             adapter.set_message_handler(self._handle_message)
+            adapter.set_pre_message_handler(self._pre_handle_message)
             adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
             adapter.set_session_store(self.session_store)
             adapter.set_busy_session_handler(self._handle_active_session_busy_message)
@@ -3825,6 +3826,7 @@ class GatewayRunner:
                         continue
 
                     adapter.set_message_handler(self._handle_message)
+                    adapter.set_pre_message_handler(self._pre_handle_message)
                     adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
                     adapter.set_session_store(self.session_store)
                     adapter.set_busy_session_handler(self._handle_active_session_busy_message)
@@ -4643,24 +4645,23 @@ class GatewayRunner:
 
         await adapter.send(source.chat_id, content, metadata=metadata)
 
-    async def _handle_message(self, event: MessageEvent) -> Optional[str]:
-        """
-        Handle an incoming message from any platform.
-        
-        This is the core message processing pipeline:
-        1. Check user authorization
-        2. Check for commands (/new, /reset, etc.)
-        3. Check for running agent and interrupt if needed
-        4. Get or create session
-        5. Build context for agent
-        6. Run agent conversation
-        7. Return response
+    async def _pre_handle_message(self, event: MessageEvent) -> Optional[MessageEvent]:
+        """Pre-check gate: returns event (possibly modified) if processing should proceed.
+
+        Called by ``_process_message_background`` *before*
+        ``on_processing_start`` so that authorization, plugin gating, and
+        other early-return checks never trigger visible processing-lifecycle
+        side effects (reactions, typing indicators).
+
+        This is the single choke point for ``_is_user_authorized`` — the
+        main handler (``_handle_message``) no longer checks it.
         """
         source = event.source
 
         # Internal events (e.g. background-process completion notifications)
         # are system-generated and must skip user authorization.
-        is_internal = bool(getattr(event, "internal", False))
+        if bool(getattr(event, "internal", False)):
+            return event
 
         # Fire pre_gateway_dispatch plugin hook for user-originated messages.
         # Plugins receive the MessageEvent and may return a dict influencing flow:
@@ -4669,43 +4670,39 @@ class GatewayRunner:
         #   {"action": "allow"}   /   None          -> normal dispatch
         # Hook runs BEFORE auth so plugins can handle unauthorized senders
         # (e.g. customer handover ingest) without triggering the pairing flow.
-        if not is_internal:
-            try:
-                from hermes_cli.plugins import invoke_hook as _invoke_hook
-                _hook_results = _invoke_hook(
-                    "pre_gateway_dispatch",
-                    event=event,
-                    gateway=self,
-                    session_store=self.session_store,
+        try:
+            from hermes_cli.plugins import invoke_hook as _invoke_hook
+            _hook_results = _invoke_hook(
+                "pre_gateway_dispatch",
+                event=event,
+                gateway=self,
+                session_store=self.session_store,
+            )
+        except Exception as _hook_exc:
+            logger.warning("pre_gateway_dispatch invocation failed: %s", _hook_exc)
+            _hook_results = []
+
+        for _result in _hook_results:
+            if not isinstance(_result, dict):
+                continue
+            _action = _result.get("action")
+            if _action == "skip":
+                logger.info(
+                    "pre_gateway_dispatch skip: reason=%s platform=%s chat=%s",
+                    _result.get("reason"),
+                    source.platform.value if source.platform else "unknown",
+                    source.chat_id or "unknown",
                 )
-            except Exception as _hook_exc:
-                logger.warning("pre_gateway_dispatch invocation failed: %s", _hook_exc)
-                _hook_results = []
+                return None
+            if _action == "rewrite":
+                _new_text = _result.get("text")
+                if isinstance(_new_text, str):
+                    event = dataclasses.replace(event, text=_new_text)
+                break
+            if _action == "allow":
+                break
 
-            for _result in _hook_results:
-                if not isinstance(_result, dict):
-                    continue
-                _action = _result.get("action")
-                if _action == "skip":
-                    logger.info(
-                        "pre_gateway_dispatch skip: reason=%s platform=%s chat=%s",
-                        _result.get("reason"),
-                        source.platform.value if source.platform else "unknown",
-                        source.chat_id or "unknown",
-                    )
-                    return None
-                if _action == "rewrite":
-                    _new_text = _result.get("text")
-                    if isinstance(_new_text, str):
-                        event = dataclasses.replace(event, text=_new_text)
-                        source = event.source
-                    break
-                if _action == "allow":
-                    break
-
-        if is_internal:
-            pass
-        elif source.user_id is None:
+        if source.user_id is None:
             # Messages with no user identity (Telegram service messages,
             # channel forwards, anonymous admin actions) cannot be
             # authorized — drop silently instead of triggering the pairing
@@ -4746,7 +4743,26 @@ class GatewayRunner:
                     # Record rate limit so subsequent messages are silently ignored
                     self.pairing_store._record_rate_limit(platform_name, source.user_id)
             return None
-        
+
+        return event
+
+    async def _handle_message(self, event: MessageEvent) -> Optional[str]:
+        """Handle an incoming message from any platform.
+
+        Authorization and plugin gating are handled by
+        ``_pre_handle_message`` - called before this method when going
+        through the normal message-processing flow.
+
+        This is the core message processing pipeline:
+        1. Check for commands (/new, /reset, etc.)
+        2. Check for running agent and interrupt if needed
+        3. Get or create session
+        4. Build context for agent
+        5. Run agent conversation
+        6. Return response
+        """
+        source = event.source
+
         # Intercept messages that are responses to a pending /update prompt.
         # The update process (detached) wrote .update_prompt.json; the watcher
         # forwarded it to the user; now the user's reply goes back via
@@ -8060,7 +8076,9 @@ class GatewayRunner:
             channel_prompt=event.channel_prompt,
         )
         
-        # Let the normal message handler process it
+        # Let the normal message handler process it - no need to check
+        # auth by calling `_pre_handle_message`: if we're here, the user
+        # has already passed it (we've gone through `_handle_message` once)
         return await self._handle_message(retry_event)
 
     # ────────────────────────────────────────────────────────────────

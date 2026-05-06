@@ -57,13 +57,16 @@ When a message arrives from any platform:
 2. **Base adapter** checks active session guard:
    - If agent is running for this session → queue message, set interrupt event
    - If `/approve`, `/deny`, `/stop` → bypass guard (dispatched inline)
-3. **GatewayRunner._handle_message()** receives the event:
+3. **GatewayRunner._pre_handle_message()** receives the event:
+   - Check authorization (see Authorization below)
+   - Early returns if not authorized
+4. **GatewayRunner._handle_message()** receives the event:
    - Resolve session key via `_session_key_for_source()` (format: `agent:main:{platform}:{chat_type}:{chat_id}`)
    - Check authorization (see Authorization below)
    - Check if it's a slash command → dispatch to command handler
    - Check if agent is already running → intercept commands like `/stop`, `/status`
    - Otherwise → create `AIAgent` instance and run conversation
-4. **Response** is sent back through the platform adapter
+5. **Response** is sent back through the platform adapter
 
 ### Session Key Format
 
