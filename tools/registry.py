@@ -111,15 +111,45 @@ class ToolEntry:
 # ---------------------------------------------------------------------------
 
 _CHECK_FN_TTL_SECONDS = 30.0
-_check_fn_cache: Dict[Callable, tuple[float, bool]] = {}
+_check_fn_cache: Dict[tuple[Callable, tuple], tuple[float, bool]] = {}
 _check_fn_cache_lock = threading.Lock()
+
+
+def _session_cache_fingerprint() -> tuple:
+    """Return session context that can affect tool availability checks.
+
+    Some check_fn callables intentionally read gateway session context (for
+    example, send_message is always available inside messaging sessions). A
+    process-wide cache keyed only by callable can otherwise let an early CLI
+    or not-yet-contextualized false result hide tools from later TUI/gateway
+    sessions in the same long-lived process.
+    """
+    names = (
+        "HERMES_SESSION_PLATFORM",
+        "HERMES_SESSION_CHAT_ID",
+        "HERMES_SESSION_THREAD_ID",
+        "HERMES_SESSION_USER_ID",
+        "HERMES_SESSION_KEY",
+        "HERMES_CRON_AUTO_DELIVER_PLATFORM",
+        "HERMES_CRON_AUTO_DELIVER_CHAT_ID",
+        "HERMES_CRON_AUTO_DELIVER_THREAD_ID",
+    )
+    try:
+        from gateway.session_context import get_session_env
+
+        return tuple((name, get_session_env(name, "")) for name in names)
+    except Exception:
+        import os
+
+        return tuple((name, os.getenv(name, "")) for name in names)
 
 
 def _check_fn_cached(fn: Callable) -> bool:
     """Return bool(fn()), TTL-cached across calls. Swallows exceptions as False."""
     now = time.monotonic()
+    cache_key = (fn, _session_cache_fingerprint())
     with _check_fn_cache_lock:
-        cached = _check_fn_cache.get(fn)
+        cached = _check_fn_cache.get(cache_key)
         if cached is not None:
             ts, value = cached
             if now - ts < _CHECK_FN_TTL_SECONDS:
@@ -129,7 +159,7 @@ def _check_fn_cached(fn: Callable) -> bool:
     except Exception:
         value = False
     with _check_fn_cache_lock:
-        _check_fn_cache[fn] = (now, value)
+        _check_fn_cache[cache_key] = (now, value)
     return value
 
 

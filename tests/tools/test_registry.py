@@ -5,7 +5,11 @@ import threading
 from pathlib import Path
 from unittest.mock import patch
 
-from tools.registry import ToolRegistry, discover_builtin_tools
+from tools.registry import (
+    ToolRegistry,
+    discover_builtin_tools,
+    invalidate_check_fn_cache,
+)
 
 
 def _dummy_handler(args, **kwargs):
@@ -110,6 +114,42 @@ class TestGetDefinitions:
         defs = reg.get_definitions({"first", "second"})
         assert len(defs) == 2
         assert calls["count"] == 1
+
+    def test_check_fn_cache_is_session_context_aware(self, monkeypatch):
+        """A CLI false result must not hide a tool in a later gateway session."""
+        reg = ToolRegistry()
+        calls = {"count": 0}
+        session_env = {"HERMES_SESSION_PLATFORM": ""}
+
+        def fake_get_session_env(name, default=""):
+            return session_env.get(name, default)
+
+        monkeypatch.setattr(
+            "gateway.session_context.get_session_env", fake_get_session_env
+        )
+        invalidate_check_fn_cache()
+
+        def session_check():
+            calls["count"] += 1
+            from gateway.session_context import get_session_env
+
+            return bool(get_session_env("HERMES_SESSION_PLATFORM", ""))
+
+        reg.register(
+            name="send_message",
+            toolset="messaging",
+            schema=_make_schema("send_message"),
+            handler=_dummy_handler,
+            check_fn=session_check,
+        )
+
+        assert reg.get_definitions({"send_message"}) == []
+
+        session_env["HERMES_SESSION_PLATFORM"] = "telegram"
+        defs = reg.get_definitions({"send_message"})
+
+        assert [d["function"]["name"] for d in defs] == ["send_message"]
+        assert calls["count"] == 2
 
 
 class TestUnknownToolDispatch:

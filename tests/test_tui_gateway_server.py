@@ -619,6 +619,43 @@ def test_startup_runtime_does_not_call_network_detector(monkeypatch):
     assert provider in {None, "anthropic"}
 
 
+def test_tool_definitions_cache_is_session_context_aware(monkeypatch):
+    """TUI/gateway sessions must not share stale quiet-mode tool schemas."""
+    import model_tools
+
+    session_env = {"HERMES_SESSION_PLATFORM": ""}
+    calls = []
+
+    def fake_get_session_env(name, default=""):
+        return session_env.get(name, default)
+
+    def fake_compute(enabled_toolsets=None, disabled_toolsets=None, quiet_mode=False):
+        calls.append(session_env["HERMES_SESSION_PLATFORM"])
+        tool_name = (
+            "send_message"
+            if session_env["HERMES_SESSION_PLATFORM"]
+            else "plain_chat"
+        )
+        return [{"type": "function", "function": {"name": tool_name}}]
+
+    monkeypatch.setattr(
+        "gateway.session_context.get_session_env", fake_get_session_env
+    )
+    monkeypatch.setattr(model_tools, "_compute_tool_definitions", fake_compute)
+    model_tools._clear_tool_defs_cache()
+
+    try:
+        first = model_tools.get_tool_definitions(["hermes-cli"], quiet_mode=True)
+        session_env["HERMES_SESSION_PLATFORM"] = "telegram"
+        second = model_tools.get_tool_definitions(["hermes-cli"], quiet_mode=True)
+    finally:
+        model_tools._clear_tool_defs_cache()
+
+    assert [t["function"]["name"] for t in first] == ["plain_chat"]
+    assert [t["function"]["name"] for t in second] == ["send_message"]
+    assert calls == ["", "telegram"]
+
+
 def _session(agent=None, **extra):
     return {
         "agent": agent if agent is not None else types.SimpleNamespace(),
