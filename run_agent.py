@@ -3817,9 +3817,16 @@ class AIAgent:
                     tool_calls_data = [
                         {"name": tc.function.name, "arguments": tc.function.arguments}
                         for tc in msg.tool_calls
+                        if tc.function.name and tc.function.arguments
                     ]
                 elif isinstance(msg.get("tool_calls"), list):
-                    tool_calls_data = msg["tool_calls"]
+                    tool_calls_data = [
+                        tc for tc in msg["tool_calls"]
+                        if isinstance(tc, dict)
+                        and tc.get("name") and tc.get("arguments")
+                    ]
+                if tool_calls_data is not None and not tool_calls_data:
+                    tool_calls_data = None
                 self._session_db.append_message(
                     session_id=self.session_id,
                     role=role,
@@ -5143,6 +5150,28 @@ class AIAgent:
                 continue
             filtered.append(msg)
         messages = filtered
+
+        # --- Strip malformed tool calls from assistant messages -----------
+        # Malformed entries (empty name, empty/non-JSON arguments) can be
+        # persisted by older versions or edge-case provider responses and
+        # cause 400 errors when replayed to strict providers.
+        for msg in messages:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                valid = []
+                for tc in msg["tool_calls"]:
+                    name = tc.get("name") or (tc.get("function") or {}).get("name")
+                    args = tc.get("arguments") or (tc.get("function") or {}).get("arguments")
+                    if name and args:
+                        valid.append(tc)
+                    else:
+                        logger.debug(
+                            "Pre-call sanitizer: dropping malformed tool call (name=%r)",
+                            name,
+                        )
+                if valid:
+                    msg["tool_calls"] = valid
+                else:
+                    msg.pop("tool_calls", None)
 
         surviving_call_ids: set = set()
         for msg in messages:
