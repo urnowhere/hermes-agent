@@ -1000,6 +1000,16 @@ install_deps() {
             log_info "Then re-run: cd $INSTALL_DIR && uv pip install -e '.[all]'"
             exit 1
         fi
+        # After base install, try each gateway/messaging extra individually so
+        # users aren't silently left without platform support (fixes #3944).
+        log_info "Attempting to install platform extras individually..."
+        for extra in messaging slack matrix sms; do
+            if $UV_CMD pip install -e ".[$extra]" 2>/dev/null; then
+                log_info "  [$extra] installed"
+            else
+                log_warn "  [$extra] skipped — run manually: uv pip install -e '.[$extra]'"
+            fi
+        done
     else
         rm -f "$ALL_INSTALL_LOG"
     fi
