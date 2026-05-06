@@ -33,6 +33,7 @@ import { useSearchParams } from "react-router-dom";
 import { ChatSidebar } from "@/components/ChatSidebar";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { useI18n } from "@/i18n";
+import { api } from "@/lib/api";
 import { PluginSlot } from "@/plugins";
 
 function buildWsUrl(
@@ -111,7 +112,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   // the moment `isActive` flips back to true (display:none → display:flex
   // collapses the host's box, so ResizeObserver never fires on return).
   const syncMetricsRef = useRef<(() => void) | null>(null);
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   // Lazy-init: the missing-token check happens at construction so the effect
   // body doesn't have to setState (React 19's set-state-in-effect rule).
   const [banner, setBanner] = useState<string | null>(() =>
@@ -147,8 +148,35 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       : false,
   );
 
-  const resumeRef = useRef<string | null>(searchParams.get("resume"));
+  const resumeParam = searchParams.get("resume");
+  const resumeRef = useRef<string | null>(resumeParam);
+  resumeRef.current = resumeParam;
   const channel = useMemo(() => generateChannelId(), []);
+
+  useEffect(() => {
+    if (!resumeParam) return;
+
+    let cancelled = false;
+
+    api
+      .getSessionLatestDescendant(resumeParam)
+      .then((res) => {
+        if (cancelled || !res.session_id || res.session_id === resumeParam) {
+          return;
+        }
+
+        const next = new URLSearchParams(searchParams);
+        next.set("resume", res.session_id);
+        setSearchParams(next, { replace: true });
+      })
+      .catch(() => {
+        // Best-effort: old servers or missing sessions should not block chat.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [resumeParam, searchParams, setSearchParams]);
 
   useEffect(() => {
     const mql = window.matchMedia("(max-width: 1023px)");
