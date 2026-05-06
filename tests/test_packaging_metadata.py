@@ -20,3 +20,10 @@ def test_manifest_includes_bundled_skills():
 
     assert "graft skills" in manifest
     assert "graft optional-skills" in manifest
+
+
+def test_manifest_includes_tui_runtime_assets():
+    manifest = (REPO_ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+
+    assert "graft ui-tui" in manifest
+    assert "graft scripts" in manifest
