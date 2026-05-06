@@ -336,6 +336,7 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
         with _env_lock:
             if task_id in _active_environments:
                 _last_activity[task_id] = time.time()
+                cached.cwd = getattr(_active_environments[task_id], "cwd", cached.cwd)
                 return cached
             else:
                 # Environment was cleaned up -- invalidate stale cache entry
@@ -719,7 +720,7 @@ def _invalidate_dedup_for_path(filepath: str, task_id: str) -> None:
     internally.
     """
     try:
-        resolved = str(_resolve_path(filepath))
+        resolved = str(_resolve_path_for_task(filepath, task_id))
     except (OSError, ValueError):
         return
     with _read_tracker_lock:
