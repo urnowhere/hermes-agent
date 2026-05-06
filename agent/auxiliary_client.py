@@ -1598,7 +1598,7 @@ def _build_codex_client(model: str) -> Tuple[Optional[Any], Optional[str]]:
     return CodexAuxiliaryClient(real_client, model), model
 
 
-def _try_anthropic(explicit_api_key: str = None) -> Tuple[Optional[Any], Optional[str]]:
+def _try_anthropic() -> Tuple[Optional[Any], Optional[str]]:
     try:
         from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token
     except ImportError:
@@ -1608,10 +1608,10 @@ def _try_anthropic(explicit_api_key: str = None) -> Tuple[Optional[Any], Optiona
     if pool_present:
         if entry is None:
             return None, None
-        token = explicit_api_key or _pool_runtime_api_key(entry)
+        token = _pool_runtime_api_key(entry)
     else:
         entry = None
-        token = explicit_api_key or resolve_anthropic_token()
+        token = resolve_anthropic_token()
     if not token:
         return None, None
 
@@ -2438,7 +2438,7 @@ def resolve_provider_client(
 
     if pconfig.auth_type == "api_key":
         if provider == "anthropic":
-            client, default_model = _try_anthropic(explicit_api_key=explicit_api_key)
+            client, default_model = _try_anthropic()
             if client is None:
                 logger.warning("resolve_provider_client: anthropic requested but no Anthropic credentials found")
                 return None, None
@@ -3263,17 +3263,27 @@ def _get_auxiliary_task_config(task: str) -> Dict[str, Any]:
 
 
 def _get_task_timeout(task: str, default: float = _DEFAULT_AUX_TIMEOUT) -> float:
-    """Read timeout from auxiliary.{task}.timeout in config, falling back to *default*."""
-    if not task:
-        return default
-    task_config = _get_auxiliary_task_config(task)
-    raw = task_config.get("timeout")
-    if raw is not None:
-        try:
-            return float(raw)
-        except (ValueError, TypeError):
-            pass
-    return default
+    """Read timeout from auxiliary.{task}.timeout and apply side-task caps."""
+    from agent.side_task_policy import apply_side_task_timeout_cap
+
+    timeout_value = default
+    if task:
+        task_config = _get_auxiliary_task_config(task)
+        raw = task_config.get("timeout")
+        if raw is not None:
+            try:
+                timeout_value = float(raw)
+            except (ValueError, TypeError):
+                timeout_value = default
+    capped = apply_side_task_timeout_cap(task, timeout_value)
+    if capped != timeout_value:
+        logger.info(
+            "Auxiliary %s: timeout capped %.2fs -> %.2fs by side-task policy",
+            task or "call",
+            timeout_value,
+            capped,
+        )
+    return capped
 
 
 def _get_task_extra_body(task: str) -> Dict[str, Any]:

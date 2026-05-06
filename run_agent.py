@@ -150,6 +150,12 @@ from agent.context_compressor import ContextCompressor
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
+from agent.governance_context import (
+    build_governance_retrieval_context,
+    compact_governance_memory_block,
+    is_governance_source_available,
+    is_governance_source_required,
+)
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.codex_responses_adapter import (
     _derive_responses_function_call_id as _codex_derive_responses_function_call_id,
@@ -5006,9 +5012,17 @@ class AIAgent:
 
         if self._memory_store:
             if self._memory_enabled:
+                mem_start = time.perf_counter()
                 mem_block = self._memory_store.format_for_system_prompt("memory")
                 if mem_block:
-                    prompt_parts.append(mem_block)
+                    compacted_mem_block = compact_governance_memory_block(mem_block)
+                    logger.info(
+                        "latency.phase system_prompt.memory_ms=%.2f original_chars=%d compacted_chars=%d",
+                        (time.perf_counter() - mem_start) * 1000.0,
+                        len(mem_block),
+                        len(compacted_mem_block),
+                    )
+                    prompt_parts.append(compacted_mem_block)
             # USER.md is always included when enabled.
             if self._user_profile_enabled:
                 user_block = self._memory_store.format_for_system_prompt("user")
@@ -9492,6 +9506,15 @@ class AIAgent:
         if block_message is not None:
             return json.dumps({"error": block_message}, ensure_ascii=False)
 
+        if is_governance_source_required() and not is_governance_source_available():
+            return json.dumps({
+                "error": (
+                    "Governance source unavailable: exact rule retrieval could not read "
+                    "rules.source.json. Tool execution is blocked until governance source "
+                    "is readable."
+                )
+            }, ensure_ascii=False)
+
         if function_name == "todo":
             from tools.todo_tool import todo_tool as _todo_tool
             return _todo_tool(
@@ -10008,7 +10031,17 @@ class AIAgent:
                 if not guardrail_decision.allows_execution:
                     _guardrail_block_decision = guardrail_decision
 
-            _execution_blocked = _block_msg is not None or _guardrail_block_decision is not None
+            _governance_source_block = False
+            if _block_msg is None and _guardrail_block_decision is None:
+                _governance_source_block = (
+                    is_governance_source_required() and not is_governance_source_available()
+                )
+
+            _execution_blocked = (
+                _block_msg is not None
+                or _guardrail_block_decision is not None
+                or _governance_source_block
+            )
 
             if _execution_blocked:
                 # Tool blocked by plugin or guardrail policy — skip counters,
@@ -10091,6 +10124,15 @@ class AIAgent:
                 # Tool blocked by tool-loop guardrail — synthesize exactly one
                 # tool result for the original tool_call_id without executing.
                 function_result = self._guardrail_block_result(_guardrail_block_decision)
+                tool_duration = 0.0
+            elif _governance_source_block:
+                function_result = json.dumps({
+                    "error": (
+                        "Governance source unavailable: exact rule retrieval could not read "
+                        "rules.source.json. Tool execution is blocked until governance source "
+                        "is readable."
+                    )
+                }, ensure_ascii=False)
                 tool_duration = 0.0
             elif function_name == "todo":
                 from tools.todo_tool import todo_tool as _todo_tool
@@ -10760,6 +10802,7 @@ class AIAgent:
         # producing a different system prompt and breaking the Anthropic
         # prefix cache.
         if self._cached_system_prompt is None:
+            system_prompt_start = time.perf_counter()
             stored_prompt = None
             if conversation_history and self._session_db:
                 try:
@@ -10770,12 +10813,23 @@ class AIAgent:
                     pass  # Fall through to build fresh
 
             if stored_prompt:
-                # Continuing session — reuse the exact system prompt from
+                # Continuing session — reuse the exact [REDACTED_INTERNAL_IP] from
                 # the previous turn so the Anthropic cache prefix matches.
-                self._cached_system_prompt = stored_prompt
+                self._cached_system_prompt = compact_governance_memory_block(stored_prompt)
+                logger.info(
+                    "latency.phase system_prompt.reuse_ms=%.2f cached_chars=%d stored_chars=%d",
+                    (time.perf_counter() - system_prompt_start) * 1000.0,
+                    len(self._cached_system_prompt or ""),
+                    len(stored_prompt or ""),
+                )
             else:
-                # First turn of a new session — build from scratch.
+
                 self._cached_system_prompt = self._build_system_prompt(system_message)
+                logger.info(
+                    "latency.phase system_prompt.build_ms=%.2f cached_chars=%d",
+                    (time.perf_counter() - system_prompt_start) * 1000.0,
+                    len(self._cached_system_prompt or ""),
+                )
                 # Plugin hook: on_session_start
                 # Fired once when a brand-new session is created (not on
                 # continuation).  Plugins can use this to initialise
@@ -10881,6 +10935,7 @@ class AIAgent:
         #
         # All injected context is ephemeral (not persisted to session DB).
         _plugin_user_context = ""
+        pre_llm_hook_start = time.perf_counter()
         try:
             from hermes_cli.plugins import invoke_hook as _invoke_hook
             _pre_results = _invoke_hook(
@@ -10903,6 +10958,12 @@ class AIAgent:
                 _plugin_user_context = "\n\n".join(_ctx_parts)
         except Exception as exc:
             logger.warning("pre_llm_call hook failed: %s", exc)
+        finally:
+            logger.info(
+                "latency.phase pre_llm_hooks_ms=%.2f injected_chars=%d",
+                (time.perf_counter() - pre_llm_hook_start) * 1000.0,
+                len(_plugin_user_context or ""),
+            )
 
         # Main conversation loop
         api_call_count = 0
@@ -10947,12 +11008,18 @@ class AIAgent:
         # Use original_user_message (clean input) — user_message may contain
         # injected skill content that bloats / breaks provider queries.
         _ext_prefetch_cache = ""
+        ext_prefetch_start = time.perf_counter()
         if self._memory_manager:
             try:
                 _query = original_user_message if isinstance(original_user_message, str) else ""
                 _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
             except Exception:
                 pass
+        logger.info(
+            "latency.phase external_memory_prefetch_ms=%.2f injected_chars=%d",
+            (time.perf_counter() - ext_prefetch_start) * 1000.0,
+            len(_ext_prefetch_cache or ""),
+        )
 
         while (api_call_count < self.max_iterations and self.iteration_budget.remaining > 0) or self._budget_grace_call:
             # Reset per-turn checkpoint dedup so each iteration can take one snapshot
@@ -11100,6 +11167,18 @@ class AIAgent:
                             _injections.append(_fenced)
                     if _plugin_user_context:
                         _injections.append(_plugin_user_context)
+                    gov_start = time.perf_counter()
+                    _governance_context = build_governance_retrieval_context(
+                        original_user_message if isinstance(original_user_message, str) else ""
+                    )
+                    logger.info(
+                        "latency.phase governance_exact_retrieval_ms=%.2f injected_chars=%d api_call=%d",
+                        (time.perf_counter() - gov_start) * 1000.0,
+                        len(_governance_context or ""),
+                        api_call_count,
+                    )
+                    if _governance_context:
+                        _injections.append(_governance_context)
                     if _injections:
                         _base = api_msg.get("content", "")
                         if isinstance(_base, str):
