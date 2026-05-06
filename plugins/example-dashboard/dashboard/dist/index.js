@@ -104,10 +104,10 @@
     return React.createElement(Card, {
       className: "border-dashed",
     },
-      React.createElement(CardContent, { className: "flex items-center gap-3 py-2" },
+      React.createElement(CardContent, { className: "flex flex-col items-start gap-2 py-2 sm:flex-row sm:items-center" },
         React.createElement(Badge, { variant: "outline" }, "Example"),
         React.createElement("span", {
-          className: "text-xs text-muted-foreground",
+          className: "text-xs text-muted-foreground break-words leading-relaxed",
         }, "This banner was injected into the Sessions page by the example plugin via the ",
           React.createElement("code", { className: "font-courier" }, "sessions:top"),
           " slot."),

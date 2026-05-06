@@ -83,7 +83,7 @@ function SnippetHighlight({ snippet }: { snippet: string }) {
     parts.push(snippet.slice(last));
   }
   return (
-    <p className="text-xs text-muted-foreground/80 truncate max-w-lg mt-0.5">
+    <p className="mt-0.5 max-w-lg text-xs leading-relaxed text-muted-foreground/80 break-words line-clamp-3 sm:line-clamp-2">
       {parts}
     </p>
   );
@@ -303,7 +303,7 @@ function SessionRow({
       }`}
     >
       <div
-        className="flex items-center justify-between p-3 cursor-pointer hover:bg-secondary/30 transition-colors"
+        className="flex cursor-pointer flex-col gap-3 p-3 transition-colors hover:bg-secondary/30 sm:flex-row sm:items-center sm:justify-between"
         onClick={onToggle}
       >
         <div className="flex items-center gap-3 min-w-0 flex-1">
@@ -311,9 +311,9 @@ function SessionRow({
             <SourceIcon className="h-4 w-4" />
           </div>
           <div className="flex flex-col gap-0.5 min-w-0">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-start gap-2">
               <span
-                className={`text-sm truncate pr-2 ${hasTitle ? "font-medium" : "text-muted-foreground italic"}`}
+                className={`pr-2 text-sm break-words sm:line-clamp-2 ${hasTitle ? "font-medium" : "text-muted-foreground italic line-clamp-2"}`}
               >
                 {hasTitle
                   ? session.title
@@ -328,8 +328,8 @@ function SessionRow({
                 </Badge>
               )}
             </div>
-            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <span className="truncate max-w-[120px] sm:max-w-[180px]">
+            <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-muted-foreground">
+              <span className="break-all sm:break-words sm:max-w-[180px]">
                 {(session.model ?? t.common.unknown).split("/").pop()}
               </span>
               <span className="text-border">&#183;</span>
@@ -351,7 +351,7 @@ function SessionRow({
           </div>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
           <Badge tone="outline" className="text-[10px]">
             {session.source ?? "local"}
           </Badge>
@@ -749,11 +749,11 @@ export default function SessionsPage() {
                 className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border border-border p-3 w-full"
               >
                 <div className="flex flex-col gap-1 min-w-0 w-full">
-                  <span className="font-medium text-sm truncate">
+                  <span className="text-sm font-medium break-words line-clamp-2">
                     {s.title ?? t.common.untitled}
                   </span>
 
-                  <span className="text-xs text-muted-foreground truncate">
+                  <span className="text-xs text-muted-foreground break-all sm:break-words">
                     <span className="font-mono-ui">
                       {(s.model ?? t.common.unknown).split("/").pop()}
                     </span>{" "}
@@ -762,7 +762,7 @@ export default function SessionsPage() {
                   </span>
 
                   {s.preview && (
-                    <span className="text-xs text-muted-foreground/70 truncate">
+                    <span className="text-xs text-muted-foreground/70 break-words line-clamp-2">
                       {s.preview}
                     </span>
                   )}

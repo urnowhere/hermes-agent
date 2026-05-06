@@ -57,12 +57,12 @@ export function PlatformsCard({ platforms }: PlatformsCardProps) {
                 />
 
                 <div className="flex flex-col gap-0.5 min-w-0">
-                  <span className="text-sm font-medium capitalize truncate">
+                  <span className="text-sm font-medium capitalize break-words">
                     {name}
                   </span>
 
                   {info.error_message && (
-                    <span className="text-xs text-destructive">
+                    <span className="text-xs text-destructive break-words">
                       {info.error_message}
                     </span>
                   )}

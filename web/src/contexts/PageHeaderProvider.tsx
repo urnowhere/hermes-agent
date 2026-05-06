@@ -51,10 +51,10 @@ export function PageHeaderProvider({
         <header
           className={cn(
             "z-1 w-full shrink-0",
-            "box-border h-14 min-h-14",
+            "box-border min-h-14 sm:h-14",
             "border-b border-current/20",
             "bg-background-base/40 backdrop-blur-sm",
-            "overflow-hidden",
+            "overflow-visible",
             "sm:min-h-0",
           )}
           role="banner"
