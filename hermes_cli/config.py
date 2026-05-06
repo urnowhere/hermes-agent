@@ -1051,7 +1051,7 @@ DEFAULT_CONFIG = {
         # agent, which can retry with the flagged content removed.
         # External hub installs (trusted/community sources) are always
         # scanned regardless of this setting.
-        "guard_agent_created": False,
+        "guard_agent_created": True,
     },
 
     # Curator — background skill maintenance.
