@@ -9996,7 +9996,7 @@ class HermesCLI:
                 goodbye = get_active_goodbye("Goodbye! ⚕")
             except Exception:
                 goodbye = "Goodbye! ⚕"
-            print(goodbye)
+            Console().print(goodbye)
 
     def _get_tui_prompt_symbols(self) -> tuple[str, str]:
         """Return ``(normal_prompt, state_suffix)`` for the active skin.
