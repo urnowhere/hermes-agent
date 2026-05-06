@@ -428,6 +428,121 @@ class TestBuildSkillsSystemPrompt:
         result = build_skills_system_prompt()
         assert "backend-skill" in result
 
+    # ----- Regression: #13851 -----
+    # `skills.platform_disabled.<platform>` was ignored when the Signal (and
+    # any other) gateway built system prompts on an async task that didn't
+    # inherit the session contextvars. The fix adds an explicit `platform=`
+    # parameter to `build_skills_system_prompt()` that is authoritative for
+    # both the cache key and `get_disabled_skill_names()` resolution.
+
+    def _write_platform_disabled_config(self, tmp_path, platform, disabled_names):
+        """Helper to drop a config.yaml with skills.platform_disabled set."""
+        config_path = tmp_path / "config.yaml"
+        import yaml
+        config_path.write_text(yaml.safe_dump({
+            "skills": {
+                "platform_disabled": {platform: list(disabled_names)},
+            }
+        }))
+        return config_path
+
+    def test_explicit_platform_param_disables_skills_for_that_platform(
+        self, monkeypatch, tmp_path
+    ):
+        """Passing platform="signal" must exclude signal-disabled skills from the prompt."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        # Skills under ~/.hermes/skills/misc/{skill}
+        for name in ("weather", "apple-notes"):
+            d = tmp_path / "skills" / "misc" / name
+            d.mkdir(parents=True)
+            (d / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: {name} skill\n---\n"
+            )
+        self._write_platform_disabled_config(tmp_path, "signal", ["apple-notes"])
+        # Ensure no env vars leak in
+        monkeypatch.delenv("HERMES_PLATFORM", raising=False)
+        monkeypatch.delenv("HERMES_SESSION_PLATFORM", raising=False)
+
+        result = build_skills_system_prompt(platform="signal")
+        assert "weather" in result
+        assert "apple-notes" not in result
+
+    def test_explicit_platform_param_wins_over_env_vars(
+        self, monkeypatch, tmp_path
+    ):
+        """Caller-provided platform= must override HERMES_PLATFORM env."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        for name in ("web-search", "terminal"):
+            d = tmp_path / "skills" / "misc" / name
+            d.mkdir(parents=True)
+            (d / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: {name} skill\n---\n"
+            )
+        # Env var says telegram disables terminal; explicit param says signal disables web-search.
+        import yaml
+        (tmp_path / "config.yaml").write_text(yaml.safe_dump({
+            "skills": {
+                "platform_disabled": {
+                    "telegram": ["terminal"],
+                    "signal": ["web-search"],
+                },
+            }
+        }))
+        monkeypatch.setenv("HERMES_PLATFORM", "telegram")
+
+        result = build_skills_system_prompt(platform="signal")
+        # signal disables web-search (explicit param wins)
+        assert "web-search" not in result
+        # telegram would have disabled terminal, but explicit signal param overrode it
+        assert "terminal" in result
+
+    def test_platform_none_falls_back_to_env(self, monkeypatch, tmp_path):
+        """Without explicit platform=, legacy env-based resolution still works."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        for name in ("web-search", "apple-notes"):
+            d = tmp_path / "skills" / "misc" / name
+            d.mkdir(parents=True)
+            (d / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: {name} skill\n---\n"
+            )
+        self._write_platform_disabled_config(tmp_path, "signal", ["apple-notes"])
+        monkeypatch.setenv("HERMES_PLATFORM", "signal")
+
+        result = build_skills_system_prompt()  # no platform= kwarg
+        assert "web-search" in result
+        assert "apple-notes" not in result
+
+    def test_platform_in_cache_key_prevents_cross_platform_leak(
+        self, monkeypatch, tmp_path
+    ):
+        """Two back-to-back builds with different platforms must not share cache entries."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        for name in ("web-search", "apple-notes"):
+            d = tmp_path / "skills" / "misc" / name
+            d.mkdir(parents=True)
+            (d / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: {name} skill\n---\n"
+            )
+        import yaml
+        (tmp_path / "config.yaml").write_text(yaml.safe_dump({
+            "skills": {
+                "platform_disabled": {
+                    "signal":   ["apple-notes"],
+                    "telegram": ["web-search"],
+                },
+            }
+        }))
+        monkeypatch.delenv("HERMES_PLATFORM", raising=False)
+        monkeypatch.delenv("HERMES_SESSION_PLATFORM", raising=False)
+
+        signal_result = build_skills_system_prompt(platform="signal")
+        telegram_result = build_skills_system_prompt(platform="telegram")
+        # Different platforms → different cache entries → different filtered outputs.
+        assert "apple-notes" not in signal_result
+        assert "web-search" in signal_result
+        assert "web-search" not in telegram_result
+        assert "apple-notes" in telegram_result
+
 
 class TestBuildNousSubscriptionPrompt:
     def test_includes_active_subscription_features(self, monkeypatch):

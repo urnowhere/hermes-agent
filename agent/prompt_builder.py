@@ -718,11 +718,12 @@ def _skill_should_show(
 def build_skills_system_prompt(
     available_tools: "set[str] | None" = None,
     available_toolsets: "set[str] | None" = None,
+    platform: "str | None" = None,
 ) -> str:
     """Build a compact skill index for the system prompt.
 
     Two-layer cache:
-      1. In-process LRU dict keyed by (skills_dir, tools, toolsets)
+      1. In-process LRU dict keyed by (skills_dir, tools, toolsets, platform)
       2. Disk snapshot (``.skills_prompt_snapshot.json``) validated by
          mtime/size manifest — survives process restarts
 
@@ -732,6 +733,20 @@ def build_skills_system_prompt(
     scanned alongside the local ``~/.hermes/skills/`` directory.  External dirs
     are read-only — they appear in the index but new skills are always created
     in the local dir.  Local skills take precedence when names collide.
+
+    Args:
+        available_tools: Tool names available in the current session. Used
+            to filter out skills whose ``tools`` frontmatter doesn't match.
+        available_toolsets: Toolset names available in the current session.
+        platform: Explicit platform name (e.g. ``"signal"``). When provided,
+            this is authoritative for resolving ``skills.platform_disabled``
+            *and* is used as an extra cache-key dimension. Callers running
+            inside the gateway (where each ``AIAgent`` is constructed with a
+            known platform) should pass it explicitly — context-var fallbacks
+            are unreliable when skills prompts are built from a different
+            async task than the one that set the session vars (#13851).
+            When *None*, falls back to ``HERMES_PLATFORM`` /
+            ``HERMES_SESSION_PLATFORM`` resolution.
     """
     skills_dir = get_skills_dir()
     external_dirs = get_all_skills_dirs()[1:]  # skip local (index 0)
@@ -744,11 +759,12 @@ def build_skills_system_prompt(
     # produce distinct cache entries (gateway serves multiple platforms).
     from gateway.session_context import get_session_env
     _platform_hint = (
-        os.environ.get("HERMES_PLATFORM")
+        platform
+        or os.environ.get("HERMES_PLATFORM")
         or get_session_env("HERMES_SESSION_PLATFORM")
         or ""
     )
-    disabled = get_disabled_skill_names()
+    disabled = get_disabled_skill_names(platform=_platform_hint or None)
     cache_key = (
         str(skills_dir.resolve()),
         tuple(str(d) for d in external_dirs),
