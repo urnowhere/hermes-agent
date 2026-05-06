@@ -203,6 +203,11 @@ terminal:
 #   docker_forward_env:
 #     - "GITHUB_TOKEN"
 #     - "NPM_TOKEN"
+#   # Optional: attach the container to a user-defined Docker network so it can
+#   # reach compose-deployed sibling services (DBs, MCP servers, internal HTTP)
+#   # by container DNS. Default: True (Docker's default bridge). False sets
+#   # --network=none (fully isolated). A string sets --network=<name>.
+#   docker_network: "my-net"
 
 # -----------------------------------------------------------------------------
 # OPTION 4: Singularity/Apptainer container

@@ -105,3 +105,48 @@ class TestImportTimeEnvParsing:
                 assert mod.DISK_USAGE_WARNING_THRESHOLD_GB == 500.0
         finally:
             importlib.reload(_tt_mod)
+
+
+def test_create_environment_threads_docker_network(monkeypatch):
+    """_create_environment must extract docker_network from container_config and pass to _DockerEnvironment."""
+    from tools import terminal_tool as _tt_mod
+
+    captured_kwargs = {}
+
+    def fake_docker_environment(**kwargs):
+        captured_kwargs.update(kwargs)
+        # Return a stub object — we only care about constructor kwargs
+        return object()
+
+    with patch.object(_tt_mod, "_DockerEnvironment", side_effect=fake_docker_environment):
+        _tt_mod._create_environment(
+            "docker",
+            image="test:latest",
+            cwd="/root",
+            timeout=60,
+            container_config={"docker_network": "hermes-mcp-net"},
+        )
+
+    assert captured_kwargs.get("network") == "hermes-mcp-net"
+
+
+def test_create_environment_default_network_is_true(monkeypatch):
+    """When docker_network is absent, _create_environment passes network=True (current behavior)."""
+    from tools import terminal_tool as _tt_mod
+
+    captured_kwargs = {}
+
+    def fake_docker_environment(**kwargs):
+        captured_kwargs.update(kwargs)
+        return object()
+
+    with patch.object(_tt_mod, "_DockerEnvironment", side_effect=fake_docker_environment):
+        _tt_mod._create_environment(
+            "docker",
+            image="test:latest",
+            cwd="/root",
+            timeout=60,
+            container_config={},  # no docker_network key
+        )
+
+    assert captured_kwargs.get("network") is True

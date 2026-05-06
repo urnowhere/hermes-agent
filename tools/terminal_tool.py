@@ -1128,6 +1128,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
     volumes = cc.get("docker_volumes", [])
     docker_forward_env = cc.get("docker_forward_env", [])
     docker_env = cc.get("docker_env", {})
+    docker_network = cc.get("docker_network", True)
 
     if env_type == "local":
         return _LocalEnvironment(cwd=cwd, timeout=timeout)
@@ -1142,6 +1143,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
             auto_mount_cwd=cc.get("docker_mount_cwd_to_workspace", False),
             forward_env=docker_forward_env,
             env=docker_env,
+            network=docker_network,
             run_as_host_user=cc.get("docker_run_as_host_user", False),
         )
     
@@ -1791,6 +1793,7 @@ def terminal_tool(
                                 "docker_forward_env": config.get("docker_forward_env", []),
                                 "docker_env": config.get("docker_env", {}),
                                 "docker_run_as_host_user": config.get("docker_run_as_host_user", False),
+                                "docker_network": config.get("docker_network", True),
                             }
 
                         local_config = None

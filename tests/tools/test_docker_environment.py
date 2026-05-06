@@ -414,7 +414,9 @@ def test_security_args_include_setuid_setgid_for_gosu_drop(monkeypatch):
     }
     assert "SETUID" in added, "SETUID cap missing — gosu drop in entrypoint will fail"
     assert "SETGID" in added, "SETGID cap missing — gosu drop in entrypoint will fail"
-
+    # Sanity: the hardening posture is still in place.
+    assert "--cap-drop" in run_args and "ALL" in run_args
+    assert "--security-opt" in run_args and "no-new-privileges" in run_args
 
 # ── run_as_host_user tests ────────────────────────────────────────
 
@@ -512,3 +514,40 @@ def test_run_as_host_user_warns_and_skips_when_no_posix_ids(monkeypatch, caplog)
         "does not expose POSIX uid/gid" in rec.getMessage()
         for rec in caplog.records
     ), "expected a warning when POSIX ids are unavailable"
+
+
+def test_network_true_omits_network_flag(monkeypatch):
+    """network=True (default) should add no --network flag — uses docker default bridge."""
+    calls = _mock_subprocess_run(monkeypatch)
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/custom/docker")
+
+    _make_dummy_env(network=True)
+
+    run_call = next(c for c in calls if isinstance(c[0], list) and len(c[0]) >= 2 and c[0][1] == "run")
+    cmd = run_call[0]
+    assert "--network=none" not in cmd
+    assert not any(arg.startswith("--network=") for arg in cmd)
+
+
+def test_network_false_adds_network_none(monkeypatch):
+    """network=False should add --network=none (current behavior preserved)."""
+    calls = _mock_subprocess_run(monkeypatch)
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/custom/docker")
+
+    _make_dummy_env(network=False)
+
+    run_call = next(c for c in calls if isinstance(c[0], list) and len(c[0]) >= 2 and c[0][1] == "run")
+    assert "--network=none" in run_call[0]
+
+
+def test_network_string_adds_named_network(monkeypatch):
+    """network='hermes-mcp-net' should add --network=hermes-mcp-net (the new feature)."""
+    calls = _mock_subprocess_run(monkeypatch)
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/custom/docker")
+
+    _make_dummy_env(network="hermes-mcp-net")
+
+    run_call = next(c for c in calls if isinstance(c[0], list) and len(c[0]) >= 2 and c[0][1] == "run")
+    cmd = run_call[0]
+    assert "--network=hermes-mcp-net" in cmd
+    assert "--network=none" not in cmd
