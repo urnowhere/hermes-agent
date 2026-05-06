@@ -1758,6 +1758,15 @@ def _run_single_child(
             except Exception as e:
                 logger.debug("Progress callback completion failed: %s", e)
 
+        # Judge evaluation (#356 Phase 1)
+        _acceptance_criteria = _kwargs.get("acceptance_criteria")
+        if _acceptance_criteria:
+            entry["judge"] = _judge_output(
+                objective=goal,
+                acceptance_criteria=_acceptance_criteria,
+                output=entry.get("summary", ""),
+            )
+
         return entry
 
     except Exception as exc:
@@ -1833,6 +1842,76 @@ def _run_single_child(
             logger.debug("Failed to close child agent after delegation")
 
 
+
+
+def _judge_output(
+    objective: str,
+    acceptance_criteria: str,
+    output: str,
+) -> Dict[str, str]:
+    """Evaluate sub-agent output against acceptance criteria using a cheap LLM.
+
+    Returns a dict with verdict (PASS|FAIL) and reasoning.
+    If the auxiliary LLM is unavailable or returns unparseable output,
+    logs a warning and returns {"verdict": "FAIL", "reasoning": "..."}.
+    """
+    if not acceptance_criteria or not acceptance_criteria.strip():
+        return {"verdict": "PASS", "reasoning": "No criteria provided"}
+
+    judge_prompt = (
+        "Evaluate whether this output meets the acceptance criteria.\n\n"
+        f"Objective: {objective}\n"
+        f"Acceptance Criteria: {acceptance_criteria}\n\n"
+        f"Output:\n{output}\n\n"
+        'Respond ONLY with valid JSON — no markdown, no backticks, no preamble:\n'
+        '{"verdict": "PASS"|"FAIL", "reasoning": "explanation"}'
+    )
+
+    try:
+        import re
+        from agent.auxiliary_client import call_llm
+
+        resp = call_llm(
+            task="judge",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an independent quality judge. Check if a sub-agent's "
+                        "output meets the stated acceptance criteria. Be strict but fair. "
+                        "Respond ONLY with the requested JSON."
+                    ),
+                },
+                {"role": "user", "content": judge_prompt},
+            ],
+            temperature=0.0,
+            max_tokens=512,
+        )
+        raw = resp.choices[0].message.content.strip() if resp and resp.choices else ""
+    except Exception as exc:
+        logger.warning("Judge LLM call failed: %s", exc)
+        return {"verdict": "FAIL", "reasoning": f"Judge unavailable: {exc}"}
+
+    # Strip optional markdown code fences
+    raw = re.sub(r"^```(?:json)?\s*\n?", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\n?```\s*$", "", raw)
+    raw = raw.strip()
+
+    try:
+        parsed = json.loads(raw)
+        verdict = str(parsed.get("verdict", "")).strip().upper()
+        reasoning = str(parsed.get("reasoning", "")).strip()
+        if verdict not in {"PASS", "FAIL"}:
+            verdict = "FAIL"
+            reasoning = f"Invalid verdict from judge: {raw[:200]}"
+        return {"verdict": verdict, "reasoning": reasoning}
+    except json.JSONDecodeError:
+        logger.warning("Judge returned non-JSON: %s", raw[:200])
+        upper = raw.upper()
+        if "PASS" in upper and "FAIL" not in upper:
+            return {"verdict": "PASS", "reasoning": raw}
+        return {"verdict": "FAIL", "reasoning": f"Judge returned non-JSON: {raw[:200]}"}
+
 def delegate_task(
     goal: Optional[str] = None,
     context: Optional[str] = None,
@@ -1841,6 +1920,7 @@ def delegate_task(
     max_iterations: Optional[int] = None,
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
+    acceptance_criteria: Optional[str] = None,
     role: Optional[str] = None,
     parent_agent=None,
 ) -> str:
@@ -1929,7 +2009,7 @@ def delegate_task(
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
         task_list = [
-            {"goal": goal, "context": context, "toolsets": toolsets, "role": top_role}
+            {"goal": goal, "context": context, "toolsets": toolsets, "role": top_role, "acceptance_criteria": acceptance_criteria}
         ]
     else:
         return tool_error("Provide either 'goal' (single task) or 'tasks' (batch).")
@@ -1999,7 +2079,8 @@ def delegate_task(
     if n_tasks == 1:
         # Single task -- run directly (no thread pool overhead)
         _i, _t, child = children[0]
-        result = _run_single_child(0, _t["goal"], child, parent_agent)
+        result = _run_single_child(0, _t["goal"], child, parent_agent,
+                                    acceptance_criteria=_t.get("acceptance_criteria"))
         results.append(result)
     else:
         # Batch -- run in parallel with per-task progress lines
@@ -2015,6 +2096,7 @@ def delegate_task(
                     goal=t["goal"],
                     child=child,
                     parent_agent=parent_agent,
+                    acceptance_criteria=t.get("acceptance_criteria"),
                 )
                 futures[future] = i
 
@@ -2486,6 +2568,14 @@ DELEGATE_TASK_SCHEMA = {
                             "items": {"type": "string"},
                             "description": "Per-task ACP args override.",
                         },
+                        "acceptance_criteria": {
+                            "type": "string",
+                            "description": (
+                                "Optional acceptance criteria for this task. If provided, a cheap "
+                                "independent judge evaluates the sub-agent output against these "
+                                "criteria and returns PASS or FAIL with reasoning."
+                            ),
+                        },
                         "role": {
                             "type": "string",
                             "enum": ["leaf", "orchestrator"],
@@ -2531,6 +2621,15 @@ DELEGATE_TASK_SCHEMA = {
                 "description": (
                     "Arguments for the ACP command (default: ['--acp', '--stdio']). "
                     "Only used when acp_command is set. Example: ['--acp', '--stdio', '--model', 'claude-opus-4-6']"
+                ),
+            },
+            "acceptance_criteria": {
+                "type": "string",
+                "description": (
+                    "Optional acceptance criteria for this task. If provided, a cheap "
+                    "independent judge evaluates the sub-agent output against these "
+                    "criteria and returns PASS or FAIL with reasoning. Be specific: "
+                    "e.g., 'Output contains columns A, B, C with at least one row per input.'"
                 ),
             },
         },

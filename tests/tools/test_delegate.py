@@ -29,6 +29,7 @@ from tools.delegate_tool import (
     _build_child_agent,
     _build_child_progress_callback,
     _build_child_system_prompt,
+    _judge_output,
     _strip_blocked_tools,
     _resolve_child_credential_pool,
     _resolve_delegation_credentials,
@@ -92,6 +93,85 @@ class TestChildSystemPrompt(unittest.TestCase):
     def test_empty_context_ignored(self):
         prompt = _build_child_system_prompt("Do something", "  ")
         self.assertNotIn("CONTEXT", prompt)
+
+
+
+class TestJudgeOutput(unittest.TestCase):
+    @patch("agent.auxiliary_client.call_llm")
+    def test_judge_pass(self, mock_call_llm):
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = (
+            '{"verdict": "PASS", "reasoning": "Output contains required columns"}'
+        )
+        mock_call_llm.return_value = mock_resp
+
+        result = _judge_output(
+            objective="Cross-reference vendors",
+            acceptance_criteria="Output CSV contains columns: vendor_name, sdn_match",
+            output="vendor_name,sdn_match\nFooCorp,YES",
+        )
+        self.assertEqual(result["verdict"], "PASS")
+        self.assertEqual(result["reasoning"], "Output contains required columns")
+        mock_call_llm.assert_called_once()
+
+    @patch("agent.auxiliary_client.call_llm")
+    def test_judge_fail(self, mock_call_llm):
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = (
+            '{"verdict": "FAIL", "reasoning": "Missing sdn_match column"}'
+        )
+        mock_call_llm.return_value = mock_resp
+
+        result = _judge_output(
+            objective="Cross-reference vendors",
+            acceptance_criteria="Output CSV contains columns: vendor_name, sdn_match",
+            output="vendor_name\nFooCorp",
+        )
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertEqual(result["reasoning"], "Missing sdn_match column")
+        mock_call_llm.assert_called_once()
+
+    def test_no_criteria_no_judge(self):
+        result = _judge_output(
+            objective="List files",
+            acceptance_criteria="",
+            output="file1.py, file2.py",
+        )
+        self.assertEqual(result["verdict"], "PASS")
+        self.assertEqual(result["reasoning"], "No criteria provided")
+
+    @patch("agent.auxiliary_client.call_llm")
+    def test_judge_unavailable_skips(self, mock_call_llm):
+        mock_call_llm.side_effect = RuntimeError("No provider configured")
+
+        result = _judge_output(
+            objective="List files",
+            acceptance_criteria="Return at least 3 files",
+            output="file1.py, file2.py",
+        )
+        self.assertEqual(result["verdict"], "FAIL")
+        self.assertIn("Judge unavailable", result["reasoning"])
+        mock_call_llm.assert_called_once()
+
+    @patch("tools.delegate_tool._run_single_child")
+    def test_delegate_task_passes_acceptance_criteria(self, mock_run):
+        mock_run.return_value = {"task_index": 0, "status": "completed"}
+        parent = _make_mock_parent()
+
+        delegate_task(
+            goal="List files",
+            acceptance_criteria="Return at least 3 files",
+            parent_agent=parent,
+        )
+
+        mock_run.assert_called_once()
+        call_kwargs = mock_run.call_args.kwargs
+        self.assertEqual(
+            call_kwargs.get("acceptance_criteria"),
+            "Return at least 3 files",
+        )
 
 
 class TestStripBlockedTools(unittest.TestCase):
