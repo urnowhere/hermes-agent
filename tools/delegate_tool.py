@@ -984,6 +984,9 @@ def _build_child_agent(
     effective_base_url = override_base_url or parent_agent.base_url
     effective_api_key = override_api_key or parent_api_key
     effective_api_mode = override_api_mode or getattr(parent_agent, "api_mode", None)
+    effective_anthropic_force_bearer_auth = (
+        False if override_provider else bool(getattr(parent_agent, "_anthropic_force_bearer_auth", False))
+    )
     effective_acp_command = override_acp_command or getattr(
         parent_agent, "acp_command", None
     )
@@ -1055,6 +1058,7 @@ def _build_child_agent(
         model=effective_model,
         provider=effective_provider,
         api_mode=effective_api_mode,
+        anthropic_force_bearer_auth=effective_anthropic_force_bearer_auth,
         acp_command=effective_acp_command,
         acp_args=effective_acp_args,
         max_iterations=max_iterations,
@@ -2347,6 +2351,7 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
         "api_mode": runtime.get("api_mode"),
         "command": runtime.get("command"),
         "args": list(runtime.get("args") or []),
+        "anthropic_force_bearer_auth": bool(runtime.get("anthropic_force_bearer_auth")),
     }
 
 
