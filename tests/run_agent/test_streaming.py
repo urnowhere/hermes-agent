@@ -272,6 +272,96 @@ class TestStreamingAccumulator:
         assert response.choices[0].message.content == "Let me check"
         assert len(response.choices[0].message.tool_calls) == 1
 
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_missing_usage_falls_back_to_estimate(self, mock_close, mock_create):
+        """Stream without a usage chunk (e.g. MiniMax M2) produces an
+        estimated usage object instead of `usage=None`, so downstream
+        context-management and cost-tracking still make forward progress.
+
+        Regression guard for issue #12023.
+        """
+        from run_agent import AIAgent
+
+        # No usage chunk in the stream — mirrors observed MiniMax behavior.
+        chunks = [
+            _make_stream_chunk(content="Hello"),
+            _make_stream_chunk(content=" world"),
+            _make_stream_chunk(content="!", finish_reason="stop", model="test-model"),
+        ]
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(chunks)
+        mock_create.return_value = mock_client
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Say hi"},
+        ]
+        response = agent._interruptible_streaming_api_call({"messages": messages})
+
+        assert response.usage is not None, (
+            "Missing-usage stream should not return usage=None"
+        )
+        assert getattr(response.usage, "estimated", False) is True, (
+            "Synthesized usage should be marked estimated=True"
+        )
+        assert response.usage.prompt_tokens > 0
+        assert response.usage.completion_tokens > 0
+        assert (
+            response.usage.total_tokens
+            == response.usage.prompt_tokens + response.usage.completion_tokens
+        )
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_present_usage_is_preferred_over_estimate(
+        self, mock_close, mock_create
+    ):
+        """When the provider DOES emit usage, that value wins and is not
+        clobbered by an estimate."""
+        from run_agent import AIAgent
+
+        chunks = [
+            _make_stream_chunk(content="Hello"),
+            _make_stream_chunk(content=" world", finish_reason="stop"),
+            _make_empty_chunk(
+                usage=SimpleNamespace(prompt_tokens=42, completion_tokens=7)
+            ),
+        ]
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(chunks)
+        mock_create.return_value = mock_client
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call({})
+
+        assert response.usage.prompt_tokens == 42
+        assert response.usage.completion_tokens == 7
+        assert getattr(response.usage, "estimated", False) is False
+
 
 # ── Test: Streaming Callbacks ────────────────────────────────────────────
 

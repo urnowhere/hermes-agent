@@ -7126,6 +7126,27 @@ class AIAgent:
                 effective_finish_reason = "length"
 
             full_reasoning = "".join(reasoning_parts) or None
+
+            # When the upstream provider does not emit a usage chunk (observed
+            # with MiniMax M2 streaming), synthesize an approximate usage
+            # object from the accumulated text so context-management and
+            # cost-tracking downstream still make forward progress.  The
+            # resulting CompletionUsage is marked estimated=True so metrics
+            # reporters can distinguish.
+            if usage_obj is None:
+                _est_prompt = estimate_messages_tokens_rough(
+                    api_kwargs.get("messages", [])
+                )
+                _est_completion = estimate_tokens_rough(full_content or "")
+                if full_reasoning:
+                    _est_completion += estimate_tokens_rough(full_reasoning)
+                usage_obj = SimpleNamespace(
+                    prompt_tokens=_est_prompt,
+                    completion_tokens=_est_completion,
+                    total_tokens=_est_prompt + _est_completion,
+                    estimated=True,
+                )
+
             mock_message = SimpleNamespace(
                 role=role,
                 content=full_content,
