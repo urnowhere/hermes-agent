@@ -145,6 +145,18 @@ After `hermes plugins install owner/repo`, you're asked `Enable 'name' now? [y/N
 
 When you upgrade to a version of Hermes that has opt-in plugins (config schema v21+), any user plugins already installed under `~/.hermes/plugins/` that weren't already in `plugins.disabled` are **automatically grandfathered** into `plugins.enabled`. Your existing setup keeps working. Bundled plugins are NOT grandfathered — even existing users have to opt in explicitly.
 
+## Real-world example: WZRD
+
+WZRD is a packaged Hermes plugin that treats model momentum as an attention prior rather than a router. It follows the same `plugin.yaml` + `__init__.py` + handler structure described above and exposes three tools:
+
+- `wzrd_trending`
+- `wzrd_candidates`
+- `wzrd_compare`
+
+The plugin keeps routing separate from execution: it surfaces momentum-informed candidates, but leaves the final provider and endpoint choice to the execution router.
+
+Source: [twzrd-sol/wzrd-velocity](https://github.com/twzrd-sol/wzrd-velocity)
+
 ## Available hooks
 
 Plugins can register callbacks for these lifecycle events. See the **[Event Hooks page](/docs/user-guide/features/hooks#plugin-hooks)** for full details, callback signatures, and examples.
