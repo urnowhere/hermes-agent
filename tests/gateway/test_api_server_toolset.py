@@ -28,12 +28,17 @@ class TestHermesApiServerToolset:
         expected = [
             "terminal", "process",
             "read_file", "write_file", "patch", "search_files",
-            "vision_analyze", "image_generate",
+            "vision_analyze", "image_generate", "image_edit",
             "execute_code", "delegate_task",
             "todo", "memory", "session_search", "cronjob",
         ]
         for tool in expected:
             assert tool in tools, f"Missing expected tool: {tool}"
+
+    def test_safe_toolset_excludes_image_edit(self):
+        tools = resolve_toolset("safe")
+        assert "image_generate" in tools
+        assert "image_edit" not in tools
 
     def test_toolset_includes_browser_tools(self):
         tools = resolve_toolset("hermes-api-server")
