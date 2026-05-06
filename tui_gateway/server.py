@@ -1853,6 +1853,7 @@ def _make_agent(sid: str, key: str, session_id: str | None = None):
         requested=requested_provider,
         target_model=model or None,
     )
+    fallback_model = cfg.get("fallback_providers") or cfg.get("fallback_model") or None
     return AIAgent(
         model=model,
         max_iterations=_cfg_max_turns(cfg, 90),
@@ -1871,6 +1872,7 @@ def _make_agent(sid: str, key: str, session_id: str | None = None):
         platform="tui",
         session_id=session_id or key,
         session_db=_get_db(),
+        fallback_model=fallback_model,
         ephemeral_system_prompt=system_prompt or None,
         checkpoints_enabled=is_truthy_value(os.environ.get("HERMES_TUI_CHECKPOINTS")),
         pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),

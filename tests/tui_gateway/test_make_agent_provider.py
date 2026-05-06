@@ -26,6 +26,10 @@ def test_make_agent_passes_resolved_provider():
     fake_cfg = {
         "model": {"default": "claude-opus-4-6", "provider": "anthropic"},
         "agent": {"system_prompt": "test"},
+        "fallback_providers": [
+            {"provider": "copilot", "model": "gpt-5.5"},
+            {"provider": "minimax", "model": "MiniMax-M2.7"},
+        ],
     }
 
     with (
@@ -58,6 +62,7 @@ def test_make_agent_passes_resolved_provider():
         assert call_kwargs.kwargs["base_url"] == "https://api.anthropic.com"
         assert call_kwargs.kwargs["api_key"] == "sk-test-key"
         assert call_kwargs.kwargs["api_mode"] == "anthropic_messages"
+        assert call_kwargs.kwargs["fallback_model"] == fake_cfg["fallback_providers"]
 
 
 def test_make_agent_ignores_display_personality_without_system_prompt():
