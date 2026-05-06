@@ -3662,6 +3662,14 @@ class AIAgent:
                         api_mode=_parent_runtime.get("api_mode") or None,
                         base_url=_parent_runtime.get("base_url") or None,
                         api_key=_parent_runtime.get("api_key") or None,
+                        # Inherit reasoning_config so the review fork honors the
+                        # parent's configured reasoning effort instead of
+                        # falling back to the Codex Responses default of
+                        # ``{"effort": "medium", "summary": "auto"}``. Mirrors
+                        # the api_mode / base_url / api_key inheritance above
+                        # (see #16006, #15884, #13076 for prior runtime-field
+                        # plumbing) — addresses #18871.
+                        reasoning_config=self.reasoning_config,
                         credential_pool=getattr(self, "_credential_pool", None),
                         parent_session_id=self.session_id,
                         enabled_toolsets=["memory", "skills"],

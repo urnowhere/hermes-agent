@@ -24,6 +24,8 @@ def _make_agent_stub(agent_cls):
     agent._skill_nudge_interval = 5
     agent.background_review_callback = None
     agent.status_callback = None
+    agent.reasoning_config = None
+    agent._credential_pool = None
     agent._MEMORY_REVIEW_PROMPT = "review memory"
     agent._SKILL_REVIEW_PROMPT = "review skills"
     agent._COMBINED_REVIEW_PROMPT = "review both"
