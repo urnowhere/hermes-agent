@@ -955,17 +955,29 @@ def skill_view(
 
         skill_dir = None
         skill_md = None
+        search_names = [name]
+
+        # When a qualified name doesn't resolve to a plugin skill, allow a
+        # category alias fallback such as "autonomous-ai-agents:hermes-agent"
+        # -> "autonomous-ai-agents/hermes-agent" for local/external skills.
+        if ":" in name:
+            category_alias = name.replace(":", "/", 1)
+            if category_alias not in search_names:
+                search_names.append(category_alias)
 
         # Search all dirs: local first, then external (first match wins)
         for search_dir in all_dirs:
             # Try direct path first (e.g., "mlops/axolotl")
-            direct_path = search_dir / name
-            if direct_path.is_dir() and (direct_path / "SKILL.md").exists():
-                skill_dir = direct_path
-                skill_md = direct_path / "SKILL.md"
-                break
-            elif direct_path.with_suffix(".md").exists():
-                skill_md = direct_path.with_suffix(".md")
+            for candidate_name in search_names:
+                direct_path = search_dir / candidate_name
+                if direct_path.is_dir() and (direct_path / "SKILL.md").exists():
+                    skill_dir = direct_path
+                    skill_md = direct_path / "SKILL.md"
+                    break
+                elif direct_path.with_suffix(".md").exists():
+                    skill_md = direct_path.with_suffix(".md")
+                    break
+            if skill_md:
                 break
             if local_category_name:
                 categorized_path = search_dir / local_category_name

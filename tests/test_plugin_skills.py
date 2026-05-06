@@ -224,6 +224,22 @@ class TestSkillViewQualifiedName:
         assert result["success"] is True
         assert result["name"] == "my-local"
 
+    def test_local_category_alias_resolves_flat_skill(self, tmp_path, monkeypatch):
+        from tools.skills_tool import skill_view
+
+        skills_dir = tmp_path / "local-skills"
+        skill_dir = skills_dir / "autonomous-ai-agents" / "hermes-agent"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: hermes-agent\ndescription: local\n---\nLocal category body.\n"
+        )
+        monkeypatch.setattr("tools.skills_tool.SKILLS_DIR", skills_dir)
+
+        result = json.loads(skill_view("autonomous-ai-agents:hermes-agent"))
+        assert result["success"] is True
+        assert result["name"] == "hermes-agent"
+        assert "Local category body." in result["content"]
+
     def test_plugin_exists_but_skill_missing(self, tmp_path):
         from tools.skills_tool import skill_view
 
