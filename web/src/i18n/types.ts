@@ -141,6 +141,9 @@ export interface Translations {
     sessionDeleted: string;
     failedToDelete: string;
     resumeInChat: string;
+    copyId: string;
+    idCopied: string;
+    copyIdFailed: string;
     previousPage: string;
     nextPage: string;
     roles: {

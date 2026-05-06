@@ -8,10 +8,12 @@ import {
 import { useNavigate } from "react-router-dom";
 import {
   AlertTriangle,
+  Check,
   CheckCircle2,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Copy,
   Database,
   MessageSquare,
   Search,
@@ -261,6 +263,7 @@ function SessionRow({
   isExpanded,
   onToggle,
   onDelete,
+  onCopyId,
   resumeInChatEnabled,
 }: {
   session: SessionInfo;
@@ -269,11 +272,13 @@ function SessionRow({
   isExpanded: boolean;
   onToggle: () => void;
   onDelete: () => void;
+  onCopyId: (id: string) => Promise<boolean>;
   resumeInChatEnabled: boolean;
 }) {
   const [messages, setMessages] = useState<SessionMessage[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [justCopied, setJustCopied] = useState(false);
   const { t } = useI18n();
   const navigate = useNavigate();
 
@@ -346,6 +351,31 @@ function SessionRow({
               )}
               <span className="text-border">&#183;</span>
               <span>{timeAgo(session.last_active)}</span>
+              <span className="text-border">&#183;</span>
+              <button
+                type="button"
+                aria-label={t.sessions.copyId}
+                title={t.sessions.copyId}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onCopyId(session.id).then((ok) => {
+                    if (ok) {
+                      setJustCopied(true);
+                      setTimeout(() => setJustCopied(false), 1200);
+                    }
+                  });
+                }}
+                className="inline-flex items-center gap-1 font-mono-ui text-[11px] text-muted-foreground/70 hover:text-foreground transition-colors cursor-pointer"
+              >
+                <span className="truncate max-w-[140px] sm:max-w-none">
+                  {session.id}
+                </span>
+                {justCopied ? (
+                  <Check className="h-3 w-3 text-success shrink-0" />
+                ) : (
+                  <Copy className="h-3 w-3 opacity-50 shrink-0" />
+                )}
+              </button>
             </div>
             {snippet && <SnippetHighlight snippet={snippet} />}
           </div>
@@ -543,6 +573,20 @@ export default function SessionsPage() {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
   }, [search]);
+
+  const handleCopyId = useCallback(
+    async (id: string) => {
+      try {
+        await navigator.clipboard.writeText(id);
+        showToast(`${t.sessions.idCopied}: ${id}`, "success");
+        return true;
+      } catch {
+        showToast(t.sessions.copyIdFailed, "error");
+        return false;
+      }
+    },
+    [showToast, t.sessions.idCopied, t.sessions.copyIdFailed],
+  );
 
   const sessionDelete = useConfirmDelete({
     onDelete: useCallback(
@@ -807,6 +851,7 @@ export default function SessionsPage() {
                   setExpandedId((prev) => (prev === s.id ? null : s.id))
                 }
                 onDelete={() => sessionDelete.requestDelete(s.id)}
+                onCopyId={handleCopyId}
                 resumeInChatEnabled={resumeInChatEnabled}
               />
             ))}
