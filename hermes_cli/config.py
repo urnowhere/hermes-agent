@@ -1055,6 +1055,13 @@ DEFAULT_CONFIG = {
         },
     },
 
+    # NetEase IM / NIM channel settings.
+    # Detailed multi-instance editing is primarily intended through config.yaml
+    # (or the dashboard Config page YAML editor), not the Env page.
+    "nim": {
+        "instances": [],
+    },
+
     # Honcho AI-native memory -- reads ~/.honcho/config.json as single source of truth.
     # This section is only needed for hermes-specific overrides; everything else
     # (apiKey, workspace, peerName, sessions, enabled) comes from the global config.
@@ -2579,7 +2586,7 @@ def _normalize_custom_provider_entry(
     from urllib.parse import urlparse
 
     base_url = ""
-    for url_key in ("base_url", "url", "api"):
+    for url_key in ("api", "url", "base_url"):
         raw_url = entry.get(url_key)
         if isinstance(raw_url, str) and raw_url.strip():
             candidate = raw_url.strip()

@@ -237,6 +237,193 @@ def test_setup_gateway_in_container_shows_docker_guidance(monkeypatch, capsys):
     assert "restart" in out.lower()
 
 
+def test_gateway_platforms_include_nim():
+    names = [name for name, _env_var, _setup in setup_mod._GATEWAY_PLATFORMS]
+    assert "NIM (NetEase IM)" in names
+
+
+def test_setup_gateway_ignores_nim_env_credentials_without_config_yaml(monkeypatch):
+    env = {
+        "NIM_APP_KEY": "app-key",
+        "NIM_ACCOUNT": "bot-account",
+        "NIM_TOKEN": "bot-token",
+    }
+
+    monkeypatch.setattr(setup_mod, "get_env_value", lambda key: env.get(key, ""))
+    monkeypatch.setattr(setup_mod, "prompt_checklist", lambda *_args, **_kwargs: [])
+
+    captured = {}
+
+    def _capture(_question, items, pre_selected=None):
+        captured["items"] = items
+        captured["pre_selected"] = pre_selected or []
+        return []
+
+    monkeypatch.setattr(setup_mod, "prompt_checklist", _capture)
+    setup_mod.setup_gateway({})
+
+    nim_index = next(
+        i for i, item in enumerate(captured["items"])
+        if item.startswith("NIM (NetEase IM)")
+    )
+    assert nim_index not in captured["pre_selected"]
+
+def test_setup_gateway_ignores_nim_env_instances_without_config_yaml(monkeypatch):
+    env = {
+        "NIM_INSTANCES": '[{"instance_name":"work","nim_token":"app|bot|secret"}]',
+    }
+
+    monkeypatch.setattr(setup_mod, "get_env_value", lambda key: env.get(key, ""))
+
+    captured = {}
+
+    def _capture(_question, items, pre_selected=None):
+        captured["items"] = items
+        captured["pre_selected"] = pre_selected or []
+        return []
+
+    monkeypatch.setattr(setup_mod, "prompt_checklist", _capture)
+    setup_mod.setup_gateway({})
+
+    nim_index = next(
+        i for i, item in enumerate(captured["items"])
+        if item.startswith("NIM (NetEase IM)")
+    )
+    assert nim_index not in captured["pre_selected"]
+
+
+def test_setup_gateway_marks_nim_configured_from_config_yaml(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    config = load_config()
+    config["nim"] = {
+        "instances": [
+            {
+                "enabled": True,
+                "nimToken": "app|bot|secret",
+                "p2p": {"policy": "open"},
+            }
+        ]
+    }
+    save_config(config)
+
+    monkeypatch.setattr(setup_mod, "get_env_value", lambda _key: "")
+
+    captured = {}
+
+    def _capture(_question, items, pre_selected=None):
+        captured["items"] = items
+        captured["pre_selected"] = pre_selected or []
+        return []
+
+    monkeypatch.setattr(setup_mod, "prompt_checklist", _capture)
+    setup_mod.setup_gateway(load_config())
+
+    nim_index = captured["items"].index("NIM (NetEase IM)  (configured)")
+    assert nim_index in captured["pre_selected"]
+
+
+def test_setup_gateway_preserves_nim_config_saved_by_setup_flow(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(setup_mod, "get_env_value", lambda _key: "")
+    monkeypatch.setattr(setup_mod, "prompt_yes_no", lambda *args, **kwargs: False)
+    monkeypatch.setattr("platform.system", lambda: "Linux")
+
+    import hermes_cli.gateway as gateway_mod
+
+    monkeypatch.setattr(gateway_mod, "supports_systemd_services", lambda: False)
+    monkeypatch.setattr(gateway_mod, "is_macos", lambda: False)
+    monkeypatch.setattr(gateway_mod, "_is_service_installed", lambda: False)
+    monkeypatch.setattr(gateway_mod, "_is_service_running", lambda: False)
+
+    nim_index = next(
+        i for i, (name, _env_var, _setup) in enumerate(setup_mod._GATEWAY_PLATFORMS)
+        if name == "NIM (NetEase IM)"
+    )
+    monkeypatch.setattr(setup_mod, "prompt_checklist", lambda *_args, **_kwargs: [nim_index])
+
+    def _fake_setup_nim():
+        config = load_config()
+        config["nim"] = {
+            "instances": [
+                {
+                    "enabled": True,
+                    "nimToken": "app|bot|secret",
+                    "p2p": {"policy": "open", "allowFrom": []},
+                }
+            ]
+        }
+        save_config(config)
+
+    monkeypatch.setattr(setup_mod, "_setup_nim", _fake_setup_nim)
+    patched_platforms = list(setup_mod._GATEWAY_PLATFORMS)
+    patched_platforms[nim_index] = (
+        "NIM (NetEase IM)",
+        "NIM_CREDENTIALS",
+        setup_mod._setup_nim,
+    )
+    monkeypatch.setattr(setup_mod, "_GATEWAY_PLATFORMS", patched_platforms)
+
+    config = load_config()
+    setup_mod.setup_gateway(config)
+    save_config(config)
+
+    saved = load_config()
+    assert saved["nim"]["instances"][0]["nimToken"] == "app|bot|secret"
+
+    out = capsys.readouterr().out
+    assert "Messaging platforms configured!" in out
+
+
+def test_setup_nim_compact_credentials_sets_open_defaults(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    monkeypatch.setattr(
+        setup_mod,
+        "prompt",
+        lambda *_args, **_kwargs: "app-key|bot-account|bot-token",
+    )
+    monkeypatch.setattr(setup_mod, "prompt_yes_no", lambda *_args, **_kwargs: False)
+
+    setup_mod._setup_nim()
+
+    saved = load_config()
+    assert saved["nim"]["instances"] == [
+        {
+            "enabled": True,
+            "nimToken": "app-key|bot-account|bot-token",
+            "p2p": {"policy": "open", "allowFrom": []},
+            "team": {"policy": "open", "allowFrom": []},
+            "qchat": {"policy": "open", "allowFrom": []},
+            "advanced": {
+                "mediaMaxMb": 30,
+                "textChunkLimit": 4000,
+                "debug": False,
+            },
+        }
+    ]
+
+
+def test_gateway_summary_includes_nim_from_config_yaml(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(setup_mod, "get_env_value", lambda _key: "")
+
+    config = load_config()
+    config["nim"] = {
+        "instances": [
+            {
+                "enabled": True,
+                "nimToken": "app|bot|secret",
+            }
+        ]
+    }
+    save_config(config)
+
+    summary = setup_mod._get_section_config_summary(load_config(), "gateway")
+
+    assert summary == "NIM"
+
+
 def test_setup_syncs_custom_provider_removal_from_disk(tmp_path, monkeypatch):
     """Removing the last custom provider in model setup should persist."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))

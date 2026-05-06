@@ -11,6 +11,8 @@ Handles loading and validating configuration for:
 import logging
 import os
 import json
+import re
+import shlex
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Callable
@@ -105,6 +107,7 @@ class Platform(Enum):
     WECOM = "wecom"
     WECOM_CALLBACK = "wecom_callback"
     WEIXIN = "weixin"
+    NIM = "nim"
     BLUEBUBBLES = "bluebubbles"
     QQBOT = "qqbot"
     YUANBAO = "yuanbao"
@@ -179,6 +182,376 @@ class Platform(Enum):
 # Used to distinguish real platforms from arbitrary strings.
 _BUILTIN_PLATFORM_VALUES = frozenset(m.value for m in Platform.__members__.values())
 
+
+@dataclass(slots=True)
+class NimCredentials:
+    app_key: str
+    account: str
+    token: str
+
+
+@dataclass(slots=True)
+class NimResolvedConfig:
+    enabled: bool
+    credentials: NimCredentials | None
+    instance_name: str = "default"
+    route_prefix: str | None = None
+    p2p_policy: str = "open"
+    p2p_allow_from: List[str] = field(default_factory=list)
+    team_policy: str = "open"
+    team_allow_from: List[str] = field(default_factory=list)
+    qchat_policy: str = "open"
+    qchat_allow_from: List[str] = field(default_factory=list)
+    allowed_users: List[str] = field(default_factory=list)
+    allow_all_users: bool = True
+    group_policy: str = "open"
+    group_allowlist: List[str] = field(default_factory=list)
+    home_channel: str | None = None
+    bridge_command: List[str] = field(default_factory=list)
+    media_max_mb: int = 30
+    text_chunk_limit: int = 4000
+    debug: bool = False
+    advanced: Dict[str, Any] = field(default_factory=dict)
+    raw_extra: Dict[str, Any] = field(default_factory=dict)
+
+    def configured(self) -> bool:
+        return self.enabled and self.credentials is not None
+
+    def to_bridge_payload(self) -> Dict[str, Any]:
+        creds = self.credentials
+        return {
+            "enabled": self.enabled,
+            "credentials": {
+                "app_key": creds.app_key if creds else "",
+                "account": creds.account if creds else "",
+                "token": creds.token if creds else "",
+            },
+            "debug": self.debug,
+            "media_max_mb": self.media_max_mb,
+            "text_chunk_limit": self.text_chunk_limit,
+            "home_channel": self.home_channel,
+            "advanced": dict(self.advanced),
+        }
+
+
+def parse_nim_token(value: Any) -> NimCredentials | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    parts = raw.split("|", 2) if "|" in raw else raw.split("-", 2)
+    if len(parts) != 3 or any(not part for part in parts):
+        return None
+    return NimCredentials(app_key=parts[0], account=parts[1], token=parts[2])
+
+
+def _normalize_nim_instance_name(value: Any, fallback: str = "default") -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return fallback
+    normalized = re.sub(r"[^a-zA-Z0-9._-]+", "-", raw).strip("._-")
+    return normalized or fallback
+
+
+def encode_nim_chat_id(instance_name: str | None, chat_id: str) -> str:
+    raw_chat_id = str(chat_id or "").strip()
+    if not raw_chat_id:
+        return raw_chat_id
+    normalized = _normalize_nim_instance_name(instance_name or "", "")
+    if not normalized:
+        return raw_chat_id
+    prefix = f"{normalized}/"
+    return raw_chat_id if raw_chat_id.startswith(prefix) else f"{prefix}{raw_chat_id}"
+
+
+def decode_nim_chat_id(value: Any) -> tuple[str | None, str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None, ""
+    prefix, sep, remainder = raw.partition("/")
+    if not sep or not remainder:
+        return None, raw
+    normalized = _normalize_nim_instance_name(prefix, "")
+    if not normalized:
+        return None, raw
+    return normalized, remainder
+
+
+def _default_nim_bridge_dir() -> Path:
+    from nim_bot_py.bridge import NodeBridge
+
+    return NodeBridge.bridge_dir()
+
+
+def _default_nim_bridge_command() -> List[str]:
+    from nim_bot_py.bridge import NodeBridge
+
+    return NodeBridge.default_command()
+
+
+def _resolve_nim_bridge_command(value: Any) -> List[str]:
+    if value is None:
+        return _default_nim_bridge_command()
+    if isinstance(value, str):
+        parts = shlex.split(value)
+        return parts or _resolve_nim_bridge_command(None)
+    if isinstance(value, (list, tuple)):
+        parts = [str(item).strip() for item in value if str(item).strip()]
+        return parts or _resolve_nim_bridge_command(None)
+    raise TypeError("NIM bridge_command must be a string or sequence of strings")
+
+
+def _parse_csv_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()]
+
+
+def _coerce_mapping(value: Any) -> Dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _first_non_empty(*values: Any) -> Any:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
+def _normalize_nim_policy(value: Any, default: str = "open") -> str:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"open", "allowlist", "disabled"}:
+            return normalized
+    return default
+
+
+def load_nim_config(
+    platform: "PlatformConfig",
+    environ: Dict[str, str] | None = None,
+) -> NimResolvedConfig:
+    extra = dict(platform.extra or {})
+    p2p_cfg = _coerce_mapping(extra.get("p2p"))
+    team_cfg = _coerce_mapping(extra.get("team"))
+    qchat_cfg = _coerce_mapping(extra.get("qchat"))
+    advanced_cfg = _coerce_mapping(extra.get("advanced"))
+
+    nim_token = _first_non_empty(extra.get("nimToken"), extra.get("nim_token"))
+    credentials = parse_nim_token(nim_token)
+    if credentials is None:
+        app_key = _first_non_empty(extra.get("appKey"), extra.get("app_key"))
+        account = _first_non_empty(extra.get("account"))
+        token = _first_non_empty(extra.get("token"))
+        if app_key and account and token:
+            credentials = NimCredentials(
+                app_key=str(app_key).strip(),
+                account=str(account).strip(),
+                token=str(token).strip(),
+            )
+
+    legacy_p2p_allow = _parse_csv_list(_first_non_empty(extra.get("allowed_users")))
+    legacy_allow_all = _coerce_bool(extra.get("allow_all_users"), default=True)
+    p2p_allow_from = _parse_csv_list(
+        _first_non_empty(
+            p2p_cfg.get("allowFrom"),
+            p2p_cfg.get("allow_from"),
+            legacy_p2p_allow if legacy_p2p_allow else None,
+        )
+    )
+    p2p_policy = _normalize_nim_policy(p2p_cfg.get("policy"))
+    if "policy" not in p2p_cfg:
+        if legacy_allow_all:
+            p2p_policy = "open"
+        elif p2p_allow_from:
+            p2p_policy = "allowlist"
+        else:
+            p2p_policy = "open"
+
+    legacy_team_allow = _parse_csv_list(_first_non_empty(extra.get("group_allowlist")))
+    team_allow_from = _parse_csv_list(
+        _first_non_empty(
+            team_cfg.get("allowFrom"),
+            team_cfg.get("allow_from"),
+            legacy_team_allow if legacy_team_allow else None,
+        )
+    )
+    team_policy = _normalize_nim_policy(
+        _first_non_empty(team_cfg.get("policy"), extra.get("group_policy")),
+        "open",
+    )
+    qchat_policy = _normalize_nim_policy(qchat_cfg.get("policy"), "open")
+    qchat_allow_from = _parse_csv_list(
+        _first_non_empty(qchat_cfg.get("allowFrom"), qchat_cfg.get("allow_from"))
+    )
+
+    media_max_mb = _coerce_int(
+        _first_non_empty(
+            advanced_cfg.get("mediaMaxMb"),
+            advanced_cfg.get("media_max_mb"),
+            extra.get("media_max_mb"),
+        ),
+        30,
+    )
+    text_chunk_limit = max(
+        1,
+        _coerce_int(
+            _first_non_empty(
+                advanced_cfg.get("textChunkLimit"),
+                advanced_cfg.get("text_chunk_limit"),
+            ),
+            4000,
+        ),
+    )
+    debug = _coerce_bool(
+        _first_non_empty(advanced_cfg.get("debug"), extra.get("debug")),
+        default=False,
+    )
+    advanced: Dict[str, Any] = {
+        "mediaMaxMb": media_max_mb,
+        "textChunkLimit": text_chunk_limit,
+        "debug": debug,
+    }
+    for out_key, candidates in (
+        ("weblbsUrl", ("weblbsUrl", "weblbs_url")),
+        ("link_web", ("link_web",)),
+        ("nos_uploader", ("nos_uploader",)),
+        ("nos_downloader_v2", ("nos_downloader_v2",)),
+        ("nos_accelerate", ("nos_accelerate",)),
+        ("nos_accelerate_host", ("nos_accelerate_host",)),
+    ):
+        value = _first_non_empty(*(advanced_cfg.get(candidate) for candidate in candidates))
+        if value is not None:
+            advanced[out_key] = value
+    nos_ssl = _first_non_empty(advanced_cfg.get("nosSsl"), advanced_cfg.get("nos_ssl"))
+    if nos_ssl is not None:
+        advanced["nosSsl"] = _coerce_bool(nos_ssl, default=False)
+
+    instance_name = _normalize_nim_instance_name(
+        extra.get("instance_name") or extra.get("instanceName") or extra.get("name"),
+        "default",
+    )
+
+    return NimResolvedConfig(
+        instance_name=instance_name,
+        route_prefix=None,
+        enabled=platform.enabled,
+        credentials=credentials,
+        p2p_policy=p2p_policy,
+        p2p_allow_from=p2p_allow_from,
+        team_policy=team_policy,
+        team_allow_from=team_allow_from,
+        qchat_policy=qchat_policy,
+        qchat_allow_from=qchat_allow_from,
+        allowed_users=list(p2p_allow_from),
+        allow_all_users=p2p_policy == "open",
+        group_policy=team_policy,
+        group_allowlist=list(team_allow_from),
+        home_channel=str(_first_non_empty(extra.get("home_channel"), extra.get("homeChannel")) or "").strip() or None,
+        bridge_command=_default_nim_bridge_command(),
+        media_max_mb=media_max_mb,
+        text_chunk_limit=text_chunk_limit,
+        debug=debug,
+        advanced=advanced,
+        raw_extra=extra,
+    )
+
+
+def _coerce_nim_instances(value: Any) -> List[Dict[str, Any]]:
+    if value is None:
+        return []
+    raw = value
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        try:
+            raw = json.loads(text)
+        except json.JSONDecodeError as exc:
+            logger.warning("Ignoring invalid NIM_INSTANCES JSON: %s", exc)
+            return []
+    if not isinstance(raw, list):
+        logger.warning("Ignoring NIM instances config: expected a list, got %s", type(raw).__name__)
+        return []
+    instances: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            logger.warning("Ignoring NIM instance entry: expected a mapping, got %s", type(item).__name__)
+            continue
+        instances.append(dict(item))
+    return instances
+
+
+def load_nim_instances(
+    platform: "PlatformConfig",
+    environ: Dict[str, str] | None = None,
+) -> List[NimResolvedConfig]:
+    base_extra = dict(platform.extra or {})
+    raw_instances = _coerce_nim_instances(base_extra.pop("instances", None))
+
+    instances: List[NimResolvedConfig] = []
+    seen_names: set[str] = set()
+
+    def _append_instance(config_obj: NimResolvedConfig) -> None:
+        name = _normalize_nim_instance_name(config_obj.instance_name, "default")
+        if name in seen_names:
+            logger.warning("Ignoring duplicate NIM instance name: %s", name)
+            return
+        config_obj.instance_name = name
+        seen_names.add(name)
+        instances.append(config_obj)
+
+    legacy_platform = PlatformConfig(
+        enabled=platform.enabled,
+        token=platform.token,
+        api_key=platform.api_key,
+        home_channel=platform.home_channel,
+        reply_to_mode=platform.reply_to_mode,
+        extra=base_extra,
+    )
+    legacy = load_nim_config(legacy_platform, environ)
+    if legacy.configured():
+        _append_instance(legacy)
+
+    for index, item in enumerate(raw_instances, start=1):
+        instance_extra = {**base_extra, **item}
+        enabled = _coerce_bool(instance_extra.get("enabled"), default=platform.enabled)
+        instance_platform = PlatformConfig(
+            enabled=enabled,
+            token=platform.token,
+            api_key=platform.api_key,
+            home_channel=None,
+            reply_to_mode=platform.reply_to_mode,
+            extra=instance_extra,
+        )
+        resolved = load_nim_config(instance_platform, environ)
+        if not resolved.configured():
+            logger.warning("Ignoring unconfigured NIM instance entry: %s", instance_extra.get("instance_name") or instance_extra.get("name") or f"nim{index}")
+            continue
+        if "instance_name" not in instance_extra and "instanceName" not in instance_extra and "name" not in instance_extra:
+            fallback_name = resolved.credentials.account if resolved.credentials else f"nim{index}"
+            resolved.instance_name = _normalize_nim_instance_name(fallback_name, f"nim{index}")
+        _append_instance(resolved)
+
+    multi_instance = len(instances) > 1
+    for item in instances:
+        item.route_prefix = f"{item.instance_name}/" if multi_instance else None
+        if item.route_prefix and item.home_channel:
+            item.home_channel = encode_nim_chat_id(item.instance_name, item.home_channel)
+
+    return instances
 
 @dataclass
 class HomeChannel:
@@ -359,6 +732,11 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
     Platform.WEIXIN: lambda cfg: bool(
         cfg.extra.get("account_id") and (cfg.token or cfg.extra.get("token"))
     ),
+    Platform.NIM: lambda cfg: bool(
+        load_nim_instances(cfg)
+        or cfg.extra.get("nim_token")
+        or cfg.extra.get("nimToken")
+    ),
     Platform.WHATSAPP: lambda cfg: True,  # bridge handles auth
     Platform.SIGNAL: lambda cfg: bool(cfg.extra.get("http_url")),
     Platform.EMAIL: lambda cfg: bool(cfg.extra.get("address")),
@@ -477,11 +855,34 @@ class GatewayConfig:
 
         return False
     
-    def get_home_channel(self, platform: Platform) -> Optional[HomeChannel]:
+    def get_home_channel(
+        self,
+        platform: Platform,
+        source_chat_id: Optional[str] = None,
+    ) -> Optional[HomeChannel]:
         """Get the home channel for a platform."""
         config = self.platforms.get(platform)
-        if config:
+        if config and config.home_channel:
             return config.home_channel
+        if platform == Platform.NIM and config:
+            instances = load_nim_instances(config)
+            if source_chat_id:
+                instance_name, _routed = decode_nim_chat_id(source_chat_id)
+                if instance_name:
+                    for instance in instances:
+                        if instance.instance_name == instance_name and instance.home_channel:
+                            return HomeChannel(
+                                platform=Platform.NIM,
+                                chat_id=instance.home_channel,
+                                name=f"NIM {instance.instance_name}",
+                            )
+            for instance in instances:
+                if instance.home_channel:
+                    return HomeChannel(
+                        platform=Platform.NIM,
+                        chat_id=instance.home_channel,
+                        name=f"NIM {instance.instance_name}",
+                    )
         return None
     
     def get_reset_policy(
@@ -720,6 +1121,35 @@ def load_gateway_config() -> GatewayConfig:
                     if merged_extra:
                         merged["extra"] = merged_extra
                     platforms_data[plat_name] = merged
+                gw_data["platforms"] = platforms_data
+            yaml_nim = yaml_cfg.get("nim")
+            if isinstance(yaml_nim, dict):
+                nim_platform = platforms_data.setdefault(Platform.NIM.value, {})
+                if not isinstance(nim_platform, dict):
+                    nim_platform = {}
+                    platforms_data[Platform.NIM.value] = nim_platform
+                nim_existing_extra = nim_platform.get("extra", {})
+                if not isinstance(nim_existing_extra, dict):
+                    nim_existing_extra = {}
+                nim_extra = {
+                    key: value
+                    for key, value in yaml_nim.items()
+                    if key not in {"enabled", "home_channel", "home_channel_name", "reply_to_mode"}
+                }
+                merged_extra = {**nim_existing_extra, **nim_extra}
+                if merged_extra:
+                    nim_platform["extra"] = merged_extra
+                if "enabled" in yaml_nim:
+                    nim_platform["enabled"] = _coerce_bool(yaml_nim.get("enabled"), True)
+                elif "enabled" not in nim_platform and _coerce_nim_instances(merged_extra.get("instances")):
+                    nim_platform["enabled"] = True
+                nim_home_channel = str(yaml_nim.get("home_channel") or "").strip()
+                if nim_home_channel:
+                    nim_platform["home_channel"] = {
+                        "platform": Platform.NIM.value,
+                        "chat_id": nim_home_channel,
+                        "name": str(yaml_nim.get("home_channel_name") or "Home"),
+                    }
                 gw_data["platforms"] = platforms_data
             for plat in Platform:
                 if plat == Platform.LOCAL:

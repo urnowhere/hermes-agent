@@ -2315,6 +2315,118 @@ def _setup_qqbot():
     _gateway_setup_qqbot()
 
 
+def _setup_whatsapp():
+    """Delegate to the existing WhatsApp setup flow."""
+    from hermes_cli.main import cmd_whatsapp
+    import argparse
+
+    cmd_whatsapp(argparse.Namespace())
+
+
+def _setup_weixin():
+    """Configure Weixin (personal WeChat) via gateway setup."""
+    from hermes_cli.gateway import _setup_weixin as _gateway_setup_weixin
+
+    _gateway_setup_weixin()
+
+
+def _setup_signal():
+    """Configure Signal via gateway setup."""
+    from hermes_cli.gateway import _setup_signal as _gateway_setup_signal
+
+    _gateway_setup_signal()
+
+
+def _setup_email():
+    """Configure Email via gateway setup."""
+    from hermes_cli.gateway import _setup_email as _gateway_setup_email
+
+    _gateway_setup_email()
+
+
+def _setup_sms():
+    """Configure SMS (Twilio) via gateway setup."""
+    from hermes_cli.gateway import _setup_sms as _gateway_setup_sms
+
+    _gateway_setup_sms()
+
+
+def _setup_dingtalk():
+    """Configure DingTalk via gateway setup."""
+    from hermes_cli.gateway import _setup_dingtalk as _gateway_setup_dingtalk
+
+    _gateway_setup_dingtalk()
+
+
+def _setup_feishu():
+    """Configure Feishu / Lark via gateway setup."""
+    from hermes_cli.gateway import _setup_feishu as _gateway_setup_feishu
+
+    _gateway_setup_feishu()
+
+
+def _setup_nim():
+    """Configure NIM / NetEase IM via gateway setup."""
+    from hermes_cli import gateway as gateway_mod
+
+    gateway_mod.prompt = prompt
+    gateway_mod.prompt_yes_no = prompt_yes_no
+    gateway_mod._setup_nim()
+
+
+def _setup_yuanbao():
+    """Configure Yuanbao via gateway setup."""
+    from hermes_cli.gateway import _setup_yuanbao as _gateway_setup_yuanbao
+
+    _gateway_setup_yuanbao()
+
+
+def _setup_wecom():
+    """Configure WeCom (Enterprise WeChat) via gateway setup."""
+    from hermes_cli.gateway import _setup_wecom as _gateway_setup_wecom
+
+    _gateway_setup_wecom()
+
+
+def _setup_wecom_callback():
+    """Configure WeCom Callback (self-built app) via gateway setup."""
+    from hermes_cli.gateway import _setup_wecom_callback as _gw_setup
+
+    _gw_setup()
+
+
+def _legacy_gateway_configured(
+    name: str,
+    env_var: str,
+    current_config: dict,
+    platform_statuses: Dict[str, str],
+) -> bool:
+    """Preserve historical built-in platform checklist semantics."""
+    if name == "Matrix":
+        return bool(get_env_value(env_var) or get_env_value("MATRIX_PASSWORD"))
+    if name == "NIM (NetEase IM)":
+        nim_cfg = current_config.get("nim")
+        nim_instances = nim_cfg.get("instances", []) if isinstance(nim_cfg, dict) else []
+        return isinstance(nim_instances, list) and any(
+            isinstance(item, dict) for item in nim_instances
+        )
+    if name == "Signal":
+        return platform_statuses.get("signal", "not configured") == "configured"
+    if name == "Email":
+        return platform_statuses.get("email", "not configured") == "configured"
+    if name == "SMS (Twilio)":
+        return platform_statuses.get("sms", "not configured") == "configured"
+    return bool(get_env_value(env_var))
+
+
+def _gateway_status_display_name(platform: dict) -> str:
+    """Map current platform labels to the long-form setup labels."""
+    key = platform.get("key")
+    if key == "nim":
+        return "NIM (NetEase IM)"
+    return str(platform.get("label") or key or "")
+
+
 def _setup_webhooks():
     """Configure webhook integration."""
     print_header("Webhooks")
@@ -2359,7 +2471,33 @@ def _setup_webhooks():
     print_info("   https://hermes-agent.nousresearch.com/docs/user-guide/messaging/webhooks/#configuring-routes")
     print()
     print_info("   Open config in your editor:  hermes config edit")
-    print_info("   Open config in your editor:  hermes config edit")
+
+
+_GATEWAY_PLATFORMS = [
+    ("Telegram", "TELEGRAM_BOT_TOKEN", _setup_telegram),
+    ("Discord", "DISCORD_BOT_TOKEN", _setup_discord),
+    ("Slack", "SLACK_BOT_TOKEN", _setup_slack),
+    ("Signal", "SIGNAL_HTTP_URL", _setup_signal),
+    ("Email", "EMAIL_ADDRESS", _setup_email),
+    ("SMS (Twilio)", "TWILIO_ACCOUNT_SID", _setup_sms),
+    ("Matrix", "MATRIX_ACCESS_TOKEN", _setup_matrix),
+    ("Mattermost", "MATTERMOST_TOKEN", _setup_mattermost),
+    ("WhatsApp", "WHATSAPP_ENABLED", _setup_whatsapp),
+    ("DingTalk", "DINGTALK_CLIENT_ID", _setup_dingtalk),
+    ("Feishu / Lark", "FEISHU_APP_ID", _setup_feishu),
+    ("NIM (NetEase IM)", "NIM_CREDENTIALS", _setup_nim),
+    ("Yuanbao", "YUANBAO_APP_ID", _setup_yuanbao),
+    ("WeCom (Enterprise WeChat)", "WECOM_BOT_ID", _setup_wecom),
+    (
+        "WeCom Callback (Self-Built App)",
+        "WECOM_CALLBACK_CORP_ID",
+        _setup_wecom_callback,
+    ),
+    ("Weixin (WeChat)", "WEIXIN_ACCOUNT_ID", _setup_weixin),
+    ("BlueBubbles (iMessage)", "BLUEBUBBLES_SERVER_URL", _setup_bluebubbles),
+    ("QQ Bot", "QQ_APP_ID", _setup_qqbot),
+    ("Webhooks (GitHub, GitLab, etc.)", "WEBHOOK_ENABLED", _setup_webhooks),
+]
 
 
 def setup_gateway(config: dict):
@@ -2372,15 +2510,58 @@ def setup_gateway(config: dict):
     print()
 
     platforms = _all_platforms()
+    platform_statuses = {
+        str(plat.get("key")): _platform_status(plat)
+        for plat in platforms
+        if isinstance(plat, dict) and plat.get("key")
+    }
+    current_config = config if config else load_config()
 
-    # Build checklist, pre-selecting already-configured platforms.
+    # Keep the legacy built-in ordering and labels stable so tests and any
+    # monkeypatch-based automation can still address platforms by index.
     items = []
     pre_selected = []
-    for i, plat in enumerate(platforms):
-        status = _platform_status(plat)
-        items.append(f"{plat['emoji']} {plat['label']}  ({status})")
-        if status == "configured":
+    selection_handlers: list[Callable[[], None]] = []
+    for i, (name, env_var, setup_func) in enumerate(_GATEWAY_PLATFORMS):
+        is_configured = _legacy_gateway_configured(
+            name, env_var, current_config, platform_statuses
+        )
+        label = f"{name}  (configured)" if is_configured else name
+        items.append(label)
+        selection_handlers.append(setup_func)
+        if is_configured:
             pre_selected.append(i)
+
+    legacy_keys = {
+        "telegram",
+        "discord",
+        "slack",
+        "signal",
+        "email",
+        "sms",
+        "matrix",
+        "mattermost",
+        "whatsapp",
+        "dingtalk",
+        "feishu",
+        "nim",
+        "yuanbao",
+        "wecom",
+        "wecom_callback",
+        "weixin",
+        "bluebubbles",
+        "qqbot",
+        "webhook",
+    }
+    plugin_platforms = [
+        plat for plat in platforms if str(plat.get("key")) not in legacy_keys
+    ]
+    for plat in plugin_platforms:
+        status = _platform_status(plat)
+        items.append(f"{_gateway_status_display_name(plat)}  ({status})")
+        selection_handlers.append(lambda plat=plat: _configure_platform(plat))
+        if status == "configured":
+            pre_selected.append(len(items) - 1)
 
     selected = prompt_checklist("Select platforms to configure:", items, pre_selected)
 
@@ -2389,7 +2570,20 @@ def setup_gateway(config: dict):
         return
 
     for idx in selected:
-        _configure_platform(platforms[idx])
+        selection_handlers[idx]()
+
+    # Some gateway setup flows persist config.yaml directly (for example NIM
+    # writes nim.instances). Re-sync the wizard's in-memory config so the
+    # final save_config(config) does not overwrite those changes with stale data.
+    _refreshed = load_config()
+    if "nim" in _refreshed:
+        config["nim"] = _refreshed["nim"]
+    else:
+        config.pop("nim", None)
+
+    nim_cfg = config.get("nim")
+    nim_instances = nim_cfg.get("instances", []) if isinstance(nim_cfg, dict) else []
+    nim_from_config = isinstance(nim_instances, list) and any(isinstance(item, dict) for item in nim_instances)
 
     # ── Gateway Service Setup ──
     # Count any platform (built-in or plugin) the user configured during this
@@ -2405,7 +2599,7 @@ def setup_gateway(config: dict):
 
     any_messaging = any(
         _is_progress(_platform_status(p)) for p in _all_platforms()
-    )
+    ) or nim_from_config
     if any_messaging:
         print()
         print_info("━" * 50)

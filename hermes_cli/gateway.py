@@ -26,8 +26,10 @@ from hermes_cli.config import (
     get_env_value,
     get_hermes_home,
     is_managed,
+    load_config,
     managed_error,
     read_raw_config,
+    save_config,
     save_env_value,
 )
 # display_hermes_home is imported lazily at call sites to avoid ImportError
@@ -2922,6 +2924,22 @@ _PLATFORMS = [
         "token_var": "WEIXIN_ACCOUNT_ID",
     },
     {
+        "key": "nim",
+        "label": "NIM",
+        "emoji": "☁️",
+        "token_var": "NIM_CREDENTIALS",
+        "setup_instructions": [
+            "1. Prepare a NetEase IM bot account with App Key, account, and token",
+            "2. Hermes auto-installs @yxim/nim-bot on first start when npm is available",
+            "3. Enter appKey|account|token in the setup prompt",
+            "4. Detailed multi-instance settings live in the Web UI Config page or ~/.hermes/config.yaml",
+        ],
+        "vars": [
+            {"name": "NIM_CREDENTIALS", "prompt": "Credentials (appKey|account|token)", "password": True,
+             "help": "Compact credential form used by the default NIM setup flow."},
+        ],
+    },
+    {
         "key": "bluebubbles",
         "label": "BlueBubbles (iMessage)",
         "emoji": "💬",
@@ -3103,6 +3121,13 @@ def _platform_status(platform: dict) -> str:
         if val or token:
             return "partially configured"
         return "not configured"
+    if platform.get("key") == "nim":
+        raw_config = read_raw_config() or {}
+        nim_cfg = raw_config.get("nim", {})
+        nim_instances = nim_cfg.get("instances", []) if isinstance(nim_cfg, dict) else []
+        if isinstance(nim_instances, list) and any(isinstance(item, dict) for item in nim_instances):
+            return "configured"
+        return "not configured"
     if val:
         return "configured"
     return "not configured"
@@ -3258,6 +3283,59 @@ def _setup_sms():
     """Configure SMS (Twilio) via the standard platform setup."""
     sms_platform = next(p for p in _PLATFORMS if p["key"] == "sms")
     _setup_standard_platform(sms_platform)
+
+
+def _setup_nim():
+    """Configure NIM with the compact credentials flow only."""
+    nim_platform = next(p for p in _PLATFORMS if p["key"] == "nim")
+    emoji = nim_platform["emoji"]
+    label = nim_platform["label"]
+
+    print()
+    print(color(f"  ─── {emoji} {label} Setup ───", Colors.CYAN))
+    print()
+    for line in nim_platform.get("setup_instructions", []):
+        print_info(f"  {line}")
+
+    current_config = load_config()
+    nim_cfg = current_config.get("nim")
+    nim_instances = nim_cfg.get("instances", []) if isinstance(nim_cfg, dict) else []
+    existing_yaml_instances = isinstance(nim_instances, list) and any(isinstance(item, dict) for item in nim_instances)
+    if existing_yaml_instances:
+        print()
+        print_success(f"{label} is already configured.")
+        print_info("  Existing config.yaml nim.instances configuration detected.")
+        if not prompt_yes_no(f"  Reconfigure {label}?", False):
+            return
+
+    print()
+    print_info("  Detailed multi-instance options can be edited later in the Web UI Config page")
+    print_info("  or directly in ~/.hermes/config.yaml.")
+    credentials = prompt("  Credentials (appKey|account|token)", password=True)
+    if not credentials:
+        print_warning(f"  Skipped — {label} won't work without credentials.")
+        return
+
+    current_config["nim"] = {
+        "instances": [
+            {
+                "enabled": True,
+                "nimToken": credentials,
+                "p2p": {"policy": "open", "allowFrom": []},
+                "team": {"policy": "open", "allowFrom": []},
+                "qchat": {"policy": "open", "allowFrom": []},
+                "advanced": {
+                    "mediaMaxMb": 30,
+                    "textChunkLimit": 4000,
+                    "debug": False,
+                },
+            }
+        ]
+    }
+    save_config(current_config)
+
+    print()
+    print_success(f"{emoji} {label} configured in config.yaml with open defaults!")
 
 
 def _setup_dingtalk():

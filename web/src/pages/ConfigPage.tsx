@@ -74,6 +74,7 @@ const CATEGORY_ICONS: Record<
   stt: Ear,
   logging: ClipboardList,
   discord: MessageCircle,
+  nim: MessageCircle,
   auxiliary: Wrench,
   bedrock: Cloud,
   curator: Sparkles,

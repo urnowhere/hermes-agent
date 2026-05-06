@@ -1363,7 +1363,8 @@ def build_session_context(
     
     home_channels = {}
     for platform in connected:
-        home = config.get_home_channel(platform)
+        source_chat_id = source.chat_id if platform == source.platform else None
+        home = config.get_home_channel(platform, source_chat_id=source_chat_id)
         if home:
             home_channels[platform] = home
     
