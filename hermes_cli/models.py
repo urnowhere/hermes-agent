@@ -3087,6 +3087,7 @@ def validate_requested_model(
     *,
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
+    skip_validation: bool = False,
     api_mode: Optional[str] = None,
 ) -> dict[str, Any]:
     """
@@ -3094,6 +3095,11 @@ def validate_requested_model(
 
     Performs format checks first, then probes the live API to confirm
     the model actually exists.
+
+    When *skip_validation* is True, the API/catalog probing step is
+    skipped and the model is accepted after basic format checks only.
+    This is useful for custom providers that host models not listed
+    in their ``/models`` endpoint.
 
     Returns a dict with:
       - accepted: whether the CLI should switch to the requested model now
@@ -3128,6 +3134,19 @@ def validate_requested_model(
             "message": "Model names cannot contain spaces.",
         }
 
+    # When skip_validation is True, accept the model after basic format
+    # checks only — skip API/catalog probing entirely.  This lets users
+    # with custom providers use models that aren't listed in /models.
+    if skip_validation:
+        return {
+            "accepted": True,
+            "persist": True,
+            "recognized": False,
+            "message": (
+                f"Model `{requested}` accepted without validation "
+                f"(model_validate is disabled)."
+            ),
+        }
     if normalized == "lmstudio":
         from hermes_cli.auth import AuthError
         # Use probe_lmstudio_models so we can distinguish None (unreachable

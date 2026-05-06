@@ -21,6 +21,7 @@ OpenRouter variant suffixes (``:free``, ``:extended``, ``:fast``).
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import dataclass
 from typing import List, NamedTuple, Optional
@@ -910,12 +911,27 @@ def switch_model(
     new_model = normalize_model_for_provider(new_model, target_provider)
 
     # --- Validate ---
+    # Check if model validation should be skipped for this provider.
+    # Priority: HERMES_VALIDATE_MODEL env var > provider's model_validate config > default (validate)
+    skip_validation = False
+    try:
+        env_val = os.environ.get("HERMES_VALIDATE_MODEL", "").strip().lower()
+        if env_val in ("0", "false", "no", "off"):
+            skip_validation = True
+        elif not env_val:
+            # No env override — check the runtime dict for provider-level config
+            if isinstance(runtime, dict) and not runtime.get("model_validate", True):
+                skip_validation = True
+    except Exception:
+        pass
+
     try:
         validation = validate_requested_model(
             new_model,
             target_provider,
             api_key=api_key,
             base_url=base_url,
+            skip_validation=skip_validation,
             api_mode=api_mode or None,
         )
     except Exception as e:

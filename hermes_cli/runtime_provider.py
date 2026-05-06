@@ -400,6 +400,9 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                         "api_key": resolved_api_key,
                         "model": entry.get("default_model", ""),
                     }
+                    model_validate = entry.get("model_validate")
+                    if isinstance(model_validate, bool):
+                        result["model_validate"] = model_validate
                     # The v11→v12 migration writes the API mode under the new
                     # ``transport`` field, but hand-edited configs may still
                     # use the legacy ``api_mode`` spelling.  Accept both —
@@ -425,6 +428,9 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
                             "api_key": resolved_api_key,
                             "model": entry.get("default_model", ""),
                         }
+                        model_validate = entry.get("model_validate")
+                        if isinstance(model_validate, bool):
+                            result["model_validate"] = model_validate
                         api_mode = _parse_api_mode(entry.get("api_mode") or entry.get("transport"))
                         if api_mode:
                             result["api_mode"] = api_mode
@@ -474,6 +480,9 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
         model_name = str(entry.get("model", "") or "").strip()
         if model_name:
             result["model"] = model_name
+        model_validate = entry.get("model_validate")
+        if isinstance(model_validate, bool):
+            result["model_validate"] = model_validate
         return result
 
     return None
@@ -528,6 +537,9 @@ def _resolve_named_custom_runtime(
         model_name = custom_provider.get("model")
         if model_name:
             pool_result["model"] = model_name
+        # Propagate model_validate so callers know whether to skip validation
+        if "model_validate" in custom_provider:
+            pool_result["model_validate"] = custom_provider["model_validate"]
         return pool_result
 
     api_key_candidates = [
@@ -552,6 +564,9 @@ def _resolve_named_custom_runtime(
     # provider name differs from the actual model string the API expects.
     if custom_provider.get("model"):
         result["model"] = custom_provider["model"]
+    # Propagate model_validate so callers know whether to skip validation
+    if "model_validate" in custom_provider:
+        result["model_validate"] = custom_provider["model_validate"]
     return result
 
 
