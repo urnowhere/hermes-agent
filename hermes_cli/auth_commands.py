@@ -158,6 +158,41 @@ def _format_exhausted_status(entry) -> str:
     return f" {label}{reason_text}{code} ({wait} left)"
 
 
+def _select_codex_auth_method(args_obj) -> str:
+    """Resolve the Codex OAuth flow for `hermes auth add openai-codex`.
+
+    `--type oauth` chooses OAuth vs API-key credentials; it should not force
+    the device-code OAuth variant.  Keep the same method picker used by
+    `hermes login --provider openai-codex` unless a caller explicitly supplies
+    `auth_method` (used by setup/tests and the optional CLI flag).
+    """
+    selected_method = str(getattr(args_obj, "auth_method", None) or "").strip().lower()
+    aliases = {
+        "device": "device_code",
+        "device-code": "device_code",
+        "device_code": "device_code",
+        "browser": "browser_oauth_pkce",
+        "browser-oauth": "browser_oauth_pkce",
+        "browser_oauth": "browser_oauth_pkce",
+        "browser-oauth-pkce": "browser_oauth_pkce",
+        "browser_oauth_pkce": "browser_oauth_pkce",
+        "pkce": "browser_oauth_pkce",
+    }
+    if selected_method in aliases:
+        return aliases[selected_method]
+
+    print()
+    print("Choose OpenAI Codex auth method:")
+    print("  1. Device code")
+    print("  2. Browser OAuth / ChatGPT OAuth")
+    print()
+    try:
+        choice = input("Choice [1/2]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        choice = "1"
+    return "browser_oauth_pkce" if choice == "2" else "device_code"
+
+
 def auth_add_command(args) -> None:
     provider = _normalize_provider(getattr(args, "provider", ""))
     if provider not in PROVIDER_REGISTRY and provider != "openrouter" and not provider.startswith(CUSTOM_POOL_PREFIX):
@@ -312,7 +347,27 @@ def auth_add_command(args) -> None:
         # Clear any existing suppression marker so a re-link after `hermes auth
         # remove openai-codex` works without the new tokens being skipped.
         auth_mod.unsuppress_credential_source(provider, "device_code")
-        creds = auth_mod._codex_device_code_login()
+        selected_method = _select_codex_auth_method(args)
+        if selected_method == "browser_oauth_pkce":
+            creds = auth_mod._codex_browser_oauth_login(
+                open_browser=not bool(getattr(args, "no_browser", False))
+            )
+        else:
+            creds = auth_mod._codex_device_code_login()
+
+        # Keep the singleton auth store in sync with the newly minted pool
+        # credential.  Runtime resolution and refresh self-healing both read
+        # auth.json for Codex, so `auth add` should behave like `login`.
+        auth_mod._save_codex_tokens(
+            creds["tokens"],
+            creds.get("last_refresh"),
+            auth_mode=creds.get("auth_mode"),
+            account_id=creds.get("account_id") or creds.get("accountId"),
+            expires_at=creds.get("expires_at"),
+            expires_at_ms=creds.get("expires_at_ms"),
+            expires=creds.get("expires"),
+        )
+
         label = (getattr(args, "label", None) or "").strip() or label_from_token(
             creds["tokens"]["access_token"],
             _oauth_default_label(provider, len(pool.entries()) + 1),
@@ -328,6 +383,13 @@ def auth_add_command(args) -> None:
             refresh_token=creds["tokens"].get("refresh_token"),
             base_url=creds.get("base_url"),
             last_refresh=creds.get("last_refresh"),
+            expires_at_ms=creds.get("expires_at_ms"),
+            extra={
+                "account_id": creds.get("account_id") or creds.get("accountId"),
+                "accountId": creds.get("accountId") or creds.get("account_id"),
+                "auth_mode": creds.get("auth_mode"),
+                "expires": creds.get("expires"),
+            },
         )
         pool.add_entry(entry)
         print(f'Added {provider} OAuth credential #{len(pool.entries())}: "{entry.label}"')

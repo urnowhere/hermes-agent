@@ -2731,6 +2731,19 @@ def _model_flow_nous(config, current_model="", args=None):
         print("No change.")
 
 
+
+
+def _choose_openai_codex_auth_method() -> str:
+    print("Choose OpenAI Codex auth method:")
+    print("  1. Device code")
+    print("  2. Browser OAuth / ChatGPT OAuth")
+    print()
+    try:
+        choice = input("Choice [1/2]: ").strip()
+    except (KeyboardInterrupt, EOFError):
+        choice = "1"
+    return "browser_oauth_pkce" if choice == "2" else "device_code"
+
 def _model_flow_openai_codex(config, current_model=""):
     """OpenAI Codex provider: ensure logged in, then pick model."""
     from hermes_cli.auth import (
@@ -2761,11 +2774,13 @@ def _model_flow_openai_codex(config, current_model=""):
             print("Starting a fresh OpenAI Codex login...")
             print()
             try:
-                mock_args = argparse.Namespace()
+                method = _choose_openai_codex_auth_method()
+                mock_args = argparse.Namespace(auth_method=method)
                 _login_openai_codex(
                     mock_args,
                     PROVIDER_REGISTRY["openai-codex"],
                     force_new_login=True,
+                    auth_method=method,
                 )
             except SystemExit:
                 print("Login cancelled or failed.")
@@ -2783,8 +2798,9 @@ def _model_flow_openai_codex(config, current_model=""):
         print("Not logged into OpenAI Codex. Starting login...")
         print()
         try:
-            mock_args = argparse.Namespace()
-            _login_openai_codex(mock_args, PROVIDER_REGISTRY["openai-codex"])
+            method = _choose_openai_codex_auth_method()
+            mock_args = argparse.Namespace(auth_method=method)
+            _login_openai_codex(mock_args, PROVIDER_REGISTRY["openai-codex"], auth_method=method)
         except SystemExit:
             print("Login cancelled or failed.")
             return
@@ -8892,6 +8908,11 @@ def main():
     auth_add.add_argument("--inference-url", help="Nous inference base URL")
     auth_add.add_argument("--client-id", help="OAuth client id")
     auth_add.add_argument("--scope", help="OAuth scope override")
+    auth_add.add_argument(
+        "--auth-method",
+        choices=["device", "device_code", "browser", "browser_oauth", "browser_oauth_pkce", "pkce"],
+        help="OAuth method for providers with multiple OAuth flows (currently openai-codex)",
+    )
     auth_add.add_argument(
         "--no-browser",
         action="store_true",
