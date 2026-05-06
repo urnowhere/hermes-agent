@@ -221,7 +221,11 @@ def cmd_mcp_add(args):
     """Add a new MCP server with discovery-first tool selection."""
     name = args.name
     url = getattr(args, "url", None)
-    command = getattr(args, "command", None)
+    command = getattr(args, "mcp_stdio_command", None)
+    if command is None and getattr(args, "command", None) not in {None, "mcp"}:
+        # Back-compat for older parser builds that still stored --command on
+        # args.command and clobbered the top-level subparser dest.
+        command = getattr(args, "command", None)
     cmd_args = getattr(args, "args", None) or []
     auth_type = getattr(args, "auth", None)
     preset_name = getattr(args, "preset", None)
