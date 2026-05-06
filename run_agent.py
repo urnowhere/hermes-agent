@@ -7675,6 +7675,28 @@ class AIAgent:
                 fb_key_env = (fb.get("key_env") or "").strip()
                 if fb_key_env:
                     fb_api_key_hint = os.getenv(fb_key_env, "").strip() or None
+            # When base_url and api_key are absent from the fallback entry itself,
+            # look them up explicitly from custom_providers / providers config.
+            # Without this, a fallback_model that references a custom_providers entry
+            # by name (e.g. provider: aliyun-singapore) sends the request to the
+            # primary provider's endpoint instead of the custom provider's own
+            # base_url, because the named-provider lookup inside resolve_provider_client
+            # can miss for custom entries (refs #15743).
+            if not fb_base_url_hint and not fb_api_key_hint:
+                try:
+                    from hermes_cli.runtime_provider import _get_named_custom_provider
+                    _cp = _get_named_custom_provider(fb_provider)
+                    if _cp:
+                        fb_base_url_hint = (_cp.get("base_url") or "").strip() or None
+                        _cp_key = (_cp.get("api_key") or "").strip()
+                        _cp_key_env = (_cp.get("key_env") or "").strip()
+                        if not fb_api_key_hint:
+                            if _cp_key:
+                                fb_api_key_hint = _cp_key or None
+                            elif _cp_key_env:
+                                fb_api_key_hint = os.getenv(_cp_key_env, "").strip() or None
+                except Exception:
+                    pass
             # For Ollama Cloud endpoints, pull OLLAMA_API_KEY from env
             # when no explicit key is in the fallback config. Host match
             # (not substring) — see GHSA-76xc-57q6-vm5m.

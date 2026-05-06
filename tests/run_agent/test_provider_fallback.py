@@ -194,6 +194,98 @@ def _pool(n_entries: int, has_available: bool = True):
     return pool
 
 
+# ── Custom-providers fallback base_url lookup (#15743) ───────────────────
+
+
+class TestCustomProviderFallbackBaseUrl:
+    """Fallback entries that reference a custom_providers name (no inline base_url)
+    must resolve the base_url from the custom_providers config, not from the
+    primary provider."""
+
+    def test_custom_provider_base_url_used_when_not_in_fallback_entry(self):
+        """When fallback_model has no base_url but names a custom_providers entry,
+        the custom provider's base_url must be passed to resolve_provider_client
+        and end up as agent.base_url after activation."""
+        fbs = [{"provider": "aliyun-singapore", "model": "qwen3.6-plus"}]
+        agent = _make_agent(fallback_model=fbs)
+        agent.base_url = "https://inference-api.nousresearch.com/v1"  # primary
+
+        aliyun_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        aliyun_client = _mock_client(base_url=aliyun_url, api_key="aliyun-key")
+
+        with (
+            patch(
+                "hermes_cli.runtime_provider._get_named_custom_provider",
+                return_value={
+                    "name": "aliyun-singapore",
+                    "base_url": aliyun_url,
+                    "api_key": "aliyun-key",
+                },
+            ),
+            patch(
+                "agent.auxiliary_client.resolve_provider_client",
+                return_value=(aliyun_client, "qwen3.6-plus"),
+            ) as mock_rpc,
+        ):
+            assert agent._try_activate_fallback() is True
+            # The aliyun URL must be passed explicitly so the agent doesn't
+            # send the request to the primary (nous) endpoint.
+            assert mock_rpc.call_args.kwargs["explicit_base_url"] == aliyun_url
+            assert agent.base_url.rstrip("/") == aliyun_url.rstrip("/")
+            assert agent.model == "qwen3.6-plus"
+            assert agent.provider == "aliyun-singapore"
+
+    def test_inline_base_url_takes_precedence_over_custom_providers_lookup(self):
+        """When the fallback entry has its own base_url, it is used directly
+        and the custom_providers lookup is not performed."""
+        fbs = [
+            {
+                "provider": "my-provider",
+                "model": "my-model",
+                "base_url": "https://direct.example.com/v1",
+            }
+        ]
+        agent = _make_agent(fallback_model=fbs)
+
+        direct_client = _mock_client(base_url="https://direct.example.com/v1", api_key="direct-key")
+
+        with (
+            patch(
+                "hermes_cli.runtime_provider._get_named_custom_provider"
+            ) as mock_lookup,
+            patch(
+                "agent.auxiliary_client.resolve_provider_client",
+                return_value=(direct_client, "my-model"),
+            ) as mock_rpc,
+        ):
+            assert agent._try_activate_fallback() is True
+            # The custom_providers lookup must NOT be called when base_url
+            # is already present in the fallback entry.
+            mock_lookup.assert_not_called()
+            assert mock_rpc.call_args.kwargs["explicit_base_url"] == "https://direct.example.com/v1"
+
+    def test_custom_provider_lookup_failure_does_not_crash_fallback(self):
+        """If the custom_providers lookup raises, fallback still works via
+        the named-provider path inside resolve_provider_client."""
+        fbs = [{"provider": "my-provider", "model": "my-model"}]
+        agent = _make_agent(fallback_model=fbs)
+        fallback_client = _mock_client(base_url="https://resolved-by-aux.example/v1")
+
+        with (
+            patch(
+                "hermes_cli.runtime_provider._get_named_custom_provider",
+                side_effect=RuntimeError("config load failed"),
+            ),
+            patch(
+                "agent.auxiliary_client.resolve_provider_client",
+                return_value=(fallback_client, "my-model"),
+            ),
+        ):
+            # Should NOT raise — the except swallows the lookup error
+            assert agent._try_activate_fallback() is True
+            assert agent.model == "my-model"
+
+
 class TestPoolRotationRoom:
     def test_none_pool_returns_false(self):
         assert _pool_may_recover_from_rate_limit(None) is False
