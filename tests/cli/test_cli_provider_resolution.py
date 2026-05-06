@@ -214,6 +214,34 @@ def test_cli_turn_routing_uses_primary_when_disabled(monkeypatch):
     assert result["runtime"]["provider"] == "openrouter"
 
 
+def test_cli_preserves_anthropic_wif_bearer_flag_for_single_query_route(monkeypatch):
+    cli = _import_cli()
+
+    def _runtime_resolve(**kwargs):
+        return {
+            "provider": "anthropic",
+            "api_mode": "anthropic_messages",
+            "base_url": "https://api.anthropic.com",
+            "api_key": "sk-ant-oat01-testtoken",
+            "source": "wif",
+            "anthropic_force_bearer_auth": True,
+        }
+
+    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", _runtime_resolve)
+    monkeypatch.setattr("hermes_cli.runtime_provider.format_runtime_provider_error", lambda exc: str(exc))
+
+    shell = cli.HermesCLI(model="claude-sonnet-4-5", compact=True, max_turns=1)
+    shell.requested_provider = "anthropic"
+
+    assert shell._ensure_runtime_credentials() is True
+    assert getattr(shell, "_anthropic_force_bearer_auth", False) is True
+
+    route = shell._resolve_turn_agent_config("Reply with only: WIF OK")
+
+    assert route["runtime"]["provider"] == "anthropic"
+    assert route["runtime"]["anthropic_force_bearer_auth"] is True
+
+
 def test_cli_prefers_config_provider_over_stale_env_override(monkeypatch):
     cli = _import_cli()
 
