@@ -19,6 +19,8 @@ The board has two front doors, both backed by the same `~/.hermes/kanban.db`:
 
 Both surfaces route through the same `kanban_db` layer, so reads see a consistent view and writes can't drift. The rest of this page shows CLI examples because they're easy to copy-paste, but every CLI verb has a tool-call equivalent the model uses.
 
+There is also a bounded MCP facade for **external MCP-capable LLM clients** that need board visibility without becoming Hermes workers: `hermes kanban mcp serve` (or the `hermes-kanban-mcp` console script). This is deliberately separate from the dispatcher-only `kanban_*` toolset: every task operation requires an explicit `board`, all writes go through `kanban_db`, and no raw SQLite path is exposed. See [External MCP clients](#external-mcp-clients) below.
+
 This is the shape that covers the workloads `delegate_task` can't:
 
 - **Research triage** — parallel researchers + analyst + writer, human-in-the-loop.
@@ -227,6 +229,112 @@ hermes kanban complete t_abc t_def t_hij --result "batch wrap"
 hermes kanban archive  t_abc t_def t_hij
 hermes kanban unblock  t_abc t_def
 hermes kanban block    t_abc "need input" --ids t_def t_hij
+```
+
+## External MCP clients
+
+External LLM clients that speak MCP can inspect and coordinate through Kanban without getting the dispatcher-only worker toolset. Run the bounded stdio server:
+
+```bash
+hermes kanban mcp serve
+# equivalent when installed from pyproject scripts:
+hermes-kanban-mcp
+```
+
+The MCP facade is intentionally stricter than the CLI:
+
+- Every task operation takes an explicit `board` argument. Board is the hard isolation boundary; `tenant` is only an optional filter within a board.
+- Reads: `boards_list`, `tasks_list`, `task_show`, `stats`, `dispatch_dry_run`.
+- Safe writes: `task_create`, `task_comment`, `task_assign`, `task_link`, `task_unlink`.
+- Dangerous writes: `task_complete`, `task_block`, `task_unblock`, `task_archive`, and real `dispatch` exist, but return `operator_mode_required` unless explicitly enabled.
+- The server never writes raw SQLite. It calls `hermes_cli.kanban_db` APIs, so comments/events/audit rows are preserved.
+- The existing `HERMES_KANBAN_TASK` worker-tool gate is unchanged; this MCP server is a separate facade, not global exposure of `kanban_*` tools.
+
+Scope and write-mode control:
+
+```bash
+# Optional hard allowlist. If set, every MCP call outside these boards is denied.
+HERMES_KANBAN_MCP_ALLOWED_BOARDS=the-forge,ingestion-pipeline,atlas-command \
+  hermes kanban mcp serve
+
+# default: safe writes enabled, dangerous writes denied
+HERMES_KANBAN_MCP_WRITE_MODE=safe hermes kanban mcp serve
+
+# read-only: deny create/comment/assign/link/unlink too
+HERMES_KANBAN_MCP_WRITE_MODE=readonly hermes kanban mcp serve
+
+# operator: enable complete/block/unblock/archive and real dispatch
+HERMES_KANBAN_MCP_WRITE_MODE=operator hermes kanban mcp serve
+```
+
+Client config examples:
+
+**Claude Desktop** (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "hermes-kanban": {
+      "command": "hermes",
+      "args": ["kanban", "mcp", "serve"],
+      "env": {
+        "HERMES_KANBAN_MCP_ALLOWED_BOARDS": "the-forge,ingestion-pipeline,atlas-command",
+        "HERMES_KANBAN_MCP_WRITE_MODE": "safe"
+      }
+    }
+  }
+}
+```
+
+**Claude Code** (`.mcp.json` in a repo):
+
+```json
+{
+  "mcpServers": {
+    "hermes-kanban": {
+      "command": "hermes",
+      "args": ["kanban", "mcp", "serve"],
+      "env": {
+        "HERMES_KANBAN_MCP_ALLOWED_BOARDS": "the-forge,ingestion-pipeline,atlas-command",
+        "HERMES_KANBAN_MCP_WRITE_MODE": "safe"
+      }
+    }
+  }
+}
+```
+
+**Codex MCP** (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.hermes-kanban]
+command = "hermes"
+args = ["kanban", "mcp", "serve"]
+env = { HERMES_KANBAN_MCP_ALLOWED_BOARDS = "the-forge,ingestion-pipeline,atlas-command", HERMES_KANBAN_MCP_WRITE_MODE = "safe" }
+```
+
+**Hermes native MCP** (`~/.hermes/config.yaml`):
+
+```yaml
+mcp_servers:
+  kanban:
+    command: "hermes"
+    args: ["kanban", "mcp", "serve"]
+    env:
+      HERMES_KANBAN_MCP_ALLOWED_BOARDS: "the-forge,ingestion-pipeline,atlas-command"
+      HERMES_KANBAN_MCP_WRITE_MODE: "safe"
+```
+
+Use `hermes-kanban-mcp` as the command if you prefer the standalone console script:
+
+```json
+{
+  "mcpServers": {
+    "hermes-kanban": {
+      "command": "hermes-kanban-mcp",
+      "args": []
+    }
+  }
+}
 ```
 
 ## How workers interact with the board

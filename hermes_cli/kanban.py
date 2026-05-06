@@ -427,6 +427,21 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_archive = sub.add_parser("archive", help="Archive one or more tasks")
     p_archive.add_argument("task_ids", nargs="+")
 
+    # --- mcp ---
+    p_mcp = sub.add_parser(
+        "mcp",
+        help="Run a bounded Kanban MCP server for external LLM clients",
+        description=(
+            "Expose a board-scoped Kanban MCP facade over stdio. This is separate "
+            "from dispatcher-only kanban_* worker tools and never exposes raw SQLite."
+        ),
+    )
+    mcp_sub = p_mcp.add_subparsers(dest="kanban_mcp_action")
+    p_mcp_serve = mcp_sub.add_parser("serve", help="Serve Kanban MCP tools over stdio")
+    p_mcp_serve.add_argument(
+        "-v", "--verbose", action="store_true", help="Enable verbose logging on stderr"
+    )
+
     # --- tail ---
     p_tail = sub.add_parser("tail", help="Follow a task's event stream")
     p_tail.add_argument("task_id")
@@ -661,6 +676,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         "block":    _cmd_block,
         "unblock":  _cmd_unblock,
         "archive":  _cmd_archive,
+        "mcp":      _cmd_mcp,
         "tail":     _cmd_tail,
         "dispatch": _cmd_dispatch,
         "daemon":   _cmd_daemon,
@@ -1561,6 +1577,17 @@ def _cmd_archive(args: argparse.Namespace) -> int:
             else:
                 print(f"Archived {tid}")
     return 0 if not failed else 1
+
+
+def _cmd_mcp(args: argparse.Namespace) -> int:
+    action = getattr(args, "kanban_mcp_action", None) or "serve"
+    if action != "serve":
+        print(f"kanban mcp: unknown action {action!r}", file=sys.stderr)
+        return 2
+    from hermes_cli.kanban_mcp import run_mcp_server
+
+    run_mcp_server(verbose=bool(getattr(args, "verbose", False)))
+    return 0
 
 
 def _cmd_tail(args: argparse.Namespace) -> int:
