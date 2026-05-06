@@ -592,6 +592,20 @@ def load_cli_config() -> Dict[str, Any]:
 
     return defaults
 
+
+def _current_workspace_path() -> str:
+    """Return the session workspace path Hermes tools will use by default."""
+    return os.getenv("TERMINAL_CWD") or os.getcwd()
+
+
+def _session_workspace_metadata() -> dict:
+    workspace_path = _current_workspace_path()
+    return {
+        "workspace_path": workspace_path,
+        "last_cwd": workspace_path,
+    }
+
+
 # Load configuration at module startup
 CLI_CONFIG = load_cli_config()
 
@@ -5255,6 +5269,7 @@ class HermesCLI:
                             "max_iterations": self.max_turns,
                             "reasoning_config": self.reasoning_config,
                         },
+                        **_session_workspace_metadata(),
                     )
                     self.agent._session_db_created = True
                 except Exception:
@@ -5472,6 +5487,7 @@ class HermesCLI:
                     "reasoning_config": self.reasoning_config,
                 },
                 parent_session_id=parent_session_id,
+                **_session_workspace_metadata(),
             )
         except Exception as e:
             _cprint(f"  Failed to create branch session: {e}")

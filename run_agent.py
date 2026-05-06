@@ -809,6 +809,11 @@ def _sanitize_structure_non_ascii(payload: Any) -> bool:
     return found
 
 
+def _session_workspace_metadata() -> Dict[str, str]:
+    workspace_path = os.getenv("TERMINAL_CWD") or os.getcwd()
+    return {"workspace_path": workspace_path, "last_cwd": workspace_path}
+
+
 
 
 
@@ -2239,6 +2244,7 @@ class AIAgent:
                 system_prompt=self._cached_system_prompt,
                 user_id=None,
                 parent_session_id=self._parent_session_id,
+                **_session_workspace_metadata(),
             )
             self._session_db_created = True
         except Exception as e:
@@ -9303,6 +9309,7 @@ class AIAgent:
                     model=self.model,
                     model_config=self._session_init_model_config,
                     parent_session_id=old_session_id,
+                    **_session_workspace_metadata(),
                 )
                 self._session_db_created = True
                 # Auto-number the title for the continuation session
