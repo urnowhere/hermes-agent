@@ -257,6 +257,32 @@ class TestHistoryDisplay:
         assert "Checking Running Hermes Agent" in output
         assert "Use /resume <session id or title> to continue" in output
 
+    def test_resume_list_shows_full_long_titles(self, capsys):
+        cli = _make_cli()
+        cli.session_id = "current"
+        cli._session_db = MagicMock()
+        long_title = "Salvage BytePlus Volcengine PR With Fixes"
+        cli._session_db.list_sessions_rich.return_value = [
+            {
+                "id": "current",
+                "title": "Current",
+                "preview": "Current preview",
+                "last_active": 0,
+            },
+            {
+                "id": "20260401_201329_d85961",
+                "title": long_title,
+                "preview": "fix byteplus pr and resume",
+                "last_active": 0,
+            },
+        ]
+
+        cli._handle_resume_command("/resume")
+        output = capsys.readouterr().out
+
+        assert long_title in output
+        assert "20260401_201329_d85961" in output
+
 
 class TestRootLevelProviderOverride:
     """Root-level provider/base_url in config.yaml must NOT override model.provider."""
