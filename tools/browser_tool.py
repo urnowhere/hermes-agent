@@ -1100,6 +1100,103 @@ def _write_owner_pid(socket_dir: str, session_name: str) -> None:
                      session_name, exc)
 
 
+def _descendant_pids(pid: int) -> set[int]:
+    """Return every descendant PID of ``pid`` (not ``pid`` itself).
+
+    Order of preference:
+      1. psutil (cross-platform, most reliable)
+      2. Linux ``/proc/*/status`` PPid walk
+      3. empty set (caller falls back to signalling ``pid`` only)
+
+    Used by the orphan reaper to SIGKILL Chrome renderers / helpers that
+    agent-browser's daemon spawned.  Without this, a SIGTERM to the
+    daemon leaves the Chrome children pinned at 100% CPU as init-reparented
+    orphans (#17388).
+    """
+    # psutil first — handles macOS / Windows / Linux uniformly
+    try:
+        import psutil  # type: ignore[import-not-found]
+
+        try:
+            return {c.pid for c in psutil.Process(pid).children(recursive=True)}
+        except psutil.NoSuchProcess:
+            return set()
+    except ImportError:
+        pass
+
+    # Linux fallback: walk /proc
+    try:
+        all_pids = [int(p) for p in os.listdir("/proc") if p.isdigit()]
+    except OSError:
+        return set()
+
+    ppid_map: dict[int, int] = {}
+    for p in all_pids:
+        try:
+            with open(f"/proc/{p}/status") as fh:
+                for line in fh:
+                    if line.startswith("PPid:"):
+                        ppid_map[p] = int(line.split()[1])
+                        break
+        except (OSError, ValueError):
+            continue
+
+    descendants: set[int] = set()
+    stack = [pid]
+    while stack:
+        parent = stack.pop()
+        for child, pp in ppid_map.items():
+            if pp == parent and child not in descendants:
+                descendants.add(child)
+                stack.append(child)
+    return descendants
+
+
+def _kill_browser_tree(daemon_pid: int, *, session_name: str = "") -> int:
+    """SIGTERM the agent-browser daemon and everything it spawned.
+
+    Collects the full descendant PID set BEFORE signalling so reparented
+    Chrome helpers are captured — once the daemon exits, init may become
+    the parent of stragglers and the tree walk would miss them.
+
+    Returns the number of descendants that survived the SIGTERM and
+    had to be SIGKILL'd.  Failure to signal any individual pid is
+    silently ignored (ProcessLookupError / PermissionError / OSError);
+    the caller logs the overall outcome.
+    """
+    descendants = _descendant_pids(daemon_pid)
+
+    try:
+        os.kill(daemon_pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+    if not descendants:
+        return 0
+
+    # Chrome renderers + GPU helpers sometimes ignore SIGTERM.  Give them
+    # a short grace period, then SIGKILL anything still running — these
+    # are the "100% CPU zombie" processes described in #17388.
+    time.sleep(0.5)
+    killed = 0
+    for dpid in descendants:
+        try:
+            os.kill(dpid, 0)  # existence check
+        except (ProcessLookupError, PermissionError, OSError):
+            continue
+        try:
+            os.kill(dpid, signal.SIGKILL)
+            killed += 1
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    if killed:
+        logger.info(
+            "Force-killed %d lingering browser descendants (daemon=%d session=%s)",
+            killed, daemon_pid, session_name or "?",
+        )
+    return killed
+
+
 def _reap_orphaned_browser_sessions():
     """Scan for orphaned agent-browser daemon processes from previous runs.
 
@@ -1205,8 +1302,11 @@ def _reap_orphaned_browser_sessions():
             continue
 
         # Daemon is alive and its owner is dead (or legacy + untracked).  Reap.
+        # Use _kill_browser_tree so we also SIGKILL any Chrome renderers
+        # / GPU helpers that agent-browser spawned — otherwise they'd be
+        # reparented to init and keep running at 100% CPU (#17388).
         try:
-            os.kill(daemon_pid, signal.SIGTERM)
+            _kill_browser_tree(daemon_pid, session_name=session_name)
             logger.info("Reaped orphaned browser daemon PID %d (session %s)",
                         daemon_pid, session_name)
             reaped += 1
