@@ -82,6 +82,13 @@ def resolve_config_path() -> Path:
 
 _RECALL_MODE_ALIASES = {"auto": "hybrid"}
 _VALID_RECALL_MODES = {"hybrid", "context", "tools"}
+_CONTEXT_INJECTION_DEFAULTS = {
+    "sessionSummary": True,
+    "userRepresentation": True,
+    "userPeerCard": True,
+    "aiRepresentation": True,
+    "aiPeerCard": True,
+}
 
 
 def _normalize_recall_mode(val: str) -> str:
@@ -119,6 +126,22 @@ def _parse_int_config(host_val, root_val, default: int) -> int:
             except (ValueError, TypeError):
                 pass
     return default
+
+
+def _parse_context_injection(host_val, root_val) -> dict[str, bool]:
+    """Resolve section-level base-context injection flags.
+
+    Root values override defaults. Host values override root per key.
+    Unknown keys and non-dict blocks are ignored.
+    """
+    resolved = dict(_CONTEXT_INJECTION_DEFAULTS)
+    for block in (root_val, host_val):
+        if not isinstance(block, dict):
+            continue
+        for key in _CONTEXT_INJECTION_DEFAULTS:
+            if key in block:
+                resolved[key] = bool(block[key])
+    return resolved
 
 
 def _parse_dialectic_depth(host_val, root_val) -> int:
@@ -266,6 +289,10 @@ class HonchoClientConfig:
     write_frequency: str | int = "async"
     # Prefetch budget (None = no cap; set to an integer to bound auto-injected context)
     context_tokens: int | None = None
+    # Section-level controls for formatted base context injection.
+    context_injection: dict[str, bool] = field(
+        default_factory=lambda: dict(_CONTEXT_INJECTION_DEFAULTS)
+    )
     # Dialectic (peer.chat) settings
     # reasoning_level: "minimal" | "low" | "medium" | "high" | "max"
     dialectic_reasoning_level: str = "low"
@@ -463,6 +490,10 @@ class HonchoClientConfig:
             context_tokens=_parse_context_tokens(
                 host_block.get("contextTokens"),
                 raw.get("contextTokens"),
+            ),
+            context_injection=_parse_context_injection(
+                host_block.get("contextInjection"),
+                raw.get("contextInjection"),
             ),
             dialectic_reasoning_level=(
                 host_block.get("dialecticReasoningLevel")

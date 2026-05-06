@@ -103,3 +103,114 @@ class TestHonchoClientConfigAutoEnable:
 
         assert cfg.api_key == "fallback-key"
         assert cfg.enabled is True  # from_env() sets enabled=True
+
+
+class TestHonchoClientConfigContextInjection:
+    """Test section-level Honcho base context injection config."""
+
+    def test_defaults_all_sections_enabled(self):
+        cfg = HonchoClientConfig()
+
+        assert cfg.context_injection == {
+            "sessionSummary": True,
+            "userRepresentation": True,
+            "userPeerCard": True,
+            "aiRepresentation": True,
+            "aiPeerCard": True,
+        }
+
+    def test_root_level_partial_override(self, tmp_path):
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps({
+            "contextInjection": {
+                "sessionSummary": False,
+                "aiPeerCard": False,
+            },
+        }))
+
+        cfg = HonchoClientConfig.from_global_config(config_path=config_path)
+
+        assert cfg.context_injection["sessionSummary"] is False
+        assert cfg.context_injection["aiPeerCard"] is False
+        assert cfg.context_injection["userRepresentation"] is True
+        assert cfg.context_injection["userPeerCard"] is True
+        assert cfg.context_injection["aiRepresentation"] is True
+
+    def test_host_level_per_key_override_over_root(self, tmp_path):
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps({
+            "contextInjection": {
+                "sessionSummary": False,
+                "userRepresentation": False,
+                "aiPeerCard": False,
+            },
+            "hosts": {
+                "hermes": {
+                    "contextInjection": {
+                        "sessionSummary": True,
+                    },
+                },
+            },
+        }))
+
+        cfg = HonchoClientConfig.from_global_config(config_path=config_path)
+
+        assert cfg.context_injection["sessionSummary"] is True
+        assert cfg.context_injection["userRepresentation"] is False
+        assert cfg.context_injection["aiPeerCard"] is False
+
+    def test_host_false_overrides_root_true(self, tmp_path):
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps({
+            "contextInjection": {
+                "userPeerCard": True,
+            },
+            "hosts": {
+                "hermes": {
+                    "contextInjection": {
+                        "userPeerCard": False,
+                    },
+                },
+            },
+        }))
+
+        cfg = HonchoClientConfig.from_global_config(config_path=config_path)
+
+        assert cfg.context_injection["userPeerCard"] is False
+
+    def test_unknown_keys_ignored(self, tmp_path):
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps({
+            "contextInjection": {
+                "sessionSummary": False,
+                "futureSection": False,
+            },
+            "hosts": {
+                "hermes": {
+                    "contextInjection": {
+                        "anotherUnknown": False,
+                    },
+                },
+            },
+        }))
+
+        cfg = HonchoClientConfig.from_global_config(config_path=config_path)
+
+        assert "futureSection" not in cfg.context_injection
+        assert "anotherUnknown" not in cfg.context_injection
+        assert cfg.context_injection["sessionSummary"] is False
+
+    def test_non_dict_root_and_host_ignored(self, tmp_path):
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps({
+            "contextInjection": False,
+            "hosts": {
+                "hermes": {
+                    "contextInjection": ["sessionSummary"],
+                },
+            },
+        }))
+
+        cfg = HonchoClientConfig.from_global_config(config_path=config_path)
+
+        assert all(cfg.context_injection.values())

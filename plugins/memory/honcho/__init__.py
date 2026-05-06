@@ -468,26 +468,30 @@ class HonchoMemoryProvider(MemoryProvider):
     def _format_first_turn_context(self, ctx: dict) -> str:
         """Format the prefetch context dict into a readable system prompt block."""
         parts = []
+        context_injection = getattr(self._config, "context_injection", None) or {}
+
+        def enabled(section: str) -> bool:
+            return context_injection.get(section, True)
 
         # Session summary — session-scoped context, placed first for relevance
         summary = ctx.get("summary", "")
-        if summary:
+        if summary and enabled("sessionSummary"):
             parts.append(f"## Session Summary\n{summary}")
 
         rep = ctx.get("representation", "")
-        if rep:
+        if rep and enabled("userRepresentation"):
             parts.append(f"## User Representation\n{rep}")
 
         card = ctx.get("card", "")
-        if card:
+        if card and enabled("userPeerCard"):
             parts.append(f"## User Peer Card\n{card}")
 
         ai_rep = ctx.get("ai_representation", "")
-        if ai_rep:
+        if ai_rep and enabled("aiRepresentation"):
             parts.append(f"## AI Self-Representation\n{ai_rep}")
 
         ai_card = ctx.get("ai_card", "")
-        if ai_card:
+        if ai_card and enabled("aiPeerCard"):
             parts.append(f"## AI Identity Card\n{ai_card}")
 
         if not parts:

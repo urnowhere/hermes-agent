@@ -941,6 +941,95 @@ class TestBaseContextSummary:
         formatted = provider._format_first_turn_context(ctx)
         assert "Session Summary" not in formatted
 
+    def test_formatter_default_includes_all_provided_sections(self):
+        """Default formatter behavior includes every supplied base context section."""
+        provider = HonchoMemoryProvider()
+        ctx = {
+            "summary": "summary",
+            "representation": "user representation",
+            "card": "user card",
+            "ai_representation": "ai representation",
+            "ai_card": "ai card",
+        }
+
+        formatted = provider._format_first_turn_context(ctx)
+
+        assert "## Session Summary\nsummary" in formatted
+        assert "## User Representation\nuser representation" in formatted
+        assert "## User Peer Card\nuser card" in formatted
+        assert "## AI Self-Representation\nai representation" in formatted
+        assert "## AI Identity Card\nai card" in formatted
+
+    def test_formatter_omits_disabled_sections(self):
+        """Configured false flags remove only those base context sections."""
+        from plugins.memory.honcho.client import HonchoClientConfig
+
+        provider = HonchoMemoryProvider()
+        provider._config = HonchoClientConfig(context_injection={
+            "sessionSummary": True,
+            "userRepresentation": False,
+            "userPeerCard": True,
+            "aiRepresentation": False,
+            "aiPeerCard": True,
+        })
+        ctx = {
+            "summary": "summary",
+            "representation": "user representation",
+            "card": "user card",
+            "ai_representation": "ai representation",
+            "ai_card": "ai card",
+        }
+
+        formatted = provider._format_first_turn_context(ctx)
+
+        assert "Session Summary" in formatted
+        assert "User Representation" not in formatted
+        assert "User Peer Card" in formatted
+        assert "AI Self-Representation" not in formatted
+        assert "AI Identity Card" in formatted
+
+    def test_formatter_all_disabled_returns_empty_string(self):
+        """If every supplied base context section is disabled, nothing is injected."""
+        from plugins.memory.honcho.client import HonchoClientConfig
+
+        provider = HonchoMemoryProvider()
+        provider._config = HonchoClientConfig(context_injection={
+            "sessionSummary": False,
+            "userRepresentation": False,
+            "userPeerCard": False,
+            "aiRepresentation": False,
+            "aiPeerCard": False,
+        })
+        ctx = {
+            "summary": "summary",
+            "representation": "user representation",
+            "card": "user card",
+            "ai_representation": "ai representation",
+            "ai_card": "ai card",
+        }
+
+        assert provider._format_first_turn_context(ctx) == ""
+
+    def test_missing_config_context_injection_preserves_old_behavior(self):
+        """Missing config/context_injection should behave like all sections enabled."""
+        provider = HonchoMemoryProvider()
+        provider._config = SimpleNamespace()
+        ctx = {
+            "summary": "summary",
+            "representation": "user representation",
+            "card": "user card",
+            "ai_representation": "ai representation",
+            "ai_card": "ai card",
+        }
+
+        formatted = provider._format_first_turn_context(ctx)
+
+        assert "Session Summary" in formatted
+        assert "User Representation" in formatted
+        assert "User Peer Card" in formatted
+        assert "AI Self-Representation" in formatted
+        assert "AI Identity Card" in formatted
+
 
 class TestDialecticDepth:
     """Tests for the dialecticDepth multi-pass system."""

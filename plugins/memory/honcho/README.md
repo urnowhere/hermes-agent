@@ -37,6 +37,13 @@ Two independent layers, each on its own cadence:
 4. **AI Self-Representation** — Honcho's model of the AI peer
 5. **AI Identity Card** — AI peer facts
 
+`contextInjection` can hide individual base-context sections from the formatted
+injection block. All sections default to `true` for backward compatibility.
+This only controls which base-context sections are formatted into the automatic
+prompt injection; it does not disable Honcho tools, message saving, dialectic
+supplements, or necessarily the underlying prefetch API calls. To disable all
+automatic injection, use `recallMode: "tools"`.
+
 **Layer 2 — Dialectic supplement** (fired every `dialecticCadence` turns):
 Multi-pass `.chat()` reasoning about the user, appended after base context.
 
@@ -132,8 +139,33 @@ For every key, resolution order is: **host block > root > env var > default**.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `recallMode` | string | `"hybrid"` | `"hybrid"` (auto-inject + tools), `"context"` (auto-inject only, tools hidden), `"tools"` (tools only, no injection). Legacy `"auto"` → `"hybrid"` |
+| `contextInjection` | object | all `true` | Per-section controls for formatted base-context injection: `sessionSummary`, `userRepresentation`, `userPeerCard`, `aiRepresentation`, `aiPeerCard` |
 | `observationMode` | string | `"directional"` | Preset: `"directional"` (all on) or `"unified"` (shared pool). Use `observation` object for granular control |
 | `observation` | object | — | Per-peer observation config (see Observation section) |
+
+Example:
+
+```json
+{
+  "contextInjection": {
+    "sessionSummary": true,
+    "userRepresentation": true,
+    "userPeerCard": true,
+    "aiRepresentation": false,
+    "aiPeerCard": false
+  },
+  "hosts": {
+    "hermes.coder": {
+      "contextInjection": {
+        "sessionSummary": false
+      }
+    }
+  }
+}
+```
+
+Host blocks override root `contextInjection` per key. Unknown keys are ignored,
+and omitted keys inherit from the host/root/default chain.
 
 ### Write Behavior
 
@@ -225,7 +257,7 @@ Host key is derived from the active Hermes profile: `hermes` (default) or `herme
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `contextCadence` | int | `1` | Minimum turns between base context refreshes (session summary + representation + card) |
+| `contextCadence` | int | `1` | Minimum turns between base context refreshes |
 | `dialecticCadence` | int | `1` | Minimum turns between dialectic `.chat()` firings |
 | `injectionFrequency` | string | `"every-turn"` | `"every-turn"` or `"first-turn"` (inject context on the first user message only, skip from turn 2 onward) |
 | `reasoningLevelCap` | string | — | Hard cap on reasoning level: `"minimal"`, `"low"`, `"medium"`, `"high"` |

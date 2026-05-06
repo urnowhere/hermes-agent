@@ -55,6 +55,13 @@ AI-native cross-session user modeling with dialectic reasoning, session-scoped c
 
 **Architecture:** Two-layer context injection — a base layer (session summary + representation + peer card, refreshed on `contextCadence`) plus a dialectic supplement (LLM reasoning, refreshed on `dialecticCadence`). The dialectic automatically selects cold-start prompts (general user facts) vs. warm prompts (session-scoped context) based on whether base context exists.
 
+Use `contextInjection` to hide individual formatted base-context sections:
+`sessionSummary`, `userRepresentation`, `userPeerCard`, `aiRepresentation`,
+and `aiPeerCard`. All default to `true`; host blocks override root config per
+key. This does not disable Honcho tools, message saving, dialectic supplements,
+or necessarily underlying prefetch calls. Use `recallMode: "tools"` for no
+automatic injection.
+
 **Three orthogonal config knobs** control cost and depth independently:
 
 - `contextCadence` — how often the base layer refreshes (API call frequency)
@@ -81,6 +88,7 @@ hermes memory setup        # select "honcho"
 | `aiPeer` | host key | AI peer identity (one per profile) |
 | `workspace` | host key | Shared workspace ID |
 | `contextTokens` | `null` (uncapped) | Token budget for auto-injected context per turn. Truncates at word boundaries |
+| `contextInjection` | all `true` | Per-section controls for formatted base-context injection |
 | `contextCadence` | `1` | Minimum turns between `context()` API calls (base layer refresh) |
 | `dialecticCadence` | `2` | Minimum turns between `peer.chat()` LLM calls. Recommended 1–5. Only applies to `hybrid`/`context` modes |
 | `dialecticDepth` | `1` | Number of `.chat()` passes per dialectic invocation. Clamped 1–3. Pass 0: cold/warm prompt, pass 1: self-audit, pass 2: reconciliation |
@@ -104,6 +112,13 @@ hermes memory setup        # select "honcho"
 ```json
 {
   "apiKey": "your-key-from-app.honcho.dev",
+  "contextInjection": {
+    "sessionSummary": true,
+    "userRepresentation": true,
+    "userPeerCard": true,
+    "aiRepresentation": false,
+    "aiPeerCard": false
+  },
   "hosts": {
     "hermes": {
       "enabled": true,

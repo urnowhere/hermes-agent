@@ -58,9 +58,39 @@ When Honcho injects context into the system prompt (in `hybrid` or `context` rec
 
 1. **Session summary** -- a short digest of the current session so far (placed first so the model has immediate conversational continuity)
 2. **User representation** -- Honcho's accumulated model of the user (preferences, facts, patterns)
-3. **AI peer card** -- the identity card for this Hermes profile's AI peer
+3. **User peer card** -- key facts about the user peer
+4. **AI representation** -- Honcho's accumulated model of this Hermes profile's AI peer
+5. **AI peer card** -- the identity card for this Hermes profile's AI peer
 
 The session summary is generated automatically by Honcho at the start of each turn (when a prior session exists). It gives the model a warm start without replaying full history.
+
+Use `contextInjection` to hide individual formatted base-context sections while
+keeping Honcho active:
+
+```json
+{
+  "contextInjection": {
+    "sessionSummary": true,
+    "userRepresentation": true,
+    "userPeerCard": true,
+    "aiRepresentation": false,
+    "aiPeerCard": false
+  },
+  "hosts": {
+    "hermes.coder": {
+      "contextInjection": {
+        "sessionSummary": false
+      }
+    }
+  }
+}
+```
+
+All five keys default to `true`. Host config overrides root config per key;
+unknown keys are ignored. This only controls which base-context sections are
+formatted into automatic injection. It does not disable Honcho tools, message
+saving, dialectic supplements, or necessarily underlying prefetch calls. Use
+`recallMode: "tools"` when you want no automatic injection.
 
 ### Cold / Warm Prompt Selection
 
@@ -367,12 +397,13 @@ Config file: `$HERMES_HOME/honcho.json` (profile-local) or `~/.honcho/config.jso
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `contextTokens` | uncapped | Max tokens for the combined base context injection (summary + representation + card). Opt-in cap — omit to leave uncapped, set to an integer to bound injection size. |
+| `contextTokens` | uncapped | Max tokens for the combined base context injection. Opt-in cap — omit to leave uncapped, set to an integer to bound injection size. |
+| `contextInjection` | all `true` | Per-section controls for formatted base-context injection: `sessionSummary`, `userRepresentation`, `userPeerCard`, `aiRepresentation`, `aiPeerCard` |
 | `injectionFrequency` | `every-turn` | `every-turn` or `first-turn` |
 | `contextCadence` | `1` | Min turns between context API calls |
 | `dialecticCadence` | `2` | Min turns between dialectic LLM calls (recommended 1–5) |
 
-The `contextTokens` budget is enforced at injection time. If the session summary + representation + card exceed the budget, Honcho trims the summary first, then the representation, preserving the card. This prevents context blowup in long sessions.
+The `contextTokens` budget is enforced at injection time and prevents context blowup in long sessions.
 
 ### Memory-context sanitization
 
