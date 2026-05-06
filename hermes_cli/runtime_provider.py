@@ -520,20 +520,38 @@ def _resolve_named_custom_runtime(
     if not base_url:
         return None
 
-    # Check if a credential pool exists for this custom endpoint
-    pool_result = _try_resolve_from_custom_pool(base_url, "custom", custom_provider.get("api_mode"))
-    if pool_result:
-        # Propagate the model name even when using pooled credentials —
-        # the pool doesn't know about the custom_providers model field.
-        model_name = custom_provider.get("model")
-        if model_name:
-            pool_result["model"] = model_name
-        return pool_result
+    expected_pool_key = ""
+    custom_name = str(custom_provider.get("name", "") or "").strip()
+    if custom_name:
+        expected_pool_key = f"custom:{_normalize_custom_provider_name(custom_name)}"
+    shared_pool_key = get_custom_provider_pool_key(base_url) or ""
 
-    api_key_candidates = [
+    direct_api_key_candidates = [
         (explicit_api_key or "").strip(),
         str(custom_provider.get("api_key", "") or "").strip(),
         os.getenv(str(custom_provider.get("key_env", "") or "").strip(), "").strip(),
+    ]
+    direct_api_key = next(
+        (candidate for candidate in direct_api_key_candidates if has_usable_secret(candidate)),
+        "",
+    )
+
+    if not shared_pool_key or shared_pool_key == expected_pool_key:
+        # Fall back to the shared base_url pool only when this named provider
+        # is the one that owns that pool key. Multiple named custom providers
+        # can legitimately share a gateway URL while using different API keys,
+        # so a mismatched pool key must not override the requested provider.
+        pool_result = _try_resolve_from_custom_pool(base_url, "custom", custom_provider.get("api_mode"))
+        if pool_result:
+            # Propagate the model name even when using pooled credentials —
+            # the pool doesn't know about the custom_providers model field.
+            model_name = custom_provider.get("model")
+            if model_name:
+                pool_result["model"] = model_name
+            return pool_result
+
+    api_key_candidates = [
+        direct_api_key,
         os.getenv("OPENAI_API_KEY", "").strip(),
         os.getenv("OPENROUTER_API_KEY", "").strip(),
     ]
