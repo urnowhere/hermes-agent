@@ -49,6 +49,22 @@ def _audio_available() -> bool:
         return False
 
 
+def _default_input_samplerate(sd) -> int:
+    """Return the preferred capture rate for the default input device.
+
+    Falls back to the Whisper-friendly 16 kHz constant when the backend does
+    not expose a numeric default rate.
+    """
+    try:
+        info = sd.query_devices(None, "input")
+        rate = info.get("default_samplerate") if isinstance(info, dict) else getattr(info, "default_samplerate", None)
+        if isinstance(rate, (int, float)) and rate > 0:
+            return int(round(rate))
+    except Exception:
+        pass
+    return SAMPLE_RATE
+
+
 from hermes_constants import is_termux as _is_termux_environment
 
 
@@ -100,7 +116,7 @@ def detect_audio_environment() -> dict:
 
     # SSH detection
     if any(os.environ.get(v) for v in ('SSH_CLIENT', 'SSH_TTY', 'SSH_CONNECTION')):
-        warnings.append("Running over SSH -- no audio devices available")
+        notices.append("Running over SSH — using local audio devices on the target machine")
 
     # Docker/Podman container detection
     from hermes_constants import is_container
@@ -394,6 +410,7 @@ class AudioRecorder:
         self._frames: List[Any] = []
         self._recording = False
         self._start_time: float = 0.0
+        self._sample_rate: int = SAMPLE_RATE
         # Silence detection state
         self._has_spoken = False
         self._speech_start: float = 0.0  # When speech attempt began
@@ -545,7 +562,7 @@ class AudioRecorder:
         stream = None
         try:
             stream = sd.InputStream(
-                samplerate=SAMPLE_RATE,
+                samplerate=self._sample_rate,
                 channels=CHANNELS,
                 dtype=DTYPE,
                 callback=_callback,
@@ -579,7 +596,7 @@ class AudioRecorder:
         or if a recording is already in progress.
         """
         try:
-            _import_audio()
+            sd, _ = _import_audio()
         except (ImportError, OSError) as e:
             raise RuntimeError(
                 "Voice mode requires sounddevice and numpy.\n"
@@ -601,13 +618,13 @@ class AudioRecorder:
             self._peak_rms = 0
             self._current_rms = 0
             self._on_silence_stop = on_silence_stop
-
         # Ensure the persistent stream is alive (no-op after first call).
+        self._sample_rate = _default_input_samplerate(sd)
         self._ensure_stream()
 
         with self._lock:
             self._recording = True
-        logger.info("Voice recording started (rate=%d, channels=%d)", SAMPLE_RATE, CHANNELS)
+        logger.info("Voice recording started (rate=%d, channels=%d)", self._sample_rate, CHANNELS)
 
     def _close_stream_with_timeout(self, timeout: float = 3.0) -> None:
         """Close the audio stream with a timeout to prevent CoreAudio hangs."""
@@ -662,7 +679,7 @@ class AudioRecorder:
             logger.info("Voice recording stopped (%.1fs, %d samples)", elapsed, len(audio_data))
 
             # Skip very short recordings (< 0.3s of audio)
-            min_samples = int(SAMPLE_RATE * 0.3)
+            min_samples = int(self._sample_rate * 0.3)
             if len(audio_data) < min_samples:
                 logger.debug("Recording too short (%d samples), discarding", len(audio_data))
                 return None
@@ -700,8 +717,7 @@ class AudioRecorder:
 
     # -- private helpers -----------------------------------------------------
 
-    @staticmethod
-    def _write_wav(audio_data) -> str:
+    def _write_wav(self, audio_data) -> str:
         """Write numpy int16 audio data to a WAV file.
 
         Returns the file path.
@@ -713,7 +729,7 @@ class AudioRecorder:
         with wave.open(wav_path, "wb") as wf:
             wf.setnchannels(CHANNELS)
             wf.setsampwidth(SAMPLE_WIDTH)
-            wf.setframerate(SAMPLE_RATE)
+            wf.setframerate(self._sample_rate)
             wf.writeframes(audio_data.tobytes())
 
         file_size = os.path.getsize(wav_path)
