@@ -5919,6 +5919,7 @@ class AIAgent:
             if self._interrupt_requested:
                 raise InterruptedError("Agent interrupted before Codex stream retry")
             collected_output_items: list = []
+            terminal_response = None
             try:
                 with active_client.responses.stream(**api_kwargs) as stream:
                     for event in stream:
@@ -5957,8 +5958,10 @@ class AIAgent:
                             if done_item is not None:
                                 collected_output_items.append(done_item)
                         # Log non-completed terminal events for diagnostics
-                        elif event_type in ("response.incomplete", "response.failed"):
+                        elif event_type in ("response.completed", "response.incomplete", "response.failed"):
                             resp_obj = getattr(event, "response", None)
+                            if resp_obj is not None:
+                                terminal_response = resp_obj
                             status = getattr(resp_obj, "status", None) if resp_obj else None
                             incomplete_details = getattr(resp_obj, "incomplete_details", None) if resp_obj else None
                             logger.warning(
@@ -5969,6 +5972,17 @@ class AIAgent:
                                 self._client_log_context(),
                             )
                     final_response = stream.get_final_response()
+                    # Prefer the terminal event's response when get_final_response()
+                    # has empty output but the terminal event carries valid output.
+                    if terminal_response is not None:
+                        _final_output = getattr(final_response, "output", None)
+                        _terminal_output = getattr(terminal_response, "output", None)
+                        if (
+                            isinstance(_terminal_output, list)
+                            and _terminal_output
+                            and (not isinstance(_final_output, list) or not _final_output)
+                        ):
+                            final_response = terminal_response
                     # PATCH: ChatGPT Codex backend streams valid output items
                     # but get_final_response() can return an empty output list.
                     # Backfill from collected items or synthesize from deltas.
