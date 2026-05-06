@@ -4629,6 +4629,118 @@ class HermesCLI:
         elif _is_termux_environment():
             _cprint(f"  {_DIM}Tip: type your next message, or run hermes chat -q --image {_termux_example_image_path(image_path.name)} \"What do you see?\"{_RST}")
 
+    def _handle_askai_command(self, cmd_original: str):
+        """Handle /askai <question> — multi-turn Gemini dialogue (min 3 rounds)."""
+        from tools.browser_tool import browser_navigate, browser_snapshot, browser_type, browser_click, browser_press
+        import time as _time, re as _re
+
+        parts = cmd_original.split(None, 1)
+        if len(parts) < 2 or not parts[1].strip():
+            _cprint(f"  {_DIM}Usage: /askai <your question>{_RST}")
+            _cprint(f"  {_DIM}Example: /askai how do I fix CORS errors?{_RST}")
+            return
+
+        initial_question = parts[1].strip()
+
+        def _print_block(label, text):
+            if not text:
+                return
+            text = _re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+            text = _re.sub(r'`(.+?)`', r'\1', text)
+            lines = text.split("\n")
+            _cprint(f"  {label}")
+            for line in lines:
+                if line.strip():
+                    _cprint(f"    {line}")
+
+        def _extract_response(snap_text):
+            m = _re.search(r'Gemini said[:\s]*(.*?)(?=\n\s*(?:You said|Redo|Copy|$))', snap_text, _re.DOTALL)
+            if m:
+                return m.group(1).strip()
+            paras = _re.findall(r'(?:paragraph|heading).*?[:\s]*(.+?)(?=\n\s*(?:heading|button|img|list|$))', snap_text, _re.DOTALL)
+            return paras[-1].strip() if paras else ""
+
+        def _find_send(snap_text):
+            m = _re.search(r'\[ref=(e\d+)\].*?Send message', snap_text, _re.DOTALL)
+            return m.group(1) if m else ""
+
+        def _find_textbox(snap_text):
+            m = _re.search(r'\[ref=(e\d+)\].*?Enter a prompt for Gemini', snap_text, _re.DOTALL)
+            return m.group(1) if m else ""
+
+        round_num = 0
+        all_responses = []
+
+        def _do_round(question, first=False):
+            nonlocal round_num
+            round_num += 1
+            prefix = f"  🔮 [Round {round_num}]"
+
+            if first:
+                _cprint(f"{prefix} Navigating to Gemini...")
+                browser_navigate(url="https://gemini.google.com/app")
+                _time.sleep(3)
+                _cprint(f"{prefix} Typing your question...")
+                snap = browser_snapshot(full=False)
+                tb = _find_textbox(snap)
+                if not tb:
+                    m = _re.search(r'\[ref=(e\d+)\].*?(?:textbox|TextBox|Enter)', snap, _re.DOTALL)
+                    tb = m.group(1) if m else ""
+                if tb:
+                    browser_type(ref=tb, text=question)
+                else:
+                    _cprint(f"  {_DIM}(._.) Could not find textbox. URL is open — please type manually.{_RST}")
+                    return
+            else:
+                _cprint(f"{prefix} Sending follow-up...")
+                snap = browser_snapshot(full=False)
+                tb = _find_textbox(snap)
+                if not tb:
+                    m = _re.search(r'\[ref=(e\d+)\].*?(?:textbox|TextBox|Enter)', snap, _re.DOTALL)
+                    tb = m.group(1) if m else ""
+                if tb:
+                    browser_type(ref=tb, text=question)
+                else:
+                    _cprint(f"  {_DIM}(._.) Could not find textbox.{_RST}")
+                    return
+
+            send_ref = _find_send(browser_snapshot(full=False))
+            if send_ref:
+                browser_click(ref=send_ref)
+            else:
+                browser_press(key="Enter")
+
+            _cprint(f"{prefix} Waiting for Gemini to think...")
+            _time.sleep(12)
+
+            snap = browser_snapshot(full=True)
+            resp = _extract_response(snap)
+            _print_block("Gemini replied:", resp[:2000])
+            all_responses.append(resp)
+            return resp
+
+        _cprint(f"  {_DIM}(^_^) Starting multi-turn Gemini dialogue (min 3 rounds){_RST}")
+        _cprint(f"  {_DIM}Type 'q' to quit, or just ask your follow-up question.{_RST}")
+
+        _do_round(initial_question, first=True)
+
+        while round_num < 3:
+            round_num += 1
+            _cprint(f"\n  {_DIM}--- Round {round_num} of 3 (minimum) ---{_RST}")
+            _cprint(f"  {_DIM}Type your follow-up or 'done' to finish:{_RST}")
+            followup = input(f"  {''}> ").strip()
+            if followup.lower() in ("q", "quit", "done", "exit"):
+                break
+            if not followup:
+                continue
+            _do_round(followup)
+
+        if all_responses:
+            _cprint(f"\n  {_DIM}--- Summary of {len(all_responses)} rounds ---{_RST}")
+            combined = "\n\n".join(f"[Round {i+1}] {r[:500]}" for i, r in enumerate(all_responses))
+            _cprint(f"  {_DIM}Total exchanges: {len(all_responses)}{_RST}")
+            _cprint(f"  {combined[:1000]}{_RST}")
+
     def _preprocess_images_with_vision(self, text: str, images: list, *, announce: bool = True) -> str:
         """Analyze attached images via the vision tool and return enriched text.
 
@@ -6749,6 +6861,8 @@ class HermesCLI:
         elif canonical == "skills":
             with self._busy_command(self._slow_command_status(cmd_original)):
                 self._handle_skills_command(cmd_original)
+        elif canonical == "askai":
+            self._handle_askai_command(cmd_original)
         elif canonical == "platforms":
             self._show_gateway_status()
         elif canonical == "status":

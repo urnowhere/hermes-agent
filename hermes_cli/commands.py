@@ -154,6 +154,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("skills", "Search, install, inspect, or manage skills",
                "Tools & Skills", cli_only=True,
                subcommands=("search", "browse", "inspect", "install")),
+    CommandDef("askai", "Multi-turn Gemini dialogue — min 3 rounds, explores problem deeply",
+               "Tools & Skills", cli_only=True, args_hint="<question>"),
     CommandDef("cron", "Manage scheduled tasks", "Tools & Skills",
                cli_only=True, args_hint="[subcommand]",
                subcommands=("list", "add", "create", "edit", "pause", "resume", "run", "remove")),
