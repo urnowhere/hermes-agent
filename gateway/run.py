@@ -3960,6 +3960,19 @@ class GatewayRunner:
             # Adapters are still connected here, so messages can be sent.
             await self._notify_active_sessions_of_shutdown()
 
+            # Persist which sessions had running agents so the next startup
+            # can mark exactly those as resume_pending (precise) instead of
+            # the time-based 120s sweep (broad).  See
+            # SessionStore.suspend_recently_active for the reader side.
+            if self._running_agents:
+                try:
+                    active_keys = set(self._running_agents.keys())
+                    self.session_store.save_active_sessions(active_keys)
+                except Exception as e:
+                    logger.warning(
+                        "save_active_sessions failed during gateway stop: %s", e
+                    )
+
             timeout = self._restart_drain_timeout
             active_agents, timed_out = await self._drain_active_agents(timeout)
             if timed_out:

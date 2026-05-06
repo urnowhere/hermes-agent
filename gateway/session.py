@@ -1085,15 +1085,57 @@ class SessionStore:
             )
         return len(removed_keys)
 
+    def save_active_sessions(self, active_session_keys: set) -> None:
+        """Persist the set of session keys that had running agents at shutdown.
+
+        Writes a ``.active_sessions_at_shutdown`` JSON marker into
+        ``sessions_dir`` atomically (tmpfile + fsync + os.replace).  On the
+        next startup, :meth:`suspend_recently_active` consumes the marker
+        for precise targeting instead of the time-based sweep.
+
+        Called by the gateway from its shutdown path before draining active
+        agents (see ``GatewayRunner.stop``).
+        """
+        import json
+        import tempfile
+
+        marker_path = self.sessions_dir / ".active_sessions_at_shutdown"
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(self.sessions_dir), suffix=".tmp", prefix=".active_"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(sorted(active_session_keys), f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, str(marker_path))
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
     def suspend_recently_active(self, max_age_seconds: int = 120) -> int:
         """Mark recently-active sessions as resumable after an unexpected exit.
 
         Called on gateway startup after a crash or fast restart to preserve
         in-flight sessions instead of destroying their conversation history
-        (#7536).  Only marks sessions updated within *max_age_seconds* to
-        avoid touching long-idle sessions.  Sets ``resume_pending=True`` so
-        the next incoming message on the same session_key auto-resumes from
-        the existing transcript.
+        (#7536).  Sets ``resume_pending=True`` so the next incoming message
+        on the same session_key auto-resumes from the existing transcript.
+
+        Targeting:
+
+        * If a ``.active_sessions_at_shutdown`` marker exists (written by
+          :meth:`save_active_sessions` during a clean stop), only sessions
+          listed in the marker are marked resumable — precise, avoids
+          false-positives from idle-but-recently-touched sessions.
+        * Otherwise, falls back to the time-based sweep: mark anything
+          updated within *max_age_seconds*.
+
+        The marker is consumed (deleted) after read so a second startup
+        without an intervening shutdown reverts to the time-based path.
 
         Entries already flagged ``resume_pending=True`` are skipped.  Entries
         explicitly ``suspended=True`` (from /stop or stuck-loop escalation)
@@ -1103,7 +1145,21 @@ class SessionStore:
 
         Returns the number of sessions marked resumable.
         """
+        import json
         from datetime import timedelta
+
+        active_marker = self.sessions_dir / ".active_sessions_at_shutdown"
+        active_keys_from_marker: Optional[set] = None
+        if active_marker.exists():
+            try:
+                with open(active_marker, "r") as f:
+                    active_keys_from_marker = set(json.load(f))
+            except Exception:
+                active_keys_from_marker = None
+            try:
+                active_marker.unlink()
+            except Exception:
+                pass
 
         cutoff = _now() - timedelta(seconds=max_age_seconds)
         count = 0
@@ -1112,7 +1168,13 @@ class SessionStore:
             for entry in self._entries.values():
                 if entry.resume_pending:
                     continue
-                if not entry.suspended and entry.updated_at >= cutoff:
+                if entry.suspended:
+                    continue
+                if active_keys_from_marker is not None:
+                    should_mark = entry.session_key in active_keys_from_marker
+                else:
+                    should_mark = entry.updated_at >= cutoff
+                if should_mark:
                     entry.resume_pending = True
                     entry.resume_reason = "restart_interrupted"
                     entry.last_resume_marked_at = _now()
