@@ -690,6 +690,103 @@ class TestChatCompletionsNormalize:
         assert nr.provider_data == {"reasoning_content": "model-extra scratchpad"}
 
 
+class TestDeepSeekReasoningEffort:
+    """DeepSeek direct API: top-level reasoning_effort + extra_body.thinking."""
+
+    @pytest.fixture
+    def transport(self):
+        import agent.transports.chat_completions  # noqa: F401
+        from agent.transports import get_transport
+        return get_transport("chat_completions")
+
+    def test_xhigh_maps_to_max(self, transport):
+        """xhigh effort → top-level reasoning_effort='max' + thinking enabled."""
+        msgs = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="deepseek-v4-pro", messages=msgs,
+            is_deepseek=True,
+            reasoning_config={"enabled": True, "effort": "xhigh"},
+        )
+        assert kw["reasoning_effort"] == "max"
+        assert kw["extra_body"]["thinking"] == {"type": "enabled"}
+
+    def test_max_stays_max(self, transport):
+        """'max' effort passed through as-is."""
+        msgs = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="deepseek-v4-pro", messages=msgs,
+            is_deepseek=True,
+            reasoning_config={"enabled": True, "effort": "max"},
+        )
+        assert kw["reasoning_effort"] == "max"
+
+    def test_high_stays_high(self, transport):
+        """'high' effort stays 'high'."""
+        msgs = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="deepseek-v4-pro", messages=msgs,
+            is_deepseek=True,
+            reasoning_config={"enabled": True, "effort": "high"},
+        )
+        assert kw["reasoning_effort"] == "high"
+
+    def test_medium_maps_to_high(self, transport):
+        """DeepSeek doesn't support 'medium' — maps to 'high'."""
+        msgs = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="deepseek-v4-pro", messages=msgs,
+            is_deepseek=True,
+            reasoning_config={"enabled": True, "effort": "medium"},
+        )
+        assert kw["reasoning_effort"] == "high"
+
+    def test_default_no_config_is_high(self, transport):
+        """When no reasoning_config, default to 'high' with thinking enabled."""
+        msgs = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="deepseek-v4-pro", messages=msgs,
+            is_deepseek=True,
+        )
+        assert kw["reasoning_effort"] == "high"
+        assert kw["extra_body"]["thinking"] == {"type": "enabled"}
+
+    def test_disabled_skips_effort_disables_thinking(self, transport):
+        """reasoning_config.enabled=False → no reasoning_effort, thinking=disabled."""
+        msgs = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="deepseek-v4-pro", messages=msgs,
+            is_deepseek=True,
+            reasoning_config={"enabled": False},
+        )
+        assert "reasoning_effort" not in kw
+        assert kw["extra_body"]["thinking"] == {"type": "disabled"}
+
+    def test_no_effect_on_non_deepseek(self, transport):
+        """is_deepseek=False should not add DeepSeek parameters."""
+        msgs = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="gpt-4o", messages=msgs,
+            is_deepseek=False,
+            reasoning_config={"enabled": True, "effort": "xhigh"},
+        )
+        assert "reasoning_effort" not in kw
+        eb = kw.get("extra_body", {})
+        assert "thinking" not in eb
+
+    def test_deepseek_does_not_interfere_with_kimi(self, transport):
+        """Kimi and DeepSeek can be independently configured."""
+        msgs = [{"role": "user", "content": "Hi"}]
+        # set is_kimi=True but NOT is_deepseek — DeepSeek block should be skipped
+        kw = transport.build_kwargs(
+            model="kimi-latest", messages=msgs,
+            is_kimi=True,
+            is_deepseek=False,
+            reasoning_config={"enabled": True, "effort": "high"},
+        )
+        # Kimi path sets reasoning_effort to "high" (same value, but via Kimi logic)
+        assert kw["reasoning_effort"] == "high"
+
+
 class TestChatCompletionsCacheStats:
 
     def test_no_usage(self, transport):
