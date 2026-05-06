@@ -66,6 +66,7 @@ import requests
 from typing import Dict, Any, Optional, List, Tuple
 from pathlib import Path
 from agent.auxiliary_client import call_llm
+from agent.networks import CGNAT_NETWORK
 from hermes_constants import get_hermes_home
 from utils import is_truthy_value
 from hermes_cli.config import cfg_get
@@ -837,7 +838,7 @@ def _url_is_private(url: str) -> bool:
                 ip.is_private
                 or ip.is_loopback
                 or ip.is_link_local
-                or ip in ipaddress.ip_network("100.64.0.0/10")
+                or ip in CGNAT_NETWORK
             )
         except ValueError:
             pass
@@ -861,7 +862,7 @@ def _url_is_private(url: str) -> bool:
                 ip.is_private
                 or ip.is_loopback
                 or ip.is_link_local
-                or ip in ipaddress.ip_network("100.64.0.0/10")
+                or ip in CGNAT_NETWORK
             ):
                 return True
         return False

@@ -850,6 +850,7 @@ DEFAULT_CONFIG = {
     # Web dashboard settings
     "dashboard": {
         "theme": "default",  # Dashboard visual theme: "default", "midnight", "ember", "mono", "cyberpunk", "rose"
+        "tailscale_allowlist": [],  # Tailscale-User-Login values allowed through tailscale serve identity auth (empty = identity auth disabled)
     },
 
     # Privacy settings
