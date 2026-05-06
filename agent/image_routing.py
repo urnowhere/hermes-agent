@@ -96,6 +96,42 @@ def _lookup_supports_vision(provider: str, model: str) -> Optional[bool]:
     return bool(caps.supports_vision)
 
 
+# Slug fragments that strongly suggest a multimodal/vision-capable model when
+# the active provider+model combination is missing from the local models.dev
+# snapshot. The fallback only kicks in when caps lookup returns None — known
+# non-vision models (caps say False) still route to text. Patterns kept narrow
+# to avoid false positives on unrelated identifiers.
+_VISION_SLUG_FRAGMENTS = (
+    "-vl-",   # qwen2.5-vl-32b-instruct, internvl2-vl
+    "-vl:",
+    "-vl ",
+    "-omni",  # mimo-v2-omni, gpt-4o-omni
+    "vision", # claude-3-vision, gpt-4-vision-preview
+    "-vlm",   # internvlm
+    "-mllm",  # multimodal LLM
+    "multimodal",
+)
+_VISION_SLUG_SUFFIXES = ("-vl", "-vlm", "-mm", "-omni", "-vision")
+
+
+def _looks_like_vision_model(model: str) -> bool:
+    """Heuristic: does this model slug look like a vision/multimodal model?
+
+    Used as a fallback when caps lookup returns None (model not in the local
+    models.dev snapshot — common for new releases or providers using slug
+    variants we haven't mapped). Conservative: only matches well-established
+    naming conventions for vision/multimodal families.
+    """
+    if not model:
+        return False
+    slug = model.lower()
+    if any(frag in slug for frag in _VISION_SLUG_FRAGMENTS):
+        return True
+    if any(slug.endswith(suffix) for suffix in _VISION_SLUG_SUFFIXES):
+        return True
+    return False
+
+
 def decide_image_input_mode(
     provider: str,
     model: str,
@@ -125,6 +161,13 @@ def decide_image_input_mode(
 
     supports = _lookup_supports_vision(provider, model)
     if supports is True:
+        return "native"
+    if supports is None and _looks_like_vision_model(model):
+        # Caps unknown (model missing from local models.dev snapshot) but the
+        # slug shape says vision. Attempt native rather than fall through to
+        # text — text mode would prepend a vision_analyze description that
+        # leaks the cache path and never lets the model see the pixels for
+        # models like mimo-v2-omni, qwen-vl, etc.
         return "native"
     return "text"
 
@@ -233,4 +276,5 @@ def build_native_content_parts(
 __all__ = [
     "decide_image_input_mode",
     "build_native_content_parts",
+    "_looks_like_vision_model",
 ]
