@@ -50,6 +50,13 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         extra_env_vars=("OPENAI_API_KEY",),
         base_url_env_var="OPENROUTER_BASE_URL",
     ),
+    "comet": HermesOverlay(
+        transport="openai_chat",
+        is_aggregator=True,
+        extra_env_vars=("COMET_API_KEY",),
+        base_url_override="https://api.cometapi.com/v1",
+        base_url_env_var="COMET_BASE_URL",
+    ),
     "nous": HermesOverlay(
         transport="openai_chat",
         auth_type="oauth_device_code",
@@ -228,6 +235,8 @@ class ProviderDef:
 ALIASES: Dict[str, str] = {
     # openrouter
     "openai": "openrouter",     # bare "openai" → route through aggregator
+    "cometapi": "comet",
+    "comet-api": "comet",
 
     # zai
     "glm": "zai",

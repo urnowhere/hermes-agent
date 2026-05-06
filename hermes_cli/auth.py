@@ -366,6 +366,14 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=("KILOCODE_API_KEY",),
         base_url_env_var="KILOCODE_BASE_URL",
     ),
+    "comet": ProviderConfig(
+        id="comet",
+        name="CometAPI",
+        auth_type="api_key",
+        inference_base_url="https://api.cometapi.com/v1",
+        api_key_env_vars=("COMET_API_KEY",),
+        base_url_env_var="COMET_BASE_URL",
+    ),
     "huggingface": ProviderConfig(
         id="huggingface",
         name="Hugging Face",
@@ -1214,6 +1222,7 @@ def resolve_provider(
         "github-models": "copilot", "github-model": "copilot",
         "github-copilot-acp": "copilot-acp", "copilot-acp-agent": "copilot-acp",
         "aigateway": "ai-gateway", "vercel": "ai-gateway", "vercel-ai-gateway": "ai-gateway",
+        "cometapi": "comet", "comet-api": "comet",
         "opencode": "opencode-zen", "zen": "opencode-zen",
         "qwen-portal": "qwen-oauth", "qwen-cli": "qwen-oauth", "qwen-oauth": "qwen-oauth", "google-gemini-cli": "google-gemini-cli", "gemini-cli": "google-gemini-cli", "gemini-oauth": "google-gemini-cli",
         "hf": "huggingface", "hugging-face": "huggingface", "huggingface-hub": "huggingface",
