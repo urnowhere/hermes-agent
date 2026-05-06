@@ -8956,6 +8956,36 @@ class AIAgent:
 
         return msg
 
+    def _active_custom_provider_embeds_reasoning(self) -> bool:
+        """Return True when the active custom provider uses inline <think> blocks.
+
+        Some vLLM-served and OpenAI-compat endpoints (e.g. MiniMax M2.7 via
+        vLLM) require prior assistant turns to carry reasoning inline in the
+        content field as ``<think>reasoning</think>`` rather than a separate
+        top-level ``reasoning_content`` key.  MiniMax's own docs mandate this:
+
+            "You must preserve the model's thinking content completely, i.e.
+            <think>reasoning_content</think>. This is essential to ensure
+            Interleaved Thinking works effectively."
+
+        Users opt in via ``embeds_reasoning_in_content: true`` in their
+        custom_providers config entry.  See issue #20577.
+        """
+        if self.provider != "custom":
+            return False
+        try:
+            from hermes_cli.config import load_config, get_compatible_custom_providers
+            cfg = load_config()
+            for entry in get_compatible_custom_providers(cfg):
+                if not isinstance(entry, dict):
+                    continue
+                entry_url = str(entry.get("base_url") or "").strip().rstrip("/")
+                if entry_url and entry_url == self.base_url.rstrip("/"):
+                    return bool(entry.get("embeds_reasoning_in_content"))
+        except Exception:
+            pass
+        return False
+
     def _needs_thinking_reasoning_pad(self) -> bool:
         """Return True when the active provider enforces reasoning_content echo-back.
 
@@ -8998,8 +9028,32 @@ class AIAgent:
         )
 
     def _copy_reasoning_content_for_api(self, source_msg: dict, api_msg: dict) -> None:
-        """Copy provider-facing reasoning fields onto an API replay message."""
+        """Copy provider-facing reasoning fields onto an API replay message.
+
+        For most providers this sets ``reasoning_content`` on the api_msg.  For
+        vLLM-served and other OpenAI-compat endpoints that use inline ``<think>``
+        blocks (opt-in via ``embeds_reasoning_in_content: true`` in the matching
+        ``custom_providers`` config entry), the reasoning is instead prepended to
+        ``content`` as ``<think>reasoning</think>``.  MiniMax's M2.7 docs require
+        this shape for Interleaved Thinking to work correctly.  See issue #20577.
+        """
         if source_msg.get("role") != "assistant":
+            return
+
+        # Detect vLLM-style providers that embed reasoning inline in content.
+        # Must be checked before any reasoning_content path so we never send
+        # a top-level reasoning_content to an endpoint that ignores it.
+        if self._active_custom_provider_embeds_reasoning():
+            reasoning = (
+                source_msg.get("reasoning_content")
+                or source_msg.get("reasoning")
+            )
+            if isinstance(reasoning, str) and reasoning.strip():
+                existing_content = api_msg.get("content") or ""
+                api_msg["content"] = f"<think>\n{reasoning.strip()}\n</think>\n{existing_content}".strip()
+            # Remove reasoning_content if present — this provider doesn't
+            # consume it and sending it would be a no-op at best, 400 at worst.
+            api_msg.pop("reasoning_content", None)
             return
 
         # 1. Explicit reasoning_content already set — preserve it verbatim

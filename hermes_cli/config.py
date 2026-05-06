@@ -2867,6 +2867,13 @@ _VALID_CUSTOM_PROVIDER_FIELDS = {
     # key_env is read at runtime by runtime_provider.py and auxiliary_client.py
     # — include it here so the set accurately describes the supported schema.
     "key_env",
+    # embeds_reasoning_in_content: when True, the provider expects prior
+    # assistant turns to include <think>reasoning</think> inline in the
+    # content field rather than a top-level reasoning_content key.
+    # Applies to vLLM-served thinking models (e.g. MiniMax M2.7 via vLLM)
+    # and other OpenAI-compat endpoints that do not consume reasoning_content.
+    # See https://github.com/NousResearch/hermes-agent/issues/20577
+    "embeds_reasoning_in_content",
 }
 
 # Fields that look like they should be inside custom_providers, not at root
