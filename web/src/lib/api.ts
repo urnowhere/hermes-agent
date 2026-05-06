@@ -1,30 +1,15 @@
 const BASE = "";
 
 import type { DashboardTheme } from "@/themes/types";
+import { DASHBOARD_SESSION_HEADER, dashboardAuthHeaders, getDashboardSessionToken } from "@/lib/dashboardAuth";
 
-// Ephemeral session token for protected endpoints.
-// Injected into index.html by the server — never fetched via API.
-declare global {
-  interface Window {
-    __HERMES_SESSION_TOKEN__?: string;
-  }
-}
+// Dashboard auth is intentionally sessionStorage-backed.  The legacy
+// window-injected token remains supported as a fallback for older servers.
 let _sessionToken: string | null = null;
-const SESSION_HEADER = "X-Hermes-Session-Token";
-
-function setSessionHeader(headers: Headers, token: string): void {
-  if (!headers.has(SESSION_HEADER)) {
-    headers.set(SESSION_HEADER, token);
-  }
-}
 
 export async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
   // Inject the session token into all /api/ requests.
-  const headers = new Headers(init?.headers);
-  const token = window.__HERMES_SESSION_TOKEN__;
-  if (token) {
-    setSessionHeader(headers, token);
-  }
+  const headers = dashboardAuthHeaders(init?.headers);
   const res = await fetch(`${BASE}${url}`, { ...init, headers });
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
@@ -35,7 +20,7 @@ export async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> 
 
 async function getSessionToken(): Promise<string> {
   if (_sessionToken) return _sessionToken;
-  const injected = window.__HERMES_SESSION_TOKEN__;
+  const injected = getDashboardSessionToken();
   if (injected) {
     _sessionToken = injected;
     return _sessionToken;
@@ -109,7 +94,7 @@ export const api = {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        [SESSION_HEADER]: token,
+        [DASHBOARD_SESSION_HEADER]: token,
       },
       body: JSON.stringify({ key }),
     });
@@ -196,7 +181,7 @@ export const api = {
       `/api/providers/oauth/${encodeURIComponent(providerId)}`,
       {
         method: "DELETE",
-        headers: { [SESSION_HEADER]: token },
+        headers: { [DASHBOARD_SESSION_HEADER]: token },
       },
     );
   },
@@ -208,7 +193,7 @@ export const api = {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          [SESSION_HEADER]: token,
+          [DASHBOARD_SESSION_HEADER]: token,
         },
         body: "{}",
       },
@@ -222,7 +207,7 @@ export const api = {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          [SESSION_HEADER]: token,
+          [DASHBOARD_SESSION_HEADER]: token,
         },
         body: JSON.stringify({ session_id: sessionId, code }),
       },
@@ -238,7 +223,7 @@ export const api = {
       `/api/providers/oauth/sessions/${encodeURIComponent(sessionId)}`,
       {
         method: "DELETE",
-        headers: { [SESSION_HEADER]: token },
+        headers: { [DASHBOARD_SESSION_HEADER]: token },
       },
     );
   },

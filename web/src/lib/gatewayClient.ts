@@ -13,6 +13,8 @@
  *   await gw.request("prompt.submit", { session_id, text: "hi" })
  */
 
+import { buildAuthenticatedWsUrl, getDashboardSessionToken } from "@/lib/dashboardAuth";
+
 export type GatewayEventName =
   | "gateway.ready"
   | "session.info"
@@ -107,7 +109,7 @@ export class GatewayClient {
     if (this._state === "open" || this._state === "connecting") return;
     this.setState("connecting");
 
-    const resolved = token ?? window.__HERMES_SESSION_TOKEN__ ?? "";
+    const resolved = token ?? getDashboardSessionToken() ?? "";
     if (!resolved) {
       this.setState("error");
       throw new Error(
@@ -115,10 +117,7 @@ export class GatewayClient {
       );
     }
 
-    const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(
-      `${scheme}//${location.host}/api/ws?token=${encodeURIComponent(resolved)}`,
-    );
+    const ws = new WebSocket(buildAuthenticatedWsUrl("/api/ws", { token: resolved }));
     this.ws = ws;
 
     // Register message + close BEFORE awaiting open — the server emits

@@ -850,6 +850,33 @@ DEFAULT_CONFIG = {
     # Web dashboard settings
     "dashboard": {
         "theme": "default",  # Dashboard visual theme: "default", "midnight", "ember", "mono", "cyberpunk", "rose"
+        "auth": {
+            "mode": "none",  # none | token | password | trusted-proxy | tailscale
+            "token": None,
+            "password_hash": None,
+            "password": None,
+            "session_ttl_seconds": 28800,
+            "allow_public_without_auth": False,
+            "rate_limit": {
+                "max_attempts": 10,
+                "window_seconds": 60,
+                "lockout_seconds": 300,
+            },
+            "trusted_proxy": {
+                "user_header": "X-Forwarded-User",
+                "email_header": "X-Forwarded-Email",
+                "name_header": "X-Forwarded-Name",
+                "allowed_users": [],
+                "allowed_emails": [],
+                "require_identity": True,
+            },
+            "tailscale": {
+                "user_header": "Tailscale-User-Login",
+                "name_header": "Tailscale-User-Name",
+                "profile_pic_header": "Tailscale-User-Profile-Pic",
+                "allowed_users": [],
+            },
+        },
     },
 
     # Privacy settings

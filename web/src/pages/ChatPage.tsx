@@ -34,16 +34,14 @@ import { ChatSidebar } from "@/components/ChatSidebar";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { useI18n } from "@/i18n";
 import { PluginSlot } from "@/plugins";
+import { buildAuthenticatedWsUrl, getDashboardSessionToken } from "@/lib/dashboardAuth";
 
 function buildWsUrl(
   token: string,
   resume: string | null,
   channel: string,
 ): string {
-  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const qs = new URLSearchParams({ token, channel });
-  if (resume) qs.set("resume", resume);
-  return `${proto}//${window.location.host}/api/pty?${qs.toString()}`;
+  return buildAuthenticatedWsUrl("/api/pty", { token, resume, channel });
 }
 
 // Channel id ties this chat tab's PTY child (publisher) to its sidebar
@@ -236,7 +234,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     const host = hostRef.current;
     if (!host) return;
 
-    const token = window.__HERMES_SESSION_TOKEN__;
+    const token = getDashboardSessionToken();
     // Banner already initialised above; just bail before wiring xterm/WS.
     if (!token) {
       return;
@@ -298,7 +296,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
           // original keydown event's activation. Log to aid debugging.
           console.warn("[dashboard clipboard] OSC 52 write failed:", err.message);
         });
-      } catch (e) {
+      } catch {
         console.warn("[dashboard clipboard] malformed OSC 52 payload");
       }
       return true;

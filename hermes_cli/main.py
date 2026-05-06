@@ -8375,6 +8375,38 @@ def _report_dashboard_status() -> int:
     return len(pids)
 
 
+def _dashboard_auth_config_from_args(args) -> dict:
+    """Build dashboard auth config from persistent config plus CLI overrides."""
+    from copy import deepcopy
+
+    from hermes_cli.config import load_config
+
+    base = (load_config().get("dashboard", {}) or {}).get("auth", {}) or {}
+    cfg = deepcopy(base)
+    if getattr(args, "auth", None) is not None:
+        cfg["mode"] = args.auth
+    cfg.setdefault("mode", "none")
+    if getattr(args, "auth_token", None):
+        cfg["token"] = args.auth_token
+    if getattr(args, "auth_password", None):
+        cfg["password"] = args.auth_password
+    if getattr(args, "auth_password_hash", None):
+        cfg["password_hash"] = args.auth_password_hash
+    trusted_proxy = dict(cfg.get("trusted_proxy") or {})
+    if getattr(args, "trusted_proxy_user_header", None):
+        trusted_proxy["user_header"] = args.trusted_proxy_user_header
+    if getattr(args, "trusted_proxy_email_header", None):
+        trusted_proxy["email_header"] = args.trusted_proxy_email_header
+    if trusted_proxy:
+        cfg["trusted_proxy"] = trusted_proxy
+    tailscale = dict(cfg.get("tailscale") or {})
+    if getattr(args, "tailscale_user_header", None):
+        tailscale["user_header"] = args.tailscale_user_header
+    if tailscale:
+        cfg["tailscale"] = tailscale
+    return cfg
+
+
 def cmd_dashboard(args):
     """Start the web UI server, or (with --stop/--status) manage running ones."""
     # --status: report running dashboards and exit, no deps needed.
@@ -8416,12 +8448,14 @@ def cmd_dashboard(args):
     from hermes_cli.web_server import start_server
 
     embedded_chat = args.tui or os.environ.get("HERMES_DASHBOARD_TUI") == "1"
+    auth_config = _dashboard_auth_config_from_args(args)
     start_server(
         host=args.host,
         port=args.port,
         open_browser=not args.no_open,
         allow_public=getattr(args, "insecure", False),
         embedded_chat=embedded_chat,
+        auth_config=auth_config,
     )
 
 
@@ -10618,6 +10652,19 @@ Examples:
             "Alternatively set HERMES_DASHBOARD_TUI=1."
         ),
     )
+    dashboard_parser.add_argument(
+        "--auth",
+        choices=["none", "token", "password", "trusted-proxy", "tailscale"],
+        default=None,
+        help="Dashboard authentication mode (default: dashboard.auth.mode from config, else none)",
+    )
+    dashboard_parser.add_argument("--auth-token", help="Dashboard token for --auth token")
+    dashboard_parser.add_argument("--auth-password", help="Dashboard password for --auth password (prefer --auth-password-hash)")
+    dashboard_parser.add_argument("--auth-password-hash", help="Dashboard password hash for --auth password")
+    dashboard_parser.add_argument("--trusted-proxy-user-header", help="Trusted proxy user header name")
+    dashboard_parser.add_argument("--trusted-proxy-email-header", help="Trusted proxy email header name")
+    dashboard_parser.add_argument("--tailscale-user-header", help="Tailscale identity user header name")
+
     # Lifecycle flags — mutually exclusive with each other and with the
     # start-a-server flags above (if both are passed, --stop / --status win
     # because they exit before the server is started).  The dashboard has

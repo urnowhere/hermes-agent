@@ -23,6 +23,7 @@
  * terminal pane keeps working unimpaired.
  */
 
+import { buildAuthenticatedWsUrl, getDashboardSessionToken } from "@/lib/dashboardAuth";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Badge } from "@nous-research/ui/ui/components/badge";
 import { Card } from "@/components/ui/card";
@@ -151,17 +152,13 @@ export function ChatSidebar({ channel, className }: ChatSidebarProps) {
   // JSON-RPC sidecar so the sidebar matches its documented best-effort
   // UX and the user always has a reconnect affordance.
   useEffect(() => {
-    const token = window.__HERMES_SESSION_TOKEN__;
+    const token = getDashboardSessionToken();
 
     if (!token || !channel) {
       return;
     }
 
-    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const qs = new URLSearchParams({ token, channel });
-    const ws = new WebSocket(
-      `${proto}//${window.location.host}/api/events?${qs.toString()}`,
-    );
+    const ws = new WebSocket(buildAuthenticatedWsUrl("/api/events", { token, channel }));
 
     // `unmounting` suppresses the banner during cleanup — `ws.close()`
     // from the effect's return fires a close event with code 1005 that

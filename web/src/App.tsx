@@ -50,6 +50,7 @@ import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { Typography } from "@/components/NouiTypography";
 import { cn } from "@/lib/utils";
 import { Backdrop } from "@/components/Backdrop";
+import { AuthGate } from "@/components/AuthGate";
 import { SidebarFooter } from "@/components/SidebarFooter";
 import { SidebarStatusStrip } from "@/components/SidebarStatusStrip";
 import { PageHeaderProvider } from "@/contexts/PageHeaderProvider";
@@ -304,7 +305,7 @@ function buildRoutes(
   return routes;
 }
 
-export default function App() {
+function AppShell() {
   const { t } = useI18n();
   const { pathname } = useLocation();
   const { manifests, loading: pluginsLoading } = usePlugins();
@@ -816,4 +817,13 @@ interface SystemActionItem {
   label: string;
   runningLabel: string;
   spin: boolean;
+}
+
+
+export default function App() {
+  return (
+    <AuthGate>
+      <AppShell />
+    </AuthGate>
+  );
 }

@@ -48,6 +48,7 @@ from hermes_cli.config import (
     redact_key,
 )
 from gateway.status import get_running_pid, read_runtime_status
+from hermes_cli.dashboard_auth import DashboardAuthManager
 
 try:
     from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -104,36 +105,42 @@ _PUBLIC_API_PATHS: frozenset = frozenset({
     "/api/config/defaults",
     "/api/config/schema",
     "/api/model/info",
+    "/api/auth/status",
+    "/api/auth/login",
     "/api/dashboard/themes",
     "/api/dashboard/plugins",
     "/api/dashboard/plugins/rescan",
 })
 
 
-def _has_valid_session_token(request: Request) -> bool:
-    """True if the request carries a valid dashboard session token.
+def _dashboard_auth_manager() -> DashboardAuthManager:
+    """Return the active dashboard auth manager.
 
-    The dedicated session header avoids collisions with reverse proxies that
-    already use ``Authorization`` (for example Caddy ``basic_auth``). We still
-    accept the legacy Bearer path for backward compatibility with older
-    dashboard bundles.
+    Tests and start_server() may install a manager on app.state.  When absent,
+    preserve the historical dashboard behavior: protect sensitive APIs with the
+    ephemeral in-process session token injected into the SPA.
     """
-    session_header = request.headers.get(_SESSION_HEADER_NAME, "")
-    if session_header and hmac.compare_digest(
-        session_header.encode(),
-        _SESSION_TOKEN.encode(),
-    ):
-        return True
+    manager = getattr(app.state, "dashboard_auth", None)
+    if isinstance(manager, DashboardAuthManager):
+        return manager
+    manager = DashboardAuthManager(
+        {"dashboard": {"auth": {"mode": "token", "token": _SESSION_TOKEN}}},
+        runtime_token=_SESSION_TOKEN,
+    )
+    app.state.dashboard_auth = manager
+    return manager
 
-    auth = request.headers.get("authorization", "")
-    expected = f"Bearer {_SESSION_TOKEN}"
-    return hmac.compare_digest(auth.encode(), expected.encode())
+
+def _has_valid_session_token(request: Request) -> bool:
+    """True if the request carries valid dashboard credentials."""
+    return _dashboard_auth_manager().authenticate_request(request).ok
 
 
 def _require_token(request: Request) -> None:
-    """Validate the ephemeral session token.  Raises 401 on mismatch."""
-    if not _has_valid_session_token(request):
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    """Validate dashboard credentials. Raises 401/429/403 on mismatch."""
+    result = _dashboard_auth_manager().authenticate_request(request)
+    if not result.ok:
+        raise HTTPException(status_code=result.status_code, detail=result.reason)
 
 
 # Accepted Host header values for loopback binds. DNS rebinding attacks
@@ -223,15 +230,75 @@ async def host_header_middleware(request: Request, call_next):
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    """Require the session token on all /api/ routes except the public list."""
+    """Require dashboard auth on all sensitive /api/ routes."""
     path = request.url.path
-    if path.startswith("/api/") and path not in _PUBLIC_API_PATHS and not path.startswith("/api/plugins/"):
-        if not _has_valid_session_token(request):
+    if path.startswith("/api/") and path not in _PUBLIC_API_PATHS:
+        result = _dashboard_auth_manager().authenticate_request(request)
+        if not result.ok:
             return JSONResponse(
-                status_code=401,
-                content={"detail": "Unauthorized"},
+                status_code=result.status_code,
+                content={"detail": result.reason},
             )
     return await call_next(request)
+
+
+
+
+class DashboardLoginBody(BaseModel):
+    token: Optional[str] = None
+    password: Optional[str] = None
+
+
+@app.get("/api/auth/status")
+async def dashboard_auth_status(request: Request):
+    return _dashboard_auth_manager().status_payload(request)
+
+
+@app.post("/api/auth/login")
+async def dashboard_auth_login(body: DashboardLoginBody, request: Request):
+    manager = _dashboard_auth_manager()
+    client_id = request.client.host if request.client else "unknown"
+    if body.password is not None:
+        result = manager.login_password(body.password, client_id=client_id)
+    elif body.token is not None:
+        # Exchange a long-lived dashboard token for an ephemeral browser session.
+        result = manager.authenticate_request(
+            type("TokenLoginRequest", (), {
+                "headers": {"authorization": f"Bearer {body.token}"},
+                "client": request.client,
+            })()
+        )
+        if result.ok:
+            identity = result.identity or None
+            session = manager.issue_session(identity) if identity else manager.issue_session(None)  # type: ignore[arg-type]
+            result.set_session_token = session
+    else:
+        result = type("Result", (), {"ok": False, "status_code": 400, "reason": "Missing token or password"})()
+
+    if not result.ok:
+        raise HTTPException(status_code=result.status_code, detail=result.reason)
+    return {
+        "ok": True,
+        "session_token": result.set_session_token,
+        "identity": getattr(manager, "_identity_payload")(result.identity) if result.identity else None,
+    }
+
+
+@app.post("/api/auth/logout")
+async def dashboard_auth_logout(request: Request):
+    token = request.headers.get("X-Hermes-Dashboard-Session") or request.headers.get(_SESSION_HEADER_NAME) or ""
+    return {"ok": _dashboard_auth_manager().revoke_session(token)}
+
+
+@app.get("/api/auth/me")
+async def dashboard_auth_me(request: Request):
+    result = _dashboard_auth_manager().authenticate_request(request)
+    if not result.ok:
+        raise HTTPException(status_code=result.status_code, detail=result.reason)
+    return {
+        "ok": True,
+        "identity": getattr(_dashboard_auth_manager(), "_identity_payload")(result.identity) if result.identity else None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2998,10 +3065,9 @@ async def pty_ws(ws: WebSocket) -> None:
         return
 
     # --- auth + loopback check (before accept so we can close cleanly) ---
-    token = ws.query_params.get("token", "")
-    expected = _SESSION_TOKEN
-    if not hmac.compare_digest(token.encode(), expected.encode()):
-        await ws.close(code=4401)
+    auth_result = _dashboard_auth_manager().authenticate_websocket(ws)
+    if not auth_result.ok:
+        await ws.close(code=4401 if auth_result.status_code in (401, 429) else 4403)
         return
 
     if not _ws_client_is_allowed(ws):
@@ -3106,9 +3172,9 @@ async def gateway_ws(ws: WebSocket) -> None:
         await ws.close(code=4403)
         return
 
-    token = ws.query_params.get("token", "")
-    if not hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
-        await ws.close(code=4401)
+    auth_result = _dashboard_auth_manager().authenticate_websocket(ws)
+    if not auth_result.ok:
+        await ws.close(code=4401 if auth_result.status_code in (401, 429) else 4403)
         return
 
     if not _ws_client_is_allowed(ws):
@@ -3138,9 +3204,9 @@ async def pub_ws(ws: WebSocket) -> None:
         await ws.close(code=4403)
         return
 
-    token = ws.query_params.get("token", "")
-    if not hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
-        await ws.close(code=4401)
+    auth_result = _dashboard_auth_manager().authenticate_websocket(ws)
+    if not auth_result.ok:
+        await ws.close(code=4401 if auth_result.status_code in (401, 429) else 4403)
         return
 
     if not _ws_client_is_allowed(ws):
@@ -3167,9 +3233,9 @@ async def events_ws(ws: WebSocket) -> None:
         await ws.close(code=4403)
         return
 
-    token = ws.query_params.get("token", "")
-    if not hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
-        await ws.close(code=4401)
+    auth_result = _dashboard_auth_manager().authenticate_websocket(ws)
+    if not auth_result.ok:
+        await ws.close(code=4401 if auth_result.status_code in (401, 429) else 4403)
         return
 
     if not _ws_client_is_allowed(ws):
@@ -4022,25 +4088,32 @@ def start_server(
     allow_public: bool = False,
     *,
     embedded_chat: bool = False,
+    auth_config: Optional[dict] = None,
 ):
     """Start the web UI server."""
     import uvicorn
 
     global _DASHBOARD_EMBEDDED_CHAT_ENABLED
     _DASHBOARD_EMBEDDED_CHAT_ENABLED = embedded_chat
+    if auth_config is not None:
+        app.state.dashboard_auth = DashboardAuthManager({"dashboard": {"auth": auth_config}}, runtime_token=_SESSION_TOKEN)
 
     _LOCALHOST = ("127.0.0.1", "localhost", "::1")
-    if host not in _LOCALHOST and not allow_public:
+    auth_mode = (auth_config or {}).get("mode", "none") if isinstance(auth_config, dict) else "none"
+    has_robust_auth = auth_mode in {"token", "password", "trusted-proxy", "tailscale"}
+    if host not in _LOCALHOST and not allow_public and not has_robust_auth:
         raise SystemExit(
             f"Refusing to bind to {host} — the dashboard exposes API keys "
             f"and config without robust authentication.\n"
             f"Use --insecure to override (NOT recommended on untrusted networks)."
         )
-    if host not in _LOCALHOST:
+    if host not in _LOCALHOST and not has_robust_auth:
         _log.warning(
             "Binding to %s with --insecure — the dashboard has no robust "
             "authentication. Only use on trusted networks.", host,
         )
+    elif host not in _LOCALHOST:
+        _log.warning("Binding dashboard to %s with auth mode %s enabled.", host, auth_mode)
 
     # Record the bound host so host_header_middleware can validate incoming
     # Host headers against it. Defends against DNS rebinding (GHSA-ppp5-vxwm-4cf7).
@@ -4051,10 +4124,16 @@ def start_server(
 
     if open_browser:
         import webbrowser
+        from urllib.parse import quote
 
         def _open():
             time.sleep(1.0)
-            webbrowser.open(f"http://{host}:{port}")
+            url = f"http://{host}:{port}"
+            if auth_mode == "token":
+                token = str((auth_config or {}).get("token") or _SESSION_TOKEN)
+                if token:
+                    url = f"{url}/#token={quote(token, safe='')}"
+            webbrowser.open(url)
 
         threading.Thread(target=_open, daemon=True).start()
 
