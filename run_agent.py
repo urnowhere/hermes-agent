@@ -9924,16 +9924,17 @@ class AIAgent:
                 except Exception as cb_err:
                     logging.debug(f"Tool complete callback error: {cb_err}")
 
-            function_result = maybe_persist_tool_result(
-                content=function_result,
-                tool_name=name,
-                tool_use_id=tc.id,
-                env=get_active_env(effective_task_id),
-            )
+            if not blocked:
+                function_result = maybe_persist_tool_result(
+                    content=function_result,
+                    tool_name=name,
+                    tool_use_id=tc.id,
+                    env=get_active_env(effective_task_id),
+                )
 
-            subdir_hints = self._subdirectory_hints.check_tool_call(name, args)
-            if subdir_hints:
-                function_result += subdir_hints
+                subdir_hints = self._subdirectory_hints.check_tool_call(name, args)
+                if subdir_hints:
+                    function_result += subdir_hints
 
             tool_msg = {
                 "role": "tool",
@@ -10312,17 +10313,18 @@ class AIAgent:
                 except Exception as cb_err:
                     logging.debug(f"Tool complete callback error: {cb_err}")
 
-            function_result = maybe_persist_tool_result(
-                content=function_result,
-                tool_name=function_name,
-                tool_use_id=tool_call.id,
-                env=get_active_env(effective_task_id),
-            )
+            if not _execution_blocked:
+                function_result = maybe_persist_tool_result(
+                    content=function_result,
+                    tool_name=function_name,
+                    tool_use_id=tool_call.id,
+                    env=get_active_env(effective_task_id),
+                )
 
-            # Discover subdirectory context files from tool arguments
-            subdir_hints = self._subdirectory_hints.check_tool_call(function_name, function_args)
-            if subdir_hints:
-                function_result += subdir_hints
+                # Discover subdirectory context files from tool arguments
+                subdir_hints = self._subdirectory_hints.check_tool_call(function_name, function_args)
+                if subdir_hints:
+                    function_result += subdir_hints
 
             tool_msg = {
                 "role": "tool",
