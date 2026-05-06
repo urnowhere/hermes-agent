@@ -5111,8 +5111,16 @@ class HermesCLI:
         print()
         print(f"  {'Title':<32} {'Preview':<40} {'Last Active':<13} {'ID'}")
         print(f"  {'─' * 32} {'─' * 40} {'─' * 13} {'─' * 24}")
-        for session in sessions:
-            title = (session.get("title") or "—")[:30]
+        for idx, session in enumerate(sessions):
+            raw_title = session.get("title") or "—"
+            # First row is the most-recently-active session (list_sessions_rich
+            # sorts by last_active DESC).  Mark it so users can spot the
+            # resume-what-I-was-just-doing target without eyeballing
+            # timestamps.  See #17352.
+            if idx == 0:
+                title = f"★ {raw_title[:28]}"
+            else:
+                title = raw_title[:30]
             preview = (session.get("preview") or "")[:38]
             last_active = _relative_time(session.get("last_active"))
             print(f"  {title:<32} {preview:<40} {last_active:<13} {session['id']}")

@@ -10141,20 +10141,29 @@ Examples:
             else:
                 print(f"{'Preview':<50} {'Last Active':<13} {'Src':<6} {'ID'}")
                 print("─" * 95)
-            for s in sessions:
+            for idx, s in enumerate(sessions):
                 last_active = _relative_time(s.get("last_active"))
                 preview = (
                     s.get("preview", "")[:38]
                     if has_titles
                     else s.get("preview", "")[:48]
                 )
+                # The first row is the most recently active session
+                # (list_sessions_rich sorts by last_active DESC).  Mark it so
+                # users can spot the "resume my most recent conversation"
+                # target immediately.  See #17352.
+                is_latest = (idx == 0)
                 if has_titles:
-                    title = (s.get("title") or "—")[:30]
+                    raw_title = s.get("title") or "—"
+                    title = (f"★ {raw_title[:28]}" if is_latest
+                             else raw_title[:30])
                     sid = s["id"]
                     print(f"{title:<32} {preview:<40} {last_active:<13} {sid}")
                 else:
+                    prefix = "★ " if is_latest else "  "
                     sid = s["id"]
-                    print(f"{preview:<50} {last_active:<13} {s['source']:<6} {sid}")
+                    marked_preview = f"{prefix}{preview[:48]}"[:50]
+                    print(f"{marked_preview:<50} {last_active:<13} {s['source']:<6} {sid}")
 
         elif action == "export":
             if args.session_id:
