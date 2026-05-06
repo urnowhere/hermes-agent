@@ -8779,7 +8779,7 @@ class HermesCLI:
             self._voice_tts_done.set()
 
     def _handle_voice_command(self, command: str):
-        """Handle /voice [on|off|tts|status] command."""
+        """Handle /voice [on|off|tts|status|vad] command."""
         parts = command.strip().split(maxsplit=1)
         subcommand = parts[1].lower().strip() if len(parts) > 1 else ""
 
@@ -8791,6 +8791,8 @@ class HermesCLI:
             self._toggle_voice_tts()
         elif subcommand == "status":
             self._show_voice_status()
+        elif subcommand == "vad":
+            self._enable_voice_vad()
         elif subcommand == "":
             # Toggle
             if self._voice_mode:
@@ -8799,7 +8801,7 @@ class HermesCLI:
                 self._enable_voice_mode()
         else:
             _cprint(f"Unknown voice subcommand: {subcommand}")
-            _cprint("Usage: /voice [on|off|tts|status]")
+            _cprint("Usage: /voice [on|off|tts|status|vad]")
 
     def _voice_beeps_enabled(self) -> bool:
         """Return whether CLI voice mode should play record start/stop beeps."""
@@ -8871,6 +8873,49 @@ class HermesCLI:
         _cprint(f"  {_DIM}{_ptt_display} to start/stop recording{_RST}")
         _cprint(f"  {_DIM}/voice tts  to toggle speech output{_RST}")
         _cprint(f"  {_DIM}/voice off  to disable voice mode{_RST}")
+
+    def _voice_silence_duration(self) -> float:
+        """Return configured silence auto-stop duration in seconds."""
+        try:
+            from hermes_cli.config import load_config
+            _cfg = load_config().get("voice")
+            voice_cfg = _cfg if isinstance(_cfg, dict) else {}
+            duration = voice_cfg.get("silence_duration", 3.0)
+            if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+                return float(duration)
+        except Exception:
+            pass
+        return 3.0
+
+    def _start_voice_vad_recording_async(self) -> None:
+        def _start_vad():
+            try:
+                self._voice_start_recording()
+                if hasattr(self, '_app') and self._app:
+                    self._app.invalidate()
+            except Exception as e:
+                _cprint(f"\n{_DIM}VAD recording failed: {e}{_RST}")
+
+        threading.Thread(target=_start_vad, daemon=True).start()
+
+    def _enable_voice_vad(self):
+        """Enable hands-free VAD mode and start listening immediately."""
+        if self._voice_mode and self._voice_continuous and self._voice_recording:
+            _cprint(f"{_DIM}VAD mode is already active.{_RST}")
+            return
+
+        if not self._voice_mode:
+            self._enable_voice_mode()
+            if not self._voice_mode:
+                return
+
+        with self._voice_lock:
+            self._voice_continuous = True
+
+        _cprint(f"\n{_ACCENT}Voice VAD mode enabled - listening...{_RST}")
+        _cprint(f"  {_DIM}Speak to start recording. Auto-stops on {self._voice_silence_duration()}s silence.{_RST}")
+        _cprint(f"  {_DIM}/voice off to disable voice mode{_RST}")
+        self._start_voice_vad_recording_async()
 
     def _disable_voice_mode(self):
         """Disable voice mode, cancel any active recording, and stop TTS."""

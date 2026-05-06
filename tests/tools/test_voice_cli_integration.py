@@ -138,6 +138,7 @@ class TestVoiceCommandParsing:
             ("/voice off", "off"),
             ("/voice tts", "tts"),
             ("/voice status", "status"),
+            ("/voice vad", "vad"),
             ("/voice", ""),
             ("/voice  ON  ", "on"),
         ]
@@ -809,6 +810,7 @@ class TestHandleVoiceCommandReal:
         cli._disable_voice_mode = MagicMock()
         cli._toggle_voice_tts = MagicMock()
         cli._show_voice_status = MagicMock()
+        cli._enable_voice_vad = MagicMock()
         return cli
 
     @patch("cli._cprint")
@@ -836,6 +838,12 @@ class TestHandleVoiceCommandReal:
         cli._show_voice_status.assert_called_once()
 
     @patch("cli._cprint")
+    def test_vad_calls_enable_vad(self, _cp):
+        cli = self._cli()
+        cli._handle_voice_command("/voice vad")
+        cli._enable_voice_vad.assert_called_once()
+
+    @patch("cli._cprint")
     def test_toggle_off_when_enabled(self, _cp):
         cli = self._cli()
         cli._voice_mode = True
@@ -858,6 +866,64 @@ class TestHandleVoiceCommandReal:
         # Should print usage via _cprint
         assert any("Unknown" in str(c) or "unknown" in str(c)
                     for c in mock_cp.call_args_list)
+
+
+class TestEnableVoiceVadReal:
+    """Tests the CLI hands-free VAD slash command behavior."""
+
+    @patch("cli._cprint")
+    def test_enables_voice_mode_then_starts_vad(self, _cp):
+        cli = _make_voice_cli()
+        cli._enable_voice_mode = MagicMock(side_effect=lambda: setattr(cli, "_voice_mode", True))
+        cli._start_voice_vad_recording_async = MagicMock()
+
+        cli._enable_voice_vad()
+
+        cli._enable_voice_mode.assert_called_once()
+        assert cli._voice_continuous is True
+        cli._start_voice_vad_recording_async.assert_called_once()
+
+    @patch("cli._cprint")
+    def test_does_not_start_when_voice_requirements_fail(self, _cp):
+        cli = _make_voice_cli()
+        cli._enable_voice_mode = MagicMock()
+        cli._start_voice_vad_recording_async = MagicMock()
+
+        cli._enable_voice_vad()
+
+        assert cli._voice_continuous is False
+        cli._start_voice_vad_recording_async.assert_not_called()
+
+    @patch("cli._cprint")
+    def test_existing_voice_mode_switches_to_continuous(self, _cp):
+        cli = _make_voice_cli(_voice_mode=True)
+        cli._enable_voice_mode = MagicMock()
+        cli._start_voice_vad_recording_async = MagicMock()
+
+        cli._enable_voice_vad()
+
+        cli._enable_voice_mode.assert_not_called()
+        assert cli._voice_continuous is True
+        cli._start_voice_vad_recording_async.assert_called_once()
+
+    @patch("cli._cprint")
+    def test_already_active_vad_is_noop(self, _cp):
+        cli = _make_voice_cli(_voice_mode=True, _voice_continuous=True, _voice_recording=True)
+        cli._start_voice_vad_recording_async = MagicMock()
+
+        cli._enable_voice_vad()
+
+        cli._start_voice_vad_recording_async.assert_not_called()
+
+    @patch("hermes_cli.config.load_config", return_value={"voice": {"silence_duration": 1.25}})
+    def test_silence_duration_reads_numeric_config(self, _cfg):
+        cli = _make_voice_cli()
+        assert cli._voice_silence_duration() == 1.25
+
+    @patch("hermes_cli.config.load_config", return_value={"voice": {"silence_duration": True}})
+    def test_silence_duration_ignores_bool_config(self, _cfg):
+        cli = _make_voice_cli()
+        assert cli._voice_silence_duration() == 3.0
 
 
 class TestEnableVoiceModeReal:
