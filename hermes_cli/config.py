@@ -2613,6 +2613,7 @@ def _normalize_custom_provider_entry(
         "api_mode", "transport", "model", "default_model", "models",
         "context_length", "rate_limit_delay",
         "request_timeout_seconds", "stale_timeout_seconds",
+        "max_tokens",
     }
     for camel, snake in _CAMEL_ALIASES.items():
         if camel in entry and snake not in entry:
@@ -2698,6 +2699,10 @@ def _normalize_custom_provider_entry(
     context_length = entry.get("context_length")
     if isinstance(context_length, int) and context_length > 0:
         normalized["context_length"] = context_length
+
+    max_tokens = entry.get("max_tokens")
+    if isinstance(max_tokens, int) and max_tokens > 0:
+        normalized["max_tokens"] = max_tokens
 
     rate_limit_delay = entry.get("rate_limit_delay")
     if isinstance(rate_limit_delay, (int, float)) and rate_limit_delay >= 0:
