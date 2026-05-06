@@ -1,12 +1,14 @@
 ---
 sidebar_position: 7
 title: "Subagent Delegation"
-description: "Spawn isolated child agents for parallel workstreams with delegate_task"
+description: "Spawn isolated child agents and ask specialist profiles for bounded work"
 ---
 
-# Subagent Delegation
+# Delegation
 
 The `delegate_task` tool spawns child AIAgent instances with isolated context, restricted toolsets, and their own terminal sessions. Each child gets a fresh conversation and works independently — only its final summary enters the parent's context.
+
+The `ask_profile` tool asks another Hermes profile to act as a bounded expert. It starts a fresh Hermes subprocess with that profile's `HERMES_HOME`, then returns the specialist profile's output as evidence for the parent to synthesize. Use it when the task should run under another profile's identity, memory, configuration, or tool boundaries rather than inside the current profile.
 
 ## Single Task
 
@@ -56,6 +58,22 @@ delegate_task(
 The subagent receives a focused system prompt built from your goal and context, instructing it to complete the task and provide a structured summary of what it did, what it found, any files modified, and any issues encountered.
 
 ## Practical Examples
+
+### Ask a Specialist Profile
+
+Ask a named profile for evidence without switching the current runtime:
+
+```python
+ask_profile(
+    profile="reviewer",
+    task="Review the API design for auth and tenant-boundary risks.",
+    context="The design doc is at /home/user/project/docs/auth-api.md"
+)
+```
+
+`ask_profile` is intentionally subprocess-backed. Hermes profiles are selected before most profile-scoped modules import, so the child process gets the target profile's config, memory, skills, sessions, and tool settings from startup.
+
+The expert profile's response is evidence, not durable truth. The parent profile remains responsible for deciding what to accept, what to tell the user, and whether to update memory or external systems.
 
 ### Parallel Research
 
@@ -161,6 +179,8 @@ Certain toolsets are blocked for subagents regardless of what you specify:
 - `code_execution` — children should reason step-by-step
 - `send_message` — no cross-platform side effects (e.g., sending Telegram messages)
 
+For `ask_profile`, toolset control happens through the expert profile's own config. You can also set a per-expert `toolsets` list in the parent profile's `delegation.profile_experts` entry; Hermes passes that list to the child process.
+
 ## Max Iterations
 
 Each subagent has an iteration limit (default: 50) that controls how many tool-calling turns it can take:
@@ -237,6 +257,7 @@ For **durable long-running work** that must survive interrupts or outlive the cu
 ## Key Properties
 
 - Each subagent gets its **own terminal session** (separate from the parent)
+- `ask_profile` gets a **separate Hermes process** with the target profile's `HERMES_HOME`
 - **Nested delegation is opt-in** — only `role="orchestrator"` children can delegate further, and only when `max_spawn_depth` is raised from its default of 1 (flat). Disable globally with `orchestrator_enabled: false`.
 - Leaf subagents **cannot** call: `delegate_task`, `clarify`, `memory`, `send_message`, `execute_code`. Orchestrator subagents retain `delegate_task` but still cannot use the other four.
 - **Interrupt propagation** — interrupting the parent interrupts all active children (including grandchildren under orchestrators)
@@ -274,6 +295,23 @@ delegation:
   model: "qwen2.5-coder"
   base_url: "http://localhost:1234/v1"
   api_key: "local-key"
+```
+
+Profile expert delegation can target Hermes named profiles by default. Custom profile homes should be allowlisted in the parent profile:
+
+```yaml
+delegation:
+  profile_experts:
+    reviewer:
+      hermes_home: ~/.hermes-reviewer
+      toolsets:
+        - web
+        - terminal
+        - file
+      timeout_seconds: 300
+  profile_timeout_seconds: 600
+  profile_max_timeout_seconds: 1800
+  # allow_named_profile_experts: false      # Require every expert alias to be configured
 ```
 
 :::tip
