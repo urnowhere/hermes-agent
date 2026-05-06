@@ -227,6 +227,30 @@ services:
 
 Start with `docker compose up -d` and view logs with `docker compose logs -f`. Dashboard output is prefixed with `[dashboard]` so it's easy to filter from gateway logs.
 
+## Connecting to local LLMs on the host
+
+If you run a local LLM server (Ollama, llama.cpp, omlx, vLLM) on the host machine while Hermes runs inside a container, use the special DNS name that resolves to the host:
+
+| Runtime | Host DNS name |
+|---------|---------------|
+| Docker Desktop (macOS / Windows) | `host.docker.internal` |
+| Docker with `--network=host` (Linux) | `localhost` (network is shared) |
+| Podman | `host.containers.internal` |
+| Lima / Colima (macOS) | `host.lima.internal` |
+
+Configure the endpoint via `hermes model` → **Custom endpoint**:
+
+```sh
+docker run -it --rm \
+  -v ~/.hermes:/opt/data \
+  nousresearch/hermes-agent model
+# When prompted for the base URL, enter:
+#   http://host.docker.internal:8080/v1   (llama.cpp default)
+#   http://host.docker.internal:11434/v1  (Ollama default)
+```
+
+Hermes auto-detects all of these hostnames as local endpoints and relaxes streaming timeouts accordingly — no manual timeout configuration needed. See the [Run Local LLMs on Mac](/docs/guides/local-llm-on-mac#timeouts) guide for timeout details.
+
 ## Resource limits
 
 The Hermes container needs moderate resources. Recommended minimums:

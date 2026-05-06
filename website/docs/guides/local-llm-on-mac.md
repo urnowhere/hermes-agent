@@ -222,7 +222,7 @@ Select **Custom endpoint** and follow the prompts. It will ask for the base URL 
 
 ## Timeouts
 
-Hermes automatically detects local endpoints (localhost, LAN IPs) and relaxes its streaming timeouts. No configuration needed for most setups.
+Hermes automatically detects local endpoints (localhost, LAN IPs, and container-to-host DNS names like `host.docker.internal`, `host.containers.internal`, and `host.lima.internal`) and relaxes its streaming timeouts. No configuration needed for most setups — including when Hermes runs inside Docker and connects to a host-side LLM server.
 
 If you still hit timeout errors (e.g. very large contexts on slow hardware), you can override the streaming read timeout:
 
