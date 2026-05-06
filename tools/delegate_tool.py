@@ -40,6 +40,8 @@ from utils import base_url_hostname, is_truthy_value
 DELEGATE_BLOCKED_TOOLS = frozenset(
     [
         "delegate_task",  # no recursive delegation
+        "list_agents",  # subagents shouldn't monitor siblings
+        "kill_agent",  # subagents shouldn't kill siblings
         "clarify",  # no user interaction
         "memory",  # no writes to shared MEMORY.md
         "send_message",  # no cross-platform side effects
@@ -149,6 +151,15 @@ _active_subagents_lock = threading.Lock()
 # for the lifetime of the run; _run_single_child is the owner.
 _active_subagents: Dict[str, Dict[str, Any]] = {}
 
+# Completion queue for subagent lifecycle notifications.
+# Each entry is {"type": "delegate.task_completed", "subagent_id": ..., "status": ..., ...}.
+# The gateway drain loop consumes this after each agent turn to auto-trigger
+# new turns when async subagent work finishes.  Pattern mirrors
+# ProcessRegistry.completion_queue (tools/process_registry.py).
+import queue as _queue_mod
+
+_subagent_completion_queue: _queue_mod.Queue = _queue_mod.Queue()
+
 
 def set_spawn_paused(paused: bool) -> bool:
     """Globally block/unblock new delegate_task spawns.
@@ -180,13 +191,19 @@ def _unregister_subagent(subagent_id: str) -> None:
         _active_subagents.pop(subagent_id, None)
 
 
-def interrupt_subagent(subagent_id: str) -> bool:
+def interrupt_subagent(subagent_id: str, force: bool = False) -> bool:
     """Request that a single running subagent stop at its next iteration boundary.
 
     Does not hard-kill the worker thread (Python can't); sets the child's
     interrupt flag which propagates to in-flight tools and recurses into
     grandchildren via AIAgent.interrupt().  Returns True if a matching
     subagent was found.
+
+    When force=True, additionally shuts down the per-child executor without
+    waiting, so the parent's delegate_task() call exits immediately rather
+    than blocking on child_timeout_seconds.  The child thread may continue
+    briefly until it hits the next iteration boundary and honors the
+    interrupt flag.
     """
     with _active_subagents_lock:
         record = _active_subagents.get(subagent_id)
@@ -200,6 +217,18 @@ def interrupt_subagent(subagent_id: str) -> bool:
     except Exception as exc:
         logger.debug("interrupt_subagent(%s) failed: %s", subagent_id, exc)
         return False
+
+    if force:
+        executor = record.get("_executor")
+        if executor is not None:
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except Exception as exc:
+                logger.debug(
+                    "interrupt_subagent(%s) force executor shutdown failed: %s",
+                    subagent_id,
+                    exc,
+                )
     return True
 
 
@@ -211,9 +240,25 @@ def list_active_subagents() -> List[Dict[str, Any]]:
     """
     with _active_subagents_lock:
         return [
-            {k: v for k, v in r.items() if k != "agent"}
+            {k: v for k, v in r.items() if k != "agent" and not k.startswith("_")}
             for r in _active_subagents.values()
         ]
+
+
+def drain_subagent_completions() -> List[Dict[str, Any]]:
+    """Drain queued subagent completion notifications.
+
+    Returns a list of DelegateEvent payloads.  The gateway calls this
+    after each agent turn to detect newly-finished subagents and
+    auto-trigger follow-up turns.
+    """
+    events: List[Dict[str, Any]] = []
+    while not _subagent_completion_queue.empty():
+        try:
+            events.append(_subagent_completion_queue.get_nowait())
+        except _queue_mod.Empty:
+            break
+    return events
 
 
 def _extract_output_tail(
@@ -1411,6 +1456,13 @@ def _run_single_child(
             }
         )
 
+    # Initialise defaults referenced by the finally-block TASK_COMPLETED
+    # emission so they are available in both try and except code paths.
+    status = "unknown"
+    summary = ""
+    duration = 0.0
+    api_calls = 0
+
     try:
         if child_progress_cb:
             try:
@@ -1455,6 +1507,15 @@ def _run_single_child(
             )
 
         _child_future = _timeout_executor.submit(_run_with_thread_capture)
+        # Store executor and future in the active subagent registry so
+        # interrupt_subagent(force=True) can shut down the executor to
+        # unblock the parent's delegate_task() call.
+        if _subagent_id:
+            with _active_subagents_lock:
+                rec = _active_subagents.get(_subagent_id)
+                if rec is not None:
+                    rec["_executor"] = _timeout_executor
+                    rec["_future"] = _child_future
         try:
             result = _child_future.result(timeout=child_timeout)
         except Exception as _timeout_exc:
@@ -1793,6 +1854,25 @@ def _run_single_child(
         # Drop the TUI-facing registry entry.  Safe to call even if the
         # child was never registered (e.g. ID missing on test doubles).
         if _subagent_id:
+            # Emit DelegateEvent.TASK_COMPLETED before unregistering so the
+            # gateway drain loop can detect finished subagents and
+            # auto-trigger follow-up turns (Mastra streamUntilIdle pattern).
+            try:
+                _subagent_completion_queue.put_nowait(
+                    {
+                        "type": DelegateEvent.TASK_COMPLETED.value,
+                        "subagent_id": _subagent_id,
+                        "task_index": task_index,
+                        "status": status,
+                        "summary": summary,
+                        "duration_seconds": duration,
+                        "api_calls": api_calls,
+                    }
+                )
+            except Exception:
+                logger.debug(
+                    "subagent completion queue put failed: %s", _subagent_id
+                )
             _unregister_subagent(_subagent_id)
 
         if child_pool is not None and leased_cred_id is not None:
@@ -2559,4 +2639,82 @@ registry.register(
     ),
     check_fn=check_delegate_requirements,
     emoji="🔀",
+)
+
+# ── list_agents ──
+LIST_AGENTS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "list_agents",
+        "description": (
+            "List all currently active subagents spawned by delegate_task. "
+            "Returns a snapshot of the live subagent tree: each entry includes "
+            "subagent_id, parent_id, depth, goal, model, started_at, status, "
+            "and tool_count.  Thread-safe — returns a copy.  Use this to "
+            "select which subagent to kill with kill_agent."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+}
+
+registry.register(
+    name="list_agents",
+    toolset="delegation",
+    schema=LIST_AGENTS_SCHEMA,
+    handler=lambda args, **kw: json.dumps(
+        list_active_subagents(), ensure_ascii=False
+    ),
+    emoji="📋",
+)
+
+# ── kill_agent ──
+KILL_AGENT_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "kill_agent",
+        "description": (
+            "Request that a running subagent stop at its next iteration "
+            "boundary.  Returns True if the subagent was found.  Set "
+            "force=true to additionally shut down the per-child executor "
+            "without waiting, so the parent's delegate_task() call exits "
+            "immediately.  Use list_agents first to discover active "
+            "subagent IDs."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "subagent_id": {
+                    "type": "string",
+                    "description": "The subagent ID to kill (from list_agents output)",
+                },
+                "force": {
+                    "type": "boolean",
+                    "description": (
+                        "If true, shut down the child executor immediately "
+                        "without waiting for graceful shutdown (default: false)"
+                    ),
+                },
+            },
+            "required": ["subagent_id"],
+        },
+    },
+}
+
+registry.register(
+    name="kill_agent",
+    toolset="delegation",
+    schema=KILL_AGENT_SCHEMA,
+    handler=lambda args, **kw: json.dumps(
+        {
+            "success": interrupt_subagent(
+                subagent_id=args.get("subagent_id", ""),
+                force=args.get("force", False),
+            )
+        },
+        ensure_ascii=False,
+    ),
+    emoji="🛑",
 )
