@@ -18,6 +18,7 @@ This test pins that the constructed ``httpx.Client`` mounts an ``HTTPProxy``
 pool when a proxy env var is set, AND that the socket-level keepalive
 transport is still installed on the no-proxy default path.
 """
+import textwrap
 from unittest.mock import patch
 
 import httpx
@@ -40,6 +41,10 @@ def _make_agent():
 def _extract_http_client(client_kwargs: dict):
     """_create_openai_client calls ``OpenAI(**client_kwargs)``; grab the injected client."""
     return client_kwargs.get("http_client")
+
+
+def _write_config(tmp_path, body: str) -> None:
+    (tmp_path / "config.yaml").write_text(textwrap.dedent(body), encoding="utf-8")
 
 
 def test_get_proxy_from_env_prefers_https_then_http_then_all(monkeypatch):
@@ -186,6 +191,47 @@ def test_get_proxy_for_base_url_returns_none_when_proxy_unset(monkeypatch):
     monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")
     assert _get_proxy_for_base_url("http://127.0.0.1:11434/v1") is None
     assert _get_proxy_for_base_url("https://api.openai.com/v1") is None
+
+
+def test_get_proxy_for_base_url_can_ignore_env_proxy_per_provider(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _write_config(
+        tmp_path,
+        """\
+        providers:
+          openai-codex:
+            ignore_env_proxy: true
+        """,
+    )
+    for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
+                "https_proxy", "http_proxy", "all_proxy",
+                "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://corp:8080")
+
+    assert _get_proxy_for_base_url(
+        "https://chatgpt.com/backend-api/codex",
+        provider_id="openai-codex",
+        model="gpt-5.5",
+    ) is None
+
+
+def test_codex_timeout_summary_includes_proxy_hint(monkeypatch):
+    for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
+                "https_proxy", "http_proxy", "all_proxy"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7897")
+
+    agent = _make_agent()
+    agent.model = "gpt-5.5"
+
+    class APITimeoutError(Exception):
+        pass
+
+    summary = agent._summarize_api_error_with_hint(APITimeoutError("request timed out"))
+    assert "request timed out" in summary
+    assert "HTTP(S)_PROXY/ALL_PROXY" in summary
+    assert "hermes auth login openai-codex" in summary
 
 
 @patch("run_agent.OpenAI")

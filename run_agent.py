@@ -93,7 +93,10 @@ OpenAI = _OpenAIProxy()
 # User-managed env files should override stale shell exports on restart.
 from hermes_cli.env_loader import load_hermes_dotenv
 from hermes_cli.timeouts import (
+    get_provider_ignore_env_proxy,
     get_provider_request_timeout,
+    get_provider_retry_attempts,
+    get_provider_retry_backoff_seconds,
     get_provider_stale_timeout,
 )
 
@@ -242,8 +245,15 @@ def _get_proxy_from_env() -> Optional[str]:
     return None
 
 
-def _get_proxy_for_base_url(base_url: Optional[str]) -> Optional[str]:
+def _get_proxy_for_base_url(
+    base_url: Optional[str],
+    *,
+    provider_id: Optional[str] = None,
+    model: Optional[str] = None,
+) -> Optional[str]:
     """Return an env-configured proxy unless NO_PROXY excludes this base URL."""
+    if provider_id and get_provider_ignore_env_proxy(provider_id, model) is True:
+        return None
     proxy = _get_proxy_from_env()
     if not proxy or not base_url:
         return proxy
@@ -4117,6 +4127,44 @@ class AIAgent:
         prefix = f"HTTP {status_code}: " if status_code else ""
         return f"{prefix}{raw[:500]}"
 
+    def _timeout_diagnostic_hint(self, error: Exception) -> str:
+        error_type = type(error).__name__
+        if error_type not in {"APITimeoutError", "ReadTimeout", "ConnectTimeout", "PoolTimeout"}:
+            return ""
+
+        provider = (self.provider or "").strip().lower()
+        if provider != "openai-codex":
+            return ""
+
+        hints: list[str] = []
+        proxy = _get_proxy_from_env()
+        if proxy:
+            if get_provider_ignore_env_proxy(provider, self.model) is True:
+                hints.append("provider config is bypassing HTTP(S)_PROXY for Codex")
+            else:
+                hints.append("Codex is using HTTP(S)_PROXY/ALL_PROXY from the environment")
+        else:
+            hints.append("Codex is connecting directly without HTTP(S)_PROXY")
+
+        hints.append(
+            "check chatgpt.com/backend-api/codex reachability and refresh `hermes auth login openai-codex` if the ChatGPT session expired"
+        )
+
+        timeout_cfg = get_provider_request_timeout(provider, self.model)
+        if timeout_cfg is not None:
+            hints.append(f"configured request timeout is {timeout_cfg:.0f}s")
+        else:
+            hints.append("set `providers.openai-codex.request_timeout_seconds` in config.yaml to raise the timeout")
+
+        return " | ".join(hints)
+
+    def _summarize_api_error_with_hint(self, error: Exception) -> str:
+        summary = self._summarize_api_error(error)
+        hint = self._timeout_diagnostic_hint(error)
+        if not hint:
+            return summary
+        return f"{summary} | {hint}"
+
     def _mask_api_key_for_logs(self, key: Optional[str]) -> Optional[str]:
         if not key:
             return None
@@ -5542,8 +5590,7 @@ class AIAgent:
             return bool(getattr(http_client, "is_closed", False))
         return False
 
-    @staticmethod
-    def _build_keepalive_http_client(base_url: str = "") -> Any:
+    def _build_keepalive_http_client(self, base_url: str = "") -> Any:
         try:
             import httpx as _httpx
             import socket as _socket
@@ -5559,7 +5606,11 @@ class AIAgent:
             # from env vars (allow_env_proxies = trust_env and transport is None).
             # Explicitly read proxy settings while still honoring NO_PROXY for
             # loopback / local endpoints such as a locally hosted sub2api.
-            _proxy = _get_proxy_for_base_url(base_url)
+            _proxy = _get_proxy_for_base_url(
+                base_url,
+                provider_id=getattr(self, "provider", None),
+                model=getattr(self, "model", None),
+            )
             return _httpx.Client(
                 transport=_httpx.HTTPTransport(socket_options=_sock_opts),
                 proxy=_proxy,
@@ -11252,7 +11303,11 @@ class AIAgent:
             
             api_start_time = time.time()
             retry_count = 0
-            max_retries = self._api_max_retries
+            max_retries = get_provider_retry_attempts(self.provider, self.model)
+            if max_retries is None:
+                max_retries = self._api_max_retries
+            if max_retries < 1:
+                max_retries = 1
             primary_recovery_attempted = False
             max_compression_attempts = 3
             codex_auth_retry_attempted=False
@@ -12951,7 +13006,7 @@ class AIAgent:
                             compression_attempts = 0
                             primary_recovery_attempted = False
                             continue
-                        _final_summary = self._summarize_api_error(api_error)
+                        _final_summary = self._summarize_api_error_with_hint(api_error)
                         if is_rate_limited:
                             self._emit_status(f"❌ Rate limited after {max_retries} retries — {_final_summary}")
                         else:
@@ -13027,7 +13082,20 @@ class AIAgent:
                                     _retry_after = min(int(_ra_raw), 120)  # Cap at 2 minutes
                                 except (TypeError, ValueError):
                                     pass
-                    wait_time = _retry_after if _retry_after else jittered_backoff(retry_count, base_delay=2.0, max_delay=60.0)
+                    if _retry_after:
+                        wait_time = _retry_after
+                    else:
+                        _backoff = get_provider_retry_backoff_seconds(self.provider, self.model)
+                        if _backoff is None:
+                            wait_time = jittered_backoff(
+                                retry_count, base_delay=2.0, max_delay=60.0,
+                            )
+                        else:
+                            wait_time = jittered_backoff(
+                                retry_count,
+                                base_delay=_backoff[0],
+                                max_delay=_backoff[1],
+                            )
                     if is_rate_limited:
                         self._emit_status(f"⏱️ Rate limited. Waiting {wait_time:.1f}s (attempt {retry_count + 1}/{max_retries})...")
                     else:

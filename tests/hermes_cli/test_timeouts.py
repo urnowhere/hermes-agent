@@ -3,7 +3,10 @@ from __future__ import annotations
 import textwrap
 
 from hermes_cli.timeouts import (
+    get_provider_ignore_env_proxy,
     get_provider_request_timeout,
+    get_provider_retry_attempts,
+    get_provider_retry_backoff_seconds,
     get_provider_stale_timeout,
 )
 
@@ -74,6 +77,48 @@ def test_provider_stale_timeout_used_when_no_model_override(monkeypatch, tmp_pat
     assert get_provider_stale_timeout("openai-codex", "gpt-5.4") == 900.0
 
 
+def test_provider_retry_settings_support_model_overrides(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _write_config(
+        tmp_path,
+        """\
+        providers:
+          openai-codex:
+            retry_attempts: 5
+            retry_backoff_seconds: 4
+            retry_backoff_max_seconds: 45
+            models:
+              gpt-5.5:
+                retry_attempts: 7
+                retry_backoff_seconds: 6
+                retry_backoff_max_seconds: 30
+        """,
+    )
+
+    assert get_provider_retry_attempts("openai-codex", "gpt-5.5") == 7
+    assert get_provider_retry_backoff_seconds("openai-codex", "gpt-5.5") == (6.0, 30.0)
+    assert get_provider_retry_attempts("openai-codex", "gpt-5.4") == 5
+    assert get_provider_retry_backoff_seconds("openai-codex", "gpt-5.4") == (4.0, 45.0)
+
+
+def test_provider_ignore_env_proxy_supports_model_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _write_config(
+        tmp_path,
+        """\
+        providers:
+          openai-codex:
+            ignore_env_proxy: false
+            models:
+              gpt-5.5:
+                ignore_env_proxy: true
+        """,
+    )
+
+    assert get_provider_ignore_env_proxy("openai-codex", "gpt-5.5") is True
+    assert get_provider_ignore_env_proxy("openai-codex", "gpt-5.4") is False
+
+
 def test_missing_timeout_returns_none(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     _write_config(
@@ -128,6 +173,30 @@ def test_invalid_stale_timeout_values_return_none(monkeypatch, tmp_path):
 
     assert get_provider_stale_timeout("openai-codex", "gpt-5.4") is None
     assert get_provider_stale_timeout("openai-codex", "gpt-5.5") is None
+
+
+def test_invalid_retry_and_proxy_values_return_none(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _write_config(
+        tmp_path,
+        """\
+        providers:
+          openai-codex:
+            retry_attempts: invalid
+            retry_backoff_seconds: slow
+            retry_backoff_max_seconds: -1
+            ignore_env_proxy: maybe
+            models:
+              gpt-5.5:
+                retry_attempts: -5
+                retry_backoff_seconds: -2
+                ignore_env_proxy: not-sure
+        """,
+    )
+
+    assert get_provider_retry_attempts("openai-codex", "gpt-5.5") is None
+    assert get_provider_retry_backoff_seconds("openai-codex", "gpt-5.5") is None
+    assert get_provider_ignore_env_proxy("openai-codex", "gpt-5.5") is None
 
 
 def test_anthropic_adapter_honors_timeout_kwarg():
