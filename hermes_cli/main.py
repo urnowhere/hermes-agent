@@ -6445,15 +6445,25 @@ def _load_installable_optional_extras() -> list[str]:
     return referenced
 
 
+def _is_termux_runtime() -> bool:
+    """Return True when running inside Android/Termux."""
+    prefix = os.environ.get("PREFIX", "")
+    return bool(os.environ.get("TERMUX_VERSION") or "com.termux/files/usr" in prefix)
+
+
 def _install_python_dependencies_with_optional_fallback(
     install_cmd_prefix: list[str],
     *,
     env: dict[str, str] | None = None,
 ) -> None:
     """Install base deps plus as many optional extras as the environment supports."""
+    preferred_extra = "termux" if _is_termux_runtime() else "all"
+    if preferred_extra == "termux":
+        print("  → Termux detected; using the Android-safe dependency set instead of .[all]")
+
     try:
         subprocess.run(
-            install_cmd_prefix + ["install", "-e", ".[all]", "--quiet"],
+            install_cmd_prefix + ["install", "-e", f".[{preferred_extra}]", "--quiet"],
             cwd=PROJECT_ROOT,
             check=True,
             env=env,
