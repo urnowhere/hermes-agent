@@ -29,6 +29,7 @@ from agent.credential_pool import (
 )
 import hermes_cli.auth as auth_mod
 from hermes_cli.auth import PROVIDER_REGISTRY
+from hermes_cli.curses_ui import reset_terminal_mode
 from hermes_constants import OPENROUTER_BASE_URL
 
 
@@ -104,6 +105,49 @@ def _oauth_default_label(provider: str, count: int) -> str:
 
 def _api_key_default_label(count: int) -> str:
     return f"api-key-{count}"
+
+
+def _read_secret_from_tty(prompt: str) -> str:
+    """Fallback for ``getpass`` failure: read directly from /dev/tty.
+
+    Used by ``_prompt_api_key`` when ``getpass.getpass`` raises ``OSError``
+    (typically because ``/dev/tty`` could not be opened or termios calls
+    failed on the controlling terminal — see #15768).
+    """
+    import termios
+
+    with open("/dev/tty", "r+") as tty_file:
+        fd = tty_file.fileno()
+        old_attrs = termios.tcgetattr(fd)
+        new_attrs = list(old_attrs)
+        new_attrs[3] |= termios.ICANON
+        new_attrs[3] &= ~termios.ECHO
+        try:
+            termios.tcsetattr(fd, termios.TCSANOW, new_attrs)
+            tty_file.write(prompt)
+            tty_file.flush()
+            value = tty_file.readline()
+            tty_file.write("\n")
+            tty_file.flush()
+            return value.rstrip("\r\n")
+        finally:
+            termios.tcsetattr(fd, termios.TCSANOW, old_attrs)
+
+
+def _prompt_api_key() -> str:
+    """Prompt for an API key, robust against earlier curses-induced tty mode.
+
+    Resets the controlling tty to canonical/echo mode (recovers from a
+    curses prompt that exited without restoring it on Linux — #15768)
+    then calls ``getpass``. If ``getpass`` itself raises ``OSError``
+    (no controlling tty, ioctl rejected), falls back to a direct
+    ``/dev/tty`` read with echo disabled via ``termios``.
+    """
+    reset_terminal_mode()
+    try:
+        return getpass("Paste your API key: ")
+    except OSError:
+        return _read_secret_from_tty("Paste your API key: ")
 
 
 def _display_source(source: str) -> str:
@@ -194,7 +238,7 @@ def auth_add_command(args) -> None:
     if requested_type == AUTH_TYPE_API_KEY:
         token = (getattr(args, "api_key", None) or "").strip()
         if not token:
-            token = getpass("Paste your API key: ").strip()
+            token = _prompt_api_key().strip()
         if not token:
             raise SystemExit("No API key provided.")
         default_label = _api_key_default_label(len(pool.entries()) + 1)

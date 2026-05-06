@@ -4,6 +4,7 @@ Used by `hermes tools` and `hermes skills` for interactive checklists.
 Provides a curses multi-select with keyboard navigation, plus a
 text-based numbered fallback for terminals without curses support.
 """
+
 import sys
 from typing import Callable, List, Optional, Set
 
@@ -27,7 +28,30 @@ def flush_stdin() -> None:
         if not sys.stdin.isatty():
             return
         import termios
+
         termios.tcflush(sys.stdin, termios.TCIFLUSH)
+    except Exception:
+        pass
+
+
+def reset_terminal_mode() -> None:
+    """Restore canonical + echo mode before hidden prompts.
+
+    Fixes issue #15768: after curses prompts in the setup wizard, some
+    terminals can be left in non-canonical mode, causing ``getpass.getpass()``
+    to read bytes without ever seeing a submitted newline.  This is a no-op
+    on non-TTY stdin and on non-POSIX platforms without ``termios``.
+    """
+    try:
+        if not sys.stdin.isatty():
+            return
+        import termios
+
+        fd = sys.stdin.fileno()
+        attrs = termios.tcgetattr(fd)
+        attrs[3] |= termios.ICANON | termios.ECHO
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        flush_stdin()
     except Exception:
         pass
 
@@ -61,6 +85,7 @@ def curses_checklist(
 
     try:
         import curses
+
         chosen = set(selected)
         result_holder: list = [None]
 
@@ -89,9 +114,11 @@ def curses_checklist(
                         hattr |= curses.color_pair(2)
                     stdscr.addnstr(0, 0, title, max_x - 1, hattr)
                     stdscr.addnstr(
-                        1, 0,
+                        1,
+                        0,
                         "  ↑↓ navigate  SPACE toggle  ENTER confirm  ESC cancel",
-                        max_x - 1, curses.A_DIM,
+                        max_x - 1,
+                        curses.A_DIM,
                     )
                 except curses.error:
                     pass
@@ -132,7 +159,9 @@ def curses_checklist(
                             sattr = curses.A_DIM
                             if curses.has_colors():
                                 sattr |= curses.color_pair(3)
-                            stdscr.addnstr(max_y - 1, sx, status_text, max_x - sx - 1, sattr)
+                            stdscr.addnstr(
+                                max_y - 1, sx, status_text, max_x - sx - 1, sattr
+                            )
                     except curses.error:
                         pass
 
@@ -193,6 +222,7 @@ def curses_radiolist(
 
     try:
         import curses
+
         result_holder: list = [None]
 
         def _draw(stdscr):
@@ -227,9 +257,11 @@ def curses_radiolist(
                         row += 1
 
                     stdscr.addnstr(
-                        row, 0,
+                        row,
+                        0,
                         "  \u2191\u2193 navigate  ENTER/SPACE select  ESC cancel",
-                        max_x - 1, curses.A_DIM,
+                        max_x - 1,
+                        curses.A_DIM,
                     )
                     row += 1
                 except curses.error:
@@ -329,6 +361,7 @@ def curses_single_select(
 
     try:
         import curses
+
         result_holder: list = [None]
 
         all_items = list(items) + [cancel_label]
@@ -354,9 +387,11 @@ def curses_single_select(
                         hattr |= curses.color_pair(2)
                     stdscr.addnstr(0, 0, title, max_x - 1, hattr)
                     stdscr.addnstr(
-                        1, 0,
+                        1,
+                        0,
                         "  ↑↓ navigate  ENTER confirm  ESC/q cancel",
-                        max_x - 1, curses.A_DIM,
+                        max_x - 1,
+                        curses.A_DIM,
                     )
                 except curses.error:
                     pass
@@ -368,7 +403,9 @@ def curses_single_select(
                     scroll_offset = cursor - visible_rows + 1
 
                 for draw_i, i in enumerate(
-                    range(scroll_offset, min(len(all_items), scroll_offset + visible_rows))
+                    range(
+                        scroll_offset, min(len(all_items), scroll_offset + visible_rows)
+                    )
                 ):
                     y = draw_i + 3
                     if y >= max_y - 1:
