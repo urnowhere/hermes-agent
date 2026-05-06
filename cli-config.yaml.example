@@ -494,6 +494,17 @@ session_reset:
 # explicitly want one shared "room brain" per group/channel.
 group_sessions_per_user: true
 
+# When a user opens a thread/topic on an earlier message (Feishu topic, Slack
+# thread, Discord thread, Telegram forum topic, ...) Hermes normally creates a
+# fresh session keyed by the thread_id and loses the parent chat's
+# conversation context. Set this to a positive integer N to seed the new
+# thread session with the last N user/assistant messages from the parent chat
+# session, so the agent can answer follow-ups about messages it sent before
+# the topic was opened (e.g. an interactive card it just posted).
+# Tool calls and tool results are intentionally skipped (their tool_call_id
+# linkage doesn't survive a session boundary). 0 = disabled (default).
+thread_inherit_messages: 0
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Gateway Streaming
 # ─────────────────────────────────────────────────────────────────────────────

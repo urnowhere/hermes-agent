@@ -8,6 +8,7 @@ from gateway.config import Platform, HomeChannel, GatewayConfig, PlatformConfig
 from gateway.session import (
     SessionSource,
     SessionStore,
+    build_parent_chat_session_key,
     build_session_context,
     build_session_context_prompt,
     build_session_key,
@@ -1284,3 +1285,268 @@ class TestRewriteTranscriptPreservesReasoning:
             "before user",
             "before assistant",
         ]
+
+
+# ---------------------------------------------------------------------------
+# Thread/topic context inheritance — when a user replies in a thread, the
+# fresh thread session should be seeded with the tail of the parent chat
+# session so the agent can answer follow-ups about earlier messages
+# (e.g. an interactive card it posted before the topic was opened).
+# ---------------------------------------------------------------------------
+class TestBuildParentChatSessionKey:
+    def test_returns_none_for_source_without_thread(self):
+        source = SessionSource(
+            platform=Platform.FEISHU,
+            chat_id="oc_grp",
+            chat_type="group",
+            user_id="u1",
+        )
+        assert build_parent_chat_session_key(source) is None
+
+    def test_returns_none_for_dm_thread(self):
+        # DMs already include thread_id in their primary session key when
+        # present, but the inheritance feature does not apply (the user
+        # already sees their own DM history end-to-end).
+        source = SessionSource(
+            platform=Platform.FEISHU,
+            chat_id="oc_dm",
+            chat_type="dm",
+            thread_id="topic-1",
+            user_id="u1",
+        )
+        assert build_parent_chat_session_key(source) is None
+
+    def test_strips_thread_id_for_group_topic(self):
+        source = SessionSource(
+            platform=Platform.FEISHU,
+            chat_id="oc_grp",
+            chat_type="group",
+            thread_id="topic-1",
+            user_id="u1",
+        )
+        parent = build_parent_chat_session_key(source, group_sessions_per_user=True)
+        live = build_session_key(source, group_sessions_per_user=True)
+        # Parent must be the same chat without the thread_id segment.
+        assert parent == "agent:main:feishu:group:oc_grp:u1"
+        assert live != parent
+        assert "topic-1" not in parent
+
+    def test_preserves_per_user_isolation_when_enabled(self):
+        source = SessionSource(
+            platform=Platform.FEISHU,
+            chat_id="oc_grp",
+            chat_type="group",
+            thread_id="topic-1",
+            user_id="alice",
+        )
+        parent = build_parent_chat_session_key(source, group_sessions_per_user=True)
+        assert parent.endswith(":alice")
+
+    def test_returns_shared_parent_when_isolation_disabled(self):
+        source = SessionSource(
+            platform=Platform.FEISHU,
+            chat_id="oc_grp",
+            chat_type="group",
+            thread_id="topic-1",
+            user_id="alice",
+        )
+        parent = build_parent_chat_session_key(
+            source, group_sessions_per_user=False
+        )
+        assert parent == "agent:main:feishu:group:oc_grp"
+
+
+class TestThreadContextInheritance:
+    """When ``thread_inherit_messages > 0``, opening a thread/topic seeds
+    the fresh session with the tail of the parent chat conversation."""
+
+    @pytest.fixture()
+    def store_with_db(self, tmp_path):
+        from hermes_state import SessionDB
+
+        config = GatewayConfig(thread_inherit_messages=5)
+        with patch("gateway.session.SessionStore._ensure_loaded"):
+            store = SessionStore(sessions_dir=tmp_path / "sessions", config=config)
+        store._db = SessionDB(db_path=tmp_path / "state.db")
+        store._loaded = True
+        return store
+
+    @staticmethod
+    def _parent_source() -> SessionSource:
+        return SessionSource(
+            platform=Platform.FEISHU,
+            chat_id="oc_chat",
+            chat_type="group",
+            user_id="alice",
+            user_name="Alice",
+        )
+
+    @staticmethod
+    def _thread_source(thread_id: str = "topic-1") -> SessionSource:
+        return SessionSource(
+            platform=Platform.FEISHU,
+            chat_id="oc_chat",
+            chat_type="group",
+            thread_id=thread_id,
+            user_id="alice",
+            user_name="Alice",
+        )
+
+    def _seed_parent(self, store, messages):
+        parent_entry = store.get_or_create_session(self._parent_source())
+        for msg in messages:
+            store.append_to_transcript(parent_entry.session_id, msg)
+        return parent_entry
+
+    def test_inherits_parent_tail_into_new_thread_session(self, store_with_db):
+        self._seed_parent(
+            store_with_db,
+            [
+                {"role": "user", "content": "What's the diagnostic status?"},
+                {"role": "assistant", "content": "Here's the report card..."},
+                {"role": "user", "content": "Anything urgent?"},
+                {"role": "assistant", "content": "Two warnings, no errors."},
+            ],
+        )
+
+        thread_entry = store_with_db.get_or_create_session(self._thread_source())
+
+        carried = store_with_db.load_transcript(thread_entry.session_id)
+        # 1 system marker + 4 inherited user/assistant messages
+        assert len(carried) == 5
+        assert carried[0]["role"] == "system"
+        assert "Inherited context" in carried[0]["content"]
+        assert carried[1] == {
+            "role": "user",
+            "content": "What's the diagnostic status?",
+        }
+        assert carried[-1] == {
+            "role": "assistant",
+            "content": "Two warnings, no errors.",
+        }
+
+    def test_disabled_when_thread_inherit_messages_is_zero(self, tmp_path):
+        from hermes_state import SessionDB
+
+        config = GatewayConfig(thread_inherit_messages=0)
+        with patch("gateway.session.SessionStore._ensure_loaded"):
+            store = SessionStore(sessions_dir=tmp_path / "sessions", config=config)
+        store._db = SessionDB(db_path=tmp_path / "state.db")
+        store._loaded = True
+
+        # Seed parent
+        parent_entry = store.get_or_create_session(self._parent_source())
+        store.append_to_transcript(
+            parent_entry.session_id, {"role": "user", "content": "hi"}
+        )
+        store.append_to_transcript(
+            parent_entry.session_id, {"role": "assistant", "content": "hello"}
+        )
+
+        thread_entry = store.get_or_create_session(self._thread_source())
+        assert store.load_transcript(thread_entry.session_id) == []
+
+    def test_no_inheritance_when_parent_session_does_not_exist(self, store_with_db):
+        """Opening a topic without prior chat history starts empty."""
+        thread_entry = store_with_db.get_or_create_session(self._thread_source())
+        assert store_with_db.load_transcript(thread_entry.session_id) == []
+
+    def test_skips_tool_calls_and_tool_messages(self, store_with_db):
+        """Inheritance must not carry tool_call_id linkage across sessions —
+        a copied ``tool`` row whose paired ``assistant.tool_calls`` got
+        dropped would break replay.  We only carry plain user/assistant text."""
+        self._seed_parent(
+            store_with_db,
+            [
+                {"role": "user", "content": "run the check"},
+                {
+                    "role": "assistant",
+                    "content": "calling tool",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "diag", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "tool_name": "diag",
+                    "content": "OK",
+                },
+                {"role": "assistant", "content": "All systems green."},
+                {"role": "user", "content": "thanks"},
+            ],
+        )
+
+        thread_entry = store_with_db.get_or_create_session(self._thread_source())
+        carried = store_with_db.load_transcript(thread_entry.session_id)
+        roles = [m["role"] for m in carried]
+        # marker + user + assistant(plain) + user — no tool/tool_calls rows
+        assert roles == ["system", "user", "assistant", "user"]
+        contents = [m["content"] for m in carried[1:]]
+        assert contents == [
+            "run the check",
+            "All systems green.",
+            "thanks",
+        ]
+
+    def test_tail_trims_to_configured_limit(self, store_with_db):
+        # 8 plain messages, limit=5 → keep last 5 (and drop a leading
+        # assistant if present so the prefix opens with a user turn).
+        msgs = []
+        for i in range(4):
+            msgs.append({"role": "user", "content": f"q{i}"})
+            msgs.append({"role": "assistant", "content": f"a{i}"})
+        self._seed_parent(store_with_db, msgs)
+
+        thread_entry = store_with_db.get_or_create_session(self._thread_source())
+        carried = store_with_db.load_transcript(thread_entry.session_id)
+        # marker + at most 5 inherited messages, prefix never starts with
+        # an assistant turn.
+        assert carried[0]["role"] == "system"
+        assert len(carried) - 1 <= 5
+        assert carried[1]["role"] == "user"
+        assert carried[-1]["content"] == "a3"
+
+    def test_force_new_skips_inheritance(self, store_with_db):
+        """``/new`` should produce a clean slate — no inherited prefix."""
+        self._seed_parent(
+            store_with_db,
+            [
+                {"role": "user", "content": "earlier"},
+                {"role": "assistant", "content": "earlier reply"},
+            ],
+        )
+        thread_entry = store_with_db.get_or_create_session(
+            self._thread_source(), force_new=True
+        )
+        assert store_with_db.load_transcript(thread_entry.session_id) == []
+
+    def test_subsequent_access_does_not_reinherit(self, store_with_db):
+        """Returning to an existing thread session must not duplicate
+        inherited messages — inheritance only seeds the *first* creation."""
+        self._seed_parent(
+            store_with_db,
+            [
+                {"role": "user", "content": "earlier"},
+                {"role": "assistant", "content": "earlier reply"},
+            ],
+        )
+        first = store_with_db.get_or_create_session(self._thread_source())
+        seeded = store_with_db.load_transcript(first.session_id)
+
+        # Append a real thread turn so the next access has something to find.
+        store_with_db.append_to_transcript(
+            first.session_id, {"role": "user", "content": "thread turn"}
+        )
+        second = store_with_db.get_or_create_session(self._thread_source())
+        assert second.session_id == first.session_id
+
+        after = store_with_db.load_transcript(first.session_id)
+        # Just the original seed + the new turn — no second copy of the
+        # inherited prefix.
+        assert len(after) == len(seeded) + 1
+        assert after[-1]["content"] == "thread turn"

@@ -431,6 +431,16 @@ class GatewayConfig:
     group_sessions_per_user: bool = True  # Isolate group/channel sessions per participant when user IDs are available
     thread_sessions_per_user: bool = False  # When False (default), threads are shared across all participants
 
+    # Thread/topic context inheritance: when a user replies in a thread (Feishu
+    # topic, Slack thread, Discord thread, ...) Hermes normally creates a fresh
+    # session keyed by thread_id, losing the parent chat's conversation context.
+    # When set to a positive integer N, the new thread session is seeded with
+    # the last N messages from the parent chat session (same chat_id, no
+    # thread_id) so the agent can answer follow-up questions about earlier
+    # messages — e.g. an interactive card it posted before the topic was opened.
+    # 0 = disabled (default, original behavior).
+    thread_inherit_messages: int = 0
+
     # Unauthorized DM policy
     unauthorized_dm_behavior: str = "pair"  # "pair" or "ignore"
 
@@ -534,6 +544,7 @@ class GatewayConfig:
             "stt_enabled": self.stt_enabled,
             "group_sessions_per_user": self.group_sessions_per_user,
             "thread_sessions_per_user": self.thread_sessions_per_user,
+            "thread_inherit_messages": self.thread_inherit_messages,
             "unauthorized_dm_behavior": self.unauthorized_dm_behavior,
             "streaming": self.streaming.to_dict(),
             "session_store_max_age_days": self.session_store_max_age_days,
@@ -579,6 +590,12 @@ class GatewayConfig:
 
         group_sessions_per_user = data.get("group_sessions_per_user")
         thread_sessions_per_user = data.get("thread_sessions_per_user")
+        try:
+            thread_inherit_messages = int(data.get("thread_inherit_messages", 0))
+            if thread_inherit_messages < 0:
+                thread_inherit_messages = 0
+        except (TypeError, ValueError):
+            thread_inherit_messages = 0
         unauthorized_dm_behavior = _normalize_unauthorized_dm_behavior(
             data.get("unauthorized_dm_behavior"),
             "pair",
@@ -603,6 +620,7 @@ class GatewayConfig:
             stt_enabled=_coerce_bool(stt_enabled, True),
             group_sessions_per_user=_coerce_bool(group_sessions_per_user, True),
             thread_sessions_per_user=_coerce_bool(thread_sessions_per_user, False),
+            thread_inherit_messages=thread_inherit_messages,
             unauthorized_dm_behavior=unauthorized_dm_behavior,
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
             session_store_max_age_days=session_store_max_age_days,
@@ -692,6 +710,9 @@ def load_gateway_config() -> GatewayConfig:
 
             if "thread_sessions_per_user" in yaml_cfg:
                 gw_data["thread_sessions_per_user"] = yaml_cfg["thread_sessions_per_user"]
+
+            if "thread_inherit_messages" in yaml_cfg:
+                gw_data["thread_inherit_messages"] = yaml_cfg["thread_inherit_messages"]
 
             streaming_cfg = yaml_cfg.get("streaming")
             if isinstance(streaming_cfg, dict):

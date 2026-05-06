@@ -591,6 +591,57 @@ def is_shared_multi_user_session(
     return not group_sessions_per_user
 
 
+def build_parent_chat_session_key(
+    source: SessionSource,
+    group_sessions_per_user: bool = True,
+) -> Optional[str]:
+    """Build the session key of the *parent* chat for a thread message.
+
+    A thread session (Feishu topic, Slack thread, Discord thread, ...) lives
+    under its own session key because :func:`build_session_key` mixes
+    ``thread_id`` into the key.  This helper reconstructs the key the same
+    chat would use **without** the thread, so callers can fetch the
+    pre-thread conversation history and seed the new thread session with it.
+
+    Parent-key construction mirrors :func:`build_session_key` exactly
+    (chat_type, chat_id, per-user isolation) but with ``thread_id`` stripped.
+    The participant id is preserved when ``group_sessions_per_user`` is True
+    so the parent points at *this user's* slice of the chat — which matches
+    the typical "user opens a topic on a private message Hermes sent them"
+    scenario.
+
+    Returns ``None`` for sources that have no thread_id (no parent to inherit
+    from) or DM sources (DM thread semantics are handled inside
+    :func:`build_session_key` directly — the caller already has the right
+    history loaded).
+    """
+    if not source.thread_id:
+        return None
+    if source.chat_type == "dm":
+        return None
+    parent = SessionSource(
+        platform=source.platform,
+        chat_id=source.chat_id,
+        chat_name=source.chat_name,
+        chat_type=source.chat_type,
+        user_id=source.user_id,
+        user_name=source.user_name,
+        thread_id=None,
+        chat_topic=source.chat_topic,
+        user_id_alt=source.user_id_alt,
+        chat_id_alt=source.chat_id_alt,
+        is_bot=source.is_bot,
+        guild_id=source.guild_id,
+        parent_chat_id=source.parent_chat_id,
+        message_id=None,
+    )
+    return build_session_key(
+        parent,
+        group_sessions_per_user=group_sessions_per_user,
+        thread_sessions_per_user=False,
+    )
+
+
 def build_session_key(
     source: SessionSource,
     group_sessions_per_user: bool = True,
@@ -932,6 +983,28 @@ class SessionStore:
                 "source": source.platform.value,
                 "user_id": source.user_id,
             }
+            # First-time creation of a thread/topic session — capture the
+            # parent chat session_id (if any) so we can inherit its tail
+            # outside the lock.  Only fires on truly fresh sessions: an
+            # auto-reset means a prior thread session existed and was already
+            # seeded once; force_new is the user explicitly asking for a
+            # blank slate.
+            should_inherit = (
+                bool(source.thread_id)
+                and not was_auto_reset
+                and not force_new
+                and getattr(self.config, "thread_inherit_messages", 0) > 0
+            )
+            inherit_parent_session_id = None
+            if should_inherit:
+                parent_key = build_parent_chat_session_key(
+                    source,
+                    group_sessions_per_user=getattr(
+                        self.config, "group_sessions_per_user", True
+                    ),
+                )
+                if parent_key and parent_key in self._entries:
+                    inherit_parent_session_id = self._entries[parent_key].session_id
 
         # SQLite operations outside the lock
         if self._db and db_end_session_id:
@@ -946,7 +1019,104 @@ class SessionStore:
             except Exception as e:
                 print(f"[gateway] Warning: Failed to create SQLite session: {e}")
 
+        # Inherit parent chat context into the new thread session.  Runs
+        # outside the lock so SQLite writes don't deadlock against concurrent
+        # session lookups; failures degrade gracefully (the new session just
+        # starts empty, original behavior).
+        if inherit_parent_session_id:
+            try:
+                self._seed_thread_session_from_parent(
+                    new_session_id=entry.session_id,
+                    parent_session_id=inherit_parent_session_id,
+                    limit=int(getattr(self.config, "thread_inherit_messages", 0)),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to inherit thread context for session %s from %s: %s",
+                    entry.session_id,
+                    inherit_parent_session_id,
+                    exc,
+                )
+
         return entry
+
+    def _seed_thread_session_from_parent(
+        self,
+        *,
+        new_session_id: str,
+        parent_session_id: str,
+        limit: int,
+    ) -> None:
+        """Copy the tail of ``parent_session_id`` into ``new_session_id``.
+
+        Only ``user`` and plain ``assistant`` messages are carried over —
+        tool calls and tool results are skipped on purpose because their
+        ``tool_call_id`` linkage is fragile across session boundaries (a
+        copied ``tool`` row pointing at an ``assistant`` whose ``tool_calls``
+        we dropped would break replay).  The agent still gets the
+        conversational substance, which is what the user typically refers
+        to when opening a topic.
+
+        Prepends a single ``system`` marker so the model can tell inherited
+        history apart from the live thread turn.
+        """
+        if limit <= 0 or self._db is None:
+            return
+
+        try:
+            history = self._db.get_messages_as_conversation(parent_session_id)
+        except Exception as exc:
+            logger.debug(
+                "Could not load parent transcript for inheritance: %s", exc
+            )
+            return
+        if not history:
+            return
+
+        carry: List[Dict[str, Any]] = []
+        for msg in history:
+            role = msg.get("role")
+            if role not in {"user", "assistant"}:
+                continue
+            if role == "assistant" and msg.get("tool_calls"):
+                continue
+            content = msg.get("content")
+            if content in (None, ""):
+                continue
+            carry.append({"role": role, "content": content})
+
+        if not carry:
+            return
+
+        # Tail-trim: keep the last ``limit`` messages, but never split a
+        # user→assistant pair across the boundary so the model sees a
+        # coherent prefix.
+        if len(carry) > limit:
+            carry = carry[-limit:]
+            if carry and carry[0].get("role") == "assistant":
+                carry = carry[1:]
+        if not carry:
+            return
+
+        marker = {
+            "role": "system",
+            "content": (
+                "[Inherited context — the next "
+                f"{len(carry)} message(s) are the tail of the parent chat "
+                "conversation that preceded this thread/topic. Treat them as "
+                "background, not as the user's current request.]"
+            ),
+        }
+        for msg in [marker, *carry]:
+            try:
+                self.append_to_transcript(new_session_id, msg)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to append inherited message into %s: %s",
+                    new_session_id,
+                    exc,
+                )
+                return
 
     def update_session(
         self,
