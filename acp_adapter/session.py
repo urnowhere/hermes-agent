@@ -207,6 +207,22 @@ class SessionManager:
 
     # ---- public API ---------------------------------------------------------
 
+    def create_model_state_probe(self, cwd: str = ".") -> SessionState:
+        """Create a transient session state for capability/model discovery without persistence."""
+        import threading
+
+        cwd = _translate_acp_cwd(cwd)
+        session_id = f"model-probe-{uuid.uuid4()}"
+        agent = self._make_agent(session_id=session_id, cwd=cwd)
+        _clear_task_cwd(session_id)
+        return SessionState(
+            session_id=session_id,
+            agent=agent,
+            cwd=cwd,
+            model=getattr(agent, "model", "") or "",
+            cancel_event=threading.Event(),
+        )
+
     def create_session(self, cwd: str = ".") -> SessionState:
         """Create a new session with a unique ID and a fresh AIAgent."""
         import threading

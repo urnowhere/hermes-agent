@@ -449,6 +449,14 @@ class HermesACPAgent(acp.Agent):
 
     # ---- ACP lifecycle ------------------------------------------------------
 
+    async def ext_method(self, name: str, payload: dict[str, Any]) -> Any:
+        """Handle Hermes-specific ACP extension requests."""
+        if name != "model_state":
+            return None
+        cwd = str((payload or {}).get("cwd") or ".")
+        state = self.session_manager.create_model_state_probe(cwd=cwd)
+        return self._build_model_state(state)
+
     async def initialize(
         self,
         protocol_version: int | None = None,
@@ -1423,6 +1431,21 @@ class HermesACPAgent(acp.Agent):
             options = {}
         options[str(config_id)] = value
         setattr(state, "config_options", options)
+
+        if str(config_id) == "reasoning_effort":
+            try:
+                from hermes_constants import parse_reasoning_effort
+
+                state.agent.reasoning_config = parse_reasoning_effort(str(value or ""))
+            except Exception:
+                logger.warning(
+                    "Session %s: failed to apply reasoning effort %s",
+                    session_id,
+                    value,
+                    exc_info=True,
+                )
+                return None
+
         self.session_manager.save_session(session_id)
         logger.info("Session %s: config option %s updated", session_id, config_id)
         return SetSessionConfigOptionResponse(config_options=[])

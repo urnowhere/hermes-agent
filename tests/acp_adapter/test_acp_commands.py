@@ -13,6 +13,7 @@ class FakeAgent:
         self.provider = "fake-provider"
         self.enabled_toolsets = ["hermes-acp"]
         self.disabled_toolsets = []
+        self.reasoning_config = None
         self.tools = []
         self.valid_tool_names = set()
         self.steers = []
@@ -148,3 +149,25 @@ async def test_acp_prompt_drains_queued_turns_after_current_run():
     assert state.queued_prompts == []
     agent_messages = [u for _sid, u in conn.updates if getattr(u, "session_update", None) == "agent_message_chunk"]
     assert len(agent_messages) >= 2
+
+
+@pytest.mark.asyncio
+async def test_acp_set_reasoning_effort_updates_session_agent_config():
+    acp_agent, state, fake, _conn = make_agent_and_state()
+
+    response = await acp_agent.set_config_option(
+        session_id=state.session_id,
+        config_id="reasoning_effort",
+        value="high",
+    )
+
+    assert response is not None
+    assert fake.reasoning_config == {"enabled": True, "effort": "high"}
+    assert getattr(state, "config_options") == {"reasoning_effort": "high"}
+
+    await acp_agent.set_config_option(
+        session_id=state.session_id,
+        config_id="reasoning_effort",
+        value="none",
+    )
+    assert fake.reasoning_config == {"enabled": False}

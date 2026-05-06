@@ -171,6 +171,28 @@ class TestSessionOps:
         assert resp.models.available_models[0].description is not None
         assert "Provider:" in resp.models.available_models[0].description
 
+
+    @pytest.mark.asyncio
+    async def test_model_state_extension_returns_models_without_creating_session(self):
+        manager = SessionManager(
+            agent_factory=lambda: SimpleNamespace(model="claude-sonnet-4-5", provider="anthropic")
+        )
+        acp_agent = HermesACPAgent(session_manager=manager)
+
+        with patch(
+            "hermes_cli.models.curated_models_for_provider",
+            return_value=[("claude-sonnet-4-5", "recommended"), ("claude-opus-4-5", "")],
+        ):
+            result = await acp_agent.ext_method("model_state", {"cwd": "/tmp/project"})
+
+        assert result is not None
+        assert result.current_model_id == "anthropic:claude-sonnet-4-5"
+        assert [model.model_id for model in result.available_models] == [
+            "anthropic:claude-sonnet-4-5",
+            "anthropic:claude-opus-4-5",
+        ]
+        assert manager.list_sessions() == []
+
     @pytest.mark.asyncio
     async def test_available_commands_include_help(self, agent):
         help_cmd = next(
