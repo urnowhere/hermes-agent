@@ -284,6 +284,10 @@ def _run_agent(
     if toolsets_list is None and use_config_toolsets:
         toolsets_list = sorted(_get_platform_tools(cfg, "cli"))
 
+    # Load fallback provider chain from config.yaml so oneshot mode can
+    # survive 429 rate-limits on the primary provider (parity with gateway).
+    fallback_model = cfg.get("fallback_providers") or cfg.get("fallback_model") or None
+
     agent = AIAgent(
         api_key=runtime.get("api_key"),
         base_url=runtime.get("base_url"),
@@ -294,6 +298,7 @@ def _run_agent(
         quiet_mode=True,
         platform="cli",
         credential_pool=runtime.get("credential_pool"),
+        fallback_model=fallback_model,
         # Interactive callbacks are intentionally NOT wired beyond this
         # one.  In oneshot mode there's no user sitting at a terminal:
         #   - clarify  → returns a synthetic "pick a default" instruction
