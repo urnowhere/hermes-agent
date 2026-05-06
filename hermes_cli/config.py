@@ -667,6 +667,12 @@ DEFAULT_CONFIG = {
         "target_ratio": 0.20,         # fraction of threshold to preserve as recent tail
         "protect_last_n": 20,         # minimum recent messages to keep uncompressed
         "hygiene_hard_message_limit": 400,  # gateway session-hygiene force-compress threshold by message count
+        # Per-provider / per-model threshold overrides (issue #18733).
+        # Resolution precedence: model_thresholds[model] > provider_thresholds[provider] > threshold > 0.50.
+        # Keys must be exact PROVIDER_REGISTRY ids (e.g. "anthropic", "gemini", "kimi-coding"),
+        # not aliases like "google" or "moonshot". Empty dicts = no overrides.
+        "provider_thresholds": {},
+        "model_thresholds": {},
     },
 
     # Anthropic prompt caching (Claude via OpenRouter or native Anthropic API).

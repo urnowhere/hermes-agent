@@ -358,6 +358,31 @@ compression:
   # compression of older turns.
   protect_last_n: 20
 
+  # ── Per-provider / per-model threshold overrides (issue #18733) ──
+  # Resolution precedence (highest first):
+  #   1. model_thresholds[<exact model id>]
+  #   2. provider_thresholds[<exact PROVIDER_REGISTRY id>]
+  #   3. threshold (above)
+  #   4. 0.50 (built-in default)
+  #
+  # Provider keys must be exact PROVIDER_REGISTRY ids from
+  # hermes_cli/auth.py — e.g. "anthropic", "gemini", "kimi-coding", "xai",
+  # "openrouter". Aliases like "google", "moonshot", or "claude" silently
+  # fall through to the global default (those aliases are scoped to
+  # auxiliary-model routing, not the main agent's provider).
+  #
+  # Valid range for any override: 0.10 - 0.95. Out-of-range or non-numeric
+  # values log a one-time warning and fall through to the next level.
+  #
+  # provider_thresholds:
+  #   anthropic: 0.65        # compress later — Claude tolerates long context well
+  #   gemini: 0.50
+  #   kimi-coding: 0.40      # compress earlier on smaller-window models
+  #
+  # model_thresholds:
+  #   "google/gemini-2.5-pro": 0.30
+  #   "claude-sonnet-4-20250514": 0.65
+
   # To pin a specific model/provider for compression summaries, use the
   # auxiliary section below (auxiliary.compression.provider / model).
 

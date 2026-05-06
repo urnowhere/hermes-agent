@@ -22,7 +22,7 @@ import json
 import logging
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional, Union
 
 from agent.auxiliary_client import call_llm
 from agent.context_engine import ContextEngine
@@ -75,6 +75,163 @@ _IMAGE_TOKEN_ESTIMATE = 1600
 # for tail-cut decisions.
 _IMAGE_CHAR_EQUIVALENT = _IMAGE_TOKEN_ESTIMATE * _CHARS_PER_TOKEN
 _SUMMARY_FAILURE_COOLDOWN_SECONDS = 600
+
+# ── Per-model / per-provider compression threshold overrides (issue #18733) ──
+
+# Bounds on the resolved threshold ratio. Values outside this range are treated
+# as configuration errors and fall through to the next precedence level.
+_THRESHOLD_MIN = 0.10
+_THRESHOLD_MAX = 0.95
+_THRESHOLD_DEFAULT = 0.50
+
+# Module-level dedup so a misconfigured override doesn't spam the gateway log
+# on every model switch / fallback. Keys are (scope, identifier) tuples:
+#   ("model",    "google/gemini-2.5-pro")
+#   ("provider", "anthropic")
+#   ("global",   "")
+#   ("alias",    "google")           — alias-not-canonical hint, see below
+# The set is intentionally NOT reset on config reload — long-lived gateway
+# processes prioritize log-noise control over reload feedback. If reload
+# feedback becomes important, expose a _reset_threshold_warnings() hook.
+_LOGGED_INVALID_OVERRIDE: set = set()
+
+# Known aliases for canonical PROVIDER_REGISTRY ids. Used only to emit a
+# hint when a user writes an alias key (e.g. "google") in
+# provider_thresholds — the lookup falls through silently (since
+# self.provider is the canonical id), but we want to tell the user *why*
+# their override didn't apply. Mirrors the alias map in
+# agent/auxiliary_client.py:_PROVIDER_ALIASES (auxiliary-routing-only;
+# the main agent's self.provider is always the canonical id).
+_PROVIDER_ALIAS_HINTS: Dict[str, str] = {
+    "google": "gemini",
+    "google-gemini": "gemini",
+    "google-ai-studio": "gemini",
+    "x-ai": "xai",
+    "x.ai": "xai",
+    "grok": "xai",
+    "glm": "zai",
+    "z-ai": "zai",
+    "z.ai": "zai",
+    "zhipu": "zai",
+    "kimi": "kimi-coding",
+    "moonshot": "kimi-coding",
+    "kimi-cn": "kimi-coding-cn",
+    "moonshot-cn": "kimi-coding-cn",
+    "claude": "anthropic",
+    "claude-code": "anthropic",
+}
+
+
+def _validate_threshold(raw: Any, *, origin: str, dedup_key: tuple) -> Optional[float]:
+    """Coerce and range-check a threshold override.
+
+    Returns the validated float, or None if the value is invalid (in which
+    case a one-time warning is logged for ``dedup_key`` and the caller should
+    fall through to the next precedence level).
+    """
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        if dedup_key not in _LOGGED_INVALID_OVERRIDE:
+            _LOGGED_INVALID_OVERRIDE.add(dedup_key)
+            logger.warning(
+                "Invalid %s=%r — must be numeric, falling through.", origin, raw,
+            )
+        return None
+    if not (_THRESHOLD_MIN <= value <= _THRESHOLD_MAX):
+        if dedup_key not in _LOGGED_INVALID_OVERRIDE:
+            _LOGGED_INVALID_OVERRIDE.add(dedup_key)
+            logger.warning(
+                "Invalid %s=%s — must be within [%.2f, %.2f], falling through.",
+                origin, value, _THRESHOLD_MIN, _THRESHOLD_MAX,
+            )
+        return None
+    return value
+
+
+def resolve_compression_threshold(
+    model: str,
+    provider: str,
+    config: Mapping[str, Any],
+) -> float:
+    """Resolve the compression threshold for the active (model, provider).
+
+    Precedence (highest first):
+      1. ``compression.model_thresholds[model]``       (exact-match)
+      2. ``compression.provider_thresholds[provider]`` (exact-match)
+      3. ``compression.threshold``                     (global)
+      4. ``_THRESHOLD_DEFAULT`` (0.50)                 (built-in)
+
+    Each level falls through to the next on miss. The resolver short-circuits
+    the FIRST valid value it finds — a valid model override is final, even if
+    a provider override or global threshold is also present.
+
+    Lookup is exact-string. Provider keys must be canonical
+    ``hermes_cli/auth.py:PROVIDER_REGISTRY`` ids (``anthropic``, ``gemini``,
+    ``kimi-coding``, ``xai``, ``openrouter``, ...). Aliases like ``google``,
+    ``moonshot``, ``claude`` silently fall through (those aliases are scoped
+    to auxiliary-model routing, not the main agent's ``self.provider``). To
+    help operators notice this, the resolver emits a one-time hint when an
+    alias key is detected in ``provider_thresholds``.
+
+    Invalid override values fall through to the next precedence level and
+    emit a one-time warning per scope+identifier:
+      * Non-numeric (``"high"``, ``None``, ``object()``)              → warn + skip
+      * Outside ``[_THRESHOLD_MIN=0.10, _THRESHOLD_MAX=0.95]``        → warn + skip
+      * Boundary values (``0.10`` or ``0.95``) are accepted as valid
+
+    Silent fall-throughs (no warning):
+      * Empty or missing override dict
+      * Override dict missing the active model / provider key
+      * ``config`` is not a Mapping (defensive: returns built-in default)
+    """
+    if not isinstance(config, Mapping):
+        return _THRESHOLD_DEFAULT
+
+    model_overrides = config.get("model_thresholds") or {}
+    if isinstance(model_overrides, Mapping) and model and model in model_overrides:
+        candidate = _validate_threshold(
+            model_overrides[model],
+            origin="compression.model_thresholds[%r]" % model,
+            dedup_key=("model", model),
+        )
+        if candidate is not None:
+            return candidate
+
+    provider_overrides = config.get("provider_thresholds") or {}
+    if isinstance(provider_overrides, Mapping):
+        if provider and provider in provider_overrides:
+            candidate = _validate_threshold(
+                provider_overrides[provider],
+                origin="compression.provider_thresholds[%r]" % provider,
+                dedup_key=("provider", provider),
+            )
+            if candidate is not None:
+                return candidate
+        else:
+            # Hint when the user wrote an alias key. The lookup itself silently
+            # fell through above; this is purely a usability nudge.
+            for alias_key in provider_overrides:
+                canonical = _PROVIDER_ALIAS_HINTS.get(alias_key)
+                if canonical and ("alias", alias_key) not in _LOGGED_INVALID_OVERRIDE:
+                    _LOGGED_INVALID_OVERRIDE.add(("alias", alias_key))
+                    logger.warning(
+                        "compression.provider_thresholds[%r] looks like an alias — "
+                        "main agent providers use the canonical PROVIDER_REGISTRY id "
+                        "%r. Override silently falls through to the global threshold.",
+                        alias_key, canonical,
+                    )
+
+    if "threshold" in config:
+        candidate = _validate_threshold(
+            config["threshold"],
+            origin="compression.threshold",
+            dedup_key=("global", ""),
+        )
+        if candidate is not None:
+            return candidate
+
+    return _THRESHOLD_DEFAULT
 
 
 def _content_length_for_budget(raw_content: Any) -> int:
@@ -377,6 +534,77 @@ class ContextCompressor(ContextEngine):
             int(context_length * 0.05), _SUMMARY_TOKENS_CEILING,
         )
 
+    def re_resolve_threshold(self) -> None:
+        """Re-pick threshold_percent from the configured compression policy
+        for the current ``(self.model, self.provider)`` pair (issue #18733).
+
+        Callers invoke this *after* ``update_model()`` so per-model /
+        per-provider overrides take effect when the user switches models,
+        a fallback fires, or the primary runtime is restored. Safe to call
+        when no ``compression_config`` was supplied — silent no-op.
+
+        Composition contract w.r.t. PR #18638's ``threshold_percent=`` param:
+          * ``re_resolve_threshold()`` is the canonical *policy* step. It
+            applies whatever the user's compression config currently says
+            for the active (model, provider) pair.
+          * #18638's ``threshold_percent=`` param is the canonical
+            *preservation* step (issue #18617's regression fix).
+          * The 3 in-scope runtime callsites in run_agent.py call them in
+            the order ``update_model() → re_resolve_threshold()``. The
+            user's per-model / per-provider override always wins over a
+            preserved value, because that's the user's stated intent.
+          * Callers who want to bypass policy (rare; explicit override path)
+            should call ``update_model(threshold_percent=...)`` *without*
+            calling ``re_resolve_threshold()``.
+
+        Live-config / hot-reload note: when ``compression_config`` is a
+        callable, it is invoked on every call so the resolver sees the
+        current config snapshot. When it's a Mapping, the snapshot is
+        captured at __init__ — restart required for changes to take effect.
+        """
+        if self._compression_config is None:
+            return
+        config = self._compression_config
+        if callable(config):
+            try:
+                config = config()
+            except Exception as exc:
+                # Don't break the model switch over a broken getter, but DO
+                # surface the failure in logs (deduplicated) so a persistent
+                # misconfiguration is visible without a process restart.
+                if ("getter_raise", type(exc).__name__) not in _LOGGED_INVALID_OVERRIDE:
+                    _LOGGED_INVALID_OVERRIDE.add(("getter_raise", type(exc).__name__))
+                    logger.warning(
+                        "compression_config getter raised %s — threshold "
+                        "re-resolution skipped; threshold_percent stays at %s. "
+                        "Fix the getter to restore per-model / per-provider overrides.",
+                        type(exc).__name__, self.threshold_percent,
+                    )
+                return
+        if not isinstance(config, Mapping):
+            if ("getter_bad_type", type(config).__name__) not in _LOGGED_INVALID_OVERRIDE:
+                _LOGGED_INVALID_OVERRIDE.add(("getter_bad_type", type(config).__name__))
+                logger.warning(
+                    "compression_config returned %s instead of Mapping — "
+                    "threshold re-resolution skipped; threshold_percent stays at %s.",
+                    type(config).__name__, self.threshold_percent,
+                )
+            return
+        new_threshold = resolve_compression_threshold(
+            model=self.model,
+            provider=self.provider,
+            config=config,
+        )
+        if new_threshold == self.threshold_percent:
+            return
+        self.threshold_percent = new_threshold
+        self.threshold_tokens = max(
+            int(self.context_length * new_threshold),
+            MINIMUM_CONTEXT_LENGTH,
+        )
+        target_tokens = int(self.threshold_tokens * self.summary_target_ratio)
+        self.tail_token_budget = target_tokens
+
     def __init__(
         self,
         model: str,
@@ -391,6 +619,9 @@ class ContextCompressor(ContextEngine):
         config_context_length: int | None = None,
         provider: str = "",
         api_mode: str = "",
+        compression_config: Optional[
+            Union[Mapping[str, Any], Callable[[], Mapping[str, Any]]]
+        ] = None,
     ):
         self.model = model
         self.base_url = base_url
@@ -398,6 +629,11 @@ class ContextCompressor(ContextEngine):
         self.provider = provider
         self.api_mode = api_mode
         self.threshold_percent = threshold_percent
+        # Source for re_resolve_threshold(). Accepts EITHER a Mapping (snapshot
+        # — fast path; ok for set-once configs) OR a zero-arg callable that
+        # returns the current Mapping (live path; the caller controls when the
+        # config can change, e.g. behind /reload-config). Issue #18733.
+        self._compression_config = compression_config
         self.protect_first_n = protect_first_n
         self.protect_last_n = protect_last_n
         self.summary_target_ratio = max(0.10, min(summary_target_ratio, 0.80))
