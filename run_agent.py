@@ -1736,6 +1736,22 @@ class AIAgent:
         self._memory_nudge_interval = 10
         self._turns_since_memory = 0
         self._iters_since_skill = 0
+        # Circuit breaker: detect and break infinite tool-call loops.
+        # Disabled by default. Enable via config.yaml:
+        #   circuit_breaker:
+        #     enabled: true
+        #     consecutive_threshold: 5    # calls before asking compression model
+        #     failure_threshold: 5        # consecutive failures before breaker
+        _cb_cfg = _agent_cfg.get("circuit_breaker", {})
+        self._circuit_breaker_enabled = bool(_cb_cfg.get("enabled", False))
+        self._consecutive_tool_calls: dict[str, int] = {}
+        self._consecutive_threshold: int = int(_cb_cfg.get("consecutive_threshold", 5))
+        
+        # Per-tool failure retry counter: tracks consecutive failures
+        # for a tool regardless of argument changes.  Prevents the LLM
+        # from retrying different variations of a failing tool call.
+        self._tool_failure_count: dict[str, int] = {}
+        self._tool_failure_threshold: int = int(_cb_cfg.get("failure_threshold", 5))
         if not skip_memory:
             try:
                 mem_config = _agent_cfg.get("memory", {})
@@ -2639,6 +2655,228 @@ class AIAgent:
             "api_mode": getattr(self, "api_mode", "") or "",
         }
 
+    def _check_tool_failure(self, tool_name: str, result: str) -> str | None:
+        """Check tool result and decide if the agent is looping.
+
+        Two-layer circuit breaker (disabled by default, enable via config.yaml):
+        1. Consecutive call check: If same tool called N times in a row,
+           ask compression model to judge if the agent is looping/repeating.
+        2. Failure check: If tool keeps returning errors, track failures.
+
+        Returns an error message if looping is detected, forcing the LLM
+        to change strategy. Returns None if still within limits.
+        """
+        import json
+
+        # ── Layer 1: Consecutive call check (config-gated) ──
+        if self._circuit_breaker_enabled:
+            consecutive = self._consecutive_tool_calls.get(tool_name, 0)
+            if consecutive >= self._consecutive_threshold:
+                # Ask compression model to judge; if unavailable, let main model self-reflect
+                loop_msg = self._check_tool_loop(tool_name, result)
+                if loop_msg is not None:
+                    return loop_msg
+                # Not looping — reset counter and allow
+                self._consecutive_tool_calls[tool_name] = 0
+
+        # ── Layer 2: Failure check (config-gated) ──
+        if not self._circuit_breaker_enabled:
+            return None
+        is_failure = False
+        try:
+            data = json.loads(result)
+            if not isinstance(data, dict):
+                self._tool_failure_count[tool_name] = 0
+                return None
+
+            if "error" in data:
+                is_failure = True
+            elif "BLOCKED" in str(data):
+                is_failure = True
+            elif data.get("total_count") == 0 and data.get("total_count") is not None:
+                # Empty result counts as failure for search-type tools
+                is_failure = True
+            elif data.get("total_count", 0) > 0:
+                # Has data — success, reset counter
+                self._tool_failure_count[tool_name] = 0
+                return None
+            else:
+                # Unknown format — treat as success (be conservative)
+                self._tool_failure_count[tool_name] = 0
+                return None
+        except (json.JSONDecodeError, TypeError):
+            # Non-JSON — check for Hermes error indicators
+            _r = result or ""
+            if "[error]" in _r or "Error executing" in _r or "Error:" in _r or _r.startswith("Error"):
+                is_failure = True
+            else:
+                self._tool_failure_count[tool_name] = 0
+                return None
+
+        if not is_failure:
+            self._tool_failure_count[tool_name] = 0
+            return None
+
+        # Count this as a failure
+        self._tool_failure_count[tool_name] = self._tool_failure_count.get(tool_name, 0) + 1
+        if self._tool_failure_count[tool_name] >= self._tool_failure_threshold:
+            count = self._tool_failure_count[tool_name]
+            base_msg = (
+                f"[Tool retry threshold reached] Tool '{tool_name}' has failed "
+                f"{count} consecutive times (different arguments each time). "
+                f"STOP retrying with different parameters. "
+            )
+
+            # Try to get a suggestion — compression model first, then built-in heuristics
+            suggestion = self._get_tool_suggestion(tool_name, result)
+            if suggestion:
+                base_msg += f"\n💡 Suggestion: {suggestion}"
+
+            base_msg += " Analyze why it's failing and try a completely different approach."
+            
+            logger.warning(
+                "Tool retry threshold reached: %s (%d consecutive failures)",
+                tool_name, count,
+            )
+            return base_msg
+
+        return None
+
+    def _check_tool_loop(self, tool_name: str, last_result: str) -> str | None:
+        """Check if the agent is looping by asking an auxiliary model.
+
+        Two strategies depending on configuration:
+        1. If compression model is available: ask it to judge (fast, cheap).
+        2. If not: return a special message that tells the main model to
+           self-reflect — letting it judge its own behavior.
+
+        Returns:
+        - None: calls are OK, reset counter and allow continuation.
+        - str: error message to return to the LLM (either hard break or
+           self-reflection prompt).
+        """
+        try:
+            from agent.auxiliary_client import call_llm
+
+            consecutive = self._consecutive_tool_calls.get(tool_name, 0)
+            result_preview = last_result[:500] if last_result else "(empty)"
+
+            prompt = (
+                f"A tool '{tool_name}' has been called {consecutive} times consecutively. "
+                f"Last result: {result_preview}\n\n"
+                f"Is the agent looping/repeating useless work? "
+                f"Answer ONLY 'YES' if the calls seem repetitive and not making progress. "
+                f"Answer ONLY 'NO' if the calls seem purposeful (e.g. reading different parts of a file, "
+                f"retrying with different parameters, iterating through a list).\n\n"
+                f"Examples:\n"
+                f"- Reading the same file multiple times with same offset -> YES\n"
+                f"- Reading different sections of a large file -> NO\n"
+                f"- Searching the same directory with same query -> YES\n"
+                f"- Running the same command that fails -> YES\n"
+                f"- Trying different parameters to fix an error -> NO\n"
+                f"\nAnswer YES or NO:"
+            )
+
+            response = call_llm(
+                task="compression",
+                messages=[
+                    {"role": "system", "content": "You are a loop detector. Answer YES or NO only."},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=10,
+                temperature=0.1,
+                main_runtime=self._current_main_runtime(),
+            )
+
+            answer = response.choices[0].message.content.strip().upper()
+            is_looping = "YES" in answer
+
+            if is_looping:
+                logger.warning(
+                    "Loop detected: %s (%d consecutive calls, compression model confirmed)",
+                    tool_name, consecutive,
+                )
+                return (
+                    f"[Circuit breaker] Tool '{tool_name}' called {consecutive} times "
+                    f"consecutively. The compression model judged this as repetitive/looping "
+                    f"behavior. STOP and try a completely different approach."
+                )
+            else:
+                logger.debug(
+                    "Not looping: %s (%d consecutive calls, compression model allowed)",
+                    tool_name, consecutive,
+                )
+                return None
+        except Exception as e:
+            # Compression model not available or failed — fall back to
+            # letting the main model self-reflect
+            logger.debug(
+                "Loop check: compression model unavailable (%s), "
+                "using self-reflection fallback", e
+            )
+
+        # Fallback: no compression model — let the main model judge itself
+        consecutive = self._consecutive_tool_calls.get(tool_name, 0)
+        result_preview = last_result[:500] if last_result else "(empty)"
+        return (
+            f"[CIRCUIT BREAKER] Tool '{tool_name}' called {consecutive} times "
+            f"consecutively (auxiliary model unavailable). All {consecutive} calls "
+            f"returned similar results. YOU ARE STUCK IN A LOOP. "
+            f"DO NOT retry this tool. DO NOT use similar parameters or approaches. "
+            f"Stop immediately and use a completely different strategy. "
+            f"Last result: {result_preview}"
+        )
+
+    def _get_tool_suggestion(self, tool_name: str, last_result: str) -> str | None:
+        """Generate a suggestion when a tool keeps failing.
+        
+        Strategy (in order):
+        1. Try auxiliary model (if configured) — gives fresh perspective
+        2. Fall back to a simple generic prompt — works zero-config
+        
+        Returns a short suggestion string, or None if no suggestion available.
+        """
+        # 1. Try auxiliary model first
+        suggestion = self._try_auxiliary_model_suggestion(tool_name, last_result)
+        if suggestion:
+            return suggestion
+        
+        # 2. Simple generic fallback — no pattern matching needed
+        return "Repeatedly failing. Try a completely different approach instead of tweaking parameters."
+    
+    def _try_auxiliary_model_suggestion(self, tool_name: str, last_result: str) -> str | None:
+        """Try to get a suggestion from the auxiliary model."""
+        try:
+            from agent.auxiliary_client import call_llm
+            
+            result_preview = last_result[:300] if last_result else "(empty)"
+            prompt = (
+                f"A tool call keeps failing. Help identify the root cause.\n\n"
+                f"Tool: {tool_name}\n"
+                f"Last result: {result_preview}\n\n"
+                f"Give ONE short suggestion (max 20 words) on how to fix this. "
+                f"Be specific. Example: 'Use gh api instead of gh run view for log retrieval'."
+            )
+            
+            response = call_llm(
+                task=None,
+                messages=[
+                    {"role": "system", "content": "You are a debugging assistant. Give concise, specific suggestions."},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=50,
+                temperature=0.3,
+                main_runtime=self._current_main_runtime(),
+            )
+            
+            suggestion = response.choices[0].message.content.strip()
+            if len(suggestion) > 100:
+                suggestion = suggestion[:97] + "..."
+            return suggestion
+        except Exception as e:
+            logger.debug("Auxiliary model suggestion failed: %s", e)
+            return None
+    
     def _check_compression_model_feasibility(self) -> None:
         """Warn at session start if the auxiliary compression model's context
         window is smaller than the main model's compression threshold.
@@ -9492,6 +9730,14 @@ class AIAgent:
         if block_message is not None:
             return json.dumps({"error": block_message}, ensure_ascii=False)
 
+        # ── Circuit breaker: track consecutive calls (before execution) ──
+        # Count consecutive calls to the same tool. When threshold reached,
+        # _check_tool_failure will ask the compression model to judge if looping.
+        if self._circuit_breaker_enabled:
+            self._consecutive_tool_calls[function_name] = (
+                self._consecutive_tool_calls.get(function_name, 0) + 1
+            )
+
         if function_name == "todo":
             from tools.todo_tool import todo_tool as _todo_tool
             return _todo_tool(
@@ -9547,13 +9793,17 @@ class AIAgent:
         elif function_name == "delegate_task":
             return self._dispatch_delegate_task(function_args)
         else:
-            return handle_function_call(
+            _function_result = handle_function_call(
                 function_name, function_args, effective_task_id,
                 tool_call_id=tool_call_id,
                 session_id=self.session_id or "",
                 enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
                 skip_pre_tool_call_hook=True,
             )
+            _cb_retry_msg = self._check_tool_failure(function_name, _function_result)
+            if _cb_retry_msg is not None:
+                return json.dumps({"error": _cb_retry_msg}, ensure_ascii=False)
+            return _function_result
 
     @staticmethod
     def _wrap_verbose(label: str, text: str, indent: str = "     ") -> str:
@@ -10081,6 +10331,11 @@ class AIAgent:
                 except Exception:
                     pass  # never block tool execution
 
+            # ── Circuit breaker: track consecutive calls (before execution) ──
+            if self._circuit_breaker_enabled:
+                self._consecutive_tool_calls[function_name] = (
+                    self._consecutive_tool_calls.get(function_name, 0) + 1
+                )
             tool_start_time = time.time()
 
             if _block_msg is not None:
@@ -10275,6 +10530,12 @@ class AIAgent:
             # Log tool errors to the persistent error log so [error] tags
             # in the UI always have a corresponding detailed entry on disk.
             _is_error_result, _ = _detect_tool_failure(function_name, function_result)
+            # ── Circuit breaker: check for looping/repeated failures ──────
+            if not _execution_blocked and self._circuit_breaker_enabled:
+                _cb_retry_msg = self._check_tool_failure(function_name, function_result)
+                if _cb_retry_msg is not None:
+                    function_result = json.dumps({"error": _cb_retry_msg}, ensure_ascii=False)
+                    _is_error_result = True
             if not _execution_blocked:
                 function_result = self._append_guardrail_observation(
                     function_name,
