@@ -267,11 +267,17 @@ def _secure_dir(path):
     caddy, etc.) needs to traverse HERMES_HOME to reach a served subdirectory.
     The execute-only bit on a directory permits cd-through without exposing
     directory listings.
+
+    Skipped in containers unless HERMES_HOME_MODE is explicitly set. Volume
+    mounts often have operator-managed ACLs or shared-reader permissions, and
+    clobbering them on every config load breaks multi-container deployments.
     """
     if is_managed():
         return
+    mode_str = os.environ.get("HERMES_HOME_MODE", "").strip()
+    if _is_container() and not mode_str:
+        return
     try:
-        mode_str = os.environ.get("HERMES_HOME_MODE", "").strip()
         mode = int(mode_str, 8) if mode_str else 0o700
     except ValueError:
         mode = 0o700

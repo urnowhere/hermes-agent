@@ -59,6 +59,42 @@ class TestEnsureHermesHome:
             ensure_hermes_home()
             assert soul_path.read_text(encoding="utf-8") == "custom soul"
 
+    def test_container_preserves_existing_dir_permissions_without_override(self, tmp_path):
+        for path in (tmp_path, *(tmp_path / name for name in ("cron", "sessions", "logs", "memories"))):
+            path.mkdir(parents=True, exist_ok=True)
+            os.chmod(path, 0o755)
+
+        with patch.dict(
+            os.environ,
+            {"HERMES_HOME": str(tmp_path), "HERMES_CONTAINER": "1"},
+            clear=False,
+        ):
+            ensure_hermes_home()
+
+        assert (tmp_path.stat().st_mode & 0o777) == 0o755
+        for name in ("cron", "sessions", "logs", "memories"):
+            assert ((tmp_path / name).stat().st_mode & 0o777) == 0o755
+
+    def test_container_honors_home_mode_override(self, tmp_path):
+        for path in (tmp_path, *(tmp_path / name for name in ("cron", "sessions", "logs", "memories"))):
+            path.mkdir(parents=True, exist_ok=True)
+            os.chmod(path, 0o755)
+
+        with patch.dict(
+            os.environ,
+            {
+                "HERMES_HOME": str(tmp_path),
+                "HERMES_CONTAINER": "1",
+                "HERMES_HOME_MODE": "0701",
+            },
+            clear=False,
+        ):
+            ensure_hermes_home()
+
+        assert (tmp_path.stat().st_mode & 0o777) == 0o701
+        for name in ("cron", "sessions", "logs", "memories"):
+            assert ((tmp_path / name).stat().st_mode & 0o777) == 0o701
+
 
 class TestLoadConfigDefaults:
     def test_returns_defaults_when_no_file(self, tmp_path):
