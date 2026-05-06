@@ -21,6 +21,8 @@ API_SERVER_ENABLED=true
 API_SERVER_KEY=change-me-local-dev
 # Optional: only if a browser must call Hermes directly
 # API_SERVER_CORS_ORIGINS=http://localhost:3000
+# Optional: bidirectional bridge for local/mobile clients
+# API_SERVER_WS_ENABLED=true
 ```
 
 ### 2. Start the gateway
@@ -210,7 +212,8 @@ Returns a machine-readable description of the API server's stable surface for ex
     "run_submission": true,
     "run_status": true,
     "run_events_sse": true,
-    "run_stop": true
+    "run_stop": true,
+    "websocket_bridge": false
   }
 }
 ```
@@ -267,6 +270,86 @@ Server-Sent Events stream of the run's tool-call progress, token deltas, and lif
 ### POST /v1/runs/\{run_id\}/stop
 
 Interrupt a running agent turn. The endpoint returns immediately with `{"status": "stopping"}` while Hermes asks the active agent to stop at the next safe interruption point.
+
+## WebSocket Bridge
+
+The optional WebSocket bridge exposes a small bidirectional JSON-frame protocol for local/mobile clients that need one long-lived connection instead of separate HTTP and SSE requests. It reuses the same API server model, toolsets, session database, and bearer auth.
+
+Enable it with:
+
+```bash
+API_SERVER_ENABLED=true
+API_SERVER_KEY=change-me-local-dev
+API_SERVER_WS_ENABLED=true
+```
+
+Connect to:
+
+```text
+ws://127.0.0.1:8642/v1/ws
+```
+
+When `API_SERVER_KEY` is configured, clients must send the same bearer token used by the HTTP API:
+
+```http
+Authorization: Bearer change-me-local-dev
+```
+
+### Frames
+
+Every client frame is a JSON object with a `type` field and optional `id`. Hermes echoes `id` on response frames so clients can correlate requests.
+
+Check bridge readiness:
+
+```json
+{"id": "status-1", "type": "status.get"}
+```
+
+Response:
+
+```json
+{
+  "id": "status-1",
+  "type": "status.result",
+  "status": "ok",
+  "platform": "hermes-agent",
+  "model": "hermes-agent",
+  "auth_required": true,
+  "websocket_bridge": true
+}
+```
+
+Send an agent message:
+
+```json
+{
+  "id": "msg-1",
+  "type": "agent.message.send",
+  "text": "Summarize my current project",
+  "session_id": "mobile-client"
+}
+```
+
+Streaming responses arrive as zero or more delta frames followed by one done frame:
+
+```json
+{"id": "msg-1", "type": "agent.message.delta", "session_id": "mobile-client", "delta": "The project"}
+{"id": "msg-1", "type": "agent.message.done", "session_id": "mobile-client", "output": "The project...", "usage": {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30}}
+```
+
+Session operations:
+
+```json
+{"id": "sessions-1", "type": "session.list", "limit": 20, "offset": 0}
+{"id": "session-1", "type": "session.get", "session_id": "mobile-client"}
+{"id": "reset-1", "type": "session.reset", "session_id": "mobile-client"}
+```
+
+Errors use a common frame:
+
+```json
+{"id": "msg-1", "type": "agent.message.error", "code": "invalid_request", "message": "text is required"}
+```
 
 ## Jobs API (background scheduled work)
 
@@ -340,6 +423,7 @@ The default bind address (`127.0.0.1`) is for local-only use. Browser access is 
 | `API_SERVER_KEY` | _(none)_ | Bearer token for auth |
 | `API_SERVER_CORS_ORIGINS` | _(none)_ | Comma-separated allowed browser origins |
 | `API_SERVER_MODEL_NAME` | _(profile name)_ | Model name on `/v1/models`. Defaults to profile name, or `hermes-agent` for default profile. |
+| `API_SERVER_WS_ENABLED` | `false` | Enable the `/v1/ws` WebSocket bridge |
 
 ### config.yaml
 
