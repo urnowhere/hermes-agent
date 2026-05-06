@@ -869,6 +869,7 @@ class MCPServerTask:
         "_tools", "_error", "_config",
         "_sampling", "_registered_tool_names", "_auth_type", "_refresh_lock",
         "_rpc_lock", "_pending_refresh_tasks",
+        "initialize_result",  # patched: cache `initialize()` response so capabilities are inspectable
     )
 
     def __init__(self, name: str):
@@ -889,6 +890,7 @@ class MCPServerTask:
         self._config: dict = {}
         self._sampling: Optional[SamplingHandler] = None
         self._registered_tool_names: list[str] = []
+        self.initialize_result: Optional[Any] = None  # patched: populated after `await session.initialize()`
         self._auth_type: str = ""
         self._refresh_lock = asyncio.Lock()
         # MCP stdio sessions are a single JSON-RPC stream. Some servers emit
@@ -1144,7 +1146,7 @@ class MCPServerTask:
                 async with ClientSession(
                     read_stream, write_stream, **sampling_kwargs
                 ) as session:
-                    await session.initialize()
+                    self.initialize_result = await session.initialize()
                     self.session = session
                     await self._discover_tools()
                     self._ready.set()
@@ -1245,7 +1247,7 @@ class MCPServerTask:
                     read_stream, write_stream, _get_session_id,
                 ):
                     async with ClientSession(read_stream, write_stream, **sampling_kwargs) as session:
-                        await session.initialize()
+                        self.initialize_result = await session.initialize()
                         self.session = session
                         await self._discover_tools()
                         self._ready.set()
@@ -1268,7 +1270,7 @@ class MCPServerTask:
                 read_stream, write_stream, _get_session_id,
             ):
                 async with ClientSession(read_stream, write_stream, **sampling_kwargs) as session:
-                    await session.initialize()
+                    self.initialize_result = await session.initialize()
                     self.session = session
                     await self._discover_tools()
                     self._ready.set()
@@ -2659,15 +2661,37 @@ def _select_utility_schemas(server_name: str, server: MCPServerTask, config: dic
             logger.debug("MCP server '%s': skipping utility '%s' (prompts disabled)", server_name, handler_key)
             continue
 
-        required_method = _UTILITY_CAPABILITY_METHODS[handler_key]
-        if not hasattr(server.session, required_method):
-            logger.debug(
-                "MCP server '%s': skipping utility '%s' (session lacks %s)",
-                server_name,
-                handler_key,
-                required_method,
-            )
-            continue
+        # patched: gate MCP utility stubs by server-advertised capabilities
+        # (https://modelcontextprotocol.io/specification — capabilities sub-objects
+        # are non-None only when the server implements the corresponding requests).
+        init_result = getattr(server, "initialize_result", None)
+        caps = getattr(init_result, "capabilities", None) if init_result is not None else None
+        if caps is not None:
+            if handler_key in {"list_resources", "read_resource"} and getattr(caps, "resources", None) is None:
+                logger.debug(
+                    "MCP server '%s': skipping utility '%s' (server does not advertise resources capability)",
+                    server_name,
+                    handler_key,
+                )
+                continue
+            if handler_key in {"list_prompts", "get_prompt"} and getattr(caps, "prompts", None) is None:
+                logger.debug(
+                    "MCP server '%s': skipping utility '%s' (server does not advertise prompts capability)",
+                    server_name,
+                    handler_key,
+                )
+                continue
+        else:
+            # Fallback when no initialize result is captured (older test fixtures).
+            required_method = _UTILITY_CAPABILITY_METHODS[handler_key]
+            if not hasattr(server.session, required_method):
+                logger.debug(
+                    "MCP server '%s': skipping utility '%s' (session lacks %s)",
+                    server_name,
+                    handler_key,
+                    required_method,
+                )
+                continue
         selected.append(entry)
     return selected
 
