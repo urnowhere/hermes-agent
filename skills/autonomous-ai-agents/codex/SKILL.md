@@ -25,9 +25,11 @@ Requires the codex CLI and a git repository.
 
 ## Prerequisites
 
-- Codex installed: `npm install -g @openai/codex`
-- OpenAI auth configured: either `OPENAI_API_KEY` or Codex OAuth credentials
-  from the Codex CLI login flow
+- Codex installed globally: `npm install -g @openai/codex`
+- Or user-local install: `npm install -g @openai/codex --prefix "$HOME/.local"` and ensure `$HOME/.local/bin` is on `PATH`
+- Codex authenticated separately from Hermes:
+  - ChatGPT/Codex subscription / CLI OAuth: `codex login --device-auth`
+  - API-key mode: configure Codex CLI's supported OpenAI API key environment
 - **Must run inside a git repository** — Codex refuses to run outside one
 - Use `pty=true` in terminal calls — Codex is an interactive terminal app
 
@@ -71,8 +73,11 @@ process(action="kill", session_id="<id>")
 | Flag | Effect |
 |------|--------|
 | `exec "prompt"` | One-shot execution, exits when done |
-| `--full-auto` | Sandboxed but auto-approves file changes in workspace |
-| `--yolo` | No sandbox, no approvals (fastest, most dangerous) |
+| `--sandbox workspace-write` | Allows writes only inside the workspace sandbox |
+| `--ask-for-approval never` | Non-interactive mode for trusted workspace-scoped automation |
+| `--cd <workspace>` | Pins Codex execution to the intended repository/worktree |
+
+Do not use dangerous bypass flags for Hermes-managed Kanban work.
 
 ## PR Reviews
 
@@ -90,8 +95,8 @@ terminal(command="git worktree add -b fix/issue-78 /tmp/issue-78 main", workdir=
 terminal(command="git worktree add -b fix/issue-99 /tmp/issue-99 main", workdir="~/project")
 
 # Launch Codex in each
-terminal(command="codex --yolo exec 'Fix issue #78: <description>. Commit when done.'", workdir="/tmp/issue-78", background=true, pty=true)
-terminal(command="codex --yolo exec 'Fix issue #99: <description>. Commit when done.'", workdir="/tmp/issue-99", background=true, pty=true)
+terminal(command="codex --sandbox workspace-write --ask-for-approval never exec 'Fix issue #78: <description>. Commit when done.'", workdir="/tmp/issue-78", background=true, pty=true)
+terminal(command="codex --sandbox workspace-write --ask-for-approval never exec 'Fix issue #99: <description>. Commit when done.'", workdir="/tmp/issue-99", background=true, pty=true)
 
 # Monitor
 process(action="list")
@@ -118,12 +123,39 @@ terminal(command="codex exec 'Review PR #87. git diff origin/main...origin/pr/87
 terminal(command="gh pr comment 86 --body '<review>'", workdir="~/project")
 ```
 
+## Hermes Kanban Worker Lane
+
+Hermes can dispatch Kanban tasks to the standalone Codex CLI while keeping the Hermes Kanban board as the only task database, log store, workspace registry, and lifecycle authority.
+
+Assign a ready task to any of these names to trigger Codex worker mode:
+
+- `codex`
+- `codex-cli`
+- `codex-worker`
+- `openai-codex`
+
+Lifecycle:
+
+1. Hermes claims the task and moves it `ready -> running`.
+2. Hermes starts `python -m hermes_cli.codex_worker` in the resolved Kanban workspace.
+3. The runner invokes `codex --cd <workspace> --sandbox workspace-write --ask-for-approval never exec`.
+4. On Codex exit 0, Hermes moves the task to `blocked` with `Codex completed; Hermes review required`.
+5. A Hermes or human reviewer inspects the workspace diff and task log, then marks the task `done` or unblocks it with fix instructions.
+6. On nonzero Codex exit, Hermes moves the task to `blocked` with `Codex failed` plus exit-code/output context.
+
+Security posture:
+
+- Codex runs in workspace-write sandbox mode by default.
+- Hermes does not pass dangerous bypass flags in the Kanban worker path.
+- Codex CLI auth is separate from Hermes OpenAI/Codex OAuth or provider credentials. Do not copy or mutate Hermes tokens for Codex.
+- Successful Codex work intentionally blocks for review instead of completing dependent Kanban tasks automatically.
+
 ## Rules
 
 1. **Always use `pty=true`** — Codex is an interactive terminal app and hangs without a PTY
 2. **Git repo required** — Codex won't run outside a git directory. Use `mktemp -d && git init` for scratch
 3. **Use `exec` for one-shots** — `codex exec "prompt"` runs and exits cleanly
-4. **`--full-auto` for building** — auto-approves changes within the sandbox
+4. **Use workspace-write sandboxing for automation** — keep Codex pinned to the intended workspace
 5. **Background for long tasks** — use `background=true` and monitor with `process` tool
 6. **Don't interfere** — monitor with `poll`/`log`, be patient with long-running tasks
 7. **Parallel is fine** — run multiple Codex processes at once for batch work

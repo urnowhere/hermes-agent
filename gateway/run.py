@@ -1502,8 +1502,8 @@ class GatewayRunner:
             return True
         import time as _time
         now = _time.monotonic()
-        last = self._telegram_lobby_reminder_ts.get(chat_id, 0.0)
-        if now - last < self._TELEGRAM_LOBBY_REMINDER_COOLDOWN_S:
+        last = self._telegram_lobby_reminder_ts.get(chat_id)
+        if last is not None and now - last < self._TELEGRAM_LOBBY_REMINDER_COOLDOWN_S:
             return False
         self._telegram_lobby_reminder_ts[chat_id] = now
         return True
@@ -9761,8 +9761,8 @@ class GatewayRunner:
             return True
         import time as _time
         now = _time.monotonic()
-        last = self._telegram_capability_hint_ts.get(chat_id, 0.0)
-        if now - last < self._TELEGRAM_CAPABILITY_HINT_COOLDOWN_S:
+        last = self._telegram_capability_hint_ts.get(chat_id)
+        if last is not None and now - last < self._TELEGRAM_CAPABILITY_HINT_COOLDOWN_S:
             return False
         self._telegram_capability_hint_ts[chat_id] = now
         return True
