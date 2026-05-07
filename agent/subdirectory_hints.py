@@ -202,8 +202,6 @@ class SubdirectoryHintTracker:
                     except ValueError:
                         pass  # keep absolute
                 found_hints.append((rel_path, content))
-                # First match wins per directory (like startup loading)
-                break
             except Exception as exc:
                 logger.debug("Could not read %s: %s", hint_path, exc)
 

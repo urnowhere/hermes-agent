@@ -232,3 +232,55 @@ class TestPermissionErrorHandling:
             )
             # Result may be None (backend skipped) — the key point is no crash
             assert result is None or isinstance(result, str)
+
+
+class TestMultipleHintFilesInDirectory:
+    """Regression tests for #14537 — all hint files in a directory should be loaded."""
+
+    def test_loads_all_hint_files_in_directory(self, tmp_path):
+        """Both AGENTS.md and .cursorrules in the same dir must both be loaded."""
+        wd = tmp_path / "workspace"
+        wd.mkdir()
+        pkg = wd / "pkg"
+        pkg.mkdir()
+        (pkg / "AGENTS.md").write_text("agents rules")
+        (pkg / ".cursorrules").write_text("cursor rules")
+
+        tracker = SubdirectoryHintTracker(str(wd))
+        result = tracker._load_hints_for_directory(pkg)
+
+        assert result is not None
+        assert "agents rules" in result
+        assert "cursor rules" in result
+
+    def test_first_hit_does_not_suppress_subsequent_files(self, tmp_path):
+        """Removing the break means every matching file is appended, not just the first."""
+        wd = tmp_path / "workspace"
+        wd.mkdir()
+        sub = wd / "lib"
+        sub.mkdir()
+
+        # AGENTS.md and .cursorrules are both in _HINT_FILENAMES and are distinct filenames
+        (sub / "AGENTS.md").write_text("content of AGENTS.md")
+        (sub / ".cursorrules").write_text("content of .cursorrules")
+
+        tracker = SubdirectoryHintTracker(str(wd))
+        result = tracker._load_hints_for_directory(sub)
+
+        assert result is not None
+        assert "content of AGENTS.md" in result, "AGENTS.md content missing"
+        assert "content of .cursorrules" in result, ".cursorrules content missing"
+
+    def test_single_hint_file_still_works(self, tmp_path):
+        """Regression guard — a directory with only one hint file still returns it."""
+        wd = tmp_path / "workspace"
+        wd.mkdir()
+        sub = wd / "only-one"
+        sub.mkdir()
+        (sub / "AGENTS.md").write_text("sole agent rule")
+
+        tracker = SubdirectoryHintTracker(str(wd))
+        result = tracker._load_hints_for_directory(sub)
+
+        assert result is not None
+        assert "sole agent rule" in result
