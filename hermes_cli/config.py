@@ -512,7 +512,8 @@ DEFAULT_CONFIG = {
         "modal_image": "nikolaik/python-nodejs:python3.11-nodejs20",
         "daytona_image": "nikolaik/python-nodejs:python3.11-nodejs20",
         "vercel_runtime": "node24",
-        # Container resource limits (docker, singularity, modal, daytona, vercel_sandbox — ignored for local/ssh)
+        "e2b_template": "base",
+        # Container resource limits (docker, singularity, modal, daytona, vercel_sandbox, e2b — ignored for local/ssh)
         "container_cpu": 1,
         "container_memory": 5120,       # MB (default 5GB)
         "container_disk": 51200,        # MB (default 50GB)
@@ -4548,6 +4549,10 @@ def show_config():
     elif terminal.get('backend') == 'vercel_sandbox':
         print(f"  Vercel runtime: {terminal.get('vercel_runtime', 'node24')}")
         print(f"  Vercel auth:    {'configured' if get_env_value('VERCEL_OIDC_TOKEN') or (get_env_value('VERCEL_TOKEN') and get_env_value('VERCEL_PROJECT_ID') and get_env_value('VERCEL_TEAM_ID')) else '(not set)'}")
+    elif terminal.get('backend') == 'e2b':
+        print(f"  E2B template: {terminal.get('e2b_template', 'base')}")
+        e2b_key = get_env_value('E2B_API_KEY')
+        print(f"  API key:      {'configured' if e2b_key else '(not set)'}")
     elif terminal.get('backend') == 'ssh':
         ssh_host = get_env_value('TERMINAL_SSH_HOST')
         ssh_user = get_env_value('TERMINAL_SSH_USER')
@@ -4737,6 +4742,7 @@ def set_config_value(key: str, value: str):
         "terminal.modal_image": "TERMINAL_MODAL_IMAGE",
         "terminal.daytona_image": "TERMINAL_DAYTONA_IMAGE",
         "terminal.vercel_runtime": "TERMINAL_VERCEL_RUNTIME",
+        "terminal.e2b_template": "TERMINAL_E2B_TEMPLATE",
         "terminal.docker_mount_cwd_to_workspace": "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE",
         "terminal.docker_run_as_host_user": "TERMINAL_DOCKER_RUN_AS_HOST_USER",
         # terminal.cwd intentionally excluded — CLI resolves at runtime,

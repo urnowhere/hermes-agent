@@ -738,6 +738,36 @@ def _prompt_vercel_sandbox_settings(config: dict):
         save_env_value("VERCEL_TEAM_ID", team)
 
 
+def _prompt_e2b_settings(config: dict):
+    """Prompt for E2B template and persistence settings."""
+    terminal = config.setdefault("terminal", {})
+
+    from tools.environments.e2b import DEFAULT_E2B_TEMPLATE, KNOWN_E2B_TEMPLATES
+
+    print()
+    print_info("E2B sandbox settings:")
+    print_info("  Templates are prebuilt sandbox images (bash, code-interpreter, desktop, ...).")
+    print_info("  Build your own with: e2b template build (see https://e2b.dev/docs).")
+
+    current_template = (
+        terminal.get("e2b_template") or DEFAULT_E2B_TEMPLATE
+    )
+    template_hint = ", ".join(KNOWN_E2B_TEMPLATES)
+    template = prompt(
+        f"  Template ({template_hint}, or a custom template name)",
+        current_template,
+    ).strip() or current_template
+    terminal["e2b_template"] = template
+    save_env_value("TERMINAL_E2B_TEMPLATE", template)
+
+    current_persist = terminal.get("container_persistent", True)
+    persist_label = "yes" if current_persist else "no"
+    print_info("  Persistent filesystem pauses the sandbox on cleanup and resumes it next session.")
+    terminal["container_persistent"] = prompt(
+        "  Persist sandbox across sessions? (yes/no)", persist_label
+    ).lower() in ("yes", "true", "y", "1")
+
+
 def _read_nearest_vercel_project(start: Path | None = None) -> dict[str, str]:
     """Read project/team defaults from the nearest Vercel link file."""
     current = (start or Path.cwd()).resolve()
@@ -1309,11 +1339,12 @@ def setup_terminal_backend(config: dict):
         "SSH - run on a remote machine",
         "Daytona - persistent cloud development environment",
         "Vercel Sandbox - cloud microVM with snapshot filesystem persistence",
+        "E2B - secure cloud sandbox (pause/resume persistence)",
     ]
-    idx_to_backend = {0: "local", 1: "docker", 2: "modal", 3: "ssh", 4: "daytona", 5: "vercel_sandbox"}
-    backend_to_idx = {"local": 0, "docker": 1, "modal": 2, "ssh": 3, "daytona": 4, "vercel_sandbox": 5}
+    idx_to_backend = {0: "local", 1: "docker", 2: "modal", 3: "ssh", 4: "daytona", 5: "vercel_sandbox", 6: "e2b"}
+    backend_to_idx = {"local": 0, "docker": 1, "modal": 2, "ssh": 3, "daytona": 4, "vercel_sandbox": 5, "e2b": 6}
 
-    next_idx = 6
+    next_idx = 7
     if is_linux:
         terminal_choices.append("Singularity/Apptainer - HPC-friendly container")
         idx_to_backend[next_idx] = "singularity"
@@ -1593,6 +1624,55 @@ def setup_terminal_backend(config: dict):
 
         _prompt_vercel_sandbox_settings(config)
 
+    elif selected_backend == "e2b":
+        print_success("Terminal backend: E2B")
+        print_info("Secure cloud sandboxes with pause/resume filesystem persistence.")
+        print_info("Sign up at: https://e2b.dev")
+        print_info("Requires the optional SDK: pip install 'hermes-agent[e2b]'")
+
+        try:
+            __import__("e2b")
+        except ImportError:
+            print_info("Installing e2b SDK...")
+            import subprocess
+
+            uv_bin = shutil.which("uv")
+            if uv_bin:
+                result = subprocess.run(
+                    [uv_bin, "pip", "install", "--python", sys.executable, "e2b"],
+                    capture_output=True,
+                    text=True,
+                )
+            else:
+                result = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "e2b"],
+                    capture_output=True,
+                    text=True,
+                )
+            if result.returncode == 0:
+                print_success("e2b SDK installed")
+            else:
+                print_warning("Install failed — run manually: pip install 'hermes-agent[e2b]'")
+                if result.stderr:
+                    print_info(f"  Error: {result.stderr.strip().splitlines()[-1]}")
+
+        print()
+        existing_key = get_env_value("E2B_API_KEY")
+        if existing_key:
+            print_info("  E2B API key: already configured")
+            if prompt_yes_no("  Update API key?", False):
+                api_key = prompt("    E2B API key", password=True)
+                if api_key:
+                    save_env_value("E2B_API_KEY", api_key)
+                    print_success("    Updated")
+        else:
+            api_key = prompt("    E2B API key", password=True)
+            if api_key:
+                save_env_value("E2B_API_KEY", api_key)
+                print_success("    Configured")
+
+        _prompt_e2b_settings(config)
+
     elif selected_backend == "ssh":
         print_success("Terminal backend: SSH")
         print_info("Run commands on a remote machine via SSH.")
@@ -1648,6 +1728,8 @@ def setup_terminal_backend(config: dict):
         save_env_value("TERMINAL_MODAL_MODE", config["terminal"].get("modal_mode", "auto"))
     if selected_backend == "vercel_sandbox":
         save_env_value("TERMINAL_VERCEL_RUNTIME", config["terminal"].get("vercel_runtime", "node24"))
+    if selected_backend == "e2b":
+        save_env_value("TERMINAL_E2B_TEMPLATE", config["terminal"].get("e2b_template", "base"))
     save_config(config)
     print()
     print_success(f"Terminal backend set to: {selected_backend}")

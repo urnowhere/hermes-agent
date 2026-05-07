@@ -977,6 +977,20 @@ def run_doctor(args):
             check_fail("daytona SDK not installed", "(pip install daytona)")
             issues.append("Install daytona SDK: pip install daytona")
 
+    # E2B (if using e2b backend)
+    if terminal_env == "e2b":
+        e2b_key = os.getenv("E2B_API_KEY")
+        if e2b_key:
+            check_ok("E2B API key", "(configured)")
+        else:
+            check_fail("E2B_API_KEY not set", "(required for TERMINAL_ENV=e2b)")
+            issues.append("Set E2B_API_KEY environment variable")
+        if importlib.util.find_spec("e2b") is not None:
+            check_ok("e2b SDK", "(installed)")
+        else:
+            check_fail("e2b SDK not installed", "(pip install 'hermes-agent[e2b]')")
+            issues.append("Install the E2B optional dependency: pip install 'hermes-agent[e2b]'")
+
     # Vercel Sandbox (if using vercel_sandbox backend)
     if terminal_env == "vercel_sandbox":
         runtime = os.getenv("TERMINAL_VERCEL_RUNTIME", "node24").strip() or "node24"
