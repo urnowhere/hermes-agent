@@ -7531,17 +7531,28 @@ class AIAgent:
                     f"Reconnecting..."
                 )
                 try:
-                    rc = request_client_holder.get("client")
-                    if rc is not None:
-                        self._close_request_openai_client(rc, reason="stale_stream_kill")
+                    if self.api_mode == "anthropic_messages":
+                        from agent.anthropic_adapter import build_anthropic_client
+
+                        self._anthropic_client.close()
+                        self._anthropic_client = build_anthropic_client(
+                            self._anthropic_api_key,
+                            getattr(self, "_anthropic_base_url", None),
+                            timeout=get_provider_request_timeout(self.provider, self.model),
+                        )
+                    else:
+                        rc = request_client_holder.get("client")
+                        if rc is not None:
+                            self._close_request_openai_client(rc, reason="stale_stream_kill")
                 except Exception:
                     pass
                 # Rebuild the primary client too — its connection pool
                 # may hold dead sockets from the same provider outage.
-                try:
-                    self._replace_primary_openai_client(reason="stale_stream_pool_cleanup")
-                except Exception:
-                    pass
+                if self.api_mode != "anthropic_messages":
+                    try:
+                        self._replace_primary_openai_client(reason="stale_stream_pool_cleanup")
+                    except Exception:
+                        pass
                 # Reset the timer so we don't kill repeatedly while
                 # the inner thread processes the closure.
                 last_chunk_time["t"] = time.time()
