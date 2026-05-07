@@ -6,6 +6,8 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
@@ -200,6 +202,28 @@ class TestSingleQueryState:
         assert cli._voice_tts_done.is_set()
         assert hasattr(cli, "_interrupt_queue")
         assert hasattr(cli, "_pending_input")
+
+
+class TestNonTTYInteractiveLaunch:
+    def test_direct_cli_main_requires_tty_before_initializing_cli(self, capsys):
+        """Direct `python cli.py` should fail clearly instead of crashing prompt_toolkit."""
+        import cli as cli_mod
+
+        with (
+            patch("sys.stdin") as mock_stdin,
+            patch.object(
+                cli_mod,
+                "HermesCLI",
+                side_effect=AssertionError("HermesCLI should not initialize"),
+            ),
+        ):
+            mock_stdin.isatty.return_value = False
+            with pytest.raises(SystemExit) as exc:
+                cli_mod.main()
+
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "interactive Hermes requires a terminal on stdin" in err
 
 
 class TestHistoryDisplay:

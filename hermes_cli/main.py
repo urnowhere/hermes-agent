@@ -84,6 +84,19 @@ def _require_tty(command_name: str) -> None:
         sys.exit(1)
 
 
+def _require_chat_tty() -> None:
+    """Exit cleanly when interactive chat is launched without a real stdin TTY."""
+    if not sys.stdin.isatty():
+        print(
+            "Error: interactive Hermes requires a terminal on stdin.\n"
+            "Run `hermes` directly in a terminal, use `hermes </dev/tty` "
+            "when a wrapper has redirected stdin, or use `hermes -z \"...\"` "
+            "for non-interactive prompts.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -1318,6 +1331,7 @@ def _pin_kanban_board_env() -> None:
 def cmd_chat(args):
     """Run interactive chat CLI."""
     use_tui = getattr(args, "tui", False) or os.environ.get("HERMES_TUI") == "1"
+    single_query = bool(getattr(args, "query", None) or getattr(args, "image", None))
 
     # Resolve --continue into --resume with the latest session or by name
     continue_val = getattr(args, "continue_last", None)
@@ -1384,6 +1398,9 @@ def cmd_chat(args):
         print()
         print("You can run 'hermes setup' at any time to configure.")
         sys.exit(1)
+
+    if not single_query:
+        _require_chat_tty()
 
     # Start update check in background (runs while other init happens)
     try:

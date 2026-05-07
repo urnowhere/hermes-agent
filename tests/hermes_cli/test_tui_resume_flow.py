@@ -25,6 +25,7 @@ def main_mod(monkeypatch):
     import hermes_cli.main as mod
 
     monkeypatch.setattr(mod, "_has_any_provider_configured", lambda: True)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     return mod
 
 

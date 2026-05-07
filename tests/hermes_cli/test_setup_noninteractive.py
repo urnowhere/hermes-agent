@@ -1,7 +1,9 @@
 """Tests for non-interactive setup and first-run headless behavior."""
 
 from argparse import Namespace
-from unittest.mock import MagicMock, patch
+import sys
+import types
+from unittest.mock import patch
 
 import pytest
 from hermes_cli.config import DEFAULT_CONFIG, load_config, save_config
@@ -143,6 +145,61 @@ class TestNonInteractiveSetup:
         mock_setup.assert_not_called()
         out = capsys.readouterr().out
         assert "hermes config set model.provider custom" in out
+
+    def test_chat_headless_with_configured_provider_exits_before_cli_startup(
+        self, monkeypatch, capsys
+    ):
+        """Bare `hermes` should not let prompt_toolkit crash on non-TTY stdin."""
+        from hermes_cli.main import cmd_chat
+
+        args = _make_chat_args()
+        fake_cli_module = types.ModuleType("cli")
+
+        with (
+            patch("hermes_cli.main._has_any_provider_configured", return_value=True),
+            patch("sys.stdin") as mock_stdin,
+        ):
+            mock_stdin.isatty.return_value = False
+            monkeypatch.setitem(sys.modules, "cli", fake_cli_module)
+
+            with pytest.raises(SystemExit) as exc:
+                cmd_chat(args)
+
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "interactive Hermes requires a terminal on stdin" in err
+        assert "hermes -z" in err
+
+    def test_chat_single_query_remains_allowed_without_tty(self, monkeypatch):
+        """Scripted `hermes chat -q` should still work with redirected stdin."""
+        from hermes_cli.main import cmd_chat
+
+        args = _make_chat_args(query="hello", quiet=True)
+        captured = {}
+
+        fake_cli_module = types.ModuleType("cli")
+
+        def fake_cli_main(**kwargs):
+            captured.update(kwargs)
+
+        fake_cli_module.main = fake_cli_main
+
+        fake_skills_sync = types.ModuleType("tools.skills_sync")
+        fake_skills_sync.sync_skills = lambda quiet=True: None
+
+        with (
+            patch("hermes_cli.main._has_any_provider_configured", return_value=True),
+            patch("hermes_cli.banner.prefetch_update_check"),
+            patch("sys.stdin") as mock_stdin,
+        ):
+            mock_stdin.isatty.return_value = False
+            monkeypatch.setitem(sys.modules, "cli", fake_cli_module)
+            monkeypatch.setitem(sys.modules, "tools.skills_sync", fake_skills_sync)
+
+            cmd_chat(args)
+
+        assert captured["query"] == "hello"
+        assert captured["quiet"] is True
 
     def test_main_accepts_tts_setup_section(self, monkeypatch):
         """`hermes setup tts` should parse and dispatch like other setup sections."""
