@@ -8617,6 +8617,8 @@ class AIAgent:
             reasoning_config=self.reasoning_config,
             request_overrides=self.request_overrides,
             session_id=getattr(self, "session_id", None),
+            provider=self.provider,
+            base_url=self.base_url,
             model_lower=(self.model or "").lower(),
             is_openrouter=_is_or,
             is_nous=_is_nous,

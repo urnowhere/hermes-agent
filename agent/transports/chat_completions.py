@@ -313,6 +313,19 @@ class ChatCompletionsTransport(ProviderTransport):
         # extra_body assembly
         extra_body: dict[str, Any] = {}
 
+        # Z.AI / BigModel: stream tool-call arguments incrementally to avoid
+        # long silent gaps that can trigger idle timeouts on large tool args.
+        _provider_lower = str(params.get("provider") or "").lower()
+        _base_url_lower = str(params.get("base_url") or "").lower()
+        _is_zai_endpoint = (
+            _provider_lower == "zai"
+            or "z.ai" in _base_url_lower
+            or "bigmodel.cn" in _base_url_lower
+        )
+
+        if _is_zai_endpoint and tools:
+            extra_body.setdefault("tool_stream", True)
+
         is_openrouter = params.get("is_openrouter", False)
         is_nous = params.get("is_nous", False)
         is_github_models = params.get("is_github_models", False)

@@ -72,6 +72,29 @@ class TestChatCompletionsBuildKwargs:
         kw = transport.build_kwargs(model="gpt-4o", messages=msgs, tools=tools)
         assert kw["tools"] == tools
 
+    def test_zai_tools_enable_tool_stream(self, transport):
+        msgs = [{"role": "user", "content": "Hi"}]
+        tools = [{"type": "function", "function": {"name": "test", "parameters": {}}}]
+        kw = transport.build_kwargs(
+            model="glm-5",
+            messages=msgs,
+            tools=tools,
+            provider="zai",
+        )
+        assert kw["extra_body"]["tool_stream"] is True
+
+    def test_non_zai_tools_do_not_enable_tool_stream(self, transport):
+        msgs = [{"role": "user", "content": "Hi"}]
+        tools = [{"type": "function", "function": {"name": "test", "parameters": {}}}]
+        kw = transport.build_kwargs(
+            model="gpt-4o",
+            messages=msgs,
+            tools=tools,
+            provider="openrouter",
+            base_url="https://openrouter.ai/api/v1",
+        )
+        assert "tool_stream" not in kw.get("extra_body", {})
+
     def test_openrouter_provider_prefs(self, transport):
         from providers import get_provider_profile
         profile = get_provider_profile("openrouter")
