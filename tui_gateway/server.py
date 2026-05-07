@@ -335,8 +335,32 @@ atexit.register(_shutdown_sessions)
 # ── Plumbing ──────────────────────────────────────────────────────────
 
 
+def _is_usable_session_db(db) -> bool:
+    """Check that *db* looks like a real SessionDB, not a test stub.
+
+    Quick type-check first, then spot-check key methods used by the gateway.
+    """
+    if type(db).__module__ != "hermes_state" or type(db).__name__ != "SessionDB":
+        return False
+    return (
+        db is not None
+        and callable(getattr(db, "list_sessions_rich", None))
+        and callable(getattr(db, "end_session", None))
+        and callable(getattr(db, "get_session", None))
+        and callable(getattr(db, "get_session_by_title", None))
+        and callable(getattr(db, "reopen_session", None))
+        and callable(getattr(db, "get_messages_as_conversation", None))
+        and callable(getattr(db, "delete_session", None))
+        and callable(getattr(db, "set_session_title", None))
+        and callable(getattr(db, "append_message", None))
+    )
+
+
 def _get_db():
     global _db, _db_error
+    if _db is not None and not _is_usable_session_db(_db):
+        logger.debug("Discarding invalid cached SessionDB instance: %r", type(_db))
+        _db = None
     if _db is None:
         from hermes_state import SessionDB
 
