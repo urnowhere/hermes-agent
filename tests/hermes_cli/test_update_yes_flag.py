@@ -12,7 +12,22 @@ import subprocess
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from hermes_cli.main import cmd_update
+import pytest
+
+import hermes_cli.main as hermes_main
+
+
+@pytest.fixture(autouse=True)
+def _isolate_update_wrapper(monkeypatch):
+    """Keep these unit tests focused on --yes behavior, not install mode/stdio state."""
+    monkeypatch.setattr("hermes_cli.config.is_managed", lambda: False)
+    monkeypatch.setattr("hermes_cli.config.managed_error", lambda _action: None)
+    monkeypatch.setattr(hermes_main, "_install_hangup_protection", lambda gateway_mode=False: {})
+    monkeypatch.setattr(hermes_main, "_finalize_update_output", lambda _state: None)
+    monkeypatch.setattr(hermes_main, "_run_pre_update_backup", lambda _args: None)
+    monkeypatch.setattr(hermes_main, "_install_python_dependencies_with_optional_fallback", lambda *a, **k: None)
+    monkeypatch.setattr(hermes_main, "_update_node_dependencies", lambda *a, **k: None)
+    monkeypatch.setattr(hermes_main, "_build_web_ui", lambda *a, **k: None)
 
 
 def _make_run_side_effect(
@@ -74,7 +89,7 @@ class TestUpdateYesConfigMigration:
         args = SimpleNamespace(yes=True)
 
         with patch("builtins.input") as mock_input:
-            cmd_update(args)
+            hermes_main.cmd_update(args)
             # Never prompted the user.
             mock_input.assert_not_called()
 
@@ -113,12 +128,12 @@ class TestUpdateYesConfigMigration:
 
         args = SimpleNamespace(yes=False)
 
-        with patch("builtins.input", return_value="n") as mock_input, patch(
-            "hermes_cli.main.sys"
+        with patch("builtins.input", return_value="n") as mock_input, patch.object(
+            hermes_main, "sys"
         ) as mock_sys:
             mock_sys.stdin.isatty.return_value = True
             mock_sys.stdout.isatty.return_value = True
-            cmd_update(args)
+            hermes_main.cmd_update(args)
             # The user was actually prompted.
             assert mock_input.called
             prompts = [c.args[0] if c.args else "" for c in mock_input.call_args_list]
@@ -128,11 +143,6 @@ class TestUpdateYesConfigMigration:
 class TestUpdateYesStashRestore:
     """--yes auto-restores the pre-update autostash without prompting."""
 
-    @patch("hermes_cli.main._restore_stashed_changes")
-    @patch(
-        "hermes_cli.main._stash_local_changes_if_needed",
-        return_value="stash@{0}",
-    )
     @patch("hermes_cli.config.check_config_version", return_value=(1, 1))
     @patch("hermes_cli.config.get_missing_config_fields", return_value=[])
     @patch("hermes_cli.config.get_missing_env_vars", return_value=[])
@@ -145,8 +155,6 @@ class TestUpdateYesStashRestore:
         _mock_missing_env,
         _mock_missing_cfg,
         _mock_version,
-        _mock_stash,
-        mock_restore,
         capsys,
     ):
         # Not on main → cmd_update switches to main → autostash fires.
@@ -156,7 +164,10 @@ class TestUpdateYesStashRestore:
 
         args = SimpleNamespace(yes=True)
 
-        cmd_update(args)
+        with patch.object(
+            hermes_main, "_stash_local_changes_if_needed", return_value="stash@{0}"
+        ), patch.object(hermes_main, "_restore_stashed_changes") as mock_restore:
+            hermes_main.cmd_update(args)
 
         # _restore_stashed_changes was called, and called with prompt_user=False
         # every time (so the user never sees "Restore local changes now?").

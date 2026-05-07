@@ -683,6 +683,7 @@ class TestNewEndpoints:
         wrapper_dir = tmp_path / "bin"
         wrapper_dir.mkdir()
         monkeypatch.setattr(profiles_mod, "_get_wrapper_dir", lambda: wrapper_dir)
+        monkeypatch.setenv("PATH", str(wrapper_dir))
 
         resp = self.client.post(
             "/api/profiles",
@@ -2174,10 +2175,12 @@ class TestPtyWebSocket:
         """Frame written to /api/pub is rebroadcast verbatim to every
         /api/events subscriber on the same channel."""
         import time
+        import uuid
         from urllib.parse import urlencode
         from hermes_cli import web_server as ws_mod
 
-        qs = urlencode({"token": self.token, "channel": "broadcast-test"})
+        channel = f"broadcast-test-{uuid.uuid4().hex}"
+        qs = urlencode({"token": self.token, "channel": channel})
         pub_path = f"/api/pub?{qs}"
         sub_path = f"/api/events?{qs}"
 
@@ -2189,7 +2192,7 @@ class TestPtyWebSocket:
             # subscriber registration and the message is dropped.
             deadline = time.monotonic() + 5.0
             while time.monotonic() < deadline:
-                if ws_mod._event_channels.get("broadcast-test"):
+                if ws_mod._event_channels.get(channel):
                     break
                 time.sleep(0.01)
             else:
