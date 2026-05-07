@@ -1,6 +1,7 @@
 """Tests for the Feishu gateway integration."""
 
 import asyncio
+import importlib.util
 import json
 import os
 import tempfile
@@ -13,11 +14,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from gateway.platforms.base import ProcessingOutcome
 
-try:
-    import lark_oapi
-    _HAS_LARK_OAPI = True
-except ImportError:
-    _HAS_LARK_OAPI = False
+_HAS_LARK_OAPI = importlib.util.find_spec("lark_oapi") is not None
 
 
 def _mock_event_dispatcher_builder(mock_handler_class):
@@ -108,6 +105,71 @@ class TestFeishuMessageNormalization(unittest.TestCase):
             normalized.text_content,
             "Sprint recap\n- Alice: Please review PR-128\n- Bob: Ship it",
         )
+
+
+class TestFeishuStreamEditRotation(unittest.TestCase):
+    @patch.dict(os.environ, {}, clear=True)
+    def test_should_rotate_stream_edit_failure_on_raw_response_code(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.base import SendResult
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        result = SendResult(
+            success=False,
+            error="update failed",
+            raw_response=SimpleNamespace(code=230072),
+        )
+
+        self.assertTrue(adapter.should_rotate_stream_edit_failure(result))
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_should_rotate_stream_edit_failure_on_error_code_text(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.base import SendResult
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        result = SendResult(
+            success=False,
+            raw_response=SimpleNamespace(
+                msg="[230072] The message has reached the number of times it can be edited."
+            ),
+        )
+
+        self.assertTrue(adapter.should_rotate_stream_edit_failure(result))
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_should_rotate_stream_edit_failure_on_english_text(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.base import SendResult
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        result = SendResult(
+            success=False,
+            raw_response=SimpleNamespace(
+                msg="The message has reached the number of times it can be edited."
+            ),
+        )
+
+        self.assertTrue(adapter.should_rotate_stream_edit_failure(result))
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_should_not_rotate_on_unrelated_failure(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.base import SendResult
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        result = SendResult(
+            success=False,
+            raw_response=SimpleNamespace(
+                msg="[230001] content format of the post type is incorrect"
+            ),
+        )
+
+        self.assertFalse(adapter.should_rotate_stream_edit_failure(result))
 
     def test_normalize_share_chat_exposes_summary_and_metadata(self):
         from gateway.platforms.feishu import normalize_feishu_message
@@ -3088,7 +3150,7 @@ class TestPendingInboundQueue(unittest.TestCase):
 class TestWebhookSecurity(unittest.TestCase):
     """Tests for webhook signature verification, rate limiting, and body size limits."""
 
-    def _make_adapter(self, encrypt_key: str = "") -> "FeishuAdapter":
+    def _make_adapter(self, encrypt_key: str = ""):
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter
 
@@ -3097,8 +3159,6 @@ class TestWebhookSecurity(unittest.TestCase):
 
     def test_signature_valid_passes(self):
         import hashlib
-        from gateway.platforms.feishu import FeishuAdapter
-        from gateway.config import PlatformConfig
 
         encrypt_key = "test_secret"
         adapter = self._make_adapter(encrypt_key)
