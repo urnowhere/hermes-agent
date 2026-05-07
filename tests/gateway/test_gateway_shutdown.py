@@ -1,4 +1,6 @@
 import asyncio
+import threading
+from collections import OrderedDict
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -140,6 +142,28 @@ async def test_gateway_stop_service_restart_sets_named_exit_code():
         await runner.stop(restart=True, service_restart=True)
 
     assert runner._exit_code == GATEWAY_SERVICE_RESTART_EXIT_CODE
+
+
+@pytest.mark.asyncio
+async def test_gateway_stop_hard_cleans_cached_agents():
+    runner, adapter = make_restart_runner()
+    adapter.disconnect = AsyncMock()
+    runner._agent_cache = OrderedDict()
+    runner._agent_cache_lock = threading.Lock()
+    runner._cleanup_agent_resources = MagicMock()
+
+    cached_a = MagicMock()
+    cached_b = MagicMock()
+    runner._agent_cache["session-a"] = (cached_a, "sig-a")
+    runner._agent_cache["session-b"] = (cached_b, "sig-b")
+
+    with patch("gateway.status.remove_pid_file"), patch("gateway.status.write_runtime_status"):
+        await runner.stop()
+
+    assert list(runner._agent_cache.keys()) == []
+    runner._cleanup_agent_resources.assert_any_call(cached_a)
+    runner._cleanup_agent_resources.assert_any_call(cached_b)
+    assert runner._cleanup_agent_resources.call_count == 2
 
 
 @pytest.mark.asyncio

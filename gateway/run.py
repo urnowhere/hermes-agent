@@ -2550,6 +2550,31 @@ class GatewayRunner:
                 pass
             self._cleanup_agent_resources(agent)
 
+    def _finalize_shutdown_cached_agents(self, active_agents: Dict[str, Any]) -> None:
+        """Hard-clean idle cached agents during full gateway shutdown.
+
+        Normal cache eviction uses release_clients() so a session can resume
+        with preserved tool state. Full gateway shutdown is a real session
+        boundary, so cached agents must be torn down like active ones.
+        """
+        _cache = getattr(self, "_agent_cache", None)
+        _lock = getattr(self, "_agent_cache_lock", None)
+        if _cache is None or _lock is None:
+            return
+
+        active_ids = {id(agent) for agent in active_agents.values()}
+        cached_agents: List[Any] = []
+        with _lock:
+            for entry in list(_cache.values()):
+                agent = entry[0] if isinstance(entry, tuple) and entry else None
+                if agent is None or id(agent) in active_ids:
+                    continue
+                cached_agents.append(agent)
+            _cache.clear()
+
+        for agent in cached_agents:
+            self._cleanup_agent_resources(agent)
+
     def _cleanup_agent_resources(self, agent: Any) -> None:
         """Best-effort cleanup for temporary or cached agent instances."""
         if agent is None:
@@ -4043,6 +4068,7 @@ class GatewayRunner:
                     logger.error("Failed to launch detached gateway restart: %s", e)
 
             self._finalize_shutdown_agents(active_agents)
+            self._finalize_shutdown_cached_agents(active_agents)
 
             # Also shut down memory providers on idle cached agents.
             # _finalize_shutdown_agents only handles agents that were
