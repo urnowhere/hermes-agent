@@ -9503,10 +9503,18 @@ class AIAgent:
             if not self._session_db:
                 return json.dumps({"success": False, "error": "Session database not available."})
             from tools.session_search_tool import session_search as _session_search
+            
+            # Auto-inject current platform as source_filter if not explicitly provided
+            source_filter = function_args.get("source_filter")
+            if not source_filter and self.platform:
+                source_filter = self.platform
+            
             return _session_search(
                 query=function_args.get("query", ""),
                 role_filter=function_args.get("role_filter"),
+                source_filter=source_filter,
                 limit=function_args.get("limit", 3),
+                include_current=function_args.get("include_current", False),
                 db=self._session_db,
                 current_session_id=self.session_id,
             )
@@ -10107,10 +10115,18 @@ class AIAgent:
                     function_result = json.dumps({"success": False, "error": "Session database not available."})
                 else:
                     from tools.session_search_tool import session_search as _session_search
+                    
+                    # Auto-inject current platform as source_filter if not explicitly provided
+                    source_filter = function_args.get("source_filter")
+                    if not source_filter and self.platform:
+                        source_filter = self.platform
+                    
                     function_result = _session_search(
                         query=function_args.get("query", ""),
                         role_filter=function_args.get("role_filter"),
+                        source_filter=source_filter,
                         limit=function_args.get("limit", 3),
+                        include_current=function_args.get("include_current", False),
                         db=self._session_db,
                         current_session_id=self.session_id,
                     )

@@ -325,7 +325,9 @@ def _list_recent_sessions(db, limit: int, current_session_id: str = None) -> str
 def session_search(
     query: str,
     role_filter: str = None,
+    source_filter: str = None,
     limit: int = 3,
+    include_current: bool = False,
     db=None,
     current_session_id: str = None,
 ) -> str:
@@ -334,7 +336,8 @@ def session_search(
 
     Uses FTS5 to find matches, then summarizes the top sessions with the
     configured auxiliary session_search model.
-    The current session is excluded from results since the agent already has that context.
+    By default, the current session is excluded from results since the agent already has that context.
+    Set include_current=True to search earlier messages in the current conversation that have been compressed.
     """
     if db is None:
         return tool_error("Session database not available.", success=False)
@@ -362,10 +365,16 @@ def session_search(
         if role_filter and role_filter.strip():
             role_list = [r.strip() for r in role_filter.split(",") if r.strip()]
 
+        # Parse source filter
+        source_list = None
+        if source_filter and source_filter.strip():
+            source_list = [s.strip() for s in source_filter.split(",") if s.strip()]
+
         # FTS5 search -- get matches ranked by relevance
         raw_results = db.search_messages(
             query=query,
             role_filter=role_list,
+            source_filter=source_list,
             exclude_sources=list(_HIDDEN_SESSION_SOURCES),
             limit=50,  # Get more matches to find unique sessions
             offset=0,
@@ -412,18 +421,20 @@ def session_search(
         )
 
         # Group by resolved (parent) session_id, dedup, skip the current
-        # session lineage. Compression and delegation create child sessions
-        # that still belong to the same active conversation.
+        # session lineage (unless include_current=True). Compression and delegation 
+        # create child sessions that still belong to the same active conversation.
         seen_sessions = {}
         for result in raw_results:
             raw_sid = result["session_id"]
             resolved_sid = _resolve_to_parent(raw_sid)
-            # Skip the current session lineage — the agent already has that
-            # context, even if older turns live in parent fragments.
-            if current_lineage_root and resolved_sid == current_lineage_root:
-                continue
-            if current_session_id and raw_sid == current_session_id:
-                continue
+            # Skip the current session lineage unless include_current=True.
+            # By default, the agent already has that context, even if older 
+            # turns live in parent fragments.
+            if not include_current:
+                if current_lineage_root and resolved_sid == current_lineage_root:
+                    continue
+                if current_session_id and raw_sid == current_session_id:
+                    continue
             if resolved_sid not in seen_sessions:
                 result = dict(result)
                 result["session_id"] = resolved_sid
@@ -576,10 +587,19 @@ SESSION_SEARCH_SCHEMA = {
                 "type": "string",
                 "description": "Optional: only search messages from specific roles (comma-separated). E.g. 'user,assistant' to skip tool outputs.",
             },
+            "source_filter": {
+                "type": "string",
+                "description": "Optional: only search sessions from specific platforms (comma-separated). E.g. 'weixin' for WeChat only, 'feishu' for Feishu only, 'weixin,feishu' for both. Available sources: weixin, feishu, cli, telegram, discord, slack.",
+            },
             "limit": {
                 "type": "integer",
                 "description": "Max sessions to summarize (default: 3, max: 5).",
                 "default": 3,
+            },
+            "include_current": {
+                "type": "boolean",
+                "description": "Optional: include the current session in search results. Default: false. Use true when you need to search earlier messages in the current conversation that have been compressed.",
+                "default": False,
             },
         },
         "required": [],
@@ -597,7 +617,9 @@ registry.register(
     handler=lambda args, **kw: session_search(
         query=args.get("query") or "",
         role_filter=args.get("role_filter"),
+        source_filter=args.get("source_filter"),
         limit=args.get("limit", 3),
+        include_current=args.get("include_current", False),
         db=kw.get("db"),
         current_session_id=kw.get("current_session_id")),
     check_fn=check_session_search_requirements,
