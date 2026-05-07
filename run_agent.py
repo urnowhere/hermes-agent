@@ -1706,9 +1706,11 @@ class AIAgent:
             "max_tokens": max_tokens,
         }
         
-        # In-memory todo list for task planning (one per agent/session)
+        # Todo list for task planning (profile-scoped, file-backed). The
+        # JSON file is reloaded on construction and rewritten on every
+        # write so todos survive gateway restarts (#19477).
         from tools.todo_tool import TodoStore
-        self._todo_store = TodoStore()
+        self._todo_store = TodoStore(persist_path=get_hermes_home() / "todos.json")
         
         # Load config once for memory, skills, and compression sections
         try:
