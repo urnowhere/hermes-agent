@@ -1454,6 +1454,13 @@ class _AsyncFailingThenSuccessCompletions:
 
 
 class TestAuxiliaryAuthRefreshRetry:
+    def test_is_auth_error_detects_copilot_http_401_text(self):
+        from agent.auxiliary_client import _is_auth_error
+
+        assert _is_auth_error(
+            RuntimeError("HTTP 401: IDE token expired: unauthorized: token expired")
+        )
+
     def test_call_llm_refreshes_codex_on_401_for_vision(self):
         failing_client = MagicMock()
         failing_client.base_url = "https://chatgpt.com/backend-api/codex"
@@ -1532,6 +1539,34 @@ class TestAuxiliaryAuthRefreshRetry:
         assert stale_client.chat.completions.create.call_count == 1
         assert fresh_client.chat.completions.create.call_count == 1
 
+    def test_call_llm_refreshes_auto_routed_copilot_on_401(self):
+        stale_client = MagicMock()
+        stale_client.base_url = "https://api.githubcopilot.com"
+        stale_client.chat.completions.create.side_effect = _AuxAuth401("IDE token expired")
+
+        fresh_client = MagicMock()
+        fresh_client.base_url = "https://api.githubcopilot.com"
+        fresh_client.chat.completions.create.return_value = _DummyResponse("fresh-copilot")
+
+        with (
+            patch("agent.auxiliary_client._resolve_task_provider_model", return_value=("auto", None, None, None, None)),
+            patch("agent.auxiliary_client._get_cached_client", side_effect=[(stale_client, "gpt-4o"), (fresh_client, "gpt-4o")]) as mock_get,
+            patch("agent.auxiliary_client._refresh_provider_credentials", return_value=True) as mock_refresh,
+            patch("agent.auxiliary_client._evict_cached_clients") as mock_evict,
+        ):
+            resp = call_llm(
+                task="compression",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        assert resp.choices[0].message.content == "fresh-copilot"
+        mock_refresh.assert_called_once_with("copilot")
+        mock_evict.assert_called_once_with("auto")
+        assert mock_get.call_args_list[0].args[0] == "auto"
+        assert mock_get.call_args_list[1].args[0] == "copilot"
+        assert stale_client.chat.completions.create.call_count == 1
+        assert fresh_client.chat.completions.create.call_count == 1
+
     @pytest.mark.asyncio
     async def test_async_call_llm_refreshes_codex_on_401_for_vision(self):
         failing_client = MagicMock()
@@ -1589,6 +1624,21 @@ class TestAuxiliaryAuthRefreshRetry:
         mock_write.assert_called_once_with("fresh-token", "refresh-token-2", 9999999999999)
         stale_client.close.assert_called_once()
 
+    def test_refresh_provider_credentials_refreshes_copilot_jwt_and_evicts_cache(self):
+        with (
+            patch("hermes_cli.copilot_auth.resolve_copilot_token", return_value=("raw-gho-token", "test")),
+            patch("hermes_cli.copilot_auth._token_fingerprint", return_value="fp"),
+            patch("hermes_cli.copilot_auth._jwt_cache", {"fp": ("expired-api-token", 0)}),
+            patch("hermes_cli.copilot_auth.exchange_copilot_token", return_value=("fresh-api-token", 9999999999)) as mock_exchange,
+            patch("agent.auxiliary_client._evict_cached_clients") as mock_evict,
+        ):
+            from agent.auxiliary_client import _refresh_provider_credentials
+
+            assert _refresh_provider_credentials("copilot") is True
+
+        mock_exchange.assert_called_once_with("raw-gho-token")
+        mock_evict.assert_called_once_with("copilot")
+
     @pytest.mark.asyncio
     async def test_async_call_llm_refreshes_anthropic_on_401_for_non_vision(self):
         stale_client = MagicMock()
@@ -1613,6 +1663,40 @@ class TestAuxiliaryAuthRefreshRetry:
 
         assert resp.choices[0].message.content == "fresh-async-anthropic"
         mock_refresh.assert_called_once_with("anthropic")
+        assert stale_client.chat.completions.create.await_count == 1
+        assert fresh_client.chat.completions.create.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_async_call_llm_refreshes_auto_routed_copilot_on_401(self):
+        stale_client = MagicMock()
+        stale_client.base_url = "https://api.githubcopilot.com"
+        stale_client.chat.completions.create = AsyncMock(side_effect=_AuxAuth401("IDE token expired"))
+
+        fresh_client = MagicMock()
+        fresh_client.base_url = "https://api.githubcopilot.com"
+        fresh_client.chat.completions.create = AsyncMock(return_value=_DummyResponse("fresh-async-copilot"))
+
+        with (
+            patch("agent.auxiliary_client._resolve_task_provider_model", return_value=("auto", None, None, None, None)),
+            patch("agent.auxiliary_client._get_cached_client", side_effect=[(stale_client, "gpt-4o"), (fresh_client, "gpt-4o")]) as mock_get,
+            patch("agent.auxiliary_client._refresh_provider_credentials", return_value=True) as mock_refresh,
+            patch("agent.auxiliary_client._evict_cached_clients") as mock_evict,
+        ):
+            resp = await async_call_llm(
+                task="session_search",
+                main_runtime={"provider": "copilot", "model": "gpt-4o"},
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        assert resp.choices[0].message.content == "fresh-async-copilot"
+        mock_refresh.assert_called_once_with("copilot")
+        mock_evict.assert_called_once_with("auto")
+        assert mock_get.call_args_list[0].args[0] == "auto"
+        assert mock_get.call_args_list[0].kwargs["main_runtime"] == {
+            "provider": "copilot",
+            "model": "gpt-4o",
+        }
+        assert mock_get.call_args_list[1].args[0] == "copilot"
         assert stale_client.chat.completions.create.await_count == 1
         assert fresh_client.chat.completions.create.await_count == 1
 
