@@ -536,14 +536,14 @@ def test_ws_events_rejects_when_token_required(tmp_path, monkeypatch):
     # No token → policy violation close.
     from starlette.websockets import WebSocketDisconnect
     with pytest.raises(WebSocketDisconnect) as exc:
-        with c.websocket_connect("/api/plugins/kanban/events"):
-            pass
+        with c.websocket_connect("/api/plugins/kanban/events") as conn:
+            conn.receive_text()
     assert exc.value.code == 1008
 
     # Wrong token → policy violation close.
     with pytest.raises(WebSocketDisconnect) as exc:
-        with c.websocket_connect("/api/plugins/kanban/events?token=nope"):
-            pass
+        with c.websocket_connect("/api/plugins/kanban/events?token=nope") as conn:
+            conn.receive_text()
     assert exc.value.code == 1008
 
     # Correct token → accepted (connect then close cleanly from our side).

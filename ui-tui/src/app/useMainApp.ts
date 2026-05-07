@@ -234,7 +234,17 @@ export function useMainApp(gw: GatewayClient) {
   }, [])
 
   const virtualRows = useMemo<TranscriptRow[]>(
-    () => historyItems.map((msg, index) => ({ index, key: messageId(msg), msg })),
+    () =>
+      historyItems.map((msg, index) => {
+        // Include the render-mode in the row key so that when a row crosses
+        // the full-render-tail boundary (FULL_RENDER_TAIL_ITEMS) its virtual
+        // height identity changes.  Without this, the height cache retains the
+        // stale full-tail measurement after the row switches to bounded-history
+        // rendering, causing the virtual offset map to overestimate content
+        // height and push the viewport into blank spacer regions.  Fixes #19944.
+        const inTail = index >= historyItems.length - FULL_RENDER_TAIL_ITEMS
+        return { index, key: `${messageId(msg)}:${inTail ? 't' : 'b'}`, msg }
+      }),
     [historyItems, messageId]
   )
 

@@ -1461,14 +1461,14 @@ _EVENT_POLL_SECONDS = 0.3
 
 @router.websocket("/events")
 async def stream_events(ws: WebSocket):
-    # Enforce the dashboard session token as a query param — browsers can't
-    # set Authorization on a WS upgrade. This matches how the PTY bridge
-    # authenticates in hermes_cli/web_server.py.
+    # Accept before any close -- FastAPI / Starlette 0.136+ requires the
+    # ASGI websocket.connect message to be consumed (via accept) before a
+    # close frame can be sent.
+    await ws.accept()
     token = ws.query_params.get("token")
     if not _check_ws_token(token):
         await ws.close(code=http_status.WS_1008_POLICY_VIOLATION)
         return
-    await ws.accept()
     try:
         since_raw = ws.query_params.get("since", "0")
         try:
