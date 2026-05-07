@@ -546,6 +546,109 @@ def _coerce_required_int(value: Any, default: int, min_value: int = 0) -> int:
 # ---------------------------------------------------------------------------
 
 
+# Feishu card markdown element max content length (official limit ~4096 chars
+# per element; split longer content into multiple elements to avoid truncation).
+_CARD_MD_ELEMENT_MAX_CHARS = 3800
+
+
+
+def _build_markdown_card_payload(content: str) -> str:
+    """Build a Feishu interactive card payload with Card JSON 2.0 structure.
+
+    Card JSON 2.0's markdown (rich text) component supports full markdown syntax
+    including headings (#/##/###), tables, blockquotes (>), bold, italic, lists,
+    code blocks, and links — no conversion needed.
+
+    Long content is split into multiple markdown elements to stay within the
+    per-element size limit (each element max ~3800 chars).
+    """
+    elements: List[Dict[str, Any]] = []
+
+    # Split content at code-fence boundaries (same logic as post rows) to keep
+    # each element coherent and avoid splitting mid-fence.
+    segments = _split_content_for_card(content)
+    for segment in segments:
+        if len(segment) <= _CARD_MD_ELEMENT_MAX_CHARS:
+            elements.append({"tag": "markdown", "content": segment})
+        else:
+            # Further split by double-newline paragraphs
+            for chunk in _split_by_paragraphs(segment, _CARD_MD_ELEMENT_MAX_CHARS):
+                elements.append({"tag": "markdown", "content": chunk})
+
+    if not elements:
+        elements.append({"tag": "markdown", "content": content})
+
+    # Card JSON 2.0 structure: schema + config + body.elements
+    card = {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True},
+        "body": {
+            "elements": elements,
+        },
+    }
+    return json.dumps(card, ensure_ascii=False)
+
+
+def _split_content_for_card(content: str) -> List[str]:
+    """Split content at code-fence boundaries for card elements."""
+    if "```" not in content:
+        return [content] if content.strip() else []
+
+    segments: List[str] = []
+    current: List[str] = []
+    in_code_block = False
+
+    def _flush():
+        nonlocal current
+        if current:
+            text = "\n".join(current)
+            if text.strip():
+                segments.append(text)
+            current = []
+
+    for line in content.splitlines():
+        stripped = line.strip()
+        is_fence = bool(
+            _MARKDOWN_FENCE_CLOSE_RE.match(stripped)
+            if in_code_block
+            else _MARKDOWN_FENCE_OPEN_RE.match(stripped)
+        )
+        if is_fence:
+            if not in_code_block:
+                _flush()
+            current.append(line)
+            in_code_block = not in_code_block
+            if not in_code_block:
+                _flush()
+            continue
+        current.append(line)
+
+    _flush()
+    return segments or ([content] if content.strip() else [])
+
+
+def _split_by_paragraphs(text: str, max_chars: int) -> List[str]:
+    """Split text into chunks at paragraph boundaries within size limit."""
+    paragraphs = text.split("\n\n")
+    chunks: List[str] = []
+    current: List[str] = []
+    current_len = 0
+
+    for para in paragraphs:
+        para_len = len(para) + 2  # +2 for \n\n separator
+        if current and current_len + para_len > max_chars:
+            chunks.append("\n\n".join(current))
+            current = [para]
+            current_len = len(para)
+        else:
+            current.append(para)
+            current_len += para_len
+
+    if current:
+        chunks.append("\n\n".join(current))
+    return chunks
+
+
 def _build_markdown_post_payload(content: str) -> str:
     rows = _build_markdown_post_rows(content)
     return json.dumps(
@@ -1721,9 +1824,9 @@ class FeishuAdapter(BasePlatformAdapter):
                         metadata=metadata,
                     )
                 except Exception as exc:
-                    if msg_type != "post" or not _POST_CONTENT_INVALID_RE.search(str(exc)):
+                    if msg_type not in ("post", "interactive") or not _POST_CONTENT_INVALID_RE.search(str(exc)):
                         raise
-                    logger.warning("[Feishu] Invalid post payload rejected by API; falling back to plain text")
+                    logger.warning("[Feishu] Invalid %s payload rejected by API; falling back to plain text", msg_type)
                     response = await self._feishu_send_with_retry(
                         chat_id=chat_id,
                         msg_type="text",
@@ -1732,11 +1835,11 @@ class FeishuAdapter(BasePlatformAdapter):
                         metadata=metadata,
                     )
                 if (
-                    msg_type == "post"
+                    msg_type in ("post", "interactive")
                     and not self._response_succeeded(response)
                     and _POST_CONTENT_INVALID_RE.search(str(getattr(response, "msg", "") or ""))
                 ):
-                    logger.warning("[Feishu] Post payload rejected by API response; falling back to plain text")
+                    logger.warning("[Feishu] %s payload rejected by API response; falling back to plain text", msg_type)
                     response = await self._feishu_send_with_retry(
                         chat_id=chat_id,
                         msg_type="text",
@@ -1770,8 +1873,8 @@ class FeishuAdapter(BasePlatformAdapter):
             request = self._build_update_message_request(message_id=message_id, request_body=body)
             response = await asyncio.to_thread(self._client.im.v1.message.update, request)
             result = self._finalize_send_result(response, "update failed")
-            if not result.success and msg_type == "post" and _POST_CONTENT_INVALID_RE.search(result.error or ""):
-                logger.warning("[Feishu] Invalid post update payload rejected by API; falling back to plain text")
+            if not result.success and msg_type in ("post", "interactive") and _POST_CONTENT_INVALID_RE.search(result.error or ""):
+                logger.warning("[Feishu] Invalid %s update payload rejected by API; falling back to plain text", msg_type)
                 fallback_body = self._build_update_message_body(
                     msg_type="text",
                     content=json.dumps({"text": _strip_markdown_to_plain_text(content)}, ensure_ascii=False),
@@ -4005,14 +4108,12 @@ class FeishuAdapter(BasePlatformAdapter):
     # =========================================================================
 
     def _build_outbound_payload(self, content: str) -> tuple[str, str]:
-        # Feishu post-type 'md' elements do not render markdown tables; sending
-        # table content as post causes the message to appear blank on the client.
-        # Force plain text for anything that looks like a markdown table.
-        if _MARKDOWN_TABLE_RE.search(content):
-            text_payload = {"text": content}
-            return "text", json.dumps(text_payload, ensure_ascii=False)
-        if _MARKDOWN_HINT_RE.search(content):
-            return "post", _build_markdown_post_payload(content)
+        # Use interactive card messages for markdown content.  Feishu's post-type
+        # 'md' elements have severely limited markdown rendering (no headings, broken
+        # tables, inconsistent code blocks).  Card messages with {tag: "markdown"}
+        # elements render the full markdown spec reliably across all Feishu clients.
+        if _MARKDOWN_HINT_RE.search(content) or _MARKDOWN_TABLE_RE.search(content):
+            return "interactive", _build_markdown_card_payload(content)
         text_payload = {"text": content}
         return "text", json.dumps(text_payload, ensure_ascii=False)
 
@@ -4286,7 +4387,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 return response
             except Exception as exc:
                 last_error = exc
-                if msg_type == "post" and _POST_CONTENT_INVALID_RE.search(str(exc)):
+                if msg_type in ("post", "interactive") and _POST_CONTENT_INVALID_RE.search(str(exc)):
                     raise
                 if attempt >= _FEISHU_SEND_ATTEMPTS - 1:
                     raise
