@@ -4,6 +4,7 @@ import json
 from inspect import iscoroutinefunction, signature
 
 from plugins.context_engine.formsy.config import EngineConfigManager
+from plugins.context_engine.formsy.client import EngineClient
 from plugins.context_engine.formsy.engine import FormsyContextEngine
 from plugins.formsy.models import (
     CompileBundle,
@@ -188,6 +189,38 @@ def test_formsy_engine_memory_read_tool_queries_runtime():
     assert data["ok"] is True
     assert data["path"] == "parser.py"
     assert data["content"] == "def parse():\n    return state"
+    assert calls == [{
+        "repo_id": "django__django-14053",
+        "session_id": "session-123",
+        "path": "parser.py",
+        "revision": "latest",
+        "start_line": 10,
+        "end_line": 12,
+    }]
+
+
+def test_formsy_engine_client_forwards_memory_read():
+    calls = []
+
+    class FakeRuntimeClient:
+        async def memory_read(self, **kwargs):
+            calls.append(kwargs)
+            return {"content": "source"}
+
+    client = EngineClient(FakeRuntimeClient())
+
+    result = FormsyContextEngine()._run_async(
+        client.memory_read(
+            repo_id="django__django-14053",
+            session_id="session-123",
+            path="parser.py",
+            revision="latest",
+            start_line=10,
+            end_line=12,
+        )
+    )
+
+    assert result == {"content": "source"}
     assert calls == [{
         "repo_id": "django__django-14053",
         "session_id": "session-123",
