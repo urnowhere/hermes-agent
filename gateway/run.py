@@ -5119,6 +5119,8 @@ class GatewayRunner:
                     return await self._handle_verbose_command(event)
                 if _cmd_def_inner.name == "footer":
                     return await self._handle_footer_command(event)
+                if _cmd_def_inner.name == "prefix":
+                    return await self._handle_prefix_command(event)
 
             # Gateway-handled info/control commands with dedicated
             # running-agent handlers.
@@ -5368,6 +5370,9 @@ class GatewayRunner:
 
         if canonical == "footer":
             return await self._handle_footer_command(event)
+
+        if canonical == "prefix":
+            return await self._handle_prefix_command(event)
 
         if canonical == "yolo":
             return await self._handle_yolo_command(event)
@@ -6544,6 +6549,26 @@ class GatewayRunner:
                     else:
                         display_reasoning = last_reasoning.strip()
                     response = f"💭 **Reasoning:**\n```\n{display_reasoning}\n```\n\n{response}"
+
+            # Response prefix — prepended to the FIRST message of the turn.
+            # Off by default (messages.response_prefix="").  When streaming
+            # already delivered the body, we cannot retroactively prepend.
+            _prefix_line = ""
+            if not agent_result.get("already_sent"):
+                try:
+                    from gateway.response_prefix import build_prefix_line as _bpl
+                    _prefix_line = _bpl(
+                        user_config=_load_gateway_config(),
+                        platform_key=_platform_config_key(source.platform),
+                        model=agent_result.get("model"),
+                        provider=agent_result.get("provider"),
+                        thinking=agent_result.get("thinking") or agent_result.get("thinking_level"),
+                    )
+                except Exception as _prefix_err:
+                    logger.debug("response_prefix build failed: %s", _prefix_err)
+                    _prefix_line = ""
+                if _prefix_line and response:
+                    response = f"{_prefix_line} {response}"
 
             # Runtime-metadata footer — only on the FINAL message of the turn.
             # Off by default (display.runtime_footer.enabled=false).  When
@@ -9419,6 +9444,104 @@ class GatewayRunner:
                 example = f"\nExample: `{preview}`"
         return (
             f"📎 Runtime footer: **{state}**"
+            f"{example}\n"
+            f"_(saved globally — takes effect on next message)_"
+        )
+
+    async def _handle_prefix_command(self, event: MessageEvent) -> str:
+        """Handle /prefix command — toggle the response prefix.
+
+        Usage:
+            /prefix           → toggle on/off
+            /prefix on        → enable globally
+            /prefix off       → disable globally
+            /prefix status    → show current state + template
+
+        The prefix is saved to ``messages.response_prefix`` (global).
+        Per-platform overrides under ``messages.platforms.<platform>.response_prefix``
+        are respected but not modified here — edit config.yaml directly for
+        per-platform control.
+        """
+        from gateway.response_prefix import resolve_prefix_config, interpolate_prefix_template
+
+        config_path = _hermes_home / "config.yaml"
+        platform_key = _platform_config_key(event.source.platform)
+
+        # --- parse argument -------------------------------------------------
+        arg = ""
+        try:
+            text = (getattr(event, "message", None) or "").strip()
+            if text.startswith("/"):
+                parts = text.split(None, 1)
+                if len(parts) > 1:
+                    arg = parts[1].strip().lower()
+        except Exception:
+            arg = ""
+
+        # --- load config ----------------------------------------------------
+        try:
+            user_config: dict = _load_gateway_config()
+        except Exception as e:
+            return f"⚠️ Could not read config.yaml: {e}"
+
+        effective = resolve_prefix_config(user_config, platform_key)
+
+        if arg in ("status", "?"):
+            state = "ON" if effective["enabled"] else "OFF"
+            template = effective.get("template") or "(empty — disabled)"
+            return (
+                f"🏷️ Response prefix: **{state}**\n"
+                f"Template: `{template}`\n"
+                f"Platform: `{platform_key}`\n"
+                f"Vars: `{{model}}`, `{{modelFull}}`, `{{provider}}`, `{{thinking}}`"
+            )
+
+        if arg in ("on", "enable", "true", "1"):
+            # Use a sensible default template if none is set
+            new_template = effective.get("template") or "[{provider}/{model}] "
+            new_enabled = True
+        elif arg in ("off", "disable", "false", "0"):
+            new_template = ""
+            new_enabled = False
+        elif arg == "":
+            # Toggle: if currently disabled, enable with default template
+            if effective["enabled"] and effective.get("template"):
+                new_template = ""
+                new_enabled = False
+            else:
+                new_template = effective.get("template") or "[{provider}/{model}] "
+                new_enabled = True
+        else:
+            return "Usage: `/prefix [on|off|status]`"
+
+        # --- write global config ---------------------------------------------
+        try:
+            if not isinstance(user_config.get("messages"), dict):
+                user_config["messages"] = {}
+            msgs = user_config["messages"]
+            if new_enabled:
+                msgs["response_prefix"] = new_template
+            else:
+                msgs["response_prefix"] = ""
+            atomic_yaml_write(config_path, user_config)
+        except Exception as e:
+            logger.warning("Failed to save messages.response_prefix: %s", e)
+            return f"⚠️ Could not save config: {e}"
+
+        state = "ON" if new_enabled else "OFF"
+        example = ""
+        if new_enabled and new_template:
+            # Show a preview using current model/provider if available.
+            preview = interpolate_prefix_template(
+                new_template,
+                model=_resolve_gateway_model(user_config) or None,
+                provider=None,
+                thinking=None,
+            )
+            if preview:
+                example = f"\nExample: `{preview}`"
+        return (
+            f"🏷️ Response prefix: **{state}**"
             f"{example}\n"
             f"_(saved globally — takes effect on next message)_"
         )

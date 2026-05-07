@@ -1687,8 +1687,15 @@ class TelegramAdapter(BasePlatformAdapter):
             short = model_id.split("/")[-1] if "/" in model_id else model_id
             if len(short) > 38:
                 short = short[:35] + "..."
+            # FIX: encode model_id directly in callback (not index) so callback
+            # resolution is robust to API model list reordering between renders.
+            # Telegram callback_data limit is 64 bytes — most model IDs fit.
+            # Fallback to index for very long IDs.
+            cb_payload = f"mm:{model_id}"
+            if len(cb_payload.encode("utf-8")) > 64:
+                cb_payload = f"mm:{abs_idx}"
             buttons.append(
-                InlineKeyboardButton(short, callback_data=f"mm:{abs_idx}")
+                InlineKeyboardButton(short, callback_data=cb_payload)
             )
 
         rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
@@ -1797,18 +1804,24 @@ class TelegramAdapter(BasePlatformAdapter):
 
         elif data.startswith("mm:"):
             # --- Model selected: perform the switch ---
-            try:
-                idx = int(data[3:])
-            except ValueError:
-                await query.answer(text="Invalid selection.")
-                return
-
+            payload = data[3:]
             model_list = state.get("model_list", [])
-            if idx < 0 or idx >= len(model_list):
-                await query.answer(text="Invalid model index.")
-                return
 
-            model_id = model_list[idx]
+            # New format: model_id encoded directly (robust to reordering)
+            # Legacy format: numeric index
+            if payload.isdigit():
+                idx = int(payload)
+                if idx < 0 or idx >= len(model_list):
+                    await query.answer(text="Invalid model index.")
+                    return
+                model_id = model_list[idx]
+            else:
+                # model_id encoded directly — verify it's still in the list
+                # (defensive: prevents arbitrary model injection via callback)
+                if payload not in model_list:
+                    await query.answer(text="Model no longer available — use /model again.")
+                    return
+                model_id = payload
             provider_slug = state.get("selected_provider", "")
             callback = state.get("on_model_selected")
 

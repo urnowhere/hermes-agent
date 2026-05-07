@@ -1240,7 +1240,22 @@ def list_authenticated_providers(
         # For preferred providers, merge models.dev entries into the curated
         # catalog so newly released models (e.g. mimo-v2.5-pro on opencode-go)
         # show up in the picker without requiring a Hermes release.
-        model_ids = curated.get(hermes_id, [])
+        #
+        # Copilot uses the live API catalog (not static curated list) so the
+        # picker reflects the actual model order returned by GitHub. Without
+        # this, copilot goes through section 1 (PROVIDER_TO_MODELS_DEV) which
+        # uses the static _PROVIDER_MODELS list, while section 2 (HERMES_OVERLAYS)
+        # which would call provider_model_ids() is skipped because the slug was
+        # already seen in section 1. Fixes picker showing wrong model order
+        # (e.g. Opus 4.7 appearing before Opus 4.6).
+        if hermes_id in {"copilot", "copilot-acp"}:
+            try:
+                from hermes_cli.models import provider_model_ids
+                model_ids = provider_model_ids(hermes_id)
+            except Exception:
+                model_ids = curated.get(hermes_id, [])
+        else:
+            model_ids = curated.get(hermes_id, [])
         if hermes_id in _MODELS_DEV_PREFERRED:
             model_ids = _merge_with_models_dev(hermes_id, model_ids)
         total = len(model_ids)
