@@ -245,3 +245,18 @@ async def test_gateway_stop_kills_tool_subprocesses_on_graceful_path(monkeypatch
 
     # Only the final catch-all fires on the graceful path.
     assert kill_count == 1
+
+
+@pytest.mark.asyncio
+async def test_gateway_stop_shuts_down_async_bridge_loop():
+    runner, adapter = make_restart_runner()
+    adapter.disconnect = AsyncMock()
+
+    with (
+        patch("gateway.status.remove_pid_file"),
+        patch("gateway.status.write_runtime_status"),
+        patch("model_tools.shutdown_async_bridge_loop") as mock_shutdown_bridge,
+    ):
+        await runner.stop()
+
+    mock_shutdown_bridge.assert_called_once()

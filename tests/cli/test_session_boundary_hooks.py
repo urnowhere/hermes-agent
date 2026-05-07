@@ -1,9 +1,5 @@
-import pytest
 from unittest.mock import MagicMock, patch
 from hermes_cli.plugins import VALID_HOOKS, PluginManager
-import os
-import shutil
-import tempfile
 from cli import HermesCLI
 
 
@@ -34,7 +30,8 @@ def test_session_finalize_on_reset(mock_invoke_hook):
 
 
 @patch("hermes_cli.plugins.invoke_hook")
-def test_session_finalize_on_cleanup(mock_invoke_hook):
+@patch("model_tools.shutdown_async_bridge_loop")
+def test_session_finalize_on_cleanup(mock_shutdown_bridge, mock_invoke_hook):
     """Verify on_session_finalize fires during CLI exit cleanup."""
     import cli as cli_mod
 
@@ -48,6 +45,7 @@ def test_session_finalize_on_cleanup(mock_invoke_hook):
     mock_invoke_hook.assert_any_call(
         "on_session_finalize", session_id="cleanup-session-id", platform="cli"
     )
+    mock_shutdown_bridge.assert_called_once()
 
 
 @patch("hermes_cli.plugins.invoke_hook")
