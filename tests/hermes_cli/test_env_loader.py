@@ -87,3 +87,21 @@ def test_main_import_applies_user_env_over_shell_values(tmp_path, monkeypatch):
 
     assert os.getenv("OPENAI_BASE_URL") == "https://new.example/v1"
     assert os.getenv("HERMES_INFERENCE_PROVIDER") == "custom"
+
+
+def test_env_loader_permission_error_is_graceful(tmp_path):
+    """PermissionError when reading .hermes/ dir should not crash (container fix)."""
+    home = tmp_path / "hermes"
+    home.mkdir()
+    env_file = home / ".env"
+    env_file.write_text("OPENAI_API_KEY=test\n", encoding="utf-8")
+    # Simulate root-owned .hermes dir that non-root user can't read
+    # (common in container setups)
+    home.chmod(0o000)
+
+    try:
+        # Should not raise PermissionError
+        loaded = load_hermes_dotenv(hermes_home=home)
+        assert loaded == []
+    finally:
+        home.chmod(0o755)  # cleanup so tmp_path can be removed

@@ -159,12 +159,16 @@ def load_hermes_dotenv(
     project_env_path = Path(project_env) if project_env else None
 
     # Fix corrupted .env files before python-dotenv parses them (#8908).
-    if user_env.exists():
+    try:
+        env_exists = user_env.exists()
+    except PermissionError:
+        env_exists = False
+    if env_exists:
         _sanitize_env_file_if_needed(user_env)
     if project_env_path and project_env_path.exists():
         _sanitize_env_file_if_needed(project_env_path)
 
-    if user_env.exists():
+    if env_exists:
         _load_dotenv_with_fallback(user_env, override=True)
         loaded.append(user_env)
 

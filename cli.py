@@ -12284,9 +12284,13 @@ def main(
     """
     global _active_worktree
 
-    # Signal to terminal_tool that we're in interactive mode
-    # This enables interactive sudo password prompts with timeout
-    os.environ["HERMES_INTERACTIVE"] = "1"
+    # Signal to terminal_tool that we're in interactive mode.
+    # Only set when both stdin and stdout are real terminals — not pipes
+    # used by automated callers (hermes chat -q, Paperclip heartbeats, cron, etc.).
+    # This prevents sudo password prompts and approval prompts in non-interactive
+    # contexts where no user is present to respond.
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        os.environ["HERMES_INTERACTIVE"] = "1"
     
     # Handle gateway mode (messaging + cron)
     if gateway:
