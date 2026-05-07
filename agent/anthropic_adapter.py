@@ -1689,27 +1689,43 @@ def convert_messages_to_anthropic(
         if m.get("role") != "assistant" or not isinstance(m.get("content"), list):
             continue
 
-        if _preserve_unsigned_thinking:
-            # Kimi's /coding and DeepSeek's /anthropic endpoints both enable
-            # thinking server-side and require unsigned thinking blocks on
-            # replayed assistant tool-call messages.  Strip signed Anthropic
-            # blocks (neither upstream can validate Anthropic signatures) but
-            # preserve the unsigned ones we synthesised from reasoning_content.
+        if _is_kimi_family_endpoint(base_url, model):
+            # Kimi returns thinking blocks with real non-empty signatures
+            # via the Anthropic SDK.  When replayed, Kimi rejects those
+            # signatures with HTTP 400 because they are opaque tokens it
+            # cannot re-validate.  However Kimi *requires* thinking blocks
+            # on tool-call messages for history validation.
+            #
+            # Fix: keep every thinking block's *content* but strip the
+            # ``signature`` and ``data`` fields.  Emit only
+            # ``{type, thinking}`` — the minimal shape Kimi accepts.
+            new_content = []
+            for b in m["content"]:
+                if not isinstance(b, dict) or b.get("type") not in _THINKING_TYPES:
+                    new_content.append(b)
+                    continue
+                thinking_text = b.get("thinking", "")
+                new_content.append({"type": b["type"], "thinking": thinking_text})
+            m["content"] = new_content or [{"type": "text", "text": "(empty)"}]
+        elif _preserve_unsigned_thinking:
+            # DeepSeek's /anthropic endpoint requires unsigned thinking
+            # blocks on replayed assistant tool-call messages.  Strip
+            # signed Anthropic blocks (DeepSeek can't validate Anthropic
+            # signatures) but preserve the unsigned ones we synthesised
+            # from reasoning_content.
             new_content = []
             for b in m["content"]:
                 if not isinstance(b, dict) or b.get("type") not in _THINKING_TYPES:
                     new_content.append(b)
                     continue
                 if b.get("signature") or b.get("data"):
-                    # Anthropic-signed block — upstream can't validate, strip
                     continue
-                # Unsigned thinking (synthesised from reasoning_content) —
-                # keep it: the upstream needs it for message-history validation.
                 new_content.append(b)
             m["content"] = new_content or [{"type": "text", "text": "(empty)"}]
         elif _is_third_party or idx != last_assistant_idx:
             # Third-party endpoint: strip ALL thinking blocks from every
-            # assistant message — signatures are Anthropic-proprietary.
+            # assistant message — signatures are Anthropic-proprietary and
+            # some providers reject unrecognised content block types.
             # Direct Anthropic: strip from non-latest assistant messages only.
             stripped = [
                 b for b in m["content"]
@@ -1893,24 +1909,17 @@ def build_anthropic_kwargs(
     # not adaptive).  Haiku does NOT support extended thinking — skip entirely.
     #
     # Kimi's /coding endpoint speaks the Anthropic Messages protocol but has
-    # its own thinking semantics: when ``thinking.enabled`` is sent, Kimi
-    # validates the message history and requires every prior assistant
-    # tool-call message to carry OpenAI-style ``reasoning_content``.  The
-    # Anthropic path never populates that field, and
-    # ``convert_messages_to_anthropic`` strips all Anthropic thinking blocks
-    # on third-party endpoints — so the request fails with HTTP 400
-    # "thinking is enabled but reasoning_content is missing in assistant
-    # tool call message at index N".  Kimi's reasoning is driven server-side
-    # on the /coding route, so skip Anthropic's thinking parameter entirely
-    # for that host.  (Kimi on chat_completions enables thinking via
-    # extra_body in the ChatCompletionsTransport — see #13503.)
-    #
     # On 4.7+ the `thinking.display` field defaults to "omitted", which
     # silently hides reasoning text that Hermes surfaces in its CLI. We
     # request "summarized" so the reasoning blocks stay populated — matching
     # 4.6 behavior and preserving the activity-feed UX during long tool runs.
-    _is_kimi_coding = _is_kimi_family_endpoint(base_url, model)
-    if reasoning_config and isinstance(reasoning_config, dict) and not _is_kimi_coding:
+    #
+    # NOTE: Previously skipped thinking for Kimi family endpoints due to
+    # tool-call reasoning_content validation issues (#13826).  Those issues
+    # have been resolved in convert_messages_to_anthropic — thinking blocks
+    # are now preserved (with signatures stripped) on assistant messages.
+    # Re-enable thinking so the Reasoning box displays correctly.
+    if reasoning_config and isinstance(reasoning_config, dict):
         if reasoning_config.get("enabled") is not False and "haiku" not in model.lower():
             effort = str(reasoning_config.get("effort", "medium")).lower()
             budget = THINKING_BUDGET.get(effort, 8000)
