@@ -809,9 +809,12 @@ function parseKeypress(s: string = ''): ParsedKey {
     key.name = 'return'
   } else if (s === '\t') {
     key.name = 'tab'
-  } else if (s === '\b' || s === '\x1b\b') {
+  } else if (s === '\b') {
     key.name = 'backspace'
-    key.meta = s.charAt(0) === '\x1b'
+    key.ctrl = true
+  } else if (s === '\x1b\b') {
+    key.name = 'backspace'
+    key.meta = true
   } else if (s === '\x7f' || s === '\x1b\x7f') {
     key.name = 'backspace'
     key.meta = s.charAt(0) === '\x1b'

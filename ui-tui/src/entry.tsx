@@ -20,6 +20,25 @@ if (!process.stdin.isTTY) {
 // terminal tab can still have mouse/focus/paste modes enabled.
 resetTerminalModes()
 
+// Enable two keyboard-protocol modes so Ctrl+modified keys (Backspace,
+// Delete, arrows, etc.) send unambiguous escape sequences instead of bare
+// bytes that look identical to their plain counterparts:
+//
+//   \x1b[>1u   Kitty Keyboard Protocol (CSI u) — pushes flag 1, "disambiguate
+//              escape codes". Terminal sends \x1b[127;5u for Ctrl+Backspace.
+//              Supported by: kitty, Ghostty, WezTerm, foot, Konsole, iTerm2,
+//              Windows Terminal (with keyboardEnhancement setting).
+//
+//   \x1b[>4;1m xterm modifyOtherKeys mode 1 — terminal sends \x1b[27;5;127~
+//              for Ctrl+Backspace. Supported by: xterm, VTE, Windows Terminal
+//              (no config needed), and most other xterm-compatible terminals.
+//
+// The TUI's input parser (parse-keypress.ts) handles both formats natively
+// and produces key.backspace=true / key.ctrl=true correctly.
+// Terminals that don't support these sequences silently ignore them.
+// Both are popped/restored by resetTerminalModes() on exit.
+process.stdout.write('\x1b[>1u\x1b[>4;1m')
+
 const gw = new GatewayClient()
 
 gw.start()
