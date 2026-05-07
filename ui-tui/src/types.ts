@@ -143,12 +143,14 @@ export interface McpServerStatus {
 export interface SessionInfo {
   cwd?: string
   fast?: boolean
+  lazy?: boolean
   mcp_servers?: McpServerStatus[]
   model: string
   reasoning_effort?: string
-  service_tier?: string
   release_date?: string
+  service_tier?: string
   skills: Record<string, string[]>
+  system_prompt?: string
   tools: Record<string, string[]>
   update_behind?: number | null
   update_command?: string
