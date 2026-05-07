@@ -145,6 +145,7 @@ from agent.model_metadata import (
     parse_available_output_tokens_from_error,
     save_context_length, is_local_endpoint,
     query_ollama_num_ctx,
+    model_requires_max_completion_tokens,
 )
 from agent.context_compressor import ContextCompressor
 from agent.subdirectory_hints import SubdirectoryHintTracker
@@ -3042,12 +3043,14 @@ class AIAgent:
         """Return the correct max tokens kwarg for the current provider.
 
         OpenAI's newer models (gpt-4o, o-series, gpt-5+) require
-        'max_completion_tokens'. Azure OpenAI also requires
-        'max_completion_tokens' for gpt-5.x models served via the
-        OpenAI-compatible endpoint. OpenRouter, local models, and older
-        OpenAI models use 'max_tokens'.
+        'max_completion_tokens' on api.openai.com, Azure, and any
+        OpenAI-compatible endpoint (OpenRouter, self-hosted, proxies).
+        Older OpenAI models (gpt-4-turbo, gpt-3.5-turbo, etc.) use
+        'max_tokens' on all endpoints.
         """
-        if self._is_direct_openai_url() or self._is_azure_openai_url():
+        if (self._is_direct_openai_url()
+                or self._is_azure_openai_url()
+                or model_requires_max_completion_tokens(self.model)):
             return {"max_completion_tokens": value}
         return {"max_tokens": value}
 
