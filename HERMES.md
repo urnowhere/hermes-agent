@@ -48,7 +48,7 @@ independently queryable via `python3 -m ops.<module>`.
 | Plugin | Location | Purpose |
 |---|---|---|
 | `model_observability` | `~/.hermes/plugins/model_observability/` | Logs model usage to `~/.hermes/logs/model_usage.jsonl`; verifies per-task model pinning in `delegate_task`; injects MISMATCH warnings inline. Query: `python ~/.hermes/scripts/model_usage.py` |
-| `hermes-lcm` | `~/.hermes/plugins/hermes-lcm/` | Lossless Context Management — hierarchical session compression. Current version: v0.8.0.8.0.8.0.8.0.8.0.8.0.8.0.8.0.8.0.8.0.8.0.8.0.8.0.8.0. Auto-updates Mondays 4AM via cron `f0e72a4cd297`. |
+| `hermes-lcm` | `~/.hermes/plugins/hermes-lcm/` | Lossless Context Management — hierarchical session compression. Current version: v0.8.0.8.0.8.0.8.0.8.0.8.0.8.0.8.0.8.0.8.0.8.0.8.0.8.0.8.0.8.0.8.0.8.0. Auto-updates Mondays 4AM via cron `f0e72a4cd297`. |
 
 ---
 
