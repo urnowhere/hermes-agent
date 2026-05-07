@@ -1183,6 +1183,10 @@ class GatewayRunner:
         # Track background tasks to prevent garbage collection mid-execution
         self._background_tasks: set = set()
 
+        # MemOS bridge daemon (TCP mode — serves viewer + memory provider)
+        from gateway.memos_daemon import MemosDaemonManager
+        self._memos_daemon = MemosDaemonManager()
+
 
     def _warn_if_docker_media_delivery_is_risky(self) -> None:
         """Warn when Docker-backed gateways lack an explicit export mount.
@@ -3160,6 +3164,11 @@ class GatewayRunner:
             )
         asyncio.create_task(self._platform_reconnect_watcher())
 
+        # Start MemOS daemon and heartbeat (ensures viewer is available)
+        if hasattr(self, "_memos_daemon"):
+            self._memos_daemon.ensure_running()
+            await self._memos_daemon.start_heartbeat()
+
         logger.info("Press Ctrl+C to stop")
         
         return True
@@ -4077,6 +4086,12 @@ class GatewayRunner:
                     continue
                 _task.cancel()
             self._background_tasks.clear()
+
+            # Stop MemOS daemon heartbeat and gracefully shut down the daemon
+            _memos = getattr(self, "_memos_daemon", None)
+            if _memos is not None:
+                await _memos.stop_heartbeat()
+                _memos.stop()
 
             self.adapters.clear()
             self._running_agents.clear()
