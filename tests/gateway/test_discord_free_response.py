@@ -1,5 +1,6 @@
 """Tests for Discord free-response defaults and mention gating."""
 
+import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -80,6 +81,15 @@ class FakeThread:
         self.parent_id = getattr(parent, "id", None)
         self.guild = getattr(parent, "guild", None) or SimpleNamespace(name=guild_name)
         self.topic = None
+
+
+class FakeMessage:
+    def __init__(self, message_id: int = 1):
+        self.id = message_id
+        self.edits = []
+
+    async def edit(self, *, content: str):
+        self.edits.append(content)
 
 
 @pytest.fixture
@@ -177,6 +187,55 @@ async def test_discord_forum_threads_are_handled_as_threads(adapter, monkeypatch
     assert event.source.thread_id == "456"
     assert event.source.chat_type == "thread"
     assert event.source.chat_name == "Hermes Server / support-forum / Can Hermes reply here?"
+
+
+@pytest.mark.asyncio
+async def test_discord_edit_message_uses_thread_metadata(adapter):
+    parent_channel = FakeTextChannel(channel_id=123, name="general")
+    thread_channel = FakeThread(channel_id=456, name="planning", parent=parent_channel)
+    message = FakeMessage(message_id=789)
+    thread_channel.fetch_message = AsyncMock(return_value=message)
+    adapter._client = SimpleNamespace(
+        get_channel=MagicMock(side_effect=lambda cid: thread_channel if cid == 456 else parent_channel),
+        fetch_channel=AsyncMock(return_value=None),
+    )
+
+    result = await adapter.edit_message(
+        chat_id="123",
+        message_id="789",
+        content="updated in thread",
+        metadata={"thread_id": "456"},
+    )
+
+    assert result.success is True
+    thread_channel.fetch_message.assert_awaited_once_with(789)
+    assert message.edits == ["updated in thread"]
+
+
+@pytest.mark.asyncio
+async def test_discord_send_typing_uses_thread_metadata(adapter, monkeypatch):
+    recorded = []
+
+    class FakeRoute:
+        def __init__(self, _method, _path, *, channel_id):
+            self.channel_id = channel_id
+
+    async def fake_request(route):
+        recorded.append(route.channel_id)
+        task = adapter._typing_tasks.get("123")
+        if task:
+            task.cancel()
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(discord_platform.discord.http, "Route", FakeRoute, raising=False)
+    adapter._client = SimpleNamespace(http=SimpleNamespace(request=fake_request))
+
+    await adapter.send_typing("123", metadata={"thread_id": "456"})
+    task = adapter._typing_tasks["123"]
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert recorded == ["456"]
 
 
 @pytest.mark.asyncio

@@ -134,15 +134,14 @@ class TestFinalizeCapabilityGate:
 
 
 class TestEditMessageFinalizeSignature:
-    """Every concrete platform adapter must accept the ``finalize`` kwarg.
+    """Every concrete platform adapter must accept shared edit kwargs.
 
-    stream_consumer._send_or_edit always passes ``finalize=`` to
-    ``adapter.edit_message(...)`` (see gateway/stream_consumer.py).  An
-    adapter that overrides edit_message without accepting finalize raises
-    TypeError the first time streaming hits a segment break or final edit.
-    Guard the contract with an explicit signature check so it cannot
-    silently regress — existing tests use MagicMock which swallows any
-    kwarg and cannot catch this.
+    stream_consumer._send_or_edit always passes ``finalize=`` and shared
+    callers may pass ``metadata=`` to ``adapter.edit_message(...)``. An
+    adapter that overrides edit_message without accepting either kwarg
+    raises TypeError at runtime. Guard the contract with an explicit
+    signature check so it cannot silently regress — existing tests use
+    MagicMock which swallows any kwarg and cannot catch this.
     """
 
     @pytest.mark.parametrize(
@@ -167,6 +166,10 @@ class TestEditMessageFinalizeSignature:
         assert "finalize" in params, (
             f"{class_name}.edit_message must accept 'finalize' kwarg; "
             f"stream_consumer._send_or_edit passes it unconditionally"
+        )
+        assert "metadata" in params, (
+            f"{class_name}.edit_message must accept 'metadata' kwarg; "
+            f"shared edit call sites pass thread/topic routing context"
         )
 
 
@@ -208,6 +211,23 @@ class TestSendOrEditMediaStripping:
         adapter.edit_message.assert_called_once()
         edited_text = adapter.edit_message.call_args[1]["content"]
         assert "MEDIA:" not in edited_text
+
+    @pytest.mark.asyncio
+    async def test_edit_preserves_metadata(self):
+        """Edit call forwards stored metadata so thread routing survives streaming."""
+        adapter = MagicMock()
+        send_result = SimpleNamespace(success=True, message_id="msg_1")
+        edit_result = SimpleNamespace(success=True)
+        adapter.send = AsyncMock(return_value=send_result)
+        adapter.edit_message = AsyncMock(return_value=edit_result)
+        adapter.MAX_MESSAGE_LENGTH = 4096
+
+        consumer = GatewayStreamConsumer(adapter, "chat_123", metadata={"thread_id": "thread-42"})
+        await consumer._send_or_edit("Starting response...")
+        await consumer._send_or_edit("Updated response")
+
+        adapter.edit_message.assert_called_once()
+        assert adapter.edit_message.call_args[1]["metadata"] == {"thread_id": "thread-42"}
 
     @pytest.mark.asyncio
     async def test_media_only_skips_send(self):

@@ -1527,15 +1527,17 @@ class DiscordAdapter(BasePlatformAdapter):
         message_id: str,
         content: str,
         *,
+        metadata=None,
         finalize: bool = False,
     ) -> SendResult:
         """Edit a previously sent Discord message."""
         if not self._client:
             return SendResult(success=False, error="Not connected")
         try:
-            channel = self._client.get_channel(int(chat_id))
+            target_chat_id = str((metadata or {}).get("thread_id") or chat_id)
+            channel = self._client.get_channel(int(target_chat_id))
             if not channel:
-                channel = await self._client.fetch_channel(int(chat_id))
+                channel = await self._client.fetch_channel(int(target_chat_id))
             msg = await channel.fetch_message(int(message_id))
             formatted = self.format_message(content)
             if len(formatted) > self.MAX_MESSAGE_LENGTH:
@@ -2583,13 +2585,15 @@ class DiscordAdapter(BasePlatformAdapter):
         if chat_id in self._typing_tasks:
             return
 
+        target_chat_id = str((metadata or {}).get("thread_id") or chat_id)
+
         async def _typing_loop() -> None:
             try:
                 while True:
                     try:
                         route = discord.http.Route(
                             "POST", "/channels/{channel_id}/typing",
-                            channel_id=chat_id,
+                            channel_id=target_chat_id,
                         )
                         await self._client.http.request(route)
                     except asyncio.CancelledError:

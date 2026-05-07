@@ -38,12 +38,13 @@ class ProgressCaptureAdapter(BasePlatformAdapter):
         )
         return SendResult(success=True, message_id="progress-1")
 
-    async def edit_message(self, chat_id, message_id, content) -> SendResult:
+    async def edit_message(self, chat_id, message_id, content, metadata=None) -> SendResult:
         self.edits.append(
             {
                 "chat_id": chat_id,
                 "message_id": message_id,
                 "content": content,
+                "metadata": metadata,
             }
         )
         return SendResult(success=True, message_id=message_id)
@@ -123,6 +124,23 @@ class DelayedProgressAgent:
         }
 
 
+class SlowProgressAgent:
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        self.tool_progress_callback("tool.started", "terminal", "first command", {})
+        time.sleep(1.8)
+        self.tool_progress_callback("tool.started", "terminal", "second command", {})
+        time.sleep(1.8)
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
 class DelayedInterimAgent:
     def __init__(self, **kwargs):
         self.interim_assistant_callback = kwargs.get("interim_assistant_callback")
@@ -173,7 +191,7 @@ async def test_run_agent_progress_stays_in_originating_topic(monkeypatch, tmp_pa
     monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
 
     fake_run_agent = types.ModuleType("run_agent")
-    fake_run_agent.AIAgent = FakeAgent
+    fake_run_agent.AIAgent = SlowProgressAgent
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
     import tools.terminal_tool  # noqa: F401 - register terminal emoji for this fake-agent test
 
@@ -202,12 +220,13 @@ async def test_run_agent_progress_stays_in_originating_topic(monkeypatch, tmp_pa
     assert adapter.sent == [
         {
             "chat_id": "-1001",
-            "content": '💻 terminal: "pwd"',
+            "content": '💻 terminal: "first command"',
             "reply_to": None,
             "metadata": {"thread_id": "17585"},
         }
     ]
     assert adapter.edits
+    assert any(call["metadata"] == {"thread_id": "17585"} for call in adapter.edits)
     assert all(call["metadata"] == {"thread_id": "17585"} for call in adapter.typing)
 
 
