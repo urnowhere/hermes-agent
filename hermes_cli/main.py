@@ -9817,9 +9817,10 @@ Examples:
     )
     _reset_parser.add_argument(
         "--target",
-        choices=["all", "memory", "user"],
+        choices=["all", "memory", "user", "conversations", "everything"],
         default="all",
-        help="Which store to reset: 'all' (default), 'memory', or 'user'",
+        help="Which store to reset: 'all' (default), 'memory', 'user', "
+             "'conversations' (state.db only), or 'everything'",
     )
 
     def cmd_memory(args):
@@ -9836,31 +9837,71 @@ Examples:
             print("  Saved to config.yaml\n")
         elif sub == "reset":
             from hermes_constants import get_hermes_home, display_hermes_home
+            import sqlite3 as _sqlite3
 
-            mem_dir = get_hermes_home() / "memories"
+            hermes_home = get_hermes_home()
+            mem_dir = hermes_home / "memories"
             target = getattr(args, "target", "all")
-            files_to_reset = []
-            if target in ("all", "memory"):
-                files_to_reset.append(("MEMORY.md", "agent notes"))
-            if target in ("all", "user"):
-                files_to_reset.append(("USER.md", "user profile"))
 
-            # Check what exists
+            # Determine what to reset
+            reset_files = target in ("all", "memory", "user", "everything")
+            reset_db = target in ("conversations", "everything")
+
+            # Build file list
+            files_to_reset = []
+            if reset_files:
+                if target in ("all", "memory", "everything"):
+                    files_to_reset.append(("MEMORY.md", "agent notes"))
+                if target in ("all", "user", "everything"):
+                    files_to_reset.append(("USER.md", "user profile"))
+
             existing = [
                 (f, desc) for f, desc in files_to_reset if (mem_dir / f).exists()
             ]
-            if not existing:
+
+            # Check DB
+            db_path = hermes_home / "state.db"
+            db_exists = reset_db and db_path.exists()
+            db_msg_count = 0
+            if db_exists:
+                _conn = None
+                try:
+                    _conn = _sqlite3.connect(str(db_path))
+                    result = _conn.execute(
+                        "SELECT name FROM sqlite_master "
+                        "WHERE type='table' AND name='messages'"
+                    ).fetchone()
+                    if result:
+                        db_msg_count = _conn.execute(
+                            "SELECT COUNT(*) FROM messages"
+                        ).fetchone()[0]
+                except Exception:
+                    db_exists = False
+                finally:
+                    if _conn:
+                        _conn.close()
+
+            # If nothing to reset, bail out
+            if not existing and not db_exists:
                 print(
-                    f"\n  Nothing to reset — no memory files found in {display_hermes_home()}/memories/\n"
+                    f"\n  Nothing to reset — no memory files or conversation "
+                    f"history found.\n"
                 )
                 return
 
-            print(f"\n  This will permanently erase the following memory files:")
+            # Show what will be reset
+            print(f"\n  This will permanently erase:")
             for f, desc in existing:
                 path = mem_dir / f
                 size = path.stat().st_size
                 print(f"    ◆ {f} ({desc}) — {size:,} bytes")
+            if db_exists:
+                print(
+                    f"    ◆ state.db (conversation history) — "
+                    f"{db_msg_count:,} messages"
+                )
 
+            # Confirmation
             if not getattr(args, "yes", False):
                 try:
                     answer = input("\n  Type 'yes' to confirm: ").strip().lower()
@@ -9871,14 +9912,45 @@ Examples:
                     print("  Cancelled.\n")
                     return
 
+            # Delete files
             for f, desc in existing:
                 (mem_dir / f).unlink()
                 print(f"  ✓ Deleted {f} ({desc})")
 
+            # Clear state.db
+            if db_exists:
+                conn = _sqlite3.connect(str(db_path))
+                try:
+                    conn.execute("PRAGMA foreign_keys = OFF")
+                    tables = conn.execute(
+                        "SELECT name FROM sqlite_master "
+                        "WHERE type='table' AND NOT name LIKE 'sqlite_%'"
+                    ).fetchall()
+                    total_deleted = 0
+                    for (table,) in tables:
+                        cursor = conn.execute(f"DELETE FROM {table}")
+                        total_deleted += cursor.rowcount
+                    conn.execute("PRAGMA foreign_keys = ON")
+                    conn.commit()
+                    print(
+                        f"  ✓ Cleared state.db "
+                        f"({total_deleted:,} rows across {len(tables)} tables)"
+                    )
+                except Exception as e:
+                    print(f"  ✗ Failed to clear state.db: {e}")
+                finally:
+                    conn.close()
+
+            # Summary
             print(
-                f"\n  Memory reset complete. New sessions will start with a blank slate."
+                f"\n  Memory reset complete. "
+                f"New sessions will start with a blank slate."
             )
-            print(f"  Files were in: {display_hermes_home()}/memories/\n")
+            if existing:
+                print(f"  Files were in: {display_hermes_home()}/memories/")
+            if db_exists:
+                print(f"  Database: {display_hermes_home()}/state.db")
+            print()
         else:
             from hermes_cli.memory_setup import memory_command
 
