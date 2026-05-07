@@ -1099,13 +1099,10 @@ class GatewayRunner:
         # Key: session_key, Value: True when a prompt is waiting for user input.
         self._update_prompt_pending: Dict[str, bool] = {}
 
-        # Slash-confirm state lives in tools.slash_confirm (module-level),
-        # so platform adapters can resolve callbacks without a backref to
-        # this runner.  Keep a local counter for confirm_id generation so
-        # IDs stay compact (button callback_data has a 64-byte cap on
-        # some platforms).
-        import itertools as _itertools
-        self._slash_confirm_counter = _itertools.count(1)
+        # Auto-updater state - loaded after config is available
+        self._home_channel: Optional[Dict[str, str]] = None
+        self._auto_updater: Optional[Any] = None
+        self._load_home_channel()
 
         # Persistent Honcho managers keyed by gateway session key.
         # This preserves write_frequency="session" semantics across short-lived
@@ -2162,6 +2159,91 @@ class GatewayRunner:
             pass
         return None
 
+    # --- Home channel tracking for auto-update notifications ---------------
+
+    def _load_home_channel(self) -> None:
+        """Load persisted home channel from disk."""
+        from hermes_cli.auto_update import _HOME_CHANNEL_FILE
+        path = _hermes_home / _HOME_CHANNEL_FILE
+        if path.exists():
+            try:
+                self._home_channel = json.loads(path.read_text())
+            except Exception:
+                self._home_channel = None
+        else:
+            self._home_channel = None
+
+    def _save_home_channel(self, platform: str, chat_id: str) -> None:
+        """Persist home channel to disk for post-update notifications."""
+        from hermes_cli.auto_update import _HOME_CHANNEL_FILE
+        channel = {"platform": platform, "chat_id": chat_id}
+        self._home_channel = channel
+        path = _hermes_home / _HOME_CHANNEL_FILE
+        try:
+            path.write_text(json.dumps(channel, indent=2))
+        except Exception as e:
+            logger.warning("Failed to save home channel: %s", e)
+
+    def _capture_home_channel(self, platform: "Platform", chat_id: str, text: str) -> None:
+        """Capture the home channel on first valid user message.
+
+        Called at the start of _handle_message to record where to send
+        post-update notifications.
+        """
+        # Only capture on non-empty user messages
+        if not text or not text.strip():
+            return
+        if self._home_channel is not None:
+            return  # Already captured
+        if not chat_id:
+            return
+        self._save_home_channel(platform.value if hasattr(platform, "value") else str(platform), chat_id)
+
+    async def _check_post_update_notification(self) -> bool:
+        """Check for post-update manifest and notify user.
+
+        Returns True if a notification was sent.
+        """
+        from hermes_cli.auto_update import _UPDATE_MANIFEST_FILE
+        manifest_path = _hermes_home / _UPDATE_MANIFEST_FILE
+        if not manifest_path.exists():
+            return False
+
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except Exception:
+            manifest_path.unlink(missing_ok=True)
+            return False
+
+        home_channel = manifest.get("home_channel")
+        if not home_channel:
+            manifest_path.unlink(missing_ok=True)
+            return False
+
+        platform_str = home_channel.get("platform")
+        chat_id = home_channel.get("chat_id")
+        if not platform_str or not chat_id:
+            manifest_path.unlink(missing_ok=True)
+            return False
+
+        version = manifest.get("version", "unknown")
+        commits = manifest.get("commits", 0)
+        message = (
+            f"Auto-update complete! Now running v{version} "
+            f"({commits} commit{'s' if commits != 1 else ''} behind)."
+        )
+
+        try:
+            platform = Platform(platform_str)
+            adapter = self.adapters.get(platform)
+            if adapter:
+                await adapter.send_message(chat_id, message)
+        except Exception as e:
+            logger.warning("Post-update notification failed: %s", e)
+
+        manifest_path.unlink(missing_ok=True)
+        return True
+
     def _snapshot_running_agents(self) -> Dict[str, Any]:
         return {
             session_key: agent
@@ -3126,6 +3208,15 @@ class GatewayRunner:
             await self._send_home_channel_startup_notifications(
                 skip_targets=skip_home_targets,
             )
+
+        # Check for post-update notification (non-blocking)
+        # This handles the case where an auto-update was applied and we need
+        # to notify the user after the gateway restarts.
+        if connected_count > 0:
+            try:
+                await self._check_post_update_notification()
+            except Exception:
+                pass
 
         # Drain any recovered process watchers (from crash recovery checkpoint)
         try:
@@ -4677,6 +4768,9 @@ class GatewayRunner:
         # Internal events (e.g. background-process completion notifications)
         # are system-generated and must skip user authorization.
         is_internal = bool(getattr(event, "internal", False))
+
+        # Auto-update: capture home channel on first valid user message
+        self._capture_home_channel(source.platform, source.chat_id, event.text or "")
 
         # Fire pre_gateway_dispatch plugin hook for user-originated messages.
         # Plugins receive the MessageEvent and may return a dict influencing flow:

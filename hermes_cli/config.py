@@ -464,7 +464,18 @@ DEFAULT_CONFIG = {
         "image_input_mode": "auto",
         "disabled_toolsets": [],
     },
-    
+
+    # Auto-update configuration for hermes-agent.
+    # When enabled, the gateway can automatically check for and apply
+    # updates from the official NousResearch/hermes-agent repository.
+    # Fork detection is automatic - updates are skipped on forks.
+    "auto_update": {
+        "enabled": False,
+        "mode": "notify",  # "notify" = tell user, "apply" = auto-apply
+        "check_interval": "24h",  # 1h, 6h, 12h, 24h, 48h, 72h
+        "grace_period_seconds": 300,  # minimum 5 min between auto-updates
+    },
+
     "terminal": {
         "backend": "local",
         "modal_mode": "auto",

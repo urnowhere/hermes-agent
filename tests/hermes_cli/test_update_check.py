@@ -151,3 +151,29 @@ def test_invalidate_update_cache_no_profiles_dir(tmp_path):
         _invalidate_update_cache()
 
     assert not (default_home / ".update_check").exists()
+
+
+def test_check_for_updates_uncached_bypasses_cache(tmp_path, monkeypatch):
+    """check_for_updates_uncached should never read/write the cache file."""
+    from hermes_cli.banner import check_for_updates_uncached
+
+    # Create a fake git repo with an expired cache
+    repo_dir = tmp_path / "hermes-agent"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    cache_file = tmp_path / ".update_check"
+    cache_file.write_text(json.dumps({"ts": 0, "behind": 999}))  # Stale cache
+
+    mock_result = MagicMock(returncode=0, stdout="3\n")
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    with patch("hermes_cli.banner.subprocess.run", return_value=mock_result) as mock_run:
+        result = check_for_updates_uncached()
+
+    # Should return fresh value from git, not cache
+    assert result == 3
+    # Should call git fetch AND git rev-list (2 calls total)
+    assert mock_run.call_count == 2
+    # Cache file should NOT have been created or updated
+    # (the uncached version doesn't write to cache)
