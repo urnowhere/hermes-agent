@@ -9,7 +9,9 @@ import { transcriptBodyWidth, transcriptGutterWidth } from '../lib/inputMetrics.
 import {
   boundedHistoryRenderText,
   boundedLiveRenderText,
+  cappedSystemPromptText,
   compactPreview,
+  fmtK,
   hasAnsi,
   isPasteBackedText,
   stripAnsi
@@ -118,6 +120,7 @@ export const MessageLine = memo(function MessageLine({
     // contain Rich markup escape codes that would otherwise hit <Ansi> full render.
     if (systemIsLong) {
       const firstLine = (msg.text.split('\n')[0] ?? '').trim().slice(0, 120) || '(system message)'
+      const capped = systemOpen ? cappedSystemPromptText(msg.text) : null
 
       return (
         <Box flexDirection="column">
@@ -129,7 +132,13 @@ export const MessageLine = memo(function MessageLine({
               {msg.text.length.toLocaleString()} chars
             </Text>
           </Box>
-          {systemOpen && <Ansi>{msg.text}</Ansi>}
+          {capped && <Ansi>{capped.text}</Ansi>}
+          {capped?.truncated && (
+            <Text color={t.color.muted} dimColor>
+              … {fmtK(capped.omittedChars)} more chars
+              {capped.omittedLines > 0 ? ` / ${fmtK(capped.omittedLines)} lines` : ''} hidden
+            </Text>
+          )}
         </Box>
       )
     }
