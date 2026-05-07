@@ -464,6 +464,74 @@ class TestAdapterFallbackIps:
         adapter = self._make_adapter(extra={"fallback_ips": ["149.154.167.220", "not-valid"]})
         assert adapter._fallback_ips() == ["149.154.167.220"]
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("extra", [None, {"fallback_ips": ["149.154.167.220"]}])
+    async def test_disable_env_skips_fallback_resolution_during_connect(self, monkeypatch, extra):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock
+
+        from gateway.platforms import telegram as telegram_mod
+
+        adapter = self._make_adapter(extra=extra)
+        monkeypatch.setattr(adapter, "_acquire_platform_lock", lambda *args: True)
+        monkeypatch.setattr(adapter, "_release_platform_lock", lambda: None)
+        monkeypatch.setattr(adapter, "_setup_dm_topics", AsyncMock())
+        monkeypatch.setenv("HERMES_TELEGRAM_DISABLE_FALLBACK_IPS", "1")
+
+        discover = AsyncMock(return_value=["149.154.167.221"])
+        monkeypatch.setattr(telegram_mod, "discover_fallback_ips", discover)
+
+        resolved_targets = []
+
+        def fake_resolve_proxy_url(platform_env_var, *, target_hosts=None):
+            resolved_targets.append((platform_env_var, list(target_hosts or [])))
+            return None
+
+        monkeypatch.setattr(telegram_mod, "resolve_proxy_url", fake_resolve_proxy_url)
+
+        request_kwargs = []
+
+        def fake_httpx_request(**kwargs):
+            request_kwargs.append(kwargs)
+            return MagicMock()
+
+        monkeypatch.setattr(telegram_mod, "HTTPXRequest", fake_httpx_request)
+
+        bot = SimpleNamespace(
+            delete_webhook=AsyncMock(),
+            set_my_commands=AsyncMock(),
+        )
+        updater = SimpleNamespace(
+            start_polling=AsyncMock(),
+            stop=AsyncMock(),
+            running=True,
+        )
+        app = SimpleNamespace(
+            bot=bot,
+            updater=updater,
+            add_handler=MagicMock(),
+            initialize=AsyncMock(),
+            start=AsyncMock(),
+        )
+        builder = MagicMock()
+        builder.token.return_value = builder
+        builder.request.return_value = builder
+        builder.get_updates_request.return_value = builder
+        builder.build.return_value = app
+        monkeypatch.setattr(
+            telegram_mod,
+            "Application",
+            SimpleNamespace(builder=MagicMock(return_value=builder)),
+        )
+
+        ok = await adapter.connect()
+
+        assert ok is True
+        discover.assert_not_awaited()
+        assert resolved_targets == [("TELEGRAM_PROXY", ["api.telegram.org"])]
+        assert request_kwargs
+        assert all("httpx_kwargs" not in kwargs for kwargs in request_kwargs)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # DoH auto-discovery
