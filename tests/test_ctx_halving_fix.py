@@ -296,6 +296,39 @@ class TestContextNotHalvedOnOutputCapError:
         new_ctx = get_next_probe_tier(200_000)
         assert new_ctx == 128_000
 
+    def test_untrusted_probe_below_current_prompt_keeps_context(self):
+        """Do not step down to a guessed tier below the prompt being recovered."""
+        from run_agent import _should_keep_context_length_on_untrusted_probe
+
+        assert _should_keep_context_length_on_untrusted_probe(
+            parsed_limit=None,
+            old_ctx=1_050_000,
+            new_ctx=128_000,
+            approx_tokens=285_378,
+        )
+
+    def test_parseable_provider_limit_is_trusted_even_below_prompt(self):
+        """A concrete provider limit is more authoritative than local estimates."""
+        from run_agent import _should_keep_context_length_on_untrusted_probe
+
+        assert not _should_keep_context_length_on_untrusted_probe(
+            parsed_limit=128_000,
+            old_ctx=1_050_000,
+            new_ctx=128_000,
+            approx_tokens=285_378,
+        )
+
+    def test_untrusted_probe_above_current_prompt_can_step_down(self):
+        """Keep existing probe behavior when the guessed tier can fit the prompt."""
+        from run_agent import _should_keep_context_length_on_untrusted_probe
+
+        assert not _should_keep_context_length_on_untrusted_probe(
+            parsed_limit=None,
+            old_ctx=1_050_000,
+            new_ctx=400_000,
+            approx_tokens=285_378,
+        )
+
     def test_output_cap_error_safety_margin(self):
         """The ephemeral value includes a 64-token safety margin below available_out."""
         from agent.model_metadata import parse_available_output_tokens_from_error

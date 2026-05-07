@@ -2953,6 +2953,51 @@ class TestRunConversation:
         assert result["final_response"] == "Recovered after compression"
         assert result["completed"] is True
 
+    def test_untrusted_probe_below_prompt_keeps_known_context_length(self, agent):
+        """Do not shrink a known large context below the prompt being recovered.
+
+        Codex can report a context overflow without a parseable limit.  If the
+        local prompt estimate is already above the guessed next tier, keep the
+        known model window and compress instead of forcing a 128K artificial
+        window.
+        """
+        self._setup_agent(agent)
+        agent.provider = "openai-codex"
+        agent.model = "gpt-5.4"
+        agent.base_url = "https://chatgpt.com/backend-api/codex"
+        agent.context_compressor.context_length = 1_050_000
+        agent.context_compressor.threshold_tokens = int(
+            agent.context_compressor.context_length * agent.context_compressor.threshold_percent
+        )
+
+        err_400 = Exception("Your input exceeds the context window of this model.")
+        err_400.status_code = 400
+        ok_resp = _mock_response(content="Recovered after compression", finish_reason="stop")
+        agent.client.chat.completions.create.side_effect = [err_400, ok_resp]
+        prefill = [
+            {"role": "user", "content": "previous question"},
+            {"role": "assistant", "content": "previous answer"},
+        ]
+
+        with (
+            patch("run_agent.estimate_messages_tokens_rough", return_value=285_378),
+            patch.object(agent, "_compress_context") as mock_compress,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            mock_compress.return_value = (
+                [{"role": "user", "content": "hello"}],
+                "compressed system prompt",
+            )
+            result = agent.run_conversation("hello", conversation_history=prefill)
+
+        mock_compress.assert_called_once()
+        assert agent.context_compressor.context_length == 1_050_000
+        assert agent.context_compressor._context_probed is False
+        assert result["final_response"] == "Recovered after compression"
+        assert result["completed"] is True
+
     def test_non_minimax_delta_overflow_still_probes_down(self, agent):
         """Non-MiniMax providers should keep the generic probe-down behavior."""
         self._setup_agent(agent)

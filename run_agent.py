@@ -882,6 +882,29 @@ def _qwen_portal_headers() -> dict:
     }
 
 
+def _should_keep_context_length_on_untrusted_probe(
+    *,
+    parsed_limit: Optional[int],
+    old_ctx: int,
+    new_ctx: Optional[int],
+    approx_tokens: Optional[int],
+) -> bool:
+    """Return True when a guessed probe tier is less credible than current usage.
+
+    If the provider gives a concrete parseable limit, trust it.  When Hermes is
+    only guessing the next probe tier, do not shrink the model window below the
+    prompt we are actively trying to recover from; that usually creates an
+    artificial overflow loop rather than useful compression.
+    """
+    if parsed_limit is not None:
+        return False
+    if not new_ctx or new_ctx >= old_ctx:
+        return False
+    if not approx_tokens or approx_tokens <= 0:
+        return False
+    return new_ctx < approx_tokens
+
+
 class AIAgent:
     """
     AI Agent with tool calling capabilities.
@@ -12760,6 +12783,23 @@ class AIAgent:
                             # Step down to the next probe tier
                             new_ctx = get_next_probe_tier(old_ctx)
 
+                        kept_untrusted_probe = _should_keep_context_length_on_untrusted_probe(
+                            parsed_limit=parsed_limit,
+                            old_ctx=old_ctx,
+                            new_ctx=new_ctx,
+                            approx_tokens=approx_tokens,
+                        )
+                        if kept_untrusted_probe:
+                            attempted_ctx = new_ctx
+                            new_ctx = old_ctx
+                            self._vprint(
+                                f"{self.log_prefix}Provider did not report a parseable context limit; "
+                                f"keeping context_length at {old_ctx:,} tokens instead of "
+                                f"probing down to {attempted_ctx:,}, which is below the "
+                                f"current prompt estimate (~{approx_tokens:,}).",
+                                force=True,
+                            )
+
                         if new_ctx and new_ctx < old_ctx:
                             compressor.update_model(
                                 model=self.model,
@@ -12781,6 +12821,8 @@ class AIAgent:
                                     parsed_limit and parsed_limit == new_ctx
                                 )
                             self._vprint(f"{self.log_prefix}⚠️  Context length exceeded — stepping down: {old_ctx:,} → {new_ctx:,} tokens", force=True)
+                        elif kept_untrusted_probe:
+                            self._vprint(f"{self.log_prefix}⚠️  Context length exceeded — keeping current context tier and attempting compression...", force=True)
                         else:
                             self._vprint(f"{self.log_prefix}⚠️  Context length exceeded at minimum tier — attempting compression...", force=True)
 
