@@ -1259,19 +1259,23 @@ def _launch_tui(
     # Guarantee an 8GB V8 heap + exposed GC for the TUI. Default node cap is
     # ~1.5–4GB depending on version and can fatal-OOM on long sessions with
     # large transcripts / reasoning blobs. Token-level merge: respect any
-    # user-supplied --max-old-space-size (they may have set it higher) and
-    # avoid duplicating --expose-gc.
+    # user-supplied --max-old-space-size (they may have set it higher).
+    # Note: --expose-gc is NOT allowed in NODE_OPTIONS (Node security policy),
+    # so it is injected directly into argv below instead.
     _tokens = env.get("NODE_OPTIONS", "").split()
     if not any(t.startswith("--max-old-space-size=") for t in _tokens):
         _tokens.append("--max-old-space-size=8192")
-    if "--expose-gc" not in _tokens:
-        _tokens.append("--expose-gc")
+    # Strip --expose-gc from NODE_OPTIONS if a previous version set it there
+    _tokens = [t for t in _tokens if t != "--expose-gc"]
     env["NODE_OPTIONS"] = " ".join(_tokens)
     if resume_session_id:
         env["HERMES_TUI_RESUME"] = resume_session_id
 
     argv, cwd = _make_tui_argv(tui_dir, tui_dev)
     code: Optional[int] = None
+    # Inject --expose-gc directly into the node command (not NODE_OPTIONS)
+    if argv and argv[0].endswith("node") and len(argv) > 1:
+        argv = [argv[0], "--expose-gc"] + argv[1:]
     try:
         try:
             code = subprocess.call(argv, cwd=str(cwd), env=env)
