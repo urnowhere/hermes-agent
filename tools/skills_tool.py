@@ -671,19 +671,28 @@ def _load_category_description(category_dir: Path) -> Optional[str]:
         return None
 
 
-def skills_list(category: str = None, task_id: str = None) -> str:
+def skills_list(
+    category: str = None,
+    limit: int = None,
+    offset: int = 0,
+    include_descriptions: bool = True,
+    task_id: str = None,
+) -> str:
     """
-    List all available skills (progressive disclosure tier 1 - minimal metadata).
+    List available skills (progressive disclosure tier 1).
 
-    Returns only name + description to minimize token usage. Use skill_view() to
-    load full content, tags, related files, etc.
+    Supports optional pagination to prevent oversized payloads in large
+    installations.
 
     Args:
         category: Optional category filter (e.g., "mlops")
+        limit: Optional max number of skills to return
+        offset: Number of skills to skip before returning results
+        include_descriptions: Include description field in each skill result
         task_id: Optional task identifier used to probe the active backend
 
     Returns:
-        JSON string with minimal skill info: name, description, category
+        JSON string with minimal skill info and pagination metadata.
     """
     try:
         if not SKILLS_DIR.exists():
@@ -719,17 +728,49 @@ def skills_list(category: str = None, task_id: str = None) -> str:
         # Sort by category then name
         all_skills = _sort_skills(all_skills)
 
-        # Extract unique categories
-        categories = sorted(
-            set(s.get("category") for s in all_skills if s.get("category"))
-        )
+        # Extract unique categories from the filtered set
+        categories = sorted(set(s.get("category") for s in all_skills if s.get("category")))
+
+        # Validate pagination inputs
+        if offset is None:
+            offset = 0
+        if not isinstance(offset, int):
+            return tool_error("offset must be an integer >= 0", success=False)
+        if offset < 0:
+            return tool_error("offset must be >= 0", success=False)
+
+        if limit is not None:
+            if not isinstance(limit, int):
+                return tool_error("limit must be an integer > 0", success=False)
+            if limit <= 0:
+                return tool_error("limit must be > 0", success=False)
+
+        total_count = len(all_skills)
+        if limit is None:
+            paged_skills = all_skills[offset:]
+        else:
+            paged_skills = all_skills[offset : offset + limit]
+
+        if not include_descriptions:
+            paged_skills = [
+                {"name": s["name"], "category": s.get("category")} for s in paged_skills
+            ]
+
+        returned_count = len(paged_skills)
+        next_offset = offset + returned_count
+        has_more = next_offset < total_count
 
         return json.dumps(
             {
                 "success": True,
-                "skills": all_skills,
+                "skills": paged_skills,
                 "categories": categories,
-                "count": len(all_skills),
+                "count": total_count,
+                "returned_count": returned_count,
+                "offset": offset,
+                "limit": limit,
+                "has_more": has_more,
+                "next_offset": next_offset if has_more else None,
                 "hint": "Use skill_view(name) to see full content, tags, and linked files",
             },
             ensure_ascii=False,
@@ -1455,14 +1496,26 @@ if __name__ == "__main__":
 
 SKILLS_LIST_SCHEMA = {
     "name": "skills_list",
-    "description": "List available skills (name + description). Use skill_view(name) to load full content.",
+    "description": "List available skills (name + description by default). Supports pagination to avoid oversized payloads.",
     "parameters": {
         "type": "object",
         "properties": {
             "category": {
                 "type": "string",
                 "description": "Optional category filter to narrow results",
-            }
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of skills to return",
+            },
+            "offset": {
+                "type": "integer",
+                "description": "Skip the first N skills (for pagination)",
+            },
+            "include_descriptions": {
+                "type": "boolean",
+                "description": "When false, return only skill names and categories",
+            },
         },
         "required": [],
     },
@@ -1492,7 +1545,11 @@ registry.register(
     toolset="skills",
     schema=SKILLS_LIST_SCHEMA,
     handler=lambda args, **kw: skills_list(
-        category=args.get("category"), task_id=kw.get("task_id")
+        category=args.get("category"),
+        limit=args.get("limit"),
+        offset=args.get("offset", 0),
+        include_descriptions=args.get("include_descriptions", True),
+        task_id=kw.get("task_id"),
     ),
     check_fn=check_skills_requirements,
     emoji="📚",

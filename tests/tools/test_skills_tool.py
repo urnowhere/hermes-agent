@@ -331,6 +331,65 @@ class TestSkillsList:
         assert result["categories"] == ["linked"]
         assert result["skills"][0]["name"] == "knowledge-brain"
 
+    def test_pagination_limit_and_offset(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "alpha")
+            _make_skill(tmp_path, "beta")
+            _make_skill(tmp_path, "gamma")
+            raw = skills_list(limit=2, offset=1)
+
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert result["count"] == 3
+        assert result["returned_count"] == 2
+        assert result["offset"] == 1
+        assert result["limit"] == 2
+        assert result["has_more"] is False
+        assert [s["name"] for s in result["skills"]] == ["beta", "gamma"]
+
+    def test_pagination_has_more_and_next_offset(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "alpha")
+            _make_skill(tmp_path, "beta")
+            _make_skill(tmp_path, "gamma")
+            raw = skills_list(limit=1, offset=1)
+
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert result["count"] == 3
+        assert result["returned_count"] == 1
+        assert result["has_more"] is True
+        assert result["next_offset"] == 2
+        assert [s["name"] for s in result["skills"]] == ["beta"]
+
+    def test_include_descriptions_false(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "alpha")
+            raw = skills_list(include_descriptions=False)
+
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert "description" not in result["skills"][0]
+        assert result["skills"][0]["name"] == "alpha"
+
+    def test_invalid_limit_returns_error(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "alpha")
+            raw = skills_list(limit=0)
+
+        result = json.loads(raw)
+        assert result["success"] is False
+        assert "limit must be > 0" in result["error"]
+
+    def test_invalid_offset_returns_error(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "alpha")
+            raw = skills_list(offset=-1)
+
+        result = json.loads(raw)
+        assert result["success"] is False
+        assert "offset must be >= 0" in result["error"]
+
 
 # ---------------------------------------------------------------------------
 # skill_view
