@@ -100,6 +100,18 @@ class TestDiscoverAndLoad:
 
         assert len(reg.loaded_hooks) == 0
 
+    def test_has_handlers_includes_user_and_builtin_handlers(self, tmp_path):
+        _create_hook(tmp_path, "my-hook", '["command:*"]',
+                      "def handle(e, c): pass\n")
+
+        reg = HookRegistry()
+        with patch("gateway.hooks.HOOKS_DIR", tmp_path):
+            reg.discover_and_load()
+
+        assert reg.has_handlers("agent:step") is True
+        assert reg.has_handlers("command:reset") is True
+        assert reg.has_handlers("unknown:event") is False
+
     def test_multiple_hooks(self, tmp_path):
         _create_hook(tmp_path, "hook-a", '["agent:start"]',
                       "def handle(e, c): pass\n")
