@@ -89,6 +89,32 @@ VALID_HOOKS: Set[str] = {
     "on_session_finalize",
     "on_session_reset",
     "subagent_stop",
+    # Outbound pre-send hook. Fired once per outbound message before the
+    # platform adapter dispatches it to the messaging API. Symmetric with
+    # ``pre_gateway_dispatch`` (which intercepts INBOUND messages); this
+    # hook intercepts OUTBOUND messages so plugins can transform / sanitize
+    # / log content on the way out.
+    #
+    # Plugins may return a value to mutate ``content`` before the adapter
+    # sends it:
+    #   "rewritten content..."         -> plain string replaces content
+    #   {"content": "rewritten..."}    -> dict form, equivalent
+    #   None / no return                -> content unchanged
+    #
+    # Last non-None return wins if multiple plugins are registered (callers
+    # should chain transformations in registration order — same semantics
+    # as pre_llm_call context injection).
+    #
+    # Kwargs:
+    #   platform: str (adapter class name, e.g. "FeishuAdapter")
+    #   chat_id:  str
+    #   content:  str
+    #   metadata: dict (may be empty)
+    #
+    # Adapter authors opt in by calling ``self._fire_pre_outbound_send_hooks(
+    # content, chat_id, metadata)`` at the start of ``send()`` and using the
+    # returned content. See ``gateway/platforms/base.py`` for the helper.
+    "pre_outbound_send",
     # Gateway pre-dispatch hook. Fired once per incoming MessageEvent
     # after the internal-event guard but BEFORE auth/pairing and agent
     # dispatch. Plugins may return a dict to influence flow:

@@ -1705,6 +1705,10 @@ class FeishuAdapter(BasePlatformAdapter):
         if not self._client:
             return SendResult(success=False, error="Not connected")
 
+        # Fire pre_outbound_send plugin hook -- plugins may rewrite content
+        # (e.g. format normalization, redaction). See base._fire_pre_outbound_send_hooks.
+        content = await self._fire_pre_outbound_send_hooks(content, chat_id, metadata)
+
         formatted = self.format_message(content)
         chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
         last_response = None

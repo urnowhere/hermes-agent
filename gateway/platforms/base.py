@@ -1430,17 +1430,61 @@ class BasePlatformAdapter(ABC):
     ) -> SendResult:
         """
         Send a message to a chat.
-        
+
         Args:
             chat_id: The chat/channel ID to send to
             content: Message content (may be markdown)
             reply_to: Optional message ID to reply to
             metadata: Additional platform-specific options
-        
+
         Returns:
             SendResult with success status and message ID
         """
         pass
+
+    async def _fire_pre_outbound_send_hooks(
+        self,
+        content: str,
+        chat_id: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Fire ``pre_outbound_send`` plugin hook and return possibly-mutated content.
+
+        Symmetric with the ``pre_gateway_dispatch`` inbound hook: plugins
+        registered for ``pre_outbound_send`` may return a string or a
+        ``{"content": str}`` dict to rewrite the outgoing message before
+        the adapter dispatches it. Returning ``None`` (or registering no
+        callback) leaves content unchanged.
+
+        Adapter implementations call this at the start of ``send()`` and
+        use the returned string in place of the input content. See
+        ``gateway/platforms/feishu.py`` for an example.
+
+        Hook failures are logged and swallowed -- a misbehaving plugin
+        cannot block outbound delivery.
+        """
+        try:
+            from hermes_cli.plugins import invoke_hook  # local import: avoid CLI dep at module load
+        except Exception:
+            return content
+        try:
+            results = invoke_hook(
+                "pre_outbound_send",
+                platform=type(self).__name__,
+                chat_id=chat_id,
+                content=content,
+                metadata=metadata or {},
+            )
+        except Exception as exc:
+            logger.warning("pre_outbound_send hook dispatch failed: %s", exc)
+            return content
+        for ret in results:
+            if isinstance(ret, str):
+                content = ret
+            elif isinstance(ret, dict) and isinstance(ret.get("content"), str):
+                content = ret["content"]
+            # Other return shapes are ignored -- documented in plugins.py.
+        return content
 
     # Default: the adapter treats ``finalize=True`` on edit_message as a
     # no-op and is happy to have the stream consumer skip redundant final
