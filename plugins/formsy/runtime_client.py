@@ -27,15 +27,24 @@ class RuntimeClient:
     def __init__(
         self,
         base_url: str,
+        memory_search_endpoint: str = "/api/v1/query",
         api_key_env: str = "FORMALCC_API_KEY",
         timeout_s: int = 30,
         max_retries: int = 3,
     ):
         self.base_url = base_url.rstrip("/")
+        self.memory_search_endpoint = self._normalize_endpoint(memory_search_endpoint)
         self.timeout_s = timeout_s
         self.max_retries = max_retries
         self.auth_manager = AuthManager(api_key_env)
         self._client: Optional[httpx.AsyncClient] = None
+
+    @staticmethod
+    def _normalize_endpoint(endpoint: str) -> str:
+        endpoint = str(endpoint or "").strip()
+        if not endpoint:
+            return "/api/v1/query"
+        return endpoint if endpoint.startswith("/") else f"/{endpoint}"
 
     async def __aenter__(self):
         """Async context manager entry."""
@@ -237,20 +246,31 @@ class RuntimeClient:
         return CompileResponse(bundle=response_data)
     
     async def memory_search(
-        self, workspace_id: str, session_id: str, query: str, top_k: int = 5, limit: Optional[int] = None
+        self,
+        repo_id: str,
+        session_id: str,
+        query: str,
+        revision: str = "latest",
+        budget: int = 4000,
+        enable_profiling: bool = False,
+        profiling_top_n: int = 20,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Call memory search endpoint (for tool calls)."""
         logger.debug(f"Memory search: query={query[:50]}...")
-        effective_top_k = limit if limit is not None else top_k
+        request_body = {
+            "repo_id": repo_id,
+            "query": query,
+            "revision": revision,
+            "budget": budget,
+            "enable_profiling": enable_profiling,
+            "profiling_top_n": profiling_top_n,
+            "metadata": metadata or {"instance_id": repo_id},
+        }
         
         return await self._request(
             "POST",
-            "/v1/runtime/memory/search",
-            data={
-                "workspace_id": workspace_id,
-                "session_id": session_id,
-                "query": query,
-                "top_k": effective_top_k,
-            },
+            self.memory_search_endpoint,
+            data=request_body,
             session_id=session_id,
         )

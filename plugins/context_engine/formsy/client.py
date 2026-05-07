@@ -54,18 +54,20 @@ class EngineClient:
 
     async def memory_search(
         self,
-        workspace_id: str,
+        repo_id: str,
         session_id: str,
         query: str,
-        limit: int = 5,
+        revision: str = "latest",
+        budget: int = 4000,
     ) -> Optional[dict[str, Any]]:
         """Search Formsy memory/context for relevant snippets."""
         try:
             return await self.runtime_client.memory_search(
-                workspace_id=workspace_id,
+                repo_id=repo_id,
                 session_id=session_id,
                 query=query,
-                limit=limit,
+                revision=revision,
+                budget=budget,
             )
         except (RuntimeAPIError, FormalCCTimeoutError) as e:
             logger.warning(f"Memory search failed: {e}")

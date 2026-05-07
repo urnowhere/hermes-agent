@@ -50,6 +50,7 @@ class FormsyContextEngine(ContextEngine):
 
         self._runtime_client = RuntimeClient(
             base_url=self._config.base_url,
+            memory_search_endpoint=self._config.memory_search_endpoint,
             api_key_env=self._config.api_key_env,
             timeout_s=self._config.timeout_s,
             max_retries=self._config.max_retries,
@@ -137,9 +138,15 @@ class FormsyContextEngine(ContextEngine):
             {
                 "name": "memory_search",
                 "description": (
-                    "Search Formsy's compiled memory/context for information "
-                    "relevant to a natural-language query. Use this before "
-                    "broad source-code content searches when Formsy is enabled."
+                    "Search Formsy's compiled code memory/context for information "
+                    "relevant to a natural-language query. Use memory_search proactively "
+                    "and repeatedly to understand the codebase faster. Prefer several "
+                    "targeted queries, such as symbols, file paths, PR behavior, call flow, "
+                    "and edge cases, over one broad query. The memory compile step has "
+                    "already completed before the task starts, so this tool is ready to "
+                    "use immediately. For SWE-bench tasks, pass repo_id and revision from "
+                    "the task metadata directly, for example repo_id='django__django-14053' "
+                    "and revision='latest'."
                 ),
                 "parameters": {
                     "type": "object",
@@ -148,9 +155,24 @@ class FormsyContextEngine(ContextEngine):
                             "type": "string",
                             "description": "Natural-language query describing the code, behavior, or fact to find.",
                         },
+                        "repo_id": {
+                            "type": "string",
+                            "description": "External repository identifier required by Formsy query API. Use the task metadata repo_id directly, e.g. django__django-14053.",
+                        },
+                        "revision": {
+                            "type": "string",
+                            "description": "Logical revision label to query. Use the task metadata revision directly when provided; otherwise use latest.",
+                            "default": "latest",
+                        },
+                        "budget": {
+                            "type": "integer",
+                            "description": "Context token budget for the Formsy query.",
+                            "default": 4000,
+                            "minimum": 1,
+                        },
                         "limit": {
                             "type": "integer",
-                            "description": "Maximum number of memory hits to return.",
+                            "description": "Deprecated. Kept for compatibility; Formsy query uses budget instead.",
                             "default": 5,
                             "minimum": 1,
                             "maximum": 20,
@@ -170,18 +192,26 @@ class FormsyContextEngine(ContextEngine):
         if not query:
             return json.dumps({"ok": False, "error": "memory_search requires a non-empty query"})
 
-        limit = self._coerce_limit(args.get("limit", args.get("top_k", 5)))
         if not self._engine_client:
             return json.dumps({"ok": False, "query": query, "error": "Formsy engine client is not initialized"})
 
         session_id = self._session_id or self._context.get("session_id") or "unknown"
-        workspace_id = self._config.workspace_id if self._config else "ws_default"
+        repo_id = str(args.get("repo_id") or (self._config.repo_id if self._config else "") or "").strip()
+        if not repo_id:
+            return json.dumps({
+                "ok": False,
+                "query": query,
+                "error": "memory_search requires repo_id. Set formsy.repo_id or pass repo_id in the tool call.",
+            })
+        revision = str(args.get("revision") or (self._config.revision if self._config else "latest") or "latest")
+        budget = self._coerce_positive_int(args.get("budget"), self._config.query_budget if self._config else 4000)
         result = self._run_async(
             self._engine_client.memory_search(
-                workspace_id=workspace_id,
+                repo_id=repo_id,
                 session_id=session_id,
                 query=query,
-                limit=limit,
+                revision=revision,
+                budget=budget,
             )
         )
         if result is None:
@@ -191,7 +221,6 @@ class FormsyContextEngine(ContextEngine):
             "ok": True,
             "query": query,
             "extra_context": self._extract_extra_context(result),
-            "results": result,
         })
 
     def _run_async(self, coro):
@@ -204,12 +233,12 @@ class FormsyContextEngine(ContextEngine):
             return None
 
     @staticmethod
-    def _coerce_limit(value: Any) -> int:
+    def _coerce_positive_int(value: Any, default: int) -> int:
         try:
-            limit = int(value)
+            number = int(value)
         except (TypeError, ValueError):
-            limit = 5
-        return max(1, min(limit, 20))
+            number = default
+        return max(1, number)
 
     @staticmethod
     def _extract_extra_context(result: Any) -> str:

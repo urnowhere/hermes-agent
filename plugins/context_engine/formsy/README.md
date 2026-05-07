@@ -24,10 +24,26 @@ Optional configuration in Hermes `config.yaml`:
 context:
   engine: "formsy"
 
-formalcc:
+formsy:
   base_url: "https://api.formsy.ai"
+  memory_search_endpoint: "/api/v1/query"
+  repo_id: "django__django-14053"
+  revision: "latest"
+  query_budget: 4000
   workspace_id: "ws_default"
   timeout_s: 30
+```
+
+When using the `memory_search` tool for SWE-bench tasks, pass the same
+repository parameters accepted by the Formsy query API:
+
+```json
+{
+  "repo_id": "django__django-14053",
+  "query": "HashedFilesMixin post_process yields duplicate filenames",
+  "revision": "latest",
+  "budget": 4000
+}
 ```
 
 ## Scene Routing

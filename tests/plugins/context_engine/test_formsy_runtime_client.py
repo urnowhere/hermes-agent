@@ -41,3 +41,51 @@ async def test_runtime_client_logs_http_error_context(caplog, monkeypatch):
     assert "X-Session-ID" in log_text
     assert "Authorization" in log_text
     assert "Bearer ***" in log_text
+
+
+@pytest.mark.asyncio
+async def test_runtime_client_memory_search_uses_configured_endpoint(monkeypatch):
+    monkeypatch.setenv("FORMALCC_API_KEY", "fsy_test_secret_token")
+    client = RuntimeClient(
+        base_url="https://runtime.example",
+        memory_search_endpoint="api/v1/query",
+        api_key_env="FORMALCC_API_KEY",
+    )
+    calls = []
+
+    class FakeAsyncClient:
+        async def request(self, method, url, json=None, headers=None):
+            calls.append({
+                "method": method,
+                "url": url,
+                "json": json,
+                "headers": headers,
+            })
+            return httpx.Response(
+                200,
+                json={"matches": []},
+                request=httpx.Request(method, url, json=json, headers=headers),
+            )
+
+    client._client = FakeAsyncClient()
+
+    result = await client.memory_search(
+        repo_id="django__django-14053",
+        session_id="session-1",
+        query="parser",
+        revision="latest",
+        budget=4000,
+    )
+
+    assert result == {"matches": []}
+    assert calls[0]["method"] == "POST"
+    assert calls[0]["url"] == "https://runtime.example/api/v1/query"
+    assert calls[0]["json"] == {
+        "repo_id": "django__django-14053",
+        "query": "parser",
+        "revision": "latest",
+        "budget": 4000,
+        "enable_profiling": False,
+        "profiling_top_n": 20,
+        "metadata": {"instance_id": "django__django-14053"},
+    }

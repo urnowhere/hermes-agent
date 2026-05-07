@@ -18,9 +18,21 @@ config_schema:
     base_url:
       type: string
       default: "https://api.formsy.ai"
+    memory_search_endpoint:
+      type: string
+      default: "/api/v1/query"
     api_key_env:
       type: string
       default: "FORMALCC_API_KEY"
+    repo_id:
+      type: string
+      default: ""
+    revision:
+      type: string
+      default: "latest"
+    query_budget:
+      type: integer
+      default: 4000
     workspace_id:
       type: string
       default: "ws_default"
