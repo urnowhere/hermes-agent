@@ -374,6 +374,33 @@ def get_cache_directory_mounts(
     return mounts
 
 
+def to_agent_visible_cache_path(
+    host_path: str,
+    container_base: str = "/root/.hermes",
+) -> str:
+    """Translate a host cache path to its mounted path inside a sandbox.
+
+    Remote backends mount Hermes cache directories into the sandbox using
+    :func:`get_cache_directory_mounts`. Gateway prompts should reference the
+    container-side path for files the agent is expected to open. Paths outside
+    known cache mounts are returned unchanged.
+    """
+    try:
+        candidate = Path(host_path).resolve(strict=False)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return host_path
+
+    for mount in get_cache_directory_mounts(container_base=container_base):
+        try:
+            host_root = Path(mount["host_path"]).resolve(strict=False)
+            relative = candidate.relative_to(host_root)
+        except (KeyError, OSError, RuntimeError, ValueError):
+            continue
+        return str(Path(mount["container_path"]) / relative)
+
+    return host_path
+
+
 def iter_cache_files(
     container_base: str = "/root/.hermes",
 ) -> List[Dict[str, str]]:

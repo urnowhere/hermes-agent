@@ -5777,16 +5777,28 @@ class GatewayRunner:
                 display_name = parts[2] if len(parts) >= 3 else basename
                 display_name = re.sub(r'[^\w.\- ]', '_', display_name)
 
+                agent_visible_path = path
+                try:
+                    _doc_cfg = _load_gateway_config()
+                    _doc_terminal_cfg = _doc_cfg.get("terminal", {}) if isinstance(_doc_cfg, dict) else {}
+                    _doc_backend = str(_doc_terminal_cfg.get("backend") or "local").strip().lower()
+                    if _doc_backend == "docker":
+                        from tools.credential_files import to_agent_visible_cache_path
+
+                        agent_visible_path = to_agent_visible_cache_path(path)
+                except Exception:
+                    agent_visible_path = path
+
                 if mtype.startswith("text/"):
                     context_note = (
                         f"[The user sent a text document: '{display_name}'. "
                         f"Its content has been included below. "
-                        f"The file is also saved at: {path}]"
+                        f"The file is also saved at: {agent_visible_path}]"
                     )
                 else:
                     context_note = (
                         f"[The user sent a document: '{display_name}'. "
-                        f"The file is saved at: {path}. "
+                        f"The file is saved at: {agent_visible_path}. "
                         f"Ask the user what they'd like you to do with it.]"
                     )
                 message_text = f"{context_note}\n\n{message_text}"

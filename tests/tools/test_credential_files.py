@@ -13,6 +13,7 @@ from tools.credential_files import (
     get_cache_directory_mounts,
     get_skills_directory_mount,
     iter_cache_files,
+    to_agent_visible_cache_path,
     iter_skills_files,
     register_credential_file,
     register_credential_files,
@@ -422,6 +423,44 @@ class TestCacheDirectoryMounts:
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
 
         assert get_cache_directory_mounts() == []
+
+    def test_agent_visible_cache_path_translates_document_file(self, tmp_path, monkeypatch):
+        """Host cache files map to the path mounted inside the Docker sandbox."""
+        hermes_home = tmp_path / ".hermes"
+        doc_dir = hermes_home / "cache" / "documents"
+        doc_dir.mkdir(parents=True)
+        uploaded = doc_dir / "upload.pdf"
+        uploaded.write_bytes(b"%PDF")
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        assert (
+            to_agent_visible_cache_path(str(uploaded))
+            == "/root/.hermes/cache/documents/upload.pdf"
+        )
+
+    def test_agent_visible_cache_path_preserves_nested_cache_file(self, tmp_path, monkeypatch):
+        """Relative subdirectories are preserved in translated cache paths."""
+        hermes_home = tmp_path / ".hermes"
+        screenshot_dir = hermes_home / "cache" / "screenshots" / "session-1"
+        screenshot_dir.mkdir(parents=True)
+        screenshot = screenshot_dir / "screen.png"
+        screenshot.write_bytes(b"PNG")
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        assert (
+            to_agent_visible_cache_path(str(screenshot), container_base="/sandbox/.hermes")
+            == "/sandbox/.hermes/cache/screenshots/session-1/screen.png"
+        )
+
+    def test_agent_visible_cache_path_leaves_non_cache_path_unchanged(self, tmp_path, monkeypatch):
+        """Only files under auto-mounted cache directories are translated."""
+        hermes_home = tmp_path / ".hermes"
+        (hermes_home / "cache" / "documents").mkdir(parents=True)
+        outside = tmp_path / "outside.pdf"
+        outside.write_bytes(b"%PDF")
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        assert to_agent_visible_cache_path(str(outside)) == str(outside)
 
 
 class TestIterCacheFiles:
