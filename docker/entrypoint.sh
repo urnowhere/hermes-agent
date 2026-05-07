@@ -5,6 +5,12 @@ set -e
 HERMES_HOME="${HERMES_HOME:-/opt/data}"
 INSTALL_DIR="/opt/hermes"
 
+# --- Dynamic Browser Discovery for agent-browser ---
+# Find a viable browser binary in the Playwright cache to avoid "Chrome not found" 
+# issues in Docker. We look for any executable containing 'chrome' or 'chromium'.
+# See issue #15697
+[ -z "$AGENT_BROWSER_EXECUTABLE_PATH" ] && export AGENT_BROWSER_EXECUTABLE_PATH=$(find "$PLAYWRIGHT_BROWSERS_PATH" -type f -executable | grep -Ei "chrome|chromium" | head -n 1)
+
 # --- Privilege dropping via gosu ---
 # When started as root (the default for Docker, or fakeroot in rootless Podman),
 # optionally remap the hermes user/group to match host-side ownership, fix volume
