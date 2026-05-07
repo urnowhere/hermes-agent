@@ -1213,7 +1213,7 @@ class WeComAdapter(BasePlatformAdapter):
             reply_req_id,
             {
                 "msgtype": "markdown",
-                "markdown": {"content": content[:self.MAX_MESSAGE_LENGTH]},
+                "markdown": {"content": content},
             },
         )
         self._raise_for_wecom_error(response, "send reply markdown")
@@ -1345,36 +1345,45 @@ class WeComAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="chat_id is required")
 
         try:
+            chunks = self.truncate_message(content, self.MAX_MESSAGE_LENGTH)
+
             reply_req_id = self._reply_req_id_for_message(reply_to)
 
             if not reply_req_id and chat_id in self._last_chat_req_ids:
                 reply_req_id = self._last_chat_req_ids[chat_id]
 
-            if reply_req_id:
-                response = await self._send_reply_markdown(reply_req_id, content)
-            else:
-                response = await self._send_request(
-                    APP_CMD_SEND,
-                    {
-                        "chatid": chat_id,
-                        "msgtype": "markdown",
-                        "markdown": {"content": content[:self.MAX_MESSAGE_LENGTH]},
-                    },
-                )
+            last_response = None
+            for i, chunk in enumerate(chunks):
+                if i == 0 and reply_req_id:
+                    last_response = await self._send_reply_markdown(
+                        reply_req_id, chunk,
+                    )
+                else:
+                    last_response = await self._send_request(
+                        APP_CMD_SEND,
+                        {
+                            "chatid": chat_id,
+                            "msgtype": "markdown",
+                            "markdown": {"content": chunk},
+                        },
+                    )
+                    self._raise_for_wecom_error(
+                        last_response, "send markdown chunk",
+                    )
         except asyncio.TimeoutError:
             return SendResult(success=False, error="Timeout sending message to WeCom")
         except Exception as exc:
             logger.error("[%s] Send failed: %s", self.name, exc)
             return SendResult(success=False, error=str(exc))
 
-        error = self._response_error(response)
+        error = self._response_error(last_response)
         if error:
             return SendResult(success=False, error=error)
 
         return SendResult(
             success=True,
-            message_id=self._payload_req_id(response) or uuid.uuid4().hex[:12],
-            raw_response=response,
+            message_id=self._payload_req_id(last_response) or uuid.uuid4().hex[:12],
+            raw_response=last_response,
         )
 
     async def send_image(

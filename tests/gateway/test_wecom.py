@@ -789,3 +789,63 @@ class TestWeComZombieSessionFix:
         cmd = adapter._send_request.await_args.args[0]
         assert cmd == APP_CMD_SEND
 
+
+
+class TestSendLongMessageSplitting:
+    """Verify that send() splits long markdown into multiple WeCom messages."""
+
+    @pytest.mark.asyncio
+    async def test_send_splits_long_message_into_chunks(self):
+        from gateway.platforms.wecom import APP_CMD_SEND, WeComAdapter
+
+        adapter = WeComAdapter(PlatformConfig(enabled=True))
+        adapter._send_request = AsyncMock(
+            return_value={"headers": {"req_id": "req-1"}, "errcode": 0},
+        )
+
+        long_content = "A" * 6000  # exceeds MAX_MESSAGE_LENGTH (4000)
+        result = await adapter.send("chat-123", long_content)
+
+        assert result.success is True
+        # Should have been called more than once (content was split)
+        assert adapter._send_request.await_count >= 2
+        # All sent chunks should be within the limit
+        for call in adapter._send_request.call_args_list:
+            payload = call[0][1]
+            assert len(payload["markdown"]["content"]) <= adapter.MAX_MESSAGE_LENGTH
+
+    @pytest.mark.asyncio
+    async def test_send_short_message_not_split(self):
+        from gateway.platforms.wecom import APP_CMD_SEND, WeComAdapter
+
+        adapter = WeComAdapter(PlatformConfig(enabled=True))
+        adapter._send_request = AsyncMock(
+            return_value={"headers": {"req_id": "req-1"}, "errcode": 0},
+        )
+
+        result = await adapter.send("chat-123", "short message")
+
+        assert result.success is True
+        adapter._send_request.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_send_reply_first_chunk_uses_reply_rest_proactive(self):
+        from gateway.platforms.wecom import APP_CMD_SEND, WeComAdapter
+
+        adapter = WeComAdapter(PlatformConfig(enabled=True))
+        adapter._reply_req_id_for_message = lambda _: "reply-req-1"
+        adapter._send_reply_request = AsyncMock(
+            return_value={"headers": {"req_id": "req-1"}, "errcode": 0},
+        )
+        adapter._send_request = AsyncMock(
+            return_value={"headers": {"req_id": "req-2"}, "errcode": 0},
+        )
+
+        long_content = "B" * 6000
+        result = await adapter.send("chat-123", long_content, reply_to="msg-orig")
+
+        assert result.success is True
+        # First chunk sent via reply
+        assert adapter._send_reply_request.await_count == 1
+        # Remaining chunk(s) sent via proactive
+        assert adapter._send_request.await_count >= 1
