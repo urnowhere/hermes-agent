@@ -933,7 +933,7 @@ async def test_restart_banner_uses_try_to_resume_wording():
 
 
 @pytest.mark.asyncio
-async def test_restart_notifies_home_channel_even_without_active_sessions():
+async def test_restart_skips_home_channel_without_active_sessions():
     runner, adapter = make_restart_runner()
     runner._restart_requested = True
     runner.config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
@@ -944,10 +944,7 @@ async def test_restart_notifies_home_channel_even_without_active_sessions():
 
     await runner._notify_active_sessions_of_shutdown()
 
-    assert adapter.sent == [
-        "⚠️ Gateway restarting — Your current task will be interrupted. "
-        "Send any message after restart and I'll try to resume where you left off."
-    ]
+    assert adapter.sent == []
 
 
 @pytest.mark.asyncio
@@ -995,7 +992,7 @@ async def test_restart_home_channel_notification_not_deduped_across_threads():
 
 
 @pytest.mark.asyncio
-async def test_restart_home_channel_notification_ignores_false_send_result():
+async def test_restart_home_channel_notification_not_sent_without_active_task_even_if_send_would_fail():
     runner, adapter = make_restart_runner()
     runner._restart_requested = True
     runner.config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
@@ -1007,7 +1004,7 @@ async def test_restart_home_channel_notification_ignores_false_send_result():
 
     await runner._notify_active_sessions_of_shutdown()
 
-    adapter.send.assert_called_once()
+    adapter.send.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

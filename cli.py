@@ -10453,6 +10453,16 @@ class HermesCLI:
                 payload = (text, images) if images else text
                 if self._agent_running and not (text and _looks_like_slash_command(text)):
                     _effective_mode = self.busy_input_mode
+                    _compression_queue = False
+                    try:
+                        if (
+                            self.agent is not None
+                            and bool(self.agent.get_activity_summary().get("compression_in_progress"))
+                        ):
+                            _effective_mode = "queue"
+                            _compression_queue = True
+                    except Exception:
+                        _compression_queue = False
                     if _effective_mode == "steer":
                         # Route Enter through /steer — inject mid-run after the
                         # next tool call.  Images can't ride along (steer only
@@ -10478,7 +10488,13 @@ class HermesCLI:
                         # Queue for the next turn instead of interrupting
                         self._pending_input.put(payload)
                         preview = text if text else f"[{len(images)} image{'s' if len(images) != 1 else ''} attached]"
-                        _cprint(f"  Queued for the next turn: {preview[:80]}{'...' if len(preview) > 80 else ''}")
+                        if _compression_queue:
+                            _cprint(
+                                f"  🗜️ Compression in progress; message queued for next turn: "
+                                f"{preview[:80]}{'...' if len(preview) > 80 else ''}"
+                            )
+                        else:
+                            _cprint(f"  Queued for the next turn: {preview[:80]}{'...' if len(preview) > 80 else ''}")
                     elif _effective_mode == "interrupt":
                         self._interrupt_queue.put(payload)
                         # Debug: log to file when message enters interrupt queue
