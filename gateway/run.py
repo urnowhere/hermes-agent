@@ -1021,7 +1021,6 @@ class GatewayRunner:
         self._ephemeral_system_prompt = self._load_ephemeral_system_prompt()
         self._reasoning_config = self._load_reasoning_config()
         self._service_tier = self._load_service_tier()
-        self._show_reasoning = self._load_show_reasoning()
         self._busy_input_mode = self._load_busy_input_mode()
         self._restart_drain_timeout = self._load_restart_drain_timeout()
         self._provider_routing = self._load_provider_routing()
@@ -2030,18 +2029,23 @@ class GatewayRunner:
         return None
 
     @staticmethod
-    def _load_show_reasoning() -> bool:
-        """Load show_reasoning toggle from config.yaml display section."""
+    def _load_show_reasoning(platform_key: str = "") -> bool:
+        """Load show_reasoning toggle, resolves per-platform then global.
+
+        Delegates to resolve_display_setting() so the resolution order
+        (platform override → global → default) stays in one place.
+        """
         try:
+            from gateway.display_config import resolve_display_setting
             import yaml as _y
             cfg_path = _hermes_home / "config.yaml"
+            user_cfg = {}
             if cfg_path.exists():
                 with open(cfg_path, encoding="utf-8") as _f:
-                    cfg = _y.safe_load(_f) or {}
-                return is_truthy_value(
-                    cfg_get(cfg, "display", "show_reasoning"),
-                    default=False,
-                )
+                    user_cfg = _y.safe_load(_f) or {}
+            return bool(resolve_display_setting(
+                user_cfg, platform_key, "show_reasoning", False
+            ))
         except Exception:
             pass
         return False
@@ -6529,10 +6533,10 @@ class GatewayRunner:
                     _load_gateway_config(),
                     _platform_config_key(source.platform),
                     "show_reasoning",
-                    getattr(self, "_show_reasoning", False),
+                    False,
                 )
             except Exception:
-                _show_reasoning_effective = getattr(self, "_show_reasoning", False)
+                _show_reasoning_effective = False
             if _show_reasoning_effective and response:
                 last_reasoning = agent_result.get("last_reasoning")
                 if last_reasoning:
@@ -9096,7 +9100,8 @@ class GatewayRunner:
         args, persist_global = self._parse_reasoning_command_args(raw_args)
         config_path = _hermes_home / "config.yaml"
         session_key = self._session_key_for_source(event.source)
-        self._show_reasoning = self._load_show_reasoning()
+        platform_key = _platform_config_key(event.source.platform)
+        show_reasoning = self._load_show_reasoning(platform_key)
         self._reasoning_config = self._resolve_session_reasoning_config(
             source=event.source,
             session_key=session_key,
@@ -9131,21 +9136,32 @@ class GatewayRunner:
                 level = "none (disabled)"
             else:
                 level = rc.get("effort", "medium")
-            display_state = "on ✓" if self._show_reasoning else "off"
+            display_state = "on ✓" if show_reasoning else "off"
             has_session_override = session_key in (getattr(self, "_session_reasoning_overrides", {}) or {})
-            scope = "session override" if has_session_override else "global config"
+            effort_scope = "session override" if has_session_override else "global config"
+
+            display_scope = "global config"
+            try:
+                user_config = _load_gateway_config()
+                platform_display_cfg = (
+                    ((user_config.get("display") or {}).get("platforms") or {}).get(platform_key) or {}
+                )
+                if isinstance(platform_display_cfg, dict) and "show_reasoning" in platform_display_cfg:
+                    display_scope = "platform override"
+            except Exception:
+                pass
             return (
                 "🧠 **Reasoning Settings**\n\n"
                 f"**Effort:** `{level}`\n"
-                f"**Scope:** {scope}\n"
-                f"**Display:** {display_state}\n\n"
+                f"**Effort Scope:** {effort_scope}\n"
+                f"**Display:** {display_state}\n"
+                f"**Display Scope:** {display_scope}\n\n"
                 "_Usage:_ `/reasoning <none|minimal|low|medium|high|xhigh|reset|show|hide> [--global]`"
             )
 
         # Display toggle (per-platform)
         platform_key = _platform_config_key(event.source.platform)
         if args in ("show", "on"):
-            self._show_reasoning = True
             _save_config_key(f"display.platforms.{platform_key}.show_reasoning", True)
             return (
                 "🧠 ✓ Reasoning display: **ON**\n"
@@ -9153,7 +9169,6 @@ class GatewayRunner:
             )
 
         if args in ("hide", "off"):
-            self._show_reasoning = False
             _save_config_key(f"display.platforms.{platform_key}.show_reasoning", False)
             return f"🧠 ✓ Reasoning display: **OFF** for **{platform_key}**"
 
