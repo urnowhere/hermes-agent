@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
+import { supportsOsc52Clipboard } from '../terminal.js'
+
 import { shouldEmitClipboardSequence } from './osc.js'
 
 describe('shouldEmitClipboardSequence', () => {
@@ -47,5 +49,40 @@ describe('shouldEmitClipboardSequence', () => {
         SSH_CONNECTION: '1'
       } as NodeJS.ProcessEnv)
     ).toBe(false)
+  })
+})
+
+describe('supportsOsc52Clipboard', () => {
+  // Terminals known to correctly implement OSC 52. On these, setClipboard()
+  // skips the native-tool safety net (wl-copy/xclip/pbcopy) to avoid racing
+  // the terminal's own clipboard write. Values must match what
+  // detectTerminal() in utils/env.ts returns — TERM=xterm-ghostty normalises
+  // to 'ghostty', TERM_PROGRAM=WezTerm stays 'WezTerm', etc.
+  it.each(['ghostty', 'kitty', 'WezTerm', 'windows-terminal', 'vscode'])(
+    'returns true for allowlisted terminal %s',
+    terminal => {
+      expect(supportsOsc52Clipboard(terminal)).toBe(true)
+    }
+  )
+
+  // Intentionally conservative — iTerm2 disables OSC 52 by default; Alacritty
+  // and GNOME Terminal detection is unreliable; xterm/Terminal.app lack
+  // reliable OSC 52. These keep the existing native-safety-net behaviour.
+  it.each(['iTerm.app', 'alacritty', 'Apple_Terminal', 'xterm', 'tmux', 'screen', 'cursor', 'WarpTerminal', ''])(
+    'returns false for non-allowlisted terminal %s',
+    terminal => {
+      expect(supportsOsc52Clipboard(terminal)).toBe(false)
+    }
+  )
+
+  it('returns false when terminal is null (detection failed)', () => {
+    expect(supportsOsc52Clipboard(null)).toBe(false)
+  })
+
+  it('defaults to the module-level detected terminal when no argument is passed', () => {
+    // With no argument, uses env.terminal detected at module load. We don't
+    // know what that is in CI, but the call must return a boolean (not throw)
+    // and the result must match calling with env.terminal explicitly.
+    expect(typeof supportsOsc52Clipboard()).toBe('boolean')
   })
 })

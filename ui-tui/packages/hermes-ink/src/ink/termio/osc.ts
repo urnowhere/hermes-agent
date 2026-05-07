@@ -6,6 +6,7 @@ import { Buffer } from 'buffer'
 
 import { env } from '../../utils/env.js'
 import { execFileNoThrow } from '../../utils/execFileNoThrow.js'
+import { supportsOsc52Clipboard } from '../terminal.js'
 
 import { BEL, ESC, ESC_TYPE, SEP } from './ansi.js'
 import type { Action, Color, TabStatusAction } from './types.js'
@@ -193,11 +194,21 @@ export async function setClipboard(text: string): Promise<ClipboardResult> {
   // AFTER awaiting tmux load-buffer, adding ~50-100ms of subprocess latency
   // before pbcopy even started — fast cmd+tab → paste would beat it
   // (https://anthropic.slack.com/archives/C07VBSHV7EV/p1773943921788829).
-  // Gated on SSH_CONNECTION (not SSH_TTY) since tmux panes inherit SSH_TTY
-  // forever but SSH_CONNECTION is in tmux's default update-environment and
-  // clears on local attach. Fire-and-forget, but `copyNativeAttempted`
-  // tells us whether ANY native path will be tried on this platform.
-  const nativeAttempted = !process.env['SSH_CONNECTION'] && copyNative(text)
+  // Skipped entirely on terminals with first-class OSC 52 support
+  // (see `supportsOsc52Clipboard()` in ../terminal.ts): running
+  // wl-copy/xclip/pbcopy in parallel with OSC 52 on those terminals can
+  // corrupt the clipboard. wl-copy on Wayland is the worst offender —
+  // `probeLinuxCopy()` runs it with empty stdin to check if the binary
+  // exists (which destructively wipes the clipboard), and the subsequent
+  // real invocation forks a background daemon that races the terminal's
+  // own OSC 52 write plus its own prior daemon's SIGTERM. On Ghostty +
+  // Wayland this produced a ~30% clipboard-empty rate (symptom: user had
+  // to press ctrl+shift+c three times before the selection landed).
+  // Gated on SSH_CONNECTION (not SSH_TTY) since tmux panes inherit
+  // SSH_TTY forever but SSH_CONNECTION is in tmux's default
+  // update-environment and clears on local attach. Fire-and-forget, but
+  // `copyNativeAttempted` tells us whether ANY native path will be tried.
+  const nativeAttempted = !process.env['SSH_CONNECTION'] && !supportsOsc52Clipboard() && copyNative(text)
 
   const tmuxBufferLoaded = await tmuxLoadBuffer(text)
 

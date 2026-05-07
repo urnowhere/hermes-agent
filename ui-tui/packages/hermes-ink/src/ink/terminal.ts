@@ -188,6 +188,26 @@ export function supportsExtendedKeys(): boolean {
   return EXTENDED_KEYS_TERMINALS.includes(env.terminal ?? '')
 }
 
+// Terminals known to correctly implement OSC 52 clipboard writes
+// (ESC ] 52 ; c ; <b64> BEL). When detected, setClipboard() skips the
+// native-tool safety net entirely — running wl-copy/xclip/pbcopy in
+// parallel with OSC 52 races the terminal's own clipboard write and can
+// corrupt it (e.g. wl-copy on Wayland holds the selection in a background
+// daemon; stacking two writes within ~30ms triggers a SIGTERM race).
+// Intentionally conservative: terminals with known flaky or disabled-by-
+// default OSC 52 (iTerm2 disables OSC 52 by default; Alacritty detection
+// is unreliable) are not on this list. Users on those terminals keep the
+// existing behaviour (native safety net fires alongside OSC 52).
+const OSC52_CAPABLE_TERMINALS = ['ghostty', 'kitty', 'WezTerm', 'windows-terminal', 'vscode']
+
+/** True if this terminal is known to correctly handle OSC 52 clipboard
+ *  writes, so setClipboard() can skip the native-tool safety net.
+ *  Accepts an optional terminal name for testability; defaults to the
+ *  module-level `env.terminal` detected at startup. */
+export function supportsOsc52Clipboard(terminal: string | null = env.terminal): boolean {
+  return OSC52_CAPABLE_TERMINALS.includes(terminal ?? '')
+}
+
 /** True if the terminal scrolls the viewport when it receives cursor-up
  *  sequences that reach above the visible area. On Windows, conhost's
  *  SetConsoleCursorPosition follows the cursor into scrollback
