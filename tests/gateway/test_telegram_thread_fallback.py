@@ -132,6 +132,121 @@ def test_forum_general_topic_without_message_thread_id_keeps_thread_context():
     assert event.source.thread_id == "1"
 
 
+def test_forum_group_general_topic_fallback():
+    """Forum GROUP chat without thread_id should also fall back to General topic."""
+    from gateway.platforms import telegram as telegram_mod
+
+    adapter = _make_adapter()
+    message = SimpleNamespace(
+        text="hello from group forum General",
+        caption=None,
+        chat=SimpleNamespace(
+            id=-100999,
+            type=telegram_mod.ChatType.GROUP,
+            is_forum=True,
+            title="Group forum",
+        ),
+        from_user=SimpleNamespace(id=789, full_name="Bob"),
+        message_thread_id=None,
+        reply_to_message=None,
+        message_id=20,
+        date=None,
+    )
+
+    event = adapter._build_message_event(message, msg_type=SimpleNamespace(value="text"))
+
+    assert event.source.chat_id == "-100999"
+    assert event.source.chat_type == "group"
+    assert event.source.thread_id == "1"
+
+
+def test_forum_supergroup_with_thread_id_preserves_it():
+    """Forum supergroup messages WITH a thread_id should keep the original value."""
+    from gateway.platforms import telegram as telegram_mod
+
+    adapter = _make_adapter()
+    message = SimpleNamespace(
+        text="hello from a named topic",
+        caption=None,
+        chat=SimpleNamespace(
+            id=-100123,
+            type=telegram_mod.ChatType.SUPERGROUP,
+            is_forum=True,
+            title="Forum group",
+        ),
+        from_user=SimpleNamespace(id=456, full_name="Alice"),
+        message_thread_id=42,
+        reply_to_message=None,
+        message_id=30,
+        date=None,
+    )
+
+    event = adapter._build_message_event(message, msg_type=SimpleNamespace(value="text"))
+
+    assert event.source.thread_id == "42"
+
+
+def test_non_forum_supergroup_without_thread_id_stays_none():
+    """Non-forum supergroup messages without thread_id should NOT get General topic."""
+    from gateway.platforms import telegram as telegram_mod
+
+    adapter = _make_adapter()
+    message = SimpleNamespace(
+        text="hello from a regular supergroup",
+        caption=None,
+        chat=SimpleNamespace(
+            id=-100555,
+            type=telegram_mod.ChatType.SUPERGROUP,
+            is_forum=False,
+            title="Regular supergroup",
+        ),
+        from_user=SimpleNamespace(id=456, full_name="Alice"),
+        message_thread_id=None,
+        reply_to_message=None,
+        message_id=40,
+        date=None,
+    )
+
+    event = adapter._build_message_event(message, msg_type=SimpleNamespace(value="text"))
+
+    assert event.source.thread_id is None
+
+
+@pytest.mark.asyncio
+async def test_get_chat_info_marks_forum_groups_and_supergroups():
+    """Forum chat detection should use raw Telegram chat type, not normalized labels."""
+    from gateway.platforms import telegram as telegram_mod
+
+    adapter = _make_adapter()
+    chats = iter([
+        SimpleNamespace(
+            type=telegram_mod.ChatType.GROUP,
+            is_forum=True,
+            title="Group forum",
+            full_name=None,
+            username=None,
+        ),
+        SimpleNamespace(
+            type=telegram_mod.ChatType.SUPERGROUP,
+            is_forum=True,
+            title="Supergroup forum",
+            full_name=None,
+            username=None,
+        ),
+    ])
+
+    async def mock_get_chat(_chat_id):
+        return next(chats)
+
+    adapter._bot = SimpleNamespace(get_chat=mock_get_chat)
+
+    group_info = await adapter.get_chat_info("-100111")
+    supergroup_info = await adapter.get_chat_info("-100222")
+
+    assert group_info["type"] == "forum"
+    assert supergroup_info["type"] == "forum"
+
+
 @pytest.mark.asyncio
 async def test_send_omits_general_topic_thread_id():
     """Telegram sends to forum General should omit message_thread_id=1."""
