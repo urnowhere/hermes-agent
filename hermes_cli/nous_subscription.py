@@ -1,6 +1,7 @@
 """Helpers for Nous subscription managed-tool capabilities."""
 
 from __future__ import annotations
+import os
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -285,6 +286,7 @@ def get_nous_subscription_features(
     direct_parallel = bool(get_env_value("PARALLEL_API_KEY"))
     direct_tavily = bool(get_env_value("TAVILY_API_KEY"))
     direct_searxng = bool(get_env_value("SEARXNG_URL"))
+    direct_brave = bool(os.environ.get("BRAVE_API_KEY", "").strip())
     direct_fal = fal_key_is_configured()
     direct_openai_tts = bool(resolve_openai_audio_api_key())
     direct_elevenlabs = bool(get_env_value("ELEVENLABS_API_KEY"))
@@ -299,6 +301,7 @@ def get_nous_subscription_features(
         direct_exa = False
         direct_parallel = False
         direct_tavily = False
+        direct_brave = False
     if image_use_gateway:
         direct_fal = False
     if tts_use_gateway:
@@ -332,6 +335,8 @@ def get_nous_subscription_features(
             # Per-capability overrides: search_backend or extract_backend may be set
             # without web.backend (using the new split config from #20061)
             or (web_search_backend == "searxng" and direct_searxng)
+            or (web_backend == "brave" and direct_brave)
+            or (web_search_backend == "brave" and direct_brave)
             or (web_search_backend == "exa" and direct_exa)
             or (web_search_backend == "firecrawl" and direct_firecrawl)
             or (web_search_backend == "parallel" and direct_parallel)
@@ -339,7 +344,7 @@ def get_nous_subscription_features(
         )
     )
     web_available = bool(
-        managed_web_available or direct_exa or direct_firecrawl or direct_parallel or direct_tavily or direct_searxng
+        managed_web_available or direct_exa or direct_firecrawl or direct_parallel or direct_tavily or direct_searxng or direct_brave
     )
 
     image_managed = image_tool_enabled and managed_image_available and not direct_fal
