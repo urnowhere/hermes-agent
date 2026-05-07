@@ -8082,17 +8082,37 @@ class AIAgent:
         Used to decide whether to strip image content parts from API-bound
         messages (for non-vision models) or let the provider adapter handle
         them natively (for vision-capable models).
+
+        Resolution order:
+          1. ``model.supports_vision`` (top-level, single-model shortcut)
+          2. ``providers.<provider>.models.<model>.supports_vision``
+          3. models.dev capability lookup
+        Custom/local models absent from models.dev would otherwise be
+        misclassified as non-vision and have their images stripped.
         """
         try:
-            from agent.models_dev import get_model_capabilities
+            from hermes_cli.config import cfg_get, load_config
+            cfg = load_config()
             provider = (getattr(self, "provider", "") or "").strip()
             model = (getattr(self, "model", "") or "").strip()
+            # self.provider is the runtime-resolved value, which is rewritten
+            # to "custom" for named custom providers (see
+            # hermes_cli/runtime_provider.py:_resolve_named_custom_runtime),
+            # while the config still holds the user-declared name (e.g.
+            # "my-vllm") under model.provider. Try both as provider keys.
+            config_provider = str(cfg_get(cfg, "model", "provider") or "").strip()
+            candidates = [("model", "supports_vision")]
+            for p in dict.fromkeys(filter(None, (provider, config_provider))):
+                candidates.append(("providers", p, "models", model, "supports_vision"))
+            for keys in candidates:
+                override = cfg_get(cfg, *keys)
+                if override is not None:
+                    return bool(override)
+            from agent.models_dev import get_model_capabilities
             if not provider or not model:
                 return False
             caps = get_model_capabilities(provider, model)
-            if caps is None:
-                return False
-            return bool(caps.supports_vision)
+            return bool(caps and caps.supports_vision)
         except Exception:
             return False
 
