@@ -31,6 +31,153 @@ from hermes_cli.config import cfg_get
 logger = logging.getLogger(__name__)
 
 
+_AUTO_EXTRACT_MAX_SOURCE_CHARS = 800
+_AUTO_EXTRACT_MAX_CLAUSE_CHARS = 180
+_AUTO_EXTRACT_MAX_FACT_CHARS = 260
+
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+_TASK_REQUEST_RE = re.compile(
+    r"\b("
+    r"can you|could you|would you|please|let'?s|lets|"
+    r"look|fix|install|research|build|make|update|run|check|"
+    r"tell me|show me|go ahead|keep going|continue"
+    r")\b",
+    re.IGNORECASE,
+)
+_UNSTABLE_REFERENCE_RE = re.compile(
+    r"\b(this|that|it|stuff|thing|something|anything|everything|here|there|now|today|tomorrow|yesterday)\b",
+    re.IGNORECASE,
+)
+
+
+def _clean_auto_extract_clause(value: str) -> str:
+    value = re.sub(r"\s+", " ", str(value or "")).strip(" \t\r\n\"'`.,;:")
+    value = re.sub(r"^(?:that|to)\s+", "", value, flags=re.IGNORECASE).strip()
+    return value[:_AUTO_EXTRACT_MAX_CLAUSE_CHARS].strip(" \t\r\n\"'`.,;:")
+
+
+def _is_stable_auto_extract_clause(value: str) -> bool:
+    value = _clean_auto_extract_clause(value)
+    if len(value) < 3:
+        return False
+    if "?" in value or "\n" in value:
+        return False
+    if _TASK_REQUEST_RE.search(value):
+        return False
+    if re.search(r"\byou(?:r|rs|self)?\b", value, re.IGNORECASE):
+        return False
+    if _UNSTABLE_REFERENCE_RE.fullmatch(value):
+        return False
+    return True
+
+
+def _format_auto_extract_fact(template: str, *parts: str) -> str | None:
+    cleaned = [_clean_auto_extract_clause(part) for part in parts]
+    if not all(_is_stable_auto_extract_clause(part) for part in cleaned):
+        return None
+    fact = template.format(*cleaned)
+    fact = re.sub(r"\s+", " ", fact).strip()
+    if not fact.endswith("."):
+        fact += "."
+    if len(fact) > _AUTO_EXTRACT_MAX_FACT_CHARS:
+        return None
+    return fact
+
+
+def _auto_extract_facts_from_text(content: str) -> list[tuple[str, str]]:
+    """Return distilled ``(fact, category)`` pairs from a user message.
+
+    This extractor is deliberately conservative. It should never store raw user
+    turns; it only keeps short normalized facts with stable anchors.
+    """
+    if not isinstance(content, str):
+        return []
+    text = re.sub(r"\s+", " ", content.strip())
+    if len(text) < 10 or len(text) > _AUTO_EXTRACT_MAX_SOURCE_CHARS:
+        return []
+
+    # Questions and explicit task requests are usually active-work context, not
+    # durable memory. Avoid storing snippets from "can you..." / "I need..." turns.
+    if "?" in text or _TASK_REQUEST_RE.search(text):
+        return []
+
+    patterns: list[tuple[re.Pattern[str], str, Any]] = [
+        (
+            re.compile(r"\bI\s+prefer\s+(?P<value>[^.!?\n]+)", re.IGNORECASE),
+            "user_pref",
+            lambda m: _format_auto_extract_fact("User prefers {}.", m.group("value")),
+        ),
+        (
+            re.compile(r"\bI\s+(?:like|love)\s+(?P<value>[^.!?\n]+)", re.IGNORECASE),
+            "user_pref",
+            lambda m: _format_auto_extract_fact("User likes {}.", m.group("value")),
+        ),
+        (
+            re.compile(r"\bI\s+use\s+(?P<value>[^.!?\n]+)", re.IGNORECASE),
+            "user_pref",
+            lambda m: _format_auto_extract_fact("User uses {}.", m.group("value")),
+        ),
+        (
+            re.compile(r"\bI\s+(?:always|usually)\s+(?P<value>[^.!?\n]+)", re.IGNORECASE),
+            "user_pref",
+            lambda m: _format_auto_extract_fact("User usually {}.", m.group("value")),
+        ),
+        (
+            re.compile(r"\bI\s+never\s+(?P<value>[^.!?\n]+)", re.IGNORECASE),
+            "user_pref",
+            lambda m: _format_auto_extract_fact("User never {}.", m.group("value")),
+        ),
+        (
+            re.compile(
+                r"\bmy\s+(?P<kind>favorite|preferred|default)\s+(?P<thing>[A-Za-z0-9 _/-]{2,60})\s+is\s+(?P<value>[^.!?\n]+)",
+                re.IGNORECASE,
+            ),
+            "user_pref",
+            lambda m: _format_auto_extract_fact(
+                "User's {} {} is {}.",
+                m.group("kind").lower(),
+                m.group("thing"),
+                m.group("value"),
+            ),
+        ),
+        (
+            re.compile(r"\bwe\s+(?:decided|agreed|chose)\s+(?:to\s+)?(?P<value>[^.!?\n]+)", re.IGNORECASE),
+            "project",
+            lambda m: _format_auto_extract_fact("Project decision: {}.", m.group("value")),
+        ),
+        (
+            re.compile(
+                r"\b(?P<subject>the project|hermes|the repo|the codebase)\s+(?P<verb>uses|needs|requires)\s+(?P<value>[^.!?\n]+)",
+                re.IGNORECASE,
+            ),
+            "project",
+            lambda m: _format_auto_extract_fact(
+                "{} {} {}.",
+                m.group("subject").capitalize(),
+                m.group("verb").lower(),
+                m.group("value"),
+            ),
+        ),
+    ]
+
+    extracted: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for sentence in _SENTENCE_SPLIT_RE.split(text):
+        sentence = sentence.strip()
+        if not sentence or len(sentence) > 320 or "?" in sentence:
+            continue
+        for pattern, category, render in patterns:
+            match = pattern.search(sentence)
+            if not match:
+                continue
+            fact = render(match)
+            if fact and fact.lower() not in seen:
+                seen.add(fact.lower())
+                extracted.append((fact, category))
+            break
+    return extracted
+
+
 # ---------------------------------------------------------------------------
 # Tool schemas (unchanged from original PR)
 # ---------------------------------------------------------------------------
@@ -357,41 +504,21 @@ class HolographicMemoryProvider(MemoryProvider):
     # -- Auto-extraction (on_session_end) ------------------------------------
 
     def _auto_extract_facts(self, messages: list) -> None:
-        _PREF_PATTERNS = [
-            re.compile(r'\bI\s+(?:prefer|like|love|use|want|need)\s+(.+)', re.IGNORECASE),
-            re.compile(r'\bmy\s+(?:favorite|preferred|default)\s+\w+\s+is\s+(.+)', re.IGNORECASE),
-            re.compile(r'\bI\s+(?:always|never|usually)\s+(.+)', re.IGNORECASE),
-        ]
-        _DECISION_PATTERNS = [
-            re.compile(r'\bwe\s+(?:decided|agreed|chose)\s+(?:to\s+)?(.+)', re.IGNORECASE),
-            re.compile(r'\bthe\s+project\s+(?:uses|needs|requires)\s+(.+)', re.IGNORECASE),
-        ]
-
         extracted = 0
+        seen: set[str] = set()
         for msg in messages:
             if msg.get("role") != "user":
                 continue
             content = msg.get("content", "")
-            if not isinstance(content, str) or len(content) < 10:
-                continue
-
-            for pattern in _PREF_PATTERNS:
-                if pattern.search(content):
-                    try:
-                        self._store.add_fact(content[:400], category="user_pref")
-                        extracted += 1
-                    except Exception:
-                        pass
-                    break
-
-            for pattern in _DECISION_PATTERNS:
-                if pattern.search(content):
-                    try:
-                        self._store.add_fact(content[:400], category="project")
-                        extracted += 1
-                    except Exception:
-                        pass
-                    break
+            for fact, category in _auto_extract_facts_from_text(content):
+                if fact.lower() in seen:
+                    continue
+                seen.add(fact.lower())
+                try:
+                    self._store.add_fact(fact, category=category)
+                    extracted += 1
+                except Exception:
+                    pass
 
         if extracted:
             logger.info("Auto-extracted %d facts from conversation", extracted)
