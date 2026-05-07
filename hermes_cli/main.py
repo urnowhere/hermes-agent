@@ -5499,6 +5499,7 @@ def _run_npm_install_deterministic(
     *,
     extra_args: tuple[str, ...] = (),
     capture_output: bool = True,
+    env: dict | None = None,
 ) -> subprocess.CompletedProcess:
     """Run a deterministic npm install that does not mutate ``package-lock.json``.
 
@@ -5518,6 +5519,7 @@ def _run_npm_install_deterministic(
             capture_output=capture_output,
             text=True,
             check=False,
+            env=env,
         )
         if ci_result.returncode == 0:
             return ci_result
@@ -5530,6 +5532,7 @@ def _run_npm_install_deterministic(
         capture_output=capture_output,
         text=True,
         check=False,
+        env=env,
     )
 
 
@@ -5556,7 +5559,17 @@ def _build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
             print("Install Node.js, then run:  cd web && npm install && npm run build")
         return not fatal
     print("→ Building web UI...")
-    r1 = _run_npm_install_deterministic(npm, web_dir, extra_args=("--silent",))
+    # Force devDependencies to install regardless of inherited NODE_ENV.
+    # The bundled TUI launcher sets NODE_ENV=production on its node
+    # subprocess (see _launch_tui), and many CI/deploy shells set
+    # NODE_ENV=production system-wide. npm >= 9 honors that and skips
+    # devDependencies, which causes `tsc -b && vite build` to fail with
+    # "tsc: not found". Override at the build site so the install is
+    # robust to caller env.
+    build_env = {**os.environ, "NODE_ENV": "development"}
+    r1 = _run_npm_install_deterministic(
+        npm, web_dir, extra_args=("--silent",), env=build_env
+    )
     if r1.returncode != 0:
         print(
             f"  {'✗' if fatal else '⚠'} Web UI npm install failed"
@@ -5565,7 +5578,7 @@ def _build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
         if fatal:
             print("  Run manually:  cd web && npm install && npm run build")
         return False
-    r2 = subprocess.run([npm, "run", "build"], cwd=web_dir, capture_output=True)
+    r2 = subprocess.run([npm, "run", "build"], cwd=web_dir, capture_output=True, env=build_env)
     if r2.returncode != 0:
         print(
             f"  {'✗' if fatal else '⚠'} Web UI build failed"
