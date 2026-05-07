@@ -91,7 +91,23 @@ def is_write_denied(path: str) -> bool:
 
 
 def get_read_block_error(path: str) -> Optional[str]:
-    """Return an error message when a read targets internal Hermes cache files."""
+    """Return an error message when a read targets a denied Hermes path.
+
+    Two categories are blocked:
+      * Internal Hermes cache files under ``HERMES_HOME/skills/.hub`` —
+        readable metadata that an attacker could use as a prompt-injection
+        carrier.
+      * Credential stores at the top of ``HERMES_HOME`` (``auth.json``,
+        ``auth.lock``, ``.anthropic_oauth.json``) — plaintext provider
+        keys / OAuth tokens that the agent never needs to read directly.
+
+    Callers that resolve relative paths against a non-process cwd
+    (e.g. ``TERMINAL_CWD`` in ``tools/file_tools.py``) MUST pre-resolve
+    and pass the absolute path string.  This function's own ``resolve()``
+    is anchored at the Python process cwd, so a relative input like
+    ``"auth.json"`` would otherwise miss the denylist when the task's
+    terminal cwd differs from the process cwd.
+    """
     resolved = Path(path).expanduser().resolve()
     hermes_home = _hermes_home_path().resolve()
     blocked_dirs = [
@@ -107,5 +123,22 @@ def get_read_block_error(path: str) -> Optional[str]:
             f"Access denied: {path} is an internal Hermes cache file "
             "and cannot be read directly to prevent prompt injection. "
             "Use the skills_list or skill_view tools instead."
+        )
+
+    # Credential stores under HERMES_HOME hold plaintext provider keys
+    # and OAuth tokens. The agent never needs to read these directly —
+    # auxiliary_client / credential_pool consume them through process
+    # env / OAuth flows that bypass read_file. Block read access so a
+    # prompt-injection reaching read_file can't exfiltrate them.
+    blocked_credential_files = {
+        hermes_home / "auth.json",
+        hermes_home / "auth.lock",
+        hermes_home / ".anthropic_oauth.json",
+    }
+    if resolved in blocked_credential_files:
+        return (
+            f"Access denied: {path} is a Hermes credential store "
+            "and cannot be read directly. Provider tools consume these "
+            "credentials through internal channels."
         )
     return None
