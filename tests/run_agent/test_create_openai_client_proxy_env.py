@@ -1,22 +1,13 @@
-"""Regression guard: _create_openai_client must honor HTTP(S)_PROXY env vars.
+"""Regression guards for _create_openai_client transport selection.
 
 When #11277 re-landed TCP keepalives, ``_create_openai_client`` began passing
-a custom ``transport=httpx.HTTPTransport(...)`` to ``httpx.Client``. httpx only
-auto-reads ``HTTP_PROXY`` / ``HTTPS_PROXY`` / ``ALL_PROXY`` when
-``transport is None`` (see ``Client.__init__``:
-``allow_env_proxies = trust_env and transport is None``). As a result, proxy
-env vars were silently ignored for the primary chat client, causing requests
-to bypass local proxies (Clash, corporate egress, etc.) and hit upstream
-directly from the raw interface.
+custom ``httpx.Client`` instances with ``HTTPTransport(socket_options=...)``.
+That has two important behaviors we want to pin:
 
-For users on WSL2 + Clash TUN this surfaced as Cloudflare ``cf-mitigated:
-challenge`` 403s against ``chatgpt.com/backend-api/codex`` once they upgraded
-past #11277. The fix forwards the proxy URL explicitly to ``httpx.Client``
-while keeping the keepalive-enabled transport in place.
-
-This test pins that the constructed ``httpx.Client`` mounts an ``HTTPProxy``
-pool when a proxy env var is set, AND that the socket-level keepalive
-transport is still installed on the no-proxy default path.
+1. For regular OpenAI-compatible endpoints, proxy env vars must still be honored.
+2. For the ChatGPT Codex backend (``https://chatgpt.com/backend-api/codex``),
+   we must NOT inject the custom keepalive transport because it resets the TLS
+   handshake (``Connection reset by peer``).
 """
 from unittest.mock import patch
 
@@ -25,12 +16,12 @@ import httpx
 from run_agent import AIAgent, _get_proxy_from_env, _get_proxy_for_base_url
 
 
-def _make_agent():
+def _make_agent(*, base_url: str, provider: str, model: str):
     return AIAgent(
         api_key="test-key",
-        base_url="https://chatgpt.com/backend-api/codex",
-        provider="openai-codex",
-        model="gpt-5.4",
+        base_url=base_url,
+        provider=provider,
+        model=model,
         quiet_mode=True,
         skip_context_files=True,
         skip_memory=True,
@@ -76,22 +67,21 @@ def test_get_proxy_from_env_normalizes_socks_alias(monkeypatch):
 
 
 @patch("run_agent.OpenAI")
-def test_create_openai_client_routes_via_proxy_when_env_set(mock_openai, monkeypatch):
-    """With HTTPS_PROXY set, the custom httpx.Client must mount an HTTPProxy pool.
-
-    This is the WSL2 + Clash / corporate-egress case. Before the fix, the custom
-    transport suppressed httpx's env-proxy auto-detection, so requests bypassed
-    the proxy entirely.
-    """
+def test_create_openai_client_routes_via_proxy_when_env_set_for_regular_openai_endpoints(mock_openai, monkeypatch):
+    """With HTTPS_PROXY set, non-Codex endpoints should still inject a proxied client."""
     for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
                 "https_proxy", "http_proxy", "all_proxy"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7897")
 
-    agent = _make_agent()
+    agent = _make_agent(
+        base_url="https://api.openai.com/v1",
+        provider="openai",
+        model="gpt-4o-mini",
+    )
     kwargs = {
-        "api_key": "test-key",
-        "base_url": "https://chatgpt.com/backend-api/codex",
+        "api_key": "***",
+        "base_url": "https://api.openai.com/v1",
     }
     agent._create_openai_client(kwargs, reason="test", shared=False)
 
@@ -99,10 +89,8 @@ def test_create_openai_client_routes_via_proxy_when_env_set(mock_openai, monkeyp
     http_client = _extract_http_client(forwarded)
     assert isinstance(http_client, httpx.Client), (
         "Expected _create_openai_client to inject a keepalive-enabled "
-        "httpx.Client; got %r" % (http_client,)
+        "httpx.Client for regular OpenAI endpoints; got %r" % (http_client,)
     )
-    # Verify a proxy mount exists. httpx Client(proxy=...) rewrites _mounts so
-    # the proxied pool (HTTPProxy) sits alongside the base transport.
     proxied_pools = [
         type(mount._pool).__name__
         for mount in http_client._mounts.values()
@@ -116,17 +104,20 @@ def test_create_openai_client_routes_via_proxy_when_env_set(mock_openai, monkeyp
 
 
 @patch("run_agent.OpenAI")
-def test_create_openai_client_no_proxy_when_env_unset(mock_openai, monkeypatch):
-    """Without proxy env vars, the keepalive transport must still be installed
-    and no HTTPProxy mount should exist."""
+def test_create_openai_client_no_proxy_when_env_unset_for_regular_openai_endpoints(mock_openai, monkeypatch):
+    """Without proxy env vars, non-Codex endpoints should still get keepalive transport."""
     for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
                 "https_proxy", "http_proxy", "all_proxy"):
         monkeypatch.delenv(key, raising=False)
 
-    agent = _make_agent()
+    agent = _make_agent(
+        base_url="https://api.openai.com/v1",
+        provider="openai",
+        model="gpt-4o-mini",
+    )
     kwargs = {
-        "api_key": "test-key",
-        "base_url": "https://chatgpt.com/backend-api/codex",
+        "api_key": "***",
+        "base_url": "https://api.openai.com/v1",
     }
     agent._create_openai_client(kwargs, reason="test", shared=False)
 
@@ -143,6 +134,67 @@ def test_create_openai_client_no_proxy_when_env_unset(mock_openai, monkeypatch):
         "pools were %r" % (pool_types,)
     )
     http_client.close()
+
+
+@patch("run_agent.OpenAI")
+def test_create_openai_client_skips_keepalive_injection_for_codex_provider(mock_openai, monkeypatch):
+    """Codex backend must use the default httpx transport to avoid TLS resets."""
+    for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
+                "https_proxy", "http_proxy", "all_proxy"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7897")
+
+    agent = _make_agent(
+        base_url="https://chatgpt.com/backend-api/codex",
+        provider="openai-codex",
+        model="gpt-5.4",
+    )
+
+    def _unexpected_keepalive_builder():
+        raise AssertionError("Codex provider path must not call _build_keepalive_http_client()")
+
+    monkeypatch.setattr(agent, "_build_keepalive_http_client", _unexpected_keepalive_builder)
+    kwargs = {
+        "api_key": "***",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+    }
+    agent._create_openai_client(kwargs, reason="test", shared=False)
+
+    forwarded = mock_openai.call_args.kwargs
+    assert _extract_http_client(forwarded) is None, (
+        "Expected no custom http_client injection for openai-codex; got %r"
+        % (forwarded.get("http_client"),)
+    )
+
+
+@patch("run_agent.OpenAI")
+def test_create_openai_client_skips_keepalive_injection_for_codex_base_url(mock_openai, monkeypatch):
+    """The Codex base URL should bypass keepalive even if provider routing changes."""
+    for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
+                "https_proxy", "http_proxy", "all_proxy"):
+        monkeypatch.delenv(key, raising=False)
+
+    agent = _make_agent(
+        base_url="https://chatgpt.com/backend-api/codex",
+        provider="openai",
+        model="gpt-5.4",
+    )
+
+    def _unexpected_keepalive_builder():
+        raise AssertionError("Codex base_url path must not call _build_keepalive_http_client()")
+
+    monkeypatch.setattr(agent, "_build_keepalive_http_client", _unexpected_keepalive_builder)
+    kwargs = {
+        "api_key": "***",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+    }
+    agent._create_openai_client(kwargs, reason="test", shared=False)
+
+    forwarded = mock_openai.call_args.kwargs
+    assert _extract_http_client(forwarded) is None, (
+        "Expected no custom http_client injection for Codex base_url; got %r"
+        % (forwarded.get("http_client"),)
+    )
 
 
 def test_get_proxy_for_base_url_returns_none_when_host_bypassed(monkeypatch):
@@ -199,7 +251,11 @@ def test_create_openai_client_bypasses_proxy_for_no_proxy_host(mock_openai, monk
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7897")
     monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")
 
-    agent = _make_agent()
+    agent = _make_agent(
+        base_url="http://127.0.0.1:11434/v1",
+        provider="openai",
+        model="local-model",
+    )
     kwargs = {
         "api_key": "***",
         "base_url": "http://127.0.0.1:11434/v1",
@@ -218,3 +274,29 @@ def test_create_openai_client_bypasses_proxy_for_no_proxy_host(mock_openai, monk
         "NO_PROXY host must not route through HTTPProxy; pools were %r" % (pool_types,)
     )
     http_client.close()
+
+
+@patch("run_agent.OpenAI")
+def test_create_openai_client_preserves_timeout_for_regular_openai_endpoints(mock_openai, monkeypatch):
+    """Timeout must be forwarded even when keepalive http_client is injected."""
+    for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
+                "https_proxy", "http_proxy", "all_proxy"):
+        monkeypatch.delenv(key, raising=False)
+
+    agent = _make_agent(
+        base_url="https://api.openai.com/v1",
+        provider="openai",
+        model="gpt-4o-mini",
+    )
+    kwargs = {
+        "api_key": "***",
+        "base_url": "https://api.openai.com/v1",
+        "timeout": 300.0,
+    }
+    agent._create_openai_client(kwargs, reason="test", shared=False)
+
+    forwarded = mock_openai.call_args.kwargs
+    assert forwarded.get("timeout") == 300.0, (
+        "Expected timeout to be preserved when injecting keepalive http_client; "
+        "got %r" % (forwarded.get("timeout"),)
+    )

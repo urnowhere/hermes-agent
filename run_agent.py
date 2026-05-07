@@ -5567,6 +5567,27 @@ class AIAgent:
         except Exception:
             return None
 
+    @staticmethod
+    def _is_chatgpt_codex_backend(provider: str, base_url: str | None) -> bool:
+        """Check if the client configuration targets the ChatGPT Codex backend.
+
+        The Codex backend (https://chatgpt.com/backend-api/codex) is incompatible
+        with custom socket_options in HTTPTransport, which causes TLS handshake
+        failures (Connection reset by peer). This helper centralizes the detection
+        logic for reuse across client construction paths.
+
+        Args:
+            provider: The provider string (e.g., "openai-codex", "openai").
+            base_url: The base_url string or None.
+
+        Returns:
+            True if the configuration targets the Codex backend, False otherwise.
+        """
+        return (
+            provider == "openai-codex"
+            or (base_url and str(base_url).lower().startswith("https://chatgpt.com/backend-api/codex"))
+        )
+
     def _create_openai_client(self, client_kwargs: dict, *, reason: str, shared: bool) -> Any:
         from agent.auxiliary_client import _validate_base_url, _validate_proxy_env_urls
         # Treat client_kwargs as read-only. Callers pass self._client_kwargs (or shallow
@@ -5645,7 +5666,18 @@ class AIAgent:
         # constructs a fresh one — no stale closed transport can be reused.
         # Tests in ``tests/run_agent/test_create_openai_client_reuse.py`` and
         # ``tests/run_agent/test_sequential_chats_live.py`` pin this invariant.
-        if "http_client" not in client_kwargs:
+        #
+        # NOTE: Skip custom HTTPTransport for openai-codex (chatgpt.com backend)
+        # as it triggers TLS handshake failures (Connection reset by peer).
+        # The custom socket_options in HTTPTransport are incompatible with
+        # chatgpt.com's TLS configuration. Use default transport instead.
+        if (
+            "http_client" not in client_kwargs
+            and not self._is_chatgpt_codex_backend(
+                self.provider,
+                client_kwargs.get("base_url"),
+            )
+        ):
             keepalive_http = self._build_keepalive_http_client(client_kwargs.get("base_url", ""))
             if keepalive_http is not None:
                 client_kwargs["http_client"] = keepalive_http
