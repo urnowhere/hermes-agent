@@ -11803,10 +11803,23 @@ class AIAgent:
                                         f"{self.log_prefix}⚠️  Truncated tool call detected — retrying API call...",
                                         force=True,
                                     )
-                                    # Don't append the broken response to messages;
-                                    # just re-run the same API call from the current
-                                    # message state, giving the model another chance.
-                                    continue
+                                    messages.append(
+                                        {
+                                            "role": "user",
+                                            "content": (
+                                                "Your previous tool call was truncated before the arguments formed valid JSON. "
+                                                "Retry with a smaller valid tool call: use small targeted patches or writes, "
+                                                "split large content into repo-local artifacts, and avoid giant tool-call payloads."
+                                            ),
+                                        }
+                                    )
+                                    # Don't append the broken assistant response to
+                                    # messages. Instead, steer the retry toward a
+                                    # smaller valid tool call and route it through the
+                                    # length-continuation path so the retry also gets
+                                    # the existing output-token budget boost.
+                                    restart_with_length_continuation = True
+                                    break
                                 self._vprint(
                                     f"{self.log_prefix}⚠️  Truncated tool call response detected again — refusing to execute incomplete tool arguments.",
                                     force=True,

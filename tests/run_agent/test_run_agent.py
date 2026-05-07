@@ -3228,6 +3228,12 @@ class TestRunConversation:
         # Tool was executed on the retry (good_resp)
         mock_hfc.assert_called_once()
         assert result["final_response"] == "Done!"
+        retry_messages = agent.client.chat.completions.create.call_args_list[1].kwargs[
+            "messages"
+        ]
+        assert retry_messages[-1]["role"] == "user"
+        assert "previous tool call was truncated" in retry_messages[-1]["content"]
+        assert "smaller valid tool call" in retry_messages[-1]["content"]
 
     def test_truncated_tool_args_detected_when_finish_reason_not_length(self, agent):
         """When a router rewrites finish_reason from 'length' to 'tool_calls',

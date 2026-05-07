@@ -263,6 +263,7 @@ For **durable long-running work** that must survive interrupts or outlive the cu
 # In ~/.hermes/config.yaml
 delegation:
   max_iterations: 50                        # Max turns per child (default: 50)
+  # max_tokens: 64000                       # Optional child output-token budget; defaults to parent max_tokens
   # max_concurrent_children: 3              # Parallel children per batch (default: 3)
   # max_spawn_depth: 1                      # Tree depth (1-3, default 1 = flat). Raise to 2 to allow orchestrator children to spawn leaves; 3 for three levels.
   # orchestrator_enabled: true              # Disable to force all children to leaf role.
@@ -275,6 +276,8 @@ delegation:
   base_url: "http://localhost:1234/v1"
   api_key: "local-key"
 ```
+
+Installations that use profile-specific config should set `delegation.max_tokens` in each profile that spawns subagents.
 
 :::tip
 The agent handles delegation automatically based on the task complexity. You don't need to explicitly ask it to delegate — it will do so when it makes sense.
