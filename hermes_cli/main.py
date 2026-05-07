@@ -7609,6 +7609,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
             restarted_services = []
             killed_pids = set()
+            force_sweep_pids = set()
             relaunched_profiles = []
 
             # --- Systemd services (Linux) ---
@@ -7837,9 +7838,9 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 if not drained:
                     try:
                         os.kill(pid, _signal.SIGTERM)
+                        force_sweep_pids.add(pid)
                     except (ProcessLookupError, PermissionError):
                         pass
-                killed_pids.add(pid)
                 relaunched_profiles.append(proc.profile)
 
             for pid in manual_pids:
@@ -7848,17 +7849,18 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 try:
                     os.kill(pid, _signal.SIGTERM)
                     killed_pids.add(pid)
+                    force_sweep_pids.add(pid)
                 except (ProcessLookupError, PermissionError):
                     pass
 
-            if restarted_services or killed_pids:
+            if restarted_services or killed_pids or relaunched_profiles:
                 print()
                 for svc in restarted_services:
                     print(f"  ✓ Restarted {svc}")
                 if relaunched_profiles:
                     names = ", ".join(relaunched_profiles)
                     print(f"  ✓ Restarting manual gateway profile(s): {names}")
-                unmapped_count = len(killed_pids) - len(relaunched_profiles)
+                unmapped_count = len(killed_pids)
                 if unmapped_count:
                     print(f"  → Stopped {unmapped_count} manual gateway process(es)")
                     print("    Restart manually: hermes gateway run")
@@ -7867,7 +7869,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                             "    (or: hermes -p <profile> gateway run  for each profile)"
                         )
 
-            if not restarted_services and not killed_pids:
+            if not restarted_services and not killed_pids and not relaunched_profiles:
                 # No gateways were running — nothing to do
                 pass
 
@@ -7891,7 +7893,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 # update (killed_pids).  Anything new is a gateway that
                 # started AFTER our restart attempt — respecting user
                 # intent, we don't kill those.
-                _stuck = [pid for pid in _surviving if pid in killed_pids]
+                _stuck = [pid for pid in _surviving if pid in force_sweep_pids]
                 if _stuck:
                     print()
                     print(

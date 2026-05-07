@@ -7,8 +7,9 @@ import pytest
 
 def test_default_origin_is_foreground():
     from tools.skill_provenance import get_current_write_origin
-    # In a fresh ContextVar context, default kicks in.
-    ctx = contextvars.copy_context()
+    # In a fresh ContextVar context, default kicks in. copy_context() would
+    # inherit the active agent/tool-loop origin from the current test runner.
+    ctx = contextvars.Context()
     origin = ctx.run(get_current_write_origin)
     assert origin == "foreground"
 
