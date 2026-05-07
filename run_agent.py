@@ -3769,6 +3769,42 @@ class AIAgent:
             metadata["tool_call_id"] = tool_call_id
         return {k: v for k, v in metadata.items() if v not in (None, "")}
 
+    def _dispatch_memory_tool(
+        self,
+        function_args: Dict[str, Any],
+        *,
+        task_id: Optional[str] = None,
+        tool_call_id: Optional[str] = None,
+    ) -> str:
+        """Dispatch a memory tool call. Used by both the main agent loop and the
+        resume/fork path so that adding new memory-tool parameters only requires
+        changes in one place."""
+        from tools.memory_tool import memory_tool as _memory_tool
+
+        target = function_args.get("target", "memory")
+        result = _memory_tool(
+            action=function_args.get("action"),
+            target=target,
+            content=function_args.get("content"),
+            old_text=function_args.get("old_text"),
+            store=self._memory_store,
+        )
+        # Bridge: notify external memory provider of built-in memory writes
+        if self._memory_manager and function_args.get("action") in ("add", "replace"):
+            try:
+                self._memory_manager.on_memory_write(
+                    function_args.get("action", ""),
+                    target,
+                    function_args.get("content", ""),
+                    metadata=self._build_memory_write_metadata(
+                        task_id=task_id,
+                        tool_call_id=tool_call_id,
+                    ),
+                )
+            except Exception:
+                pass
+        return result
+
     def _apply_persist_user_message_override(self, messages: List[Dict]) -> None:
         """Rewrite the current-turn user message before persistence/return.
 
@@ -9511,30 +9547,11 @@ class AIAgent:
                 current_session_id=self.session_id,
             )
         elif function_name == "memory":
-            target = function_args.get("target", "memory")
-            from tools.memory_tool import memory_tool as _memory_tool
-            result = _memory_tool(
-                action=function_args.get("action"),
-                target=target,
-                content=function_args.get("content"),
-                old_text=function_args.get("old_text"),
-                store=self._memory_store,
+            return self._dispatch_memory_tool(
+                function_args,
+                task_id=effective_task_id,
+                tool_call_id=tool_call_id,
             )
-            # Bridge: notify external memory provider of built-in memory writes
-            if self._memory_manager and function_args.get("action") in ("add", "replace"):
-                try:
-                    self._memory_manager.on_memory_write(
-                        function_args.get("action", ""),
-                        target,
-                        function_args.get("content", ""),
-                        metadata=self._build_memory_write_metadata(
-                            task_id=effective_task_id,
-                            tool_call_id=tool_call_id,
-                        ),
-                    )
-                except Exception:
-                    pass
-            return result
         elif self._memory_manager and self._memory_manager.has_tool(function_name):
             return self._memory_manager.handle_tool_call(function_name, function_args)
         elif function_name == "clarify":
@@ -10118,29 +10135,11 @@ class AIAgent:
                 if self._should_emit_quiet_tool_messages():
                     self._vprint(f"  {_get_cute_tool_message_impl('session_search', function_args, tool_duration, result=function_result)}")
             elif function_name == "memory":
-                target = function_args.get("target", "memory")
-                from tools.memory_tool import memory_tool as _memory_tool
-                function_result = _memory_tool(
-                    action=function_args.get("action"),
-                    target=target,
-                    content=function_args.get("content"),
-                    old_text=function_args.get("old_text"),
-                    store=self._memory_store,
+                function_result = self._dispatch_memory_tool(
+                    function_args,
+                    task_id=effective_task_id,
+                    tool_call_id=getattr(tool_call, "id", None),
                 )
-                # Bridge: notify external memory provider of built-in memory writes
-                if self._memory_manager and function_args.get("action") in ("add", "replace"):
-                    try:
-                        self._memory_manager.on_memory_write(
-                            function_args.get("action", ""),
-                            target,
-                            function_args.get("content", ""),
-                            metadata=self._build_memory_write_metadata(
-                                task_id=effective_task_id,
-                                tool_call_id=getattr(tool_call, "id", None),
-                            ),
-                        )
-                    except Exception:
-                        pass
                 tool_duration = time.time() - tool_start_time
                 if self._should_emit_quiet_tool_messages():
                     self._vprint(f"  {_get_cute_tool_message_impl('memory', function_args, tool_duration, result=function_result)}")
