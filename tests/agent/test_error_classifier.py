@@ -59,6 +59,7 @@ class TestFailoverReason:
             "provider_policy_blocked",
             "thinking_signature", "long_context_tier",
             "oauth_long_context_beta_forbidden",
+            "anthropic_oauth_tools_overage",
             "llama_cpp_grammar_pattern",
             "unknown",
         }
@@ -563,6 +564,52 @@ class TestClassifyApiError:
         )
         result = classify_api_error(e, provider="anthropic")
         assert result.reason != FailoverReason.oauth_long_context_beta_forbidden
+
+    # ── Provider-specific: Anthropic OAuth tool-use overage routing ──
+
+    def test_anthropic_oauth_tools_overage_is_distinct_non_retryable(self):
+        e = MockAPIError(
+            "You're out of extra usage. Add more at claude.ai/settings/usage and keep going.",
+            status_code=400,
+            body={
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "You're out of extra usage. Add more at claude.ai/settings/usage and keep going.",
+                }
+            },
+        )
+        result = classify_api_error(
+            e,
+            provider="anthropic",
+            model="claude-opus-4-7",
+            is_anthropic_oauth=True,
+            has_tools=True,
+        )
+        assert result.reason == FailoverReason.anthropic_oauth_tools_overage
+        assert result.retryable is False
+        assert result.should_fallback is True
+        assert result.should_rotate_credential is False
+
+    def test_anthropic_oauth_tools_overage_requires_oauth_and_tools(self):
+        e = MockAPIError(
+            "You're out of extra usage. Add more at claude.ai/settings/usage and keep going.",
+            status_code=400,
+        )
+        without_oauth = classify_api_error(
+            e,
+            provider="anthropic",
+            is_anthropic_oauth=False,
+            has_tools=True,
+        )
+        without_tools = classify_api_error(
+            e,
+            provider="anthropic",
+            is_anthropic_oauth=True,
+            has_tools=False,
+        )
+
+        assert without_oauth.reason == FailoverReason.format_error
+        assert without_tools.reason == FailoverReason.format_error
 
     # ── Transport errors ──
 

@@ -55,6 +55,7 @@ class FailoverReason(enum.Enum):
     thinking_signature = "thinking_signature"  # Anthropic thinking block sig invalid
     long_context_tier = "long_context_tier"    # Anthropic "extra usage" tier gate
     oauth_long_context_beta_forbidden = "oauth_long_context_beta_forbidden"  # Anthropic OAuth subscription rejects 1M context beta — disable beta and retry
+    anthropic_oauth_tools_overage = "anthropic_oauth_tools_overage"  # Anthropic Max OAuth rejects tool-use as overage — fallback or abort with guidance
     llama_cpp_grammar_pattern = "llama_cpp_grammar_pattern"  # llama.cpp json-schema-to-grammar rejects regex escapes in `pattern` / `format` — strip from tools and retry
 
     # Catch-all
@@ -336,6 +337,8 @@ def classify_api_error(
     approx_tokens: int = 0,
     context_length: int = 200000,
     num_messages: int = 0,
+    is_anthropic_oauth: bool = False,
+    has_tools: bool = False,
 ) -> ClassifiedError:
     """Classify an API error into a structured recovery recommendation.
 
@@ -355,6 +358,8 @@ def classify_api_error(
         model: Current model slug.
         approx_tokens: Approximate token count of the current context.
         context_length: Maximum context length for the current model.
+        is_anthropic_oauth: Whether the active Anthropic auth path uses OAuth.
+        has_tools: Whether the failed request included tool definitions.
 
     Returns:
         ClassifiedError with reason and recovery action hints.
@@ -469,6 +474,26 @@ def classify_api_error(
             FailoverReason.oauth_long_context_beta_forbidden,
             retryable=True,
             should_compress=False,
+        )
+
+    # Claude Max/Pro OAuth can authenticate normal /v1/messages calls while
+    # deterministically rejecting the same request once the `tools` array is
+    # present, with the misleading "out of extra usage" billing text. Treat it
+    # as a distinct non-retryable lane-routing failure so the agent can switch
+    # fallback providers immediately or print the right user guidance.
+    if (
+        status_code == 400
+        and provider_lower == "anthropic"
+        and is_anthropic_oauth
+        and has_tools
+        and "out of extra usage" in error_msg
+        and "claude.ai/settings/usage" in error_msg
+    ):
+        return _result(
+            FailoverReason.anthropic_oauth_tools_overage,
+            retryable=False,
+            should_rotate_credential=False,
+            should_fallback=True,
         )
 
     # llama.cpp's ``json-schema-to-grammar`` converter (used by its OAI

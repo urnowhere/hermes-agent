@@ -12178,6 +12178,8 @@ class AIAgent:
                         approx_tokens=approx_tokens,
                         context_length=_ctx_len,
                         num_messages=len(api_messages) if api_messages else 0,
+                        is_anthropic_oauth=bool(getattr(self, "_is_anthropic_oauth", False)),
+                        has_tools=bool(api_kwargs and api_kwargs.get("tools")),
                     )
                     logger.debug(
                         "Error classified: reason=%s status=%s retryable=%s compress=%s rotate=%s fallback=%s",
@@ -12896,7 +12898,28 @@ class AIAgent:
                         self._vprint(f"{self.log_prefix}   🔌 Provider: {_provider}  Model: {_model}", force=True)
                         self._vprint(f"{self.log_prefix}   🌐 Endpoint: {_base}", force=True)
                         # Actionable guidance for common auth errors
-                        if classified.is_auth or classified.reason == FailoverReason.billing:
+                        if classified.reason == FailoverReason.anthropic_oauth_tools_overage:
+                            self._vprint(
+                                f"{self.log_prefix}   💡 Anthropic rejected this tools-carrying OAuth request as overage.",
+                                force=True,
+                            )
+                            self._vprint(
+                                f"{self.log_prefix}      Your Claude Max/Pro lane may still have usage available, but external OAuth tool-use",
+                                force=True,
+                            )
+                            self._vprint(
+                                f"{self.log_prefix}      appears to be routed to an overage/API-credit lane that is disabled.",
+                                force=True,
+                            )
+                            self._vprint(
+                                f"{self.log_prefix}      Options: configure a fallback provider, add API credits at https://claude.ai/settings/usage,",
+                                force=True,
+                            )
+                            self._vprint(
+                                f"{self.log_prefix}      or switch providers with `/model <model> --provider openrouter`.",
+                                force=True,
+                            )
+                        elif classified.is_auth or classified.reason == FailoverReason.billing:
                             if _provider == "openai-codex" and status_code == 401:
                                 self._vprint(f"{self.log_prefix}   💡 Codex OAuth token was rejected (HTTP 401). Your token may have been", force=True)
                                 self._vprint(f"{self.log_prefix}      refreshed by another client (Codex CLI, VS Code). To fix:", force=True)
