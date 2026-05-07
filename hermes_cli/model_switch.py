@@ -1448,6 +1448,24 @@ def list_authenticated_providers(
         seen_slugs.add(_cp.slug.lower())
         _record_builtin_endpoint(_cp.slug)
 
+    if any(p.get("slug") == "openrouter" for p in results):
+        try:
+            from hermes_cli.models import fetch_openrouter_free_models
+            free_models = fetch_openrouter_free_models(timeout=3.0)
+        except Exception:
+            free_models = []
+        if free_models:
+            top_free = free_models[:max_models]
+            results.append({
+                "slug": "openrouter",
+                "name": "OpenRouter free models",
+                "is_current": current_provider == "openrouter",
+                "is_user_defined": False,
+                "models": top_free,
+                "total_models": len(free_models),
+                "source": "openrouter-free",
+            })
+
     # --- 3. User-defined endpoints from config ---
     # Track (name, base_url) of what section 3 emits so section 4 can skip
     # any overlapping ``custom_providers:`` entries.  Callers typically pass
