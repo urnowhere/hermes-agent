@@ -5,7 +5,59 @@ This transport owns format conversion and normalization — NOT client lifecycle
 streaming, or the _run_codex_stream() call path.
 """
 
+import os
 from typing import Any, Dict, List, Optional
+
+
+_CODEX_WEB_SEARCH_DISABLED = {"", "0", "false", "off", "no", "disabled", "disable", "none"}
+_CODEX_WEB_SEARCH_CACHED = {"cached", "cache"}
+_CODEX_WEB_SEARCH_LIVE = {"1", "true", "on", "yes", "live", "search"}
+_CODEX_NATIVE_WEB_SEARCH_TOOL_TYPES = {"web_search", "web_search_preview"}
+_CODEX_WEB_SEARCH_SOURCES_INCLUDE = "web_search_call.action.sources"
+
+
+def _is_managed_web_search_tool(tool: Any) -> bool:
+    return isinstance(tool, dict) and tool.get("type") == "function" and tool.get("name") == "web_search"
+
+
+def _has_native_web_search_tool(tools: Any) -> bool:
+    return isinstance(tools, list) and any(
+        isinstance(tool, dict) and tool.get("type") in _CODEX_NATIVE_WEB_SEARCH_TOOL_TYPES
+        for tool in tools
+    )
+
+
+def _ensure_codex_web_search_sources_include(kwargs: Dict[str, Any]) -> None:
+    includes = kwargs.get("include")
+    if isinstance(includes, list):
+        merged = list(includes)
+    else:
+        merged = []
+    if _CODEX_WEB_SEARCH_SOURCES_INCLUDE not in merged:
+        merged.append(_CODEX_WEB_SEARCH_SOURCES_INCLUDE)
+    kwargs["include"] = merged
+
+
+def _codex_native_web_search_tool(mode: Any) -> Optional[Dict[str, Any]]:
+    """Return a native Responses ``web_search`` tool for Codex mode values.
+
+    Matches the open-source Codex CLI shape:
+    - ``cached`` => ``external_web_access: false``
+    - ``live`` / truthy => ``external_web_access: true``
+    - disabled / empty => no tool
+    """
+    if mode is None:
+        return None
+    if isinstance(mode, bool):
+        return {"type": "web_search", "external_web_access": True} if mode else None
+    normalized = str(mode).strip().lower().replace("-", "_")
+    if normalized in _CODEX_WEB_SEARCH_DISABLED:
+        return None
+    if normalized in _CODEX_WEB_SEARCH_CACHED:
+        return {"type": "web_search", "external_web_access": False}
+    if normalized in _CODEX_WEB_SEARCH_LIVE:
+        return {"type": "web_search", "external_web_access": True}
+    return None
 
 from agent.transports.base import ProviderTransport
 from agent.transports.types import NormalizedResponse, ToolCall
@@ -89,11 +141,27 @@ class ResponsesApiTransport(ProviderTransport):
         _effort_clamp = {"minimal": "low"}
         reasoning_effort = _effort_clamp.get(reasoning_effort, reasoning_effort)
 
+        responses_tools = _responses_tools(tools)
+        if is_codex_backend:
+            native_web_search_mode = params.get("native_web_search_mode")
+            if native_web_search_mode is None:
+                native_web_search_mode = os.getenv("HERMES_CODEX_WEB_SEARCH")
+            native_web_search_tool = _codex_native_web_search_tool(native_web_search_mode)
+            if native_web_search_tool:
+                responses_tools = list(responses_tools or [])
+                # Avoid presenting both the provider-native Responses web_search
+                # tool and Hermes's managed function tool with the same visible
+                # name. Native search still emits normal Hermes search progress,
+                # while web_extract/browser tools remain available if enabled.
+                responses_tools = [tool for tool in responses_tools if not _is_managed_web_search_tool(tool)]
+                if not _has_native_web_search_tool(responses_tools):
+                    responses_tools.append(native_web_search_tool)
+
         kwargs = {
             "model": model,
             "instructions": instructions,
             "input": _chat_messages_to_responses_input(payload_messages),
-            "tools": _responses_tools(tools),
+            "tools": responses_tools,
             "tool_choice": "auto",
             "parallel_tool_calls": True,
             "store": False,
@@ -119,6 +187,9 @@ class ResponsesApiTransport(ProviderTransport):
         request_overrides = params.get("request_overrides")
         if request_overrides:
             kwargs.update(request_overrides)
+
+        if is_codex_backend and _has_native_web_search_tool(kwargs.get("tools")):
+            _ensure_codex_web_search_sources_include(kwargs)
 
         if is_codex_backend:
             prompt_cache_key = kwargs.get("prompt_cache_key")
@@ -189,6 +260,8 @@ class ResponsesApiTransport(ProviderTransport):
             provider_data["codex_reasoning_items"] = msg.codex_reasoning_items
         if msg and hasattr(msg, "codex_message_items") and msg.codex_message_items:
             provider_data["codex_message_items"] = msg.codex_message_items
+        if msg and hasattr(msg, "codex_web_search_items") and msg.codex_web_search_items:
+            provider_data["codex_web_search_items"] = msg.codex_web_search_items
         if msg and hasattr(msg, "reasoning_details") and msg.reasoning_details:
             provider_data["reasoning_details"] = msg.reasoning_details
 

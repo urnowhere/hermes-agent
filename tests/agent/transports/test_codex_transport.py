@@ -140,6 +140,139 @@ class TestCodexBuildKwargs:
             "x-grok-conv-id": "conv-123",
         }
 
+    def test_codex_native_web_search_live_adds_responses_tool(self, transport):
+        messages = [{"role": "user", "content": "What happened today?"}]
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=messages,
+            tools=[],
+            is_codex_backend=True,
+            native_web_search_mode="live",
+        )
+
+        assert kw["tools"] == [
+            {"type": "web_search", "external_web_access": True}
+        ]
+        assert "web_search_call.action.sources" in kw["include"]
+
+    def test_codex_native_web_search_cached_adds_responses_tool(self, transport):
+        messages = [{"role": "user", "content": "What did we already know?"}]
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=messages,
+            tools=[],
+            is_codex_backend=True,
+            native_web_search_mode="cached",
+        )
+
+        assert kw["tools"] == [
+            {"type": "web_search", "external_web_access": False}
+        ]
+        assert "web_search_call.action.sources" in kw["include"]
+
+    def test_codex_native_web_search_suppresses_managed_search_function(self, transport):
+        messages = [{"role": "user", "content": "What happened today?"}]
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "description": "Hermes managed web search",
+                    "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "web_extract",
+                    "description": "Hermes managed web extraction",
+                    "parameters": {"type": "object", "properties": {"urls": {"type": "array"}}},
+                },
+            },
+        ]
+
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=messages,
+            tools=tools,
+            is_codex_backend=True,
+            native_web_search_mode="live",
+        )
+
+        assert kw["tools"] == [
+            {
+                "type": "function",
+                "name": "web_extract",
+                "description": "Hermes managed web extraction",
+                "strict": False,
+                "parameters": {"type": "object", "properties": {"urls": {"type": "array"}}},
+            },
+            {"type": "web_search", "external_web_access": True},
+        ]
+
+    def test_codex_native_web_search_merges_sources_include_without_duplicates(self, transport):
+        messages = [{"role": "user", "content": "Search"}]
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=messages,
+            tools=[],
+            is_codex_backend=True,
+            native_web_search_mode="live",
+            request_overrides={"include": ["custom.include", "web_search_call.action.sources"]},
+        )
+
+        assert kw["include"] == ["custom.include", "web_search_call.action.sources"]
+
+    def test_codex_native_web_search_only_for_codex_backend(self, transport):
+        messages = [{"role": "user", "content": "Hi"}]
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=messages,
+            tools=[],
+            native_web_search_mode="live",
+        )
+
+        assert kw["tools"] is None
+
+    def test_preflight_allows_native_web_search_tool(self, transport):
+        sanitized = transport.preflight_kwargs({
+            "model": "gpt-5.4",
+            "instructions": "You are helpful.",
+            "input": [{"role": "user", "content": "Search the web"}],
+            "tools": [{"type": "web_search", "external_web_access": True}],
+            "store": False,
+        })
+
+        assert sanitized["tools"] == [
+            {"type": "web_search", "external_web_access": True}
+        ]
+
+    def test_preflight_parses_native_web_search_false_strings(self, transport):
+        sanitized = transport.preflight_kwargs({
+            "model": "gpt-5.4",
+            "instructions": "You are helpful.",
+            "input": [{"role": "user", "content": "Search cached context"}],
+            "tools": [{"type": "web_search", "external_web_access": "false"}],
+            "store": False,
+        })
+
+        assert sanitized["tools"] == [
+            {"type": "web_search", "external_web_access": False}
+        ]
+
+    def test_preflight_allows_native_web_search_preview_tool(self, transport):
+        sanitized = transport.preflight_kwargs({
+            "model": "gpt-5.4",
+            "instructions": "You are helpful.",
+            "input": [{"role": "user", "content": "Search preview"}],
+            "tools": [{"type": "web_search_preview", "external_web_access": "true"}],
+            "store": False,
+        })
+
+        assert sanitized["tools"] == [
+            {"type": "web_search_preview", "external_web_access": True}
+        ]
+
     def test_minimal_effort_clamped(self, transport):
         messages = [{"role": "user", "content": "Hi"}]
         kw = transport.build_kwargs(
@@ -237,6 +370,88 @@ class TestCodexNormalizeResponse:
                 "phase": "final_answer",
             }
         ]
+
+    def test_message_annotations_preserved_in_codex_message_items(self, transport):
+        r = SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    status="completed",
+                    content=[
+                        SimpleNamespace(
+                            type="output_text",
+                            text="OpenAI announced updates.",
+                            annotations=[
+                                SimpleNamespace(
+                                    type="url_citation",
+                                    url="https://example.com/openai-updates",
+                                    title="OpenAI updates",
+                                    start_index=0,
+                                    end_index=6,
+                                )
+                            ],
+                        )
+                    ],
+                )
+            ],
+            status="completed",
+            model="gpt-5.4",
+        )
+
+        nr = transport.normalize_response(r)
+
+        assert nr.provider_data["codex_message_items"][0]["content"][0]["annotations"] == [
+            {
+                "type": "url_citation",
+                "url": "https://example.com/openai-updates",
+                "title": "OpenAI updates",
+                "start_index": 0,
+                "end_index": 6,
+            }
+        ]
+
+    def test_web_search_call_items_preserved_in_provider_data(self, transport):
+        """Native Codex web-search calls should survive normalization as trace data."""
+        r = SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="web_search_call",
+                    id="ws_abc123",
+                    status="completed",
+                    action=SimpleNamespace(
+                        type="search",
+                        query="AI news this week",
+                        queries=["AI news this week", "frontier AI May 2026"],
+                    ),
+                ),
+                SimpleNamespace(
+                    type="message",
+                    role="assistant",
+                    content=[SimpleNamespace(type="output_text", text="Found current AI news.")],
+                    status="completed",
+                ),
+            ],
+            status="completed",
+            incomplete_details=None,
+            usage=SimpleNamespace(input_tokens=10, output_tokens=5,
+                                  input_tokens_details=None, output_tokens_details=None),
+        )
+
+        nr = transport.normalize_response(r)
+
+        assert nr.codex_web_search_items == [
+            {
+                "type": "web_search_call",
+                "id": "ws_abc123",
+                "status": "completed",
+                "action": {
+                    "type": "search",
+                    "query": "AI news this week",
+                    "queries": ["AI news this week", "frontier AI May 2026"],
+                },
+            }
+        ]
+        assert nr.provider_data["codex_web_search_items"] == nr.codex_web_search_items
 
     def test_tool_call_response(self, transport):
         """Normalize a Codex response with tool calls."""

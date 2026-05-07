@@ -11,7 +11,9 @@ from gateway.runtime_footer import (
     _home_relative_cwd,
     _model_short,
     build_footer_line,
+    extract_search_traces_from_messages,
     format_runtime_footer,
+    format_search_traces,
     resolve_footer_config,
 )
 
@@ -147,6 +149,161 @@ def test_format_footer_unknown_field_silently_ignored():
     assert out == "gpt-5.4 · 50%"
 
 
+def test_format_footer_renders_codex_native_search_trace():
+    out = format_runtime_footer(
+        model="openai/gpt-5.4",
+        context_tokens=50,
+        context_length=100,
+        cwd="",
+        fields=("search",),
+        search_traces=[
+            {
+                "source": "provider_native",
+                "provider": "codex",
+                "tool": "web_search",
+                "query": "finance: BTC",
+                "status": "completed",
+            }
+        ],
+    )
+    assert out == "🔎 Codex search: finance: BTC"
+
+
+def test_format_search_traces_summarizes_external_web_tool():
+    out = format_search_traces([
+        {
+            "source": "hermes_tool",
+            "provider": "tavily",
+            "tool": "web_search",
+            "query": "latest AI news",
+            "result_count": 5,
+            "status": "completed",
+        }
+    ])
+    assert out == "🔎 Tavily search: latest AI news (5 results)"
+
+
+def test_extract_search_traces_from_codex_and_web_search_tool_messages():
+    messages = [
+        {
+            "role": "assistant",
+            "content": "BTC price",
+            "codex_web_search_items": [
+                {
+                    "type": "web_search_call",
+                    "status": "completed",
+                    "action": {"type": "search", "query": "finance: BTC"},
+                }
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "web_search",
+                        "arguments": '{"query": "latest AI news", "limit": 5}',
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "name": "web_search",
+            "tool_call_id": "call_1",
+            "content": '{"success": true, "data": {"web": [{"url": "https://example.com/a"}, {"url": "https://example.com/b"}]}}',
+        },
+    ]
+
+    traces = extract_search_traces_from_messages(messages)
+
+    assert traces == [
+        {
+            "kind": "search",
+            "source": "provider_native",
+            "provider": "codex",
+            "tool": "web_search",
+            "query": "finance: BTC",
+            "queries": ["finance: BTC"],
+            "status": "completed",
+        },
+        {
+            "kind": "search",
+            "source": "hermes_tool",
+            "provider": "web",
+            "tool": "web_search",
+            "query": "latest AI news",
+            "queries": ["latest AI news"],
+            "result_count": 2,
+            "status": "completed",
+        },
+    ]
+
+
+def test_extract_search_traces_handles_codex_open_page_action():
+    messages = [
+        {"role": "user", "content": "open current source"},
+        {
+            "role": "assistant",
+            "codex_web_search_items": [
+                {
+                    "type": "web_search_call",
+                    "status": "completed",
+                    "action": {"type": "open_page", "url": "https://example.com/story"},
+                }
+            ],
+        },
+    ]
+
+    traces = extract_search_traces_from_messages(messages)
+
+    assert traces == [
+        {
+            "kind": "extract",
+            "source": "provider_native",
+            "provider": "codex",
+            "tool": "web_extract",
+            "urls": ["https://example.com/story"],
+            "status": "completed",
+        }
+    ]
+
+
+
+def test_extract_search_traces_defaults_to_current_user_turn_only():
+    messages = [
+        {
+            "role": "assistant",
+            "codex_web_search_items": [
+                {
+                    "type": "web_search_call",
+                    "status": "completed",
+                    "action": {"type": "search", "query": "old BTC search"},
+                }
+            ],
+        },
+        {"role": "user", "content": "search current AI news"},
+        {
+            "role": "assistant",
+            "codex_web_search_items": [
+                {
+                    "type": "web_search_call",
+                    "status": "completed",
+                    "action": {"type": "search", "query": "current AI news"},
+                }
+            ],
+        },
+    ]
+
+    traces = extract_search_traces_from_messages(messages)
+
+    assert len(traces) == 1
+    assert traces[0]["query"] == "current AI news"
+
+
 # ---------------------------------------------------------------------------
 # resolve_footer_config
 # ---------------------------------------------------------------------------
@@ -260,3 +417,31 @@ def test_build_footer_no_data_returns_empty_even_when_enabled():
     # With no TERMINAL_CWD env either
     if not os.environ.get("TERMINAL_CWD"):
         assert out == ""
+
+
+def test_build_footer_can_render_search_field_from_messages():
+    out = build_footer_line(
+        user_config={
+            "display": {
+                "runtime_footer": {"enabled": True, "fields": ["model", "search"]}
+            }
+        },
+        platform_key="telegram",
+        model="openai/gpt-5.4",
+        context_tokens=0,
+        context_length=None,
+        cwd="",
+        messages=[
+            {
+                "role": "assistant",
+                "codex_web_search_items": [
+                    {
+                        "type": "web_search_call",
+                        "status": "completed",
+                        "action": {"type": "search", "query": "finance: BTC"},
+                    }
+                ],
+            }
+        ],
+    )
+    assert out == "gpt-5.4 · 🔎 Codex search: finance: BTC"

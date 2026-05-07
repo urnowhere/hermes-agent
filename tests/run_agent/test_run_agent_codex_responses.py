@@ -157,9 +157,10 @@ def _codex_ack_message_response(text: str):
 
 
 class _FakeResponsesStream:
-    def __init__(self, *, final_response=None, final_error=None):
+    def __init__(self, *, final_response=None, final_error=None, events=None):
         self._final_response = final_response
         self._final_error = final_error
+        self._events = list(events or [])
 
     def __enter__(self):
         return self
@@ -168,7 +169,7 @@ class _FakeResponsesStream:
         return False
 
     def __iter__(self):
-        return iter(())
+        return iter(self._events)
 
     def get_final_response(self):
         if self._final_error is not None:
@@ -212,6 +213,27 @@ def test_api_mode_uses_explicit_provider_when_codex(monkeypatch):
     )
     assert agent.api_mode == "codex_responses"
     assert agent.provider == "openai-codex"
+
+
+def test_codex_web_search_env_overrides_config(monkeypatch):
+    _patch_agent_bootstrap(monkeypatch)
+    monkeypatch.setenv("HERMES_CODEX_WEB_SEARCH", "disabled")
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda *a, **k: {"codex": {"web_search": "live"}})
+
+    agent = run_agent.AIAgent(
+        model="gpt-5-codex",
+        provider="openai-codex",
+        api_mode="codex_responses",
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_key="codex-token",
+        quiet_mode=True,
+        max_iterations=1,
+        skip_context_files=True,
+        skip_memory=True,
+    )
+
+    assert agent._codex_native_web_search_mode == "disabled"
+
 
 
 def test_api_mode_normalizes_provider_case(monkeypatch):
@@ -396,6 +418,62 @@ def test_build_api_kwargs_copilot_responses_omits_reasoning_for_non_reasoning_mo
     assert "reasoning" not in kwargs
     assert "include" not in kwargs
     assert "prompt_cache_key" not in kwargs
+
+
+def test_run_codex_stream_reports_native_web_search_as_tool_progress(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    progress_events = []
+    agent.tool_progress_callback = lambda *args, **kwargs: progress_events.append((args, kwargs))
+    search_item = SimpleNamespace(
+        type="web_search_call",
+        status="completed",
+        action={"query": "latest world news today", "type": "search"},
+    )
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            stream=lambda **kwargs: _FakeResponsesStream(
+                final_response=_codex_message_response("news summary"),
+                events=[SimpleNamespace(type="response.output_item.done", item=search_item)],
+            ),
+            create=lambda **kwargs: _codex_message_response("fallback"),
+        )
+    )
+
+    response = agent._run_codex_stream(_codex_request_kwargs())
+
+    assert response.output[0].content[0].text == "news summary"
+    assert progress_events == [
+        (("tool.started", "web_search", "latest world news today", {"query": "latest world news today"}), {})
+    ]
+
+
+def test_run_codex_stream_reports_native_web_search_open_page_as_tool_progress(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    progress_events = []
+    agent.tool_progress_callback = lambda *args, **kwargs: progress_events.append((args, kwargs))
+    search_item = SimpleNamespace(
+        type="web_search_call",
+        status="completed",
+        action={"type": "open_page", "url": "https://example.com/story"},
+    )
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            stream=lambda **kwargs: _FakeResponsesStream(
+                final_response=_codex_message_response("page summary"),
+                events=[SimpleNamespace(type="response.output_item.done", item=search_item)],
+            ),
+            create=lambda **kwargs: _codex_message_response("fallback"),
+        )
+    )
+
+    response = agent._run_codex_stream(_codex_request_kwargs())
+
+    assert response.output[0].content[0].text == "page summary"
+    assert progress_events == [
+        (("tool.started", "web_extract", "https://example.com/story", {"urls": ["https://example.com/story"]}), {})
+    ]
 
 
 def test_run_codex_stream_retries_when_completed_event_missing(monkeypatch):

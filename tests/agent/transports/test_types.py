@@ -282,3 +282,15 @@ class TestNormalizedResponseBackwardCompat:
     def test_codex_message_items_none_when_absent(self):
         nr = NormalizedResponse(content="hi", tool_calls=None, finish_reason="stop")
         assert nr.codex_message_items is None
+
+    def test_codex_web_search_items_from_provider_data(self):
+        items = [{"id": "ws_1", "type": "web_search_call"}]
+        nr = NormalizedResponse(
+            content="hi", tool_calls=None, finish_reason="stop",
+            provider_data={"codex_web_search_items": items},
+        )
+        assert nr.codex_web_search_items == items
+
+    def test_codex_web_search_items_none_when_absent(self):
+        nr = NormalizedResponse(content="hi", tool_calls=None, finish_reason="stop")
+        assert nr.codex_web_search_items is None

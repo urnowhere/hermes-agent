@@ -1223,6 +1223,19 @@ class AIAgent:
         self.reasoning_config = reasoning_config  # None = use default (medium for OpenRouter)
         self.service_tier = service_tier
         self.request_overrides = dict(request_overrides or {})
+        self._codex_native_web_search_mode = None
+        try:
+            from hermes_cli.config import load_config as _load_codex_ws_cfg
+
+            _codex_ws_cfg = _load_codex_ws_cfg().get("codex", {}) or {}
+            _codex_ws_mode = _codex_ws_cfg.get("web_search")
+            if _codex_ws_mode is not None:
+                self._codex_native_web_search_mode = str(_codex_ws_mode).strip() or None
+        except Exception:
+            pass
+        _codex_ws_env = os.getenv("HERMES_CODEX_WEB_SEARCH", "").strip()
+        if _codex_ws_env:
+            self._codex_native_web_search_mode = _codex_ws_env
         self.prefill_messages = prefill_messages or []  # Prefilled conversation turns
         self._force_ascii_payload = False
         
@@ -5907,6 +5920,60 @@ class AIAgent:
     def _close_request_openai_client(self, client: Any, *, reason: str) -> None:
         self._close_openai_client(client, reason=reason, shared=False)
 
+    def _notify_codex_native_search_progress(self, item: Any) -> None:
+        """Render Codex native web_search_call items through normal tool progress.
+
+        Provider-hosted Responses tools are not Hermes function tools, so they do
+        not naturally pass through the ``tool.started`` callback used by gateway
+        platforms. When the Responses stream reports a completed native
+        ``web_search_call`` item, synthesize the same progress event shape that a
+        Hermes ``web_search`` tool call would have produced. The raw trace is
+        still preserved later by the Codex adapter; this is only display UX.
+        """
+        callback = getattr(self, "tool_progress_callback", None)
+        if not callback:
+            return
+        try:
+            if isinstance(item, dict):
+                item_type = item.get("type")
+                action = item.get("action") or {}
+            else:
+                item_type = getattr(item, "type", None)
+                action = getattr(item, "action", None) or {}
+                if hasattr(action, "model_dump"):
+                    action = action.model_dump(exclude_none=True)
+
+            if item_type != "web_search_call" or not isinstance(action, dict):
+                return
+
+            action_type = str(action.get("type") or "search")
+            if action_type in {"open_page", "find_in_page"}:
+                url = action.get("url") or action.get("page_url")
+                if not url:
+                    return
+                args = {"urls": [str(url)]}
+                if action.get("pattern"):
+                    args["pattern"] = str(action.get("pattern"))
+                callback("tool.started", "web_extract", str(url), args)
+                return
+
+            query = action.get("query")
+            if not query:
+                queries = action.get("queries")
+                if isinstance(queries, list) and queries:
+                    query = queries[0]
+            if not query:
+                return
+
+            args = {"query": str(query)}
+            # Use the existing Hermes web_search display path so Telegram/TUI
+            # renders native Codex search like every other web-search provider:
+            # e.g. `🔍 web_search: "latest news"` in the normal progress bubble,
+            # not embedded between model/context runtime footer fields.
+            callback("tool.started", "web_search", str(query), args)
+        except Exception as exc:
+            logger.debug("Codex native web-search progress callback failed: %s", exc)
+
     def _run_codex_stream(self, api_kwargs: dict, client: Any = None, on_first_delta: callable = None):
         """Execute one streaming Responses API request and return the final response."""
         import httpx as _httpx
@@ -5960,6 +6027,7 @@ class AIAgent:
                             done_item = getattr(event, "item", None)
                             if done_item is not None:
                                 collected_output_items.append(done_item)
+                                self._notify_codex_native_search_progress(done_item)
                         # Log non-completed terminal events for diagnostics
                         elif event_type in ("response.incomplete", "response.failed"):
                             resp_obj = getattr(event, "response", None)
@@ -6063,6 +6131,7 @@ class AIAgent:
                         done_item = event.get("item")
                     if done_item is not None:
                         collected_output_items.append(done_item)
+                        self._notify_codex_native_search_progress(done_item)
                 elif event_type in ("response.output_text.delta",):
                     delta = getattr(event, "delta", "")
                     if not delta and isinstance(event, dict):
@@ -8495,6 +8564,7 @@ class AIAgent:
                 is_codex_backend=is_codex_backend,
                 is_xai_responses=is_xai_responses,
                 github_reasoning_extra=self._github_models_reasoning_extra_body() if is_github_responses else None,
+                native_web_search_mode=getattr(self, "_codex_native_web_search_mode", None),
             )
 
         # ── chat_completions (default) ─────────────────────────────────────
@@ -8904,6 +8974,13 @@ class AIAgent:
         codex_message_items = getattr(assistant_message, "codex_message_items", None)
         if codex_message_items:
             msg["codex_message_items"] = codex_message_items
+
+        # Codex Responses API: preserve native web_search_call traces for
+        # observability. These are not replayed by the Codex adapter, but
+        # keeping them in the session makes provider-side search auditable.
+        codex_web_search_items = getattr(assistant_message, "codex_web_search_items", None)
+        if codex_web_search_items:
+            msg["codex_web_search_items"] = codex_web_search_items
 
         if assistant_tool_calls:
             tool_calls = []

@@ -136,6 +136,18 @@ with the Generative Language API enabled.
 
 :::info Codex Note
 The OpenAI Codex provider authenticates via device code (open a URL, enter a code). Hermes stores the resulting credentials in its own auth store under `~/.hermes/auth.json` and can import existing Codex CLI credentials from `~/.codex/auth.json` when present. No Codex CLI installation is required.
+
+Codex can also expose OpenAI's native Responses API web-search tool without configuring Hermes's external `web_search` providers. Enable it with:
+
+```bash
+hermes config set codex.web_search live      # live external web access
+hermes config set codex.web_search cached    # cached/no-live mode
+hermes config set codex.web_search disabled  # off
+```
+
+When enabled, Hermes requests native web-search source traces, preserves `web_search_call` response items and citation annotations in session/provider metadata, and suppresses Hermes's managed `web_search` function tool to avoid presenting two search tools with the same name. During streaming, native Codex searches are still surfaced through the normal Hermes tool-progress UI as `web_search`/`web_extract`, so Telegram/TUI users see the same separate search-progress line as they do with Hermes's external web providers. If you prefer a compact end-of-turn summary, gateway runtime footers can optionally include a `search` field, but it is not required for the standard search-call UX.
+
+For process-scoped tests, `HERMES_CODEX_WEB_SEARCH` accepts the same values and overrides `codex.web_search` from config.
 :::
 
 :::warning

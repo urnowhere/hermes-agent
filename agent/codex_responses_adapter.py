@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
 
 logger = logging.getLogger(__name__)
+_CODEX_NATIVE_WEB_SEARCH_TOOL_TYPES = {"web_search", "web_search_preview"}
 
 
 # Matches Codex/Harmony tool-call serialization that occasionally leaks into
@@ -637,8 +638,24 @@ def _preflight_codex_api_kwargs(
         for idx, tool in enumerate(tools):
             if not isinstance(tool, dict):
                 raise ValueError(f"Codex Responses tools[{idx}] must be an object.")
-            if tool.get("type") != "function":
-                raise ValueError(f"Codex Responses tools[{idx}] has unsupported type {tool.get('type')!r}.")
+            tool_type = tool.get("type")
+            if tool_type in _CODEX_NATIVE_WEB_SEARCH_TOOL_TYPES:
+                normalized_web_search: Dict[str, Any] = {"type": tool_type}
+                external_web_access = tool.get("external_web_access")
+                if external_web_access is not None:
+                    normalized_web_search["external_web_access"] = _codex_bool(external_web_access)
+                for optional_key in (
+                    "filters",
+                    "user_location",
+                    "search_context_size",
+                    "search_content_types",
+                ):
+                    if optional_key in tool and tool[optional_key] is not None:
+                        normalized_web_search[optional_key] = tool[optional_key]
+                normalized_tools.append(normalized_web_search)
+                continue
+            if tool_type != "function":
+                raise ValueError(f"Codex Responses tools[{idx}] has unsupported type {tool_type!r}.")
 
             name = tool.get("name")
             parameters = tool.get("parameters")
@@ -782,6 +799,90 @@ def _extract_responses_reasoning_text(item: Any) -> str:
     return ""
 
 
+def _codex_json_safe(value: Any) -> Any:
+    """Convert SDK response objects into JSON-serializable trace data."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, list):
+        return [_codex_json_safe(v) for v in value]
+    if isinstance(value, tuple):
+        return [_codex_json_safe(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _codex_json_safe(v) for k, v in value.items() if v is not None}
+    if hasattr(value, "model_dump"):
+        try:
+            return _codex_json_safe(value.model_dump(exclude_none=True))
+        except TypeError:
+            return _codex_json_safe(value.model_dump())
+        except Exception:
+            pass
+    if hasattr(value, "__dict__"):
+        return {
+            str(k): _codex_json_safe(v)
+            for k, v in vars(value).items()
+            if not str(k).startswith("_") and v is not None
+        }
+    return str(value)
+
+
+def _extract_codex_web_search_item(item: Any, item_status: Optional[str]) -> Dict[str, Any]:
+    """Extract a compact trace from a native Responses web_search_call item."""
+    trace: Dict[str, Any] = {"type": "web_search_call"}
+    item_id = getattr(item, "id", None)
+    if isinstance(item_id, str) and item_id:
+        trace["id"] = item_id
+    if item_status:
+        trace["status"] = item_status
+
+    action = getattr(item, "action", None)
+    if action is not None:
+        action_data = _codex_json_safe(action)
+        if isinstance(action_data, dict) and action_data:
+            trace["action"] = action_data
+
+    for key in ("query", "queries", "results"):
+        value = getattr(item, key, None)
+        if value is not None:
+            trace[key] = _codex_json_safe(value)
+    return trace
+
+
+def _codex_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"", "0", "false", "off", "no", "disabled", "disable", "none"}:
+            return False
+        if normalized in {"1", "true", "on", "yes", "live", "enabled", "enable"}:
+            return True
+    return bool(value)
+
+
+def _extract_responses_message_content_parts(item: Any) -> List[Dict[str, Any]]:
+    """Extract JSON-safe output_text parts, including citation annotations."""
+    content = getattr(item, "content", None)
+    if not isinstance(content, list):
+        return []
+
+    parts: List[Dict[str, Any]] = []
+    for part in content:
+        ptype = getattr(part, "type", None)
+        if ptype not in {"output_text", "text"}:
+            continue
+        text = getattr(part, "text", None)
+        if not isinstance(text, str) or not text:
+            continue
+        raw_part: Dict[str, Any] = {"type": "output_text", "text": text}
+        annotations = getattr(part, "annotations", None)
+        if isinstance(annotations, list) and annotations:
+            raw_part["annotations"] = _codex_json_safe(annotations)
+        parts.append(raw_part)
+    return parts
+
+
 # ---------------------------------------------------------------------------
 # Full response normalization
 # ---------------------------------------------------------------------------
@@ -825,6 +926,7 @@ def _normalize_codex_response(response: Any) -> tuple[Any, str]:
     reasoning_parts: List[str] = []
     reasoning_items_raw: List[Dict[str, Any]] = []
     message_items_raw: List[Dict[str, Any]] = []
+    web_search_items_raw: List[Dict[str, Any]] = []
     tool_calls: List[Any] = []
     has_incomplete_items = response_status in {"queued", "in_progress", "incomplete"}
     saw_commentary_phase = False
@@ -853,11 +955,14 @@ def _normalize_codex_response(response: Any) -> tuple[Any, str]:
             message_text = _extract_responses_message_text(item)
             if message_text:
                 content_parts.append(message_text)
+                message_content = _extract_responses_message_content_parts(item) or [
+                    {"type": "output_text", "text": message_text}
+                ]
                 raw_message_item: Dict[str, Any] = {
                     "type": "message",
                     "role": "assistant",
                     "status": _normalize_responses_message_status(item_status),
-                    "content": [{"type": "output_text", "text": message_text}],
+                    "content": message_content,
                 }
                 item_id = getattr(item, "id", None)
                 if isinstance(item_id, str) and item_id:
@@ -888,6 +993,8 @@ def _normalize_codex_response(response: Any) -> tuple[Any, str]:
                             raw_summary.append({"type": "summary_text", "text": text})
                     raw_item["summary"] = raw_summary
                 reasoning_items_raw.append(raw_item)
+        elif item_type == "web_search_call":
+            web_search_items_raw.append(_extract_codex_web_search_item(item, item_status))
         elif item_type == "function_call":
             if item_status in {"queued", "in_progress", "incomplete"}:
                 continue
@@ -978,6 +1085,7 @@ def _normalize_codex_response(response: Any) -> tuple[Any, str]:
         reasoning_details=None,
         codex_reasoning_items=reasoning_items_raw or None,
         codex_message_items=message_items_raw or None,
+        codex_web_search_items=web_search_items_raw or None,
     )
 
     if tool_calls:
