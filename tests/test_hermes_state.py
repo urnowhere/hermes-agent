@@ -520,6 +520,148 @@ class TestMessageStorage:
 
 
 # =========================================================================
+# Role-prefix leak detection (#18556)
+# =========================================================================
+
+class TestRolePrefixLeakDetection:
+    """append_message() must emit a WARNING when an assistant message begins
+    with a raw transcript role marker (`user\\n`, `assistant\\n`, etc.).
+    Such content can visually impersonate a user turn in UIs that render
+    message content verbatim, poisoning session review (#18556)."""
+
+    def test_leaked_user_prefix_logs_warning(self, db, caplog):
+        import logging
+        db.create_session(session_id="s1", source="cli")
+        with caplog.at_level(logging.WARNING, logger="hermes_state"):
+            db.append_message(
+                "s1", role="assistant",
+                content="user\nNew reviews are fine\n---\n---\n---",
+            )
+        assert any("role-prefix leak" in rec.message for rec in caplog.records), (
+            f"expected leak warning; got: {[r.message for r in caplog.records]}"
+        )
+        # Content is still persisted as-is (advisory, not lossy)
+        messages = db.get_messages("s1")
+        assert messages[0]["content"].startswith("user\n")
+
+    def test_leaked_assistant_prefix_logs_warning(self, db, caplog):
+        import logging
+        db.create_session(session_id="s1", source="cli")
+        with caplog.at_level(logging.WARNING, logger="hermes_state"):
+            db.append_message(
+                "s1", role="assistant",
+                content="assistant\nDoing the thing.",
+            )
+        assert any("role-prefix leak" in rec.message for rec in caplog.records)
+
+    def test_leaked_system_prefix_logs_warning(self, db, caplog):
+        import logging
+        db.create_session(session_id="s1", source="cli")
+        with caplog.at_level(logging.WARNING, logger="hermes_state"):
+            db.append_message(
+                "s1", role="assistant",
+                content="system\nYou are a helpful assistant.",
+            )
+        assert any("role-prefix leak" in rec.message for rec in caplog.records)
+
+    def test_leaked_prefix_with_crlf_logs_warning(self, db, caplog):
+        """Windows-style line endings in model output should still trip the detector."""
+        import logging
+        db.create_session(session_id="s1", source="cli")
+        with caplog.at_level(logging.WARNING, logger="hermes_state"):
+            db.append_message(
+                "s1", role="assistant",
+                content="user\r\nsome fake user content",
+            )
+        assert any("role-prefix leak" in rec.message for rec in caplog.records)
+
+    def test_role_colon_form_does_not_trigger(self, db, caplog):
+        """`user:` (colon form) is NOT a leak signal — too many false positives
+        (code `user_id:`, markdown `- user:`, etc.). Only bare `role\\n`
+        transcript leakage fires."""
+        import logging
+        db.create_session(session_id="s1", source="cli")
+        with caplog.at_level(logging.WARNING, logger="hermes_state"):
+            db.append_message(
+                "s1", role="assistant",
+                content="user: the field you asked about is named `id`.",
+            )
+        assert not any("role-prefix leak" in rec.message for rec in caplog.records)
+
+    def test_role_word_in_middle_does_not_trigger(self, db, caplog):
+        """The detector anchors at ^ — role words inside the message don't fire."""
+        import logging
+        db.create_session(session_id="s1", source="cli")
+        with caplog.at_level(logging.WARNING, logger="hermes_state"):
+            db.append_message(
+                "s1", role="assistant",
+                content="The user\nwants to reset the password.",
+            )
+        assert not any("role-prefix leak" in rec.message for rec in caplog.records)
+
+    def test_user_role_message_does_not_trigger_even_when_prefixed(self, db, caplog):
+        """Only assistant-role messages are subject to the leak check. User
+        messages naturally can start with any word."""
+        import logging
+        db.create_session(session_id="s1", source="cli")
+        with caplog.at_level(logging.WARNING, logger="hermes_state"):
+            db.append_message(
+                "s1", role="user",
+                content="user\nsome literal content",
+            )
+        assert not any("role-prefix leak" in rec.message for rec in caplog.records)
+
+    def test_tool_role_message_does_not_trigger(self, db, caplog):
+        """Tool outputs can contain arbitrary text — don't gate them."""
+        import logging
+        db.create_session(session_id="s1", source="cli")
+        with caplog.at_level(logging.WARNING, logger="hermes_state"):
+            db.append_message(
+                "s1", role="tool",
+                content="assistant\nsome tool output text",
+                tool_name="terminal",
+            )
+        assert not any("role-prefix leak" in rec.message for rec in caplog.records)
+
+    def test_empty_assistant_content_does_not_trigger(self, db, caplog):
+        """Empty content (None or '') should not crash the detector."""
+        import logging
+        db.create_session(session_id="s1", source="cli")
+        with caplog.at_level(logging.WARNING, logger="hermes_state"):
+            db.append_message("s1", role="assistant", content=None)
+            db.append_message("s1", role="assistant", content="")
+        assert not any("role-prefix leak" in rec.message for rec in caplog.records)
+
+    def test_multimodal_list_content_does_not_trigger(self, db, caplog):
+        """Multimodal content (list of parts) is not a plain string — don't
+        try to regex-match it. Text parts are handled by normal LLM flow,
+        not by a role-prefix check at the DB layer."""
+        import logging
+        db.create_session(session_id="s1", source="cli")
+        with caplog.at_level(logging.WARNING, logger="hermes_state"):
+            db.append_message(
+                "s1", role="assistant",
+                content=[{"type": "text", "text": "user\nhi"}],
+            )
+        assert not any("role-prefix leak" in rec.message for rec in caplog.records)
+
+    def test_detector_preview_is_truncated(self, db, caplog):
+        """The logged preview should be short (first 200 chars) — the full
+        95k-char corrupted message from #18556 must not flood the log."""
+        import logging
+        db.create_session(session_id="s1", source="cli")
+        huge = "user\n" + ("A" * 10_000)
+        with caplog.at_level(logging.WARNING, logger="hermes_state"):
+            db.append_message("s1", role="assistant", content=huge)
+        leak_records = [r for r in caplog.records if "role-prefix leak" in r.message]
+        assert leak_records
+        # The formatted warning record should not contain the full 10k body
+        assert len(leak_records[0].getMessage()) < 1000, (
+            "warning message should be bounded by the 200-char preview"
+        )
+
+
+# =========================================================================
 # FTS5 search
 # =========================================================================
 

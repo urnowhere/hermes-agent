@@ -1258,6 +1258,43 @@ class SessionDB:
                 return content
         return content
 
+    # ------------------------------------------------------------------
+    # Role-prefix leak detection
+    #
+    # Assistant output that begins with a bare transcript role marker
+    # (`user\n`, `assistant\n`, `system\n`, `tool\n`, `developer\n`) is
+    # almost always a sign of model degeneration or prompt-format confusion:
+    # the model is regurgitating the chat template's role headers back as
+    # content. When such output is stored as role=assistant and later
+    # rendered in a UI that displays content verbatim, it can visually
+    # impersonate a user turn and poison session context (see #18556:
+    # 95kB assistant message beginning with `user\n...` produced fake
+    # user-looking lines that confused session review).
+    #
+    # This is a narrow detector: only exact `role\n` (or `role\r\n`) at
+    # the very start of the content is flagged. `role:` is deliberately
+    # NOT matched — it produces too many false positives ("user: bob",
+    # "assistant: this script", etc.). Code and prose that happens to
+    # contain role words elsewhere is untouched.
+    #
+    # Behavior on detection: the message is still persisted as-is (so
+    # callers are not silently lossy), but a WARNING is emitted with
+    # session_id, the leaked role, and a content prefix so operators
+    # can audit the session.
+    # ------------------------------------------------------------------
+    _ROLE_PREFIX_LEAK_RE = re.compile(
+        r"^(user|assistant|system|tool|developer)\r?\n"
+    )
+
+    @classmethod
+    def _detect_role_prefix_leak(cls, role: str, content: Any) -> Optional[str]:
+        """Return the leaked role label if an assistant message begins with
+        a raw transcript role header, else None."""
+        if role != "assistant" or not isinstance(content, str) or not content:
+            return None
+        m = cls._ROLE_PREFIX_LEAK_RE.match(content)
+        return m.group(1) if m else None
+
     def append_message(
         self,
         session_id: str,
@@ -1280,6 +1317,25 @@ class SessionDB:
         Also increments the session's message_count (and tool_call_count
         if role is 'tool' or tool_calls is present).
         """
+        # Audit: detect assistant messages that begin with a raw transcript
+        # role header (e.g. "user\n..."). These are almost always a symptom
+        # of model degeneration and can visually impersonate user input in
+        # UIs that render content verbatim. See #18556 for a concrete
+        # incident (95kB corrupted assistant message beginning with "user\n"
+        # that generated fake user-looking lines and a divider loop).
+        leaked_role = self._detect_role_prefix_leak(role, content)
+        if leaked_role:
+            preview = content[:200].replace("\n", " ")
+            logger.warning(
+                "role-prefix leak in session %s: assistant message begins "
+                "with raw %r header (may impersonate user turn in UIs). "
+                "len=%d, preview=%r. Stored as-is — audit session integrity.",
+                session_id,
+                leaked_role,
+                len(content),
+                preview,
+            )
+
         # Serialize structured fields to JSON before entering the write txn
         reasoning_details_json = (
             json.dumps(reasoning_details)
