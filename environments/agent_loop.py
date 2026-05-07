@@ -23,6 +23,14 @@ from typing import Any, Dict, List, Optional, Set
 from model_tools import handle_function_call
 from tools.terminal_tool import get_active_env
 from tools.tool_result_storage import maybe_persist_tool_result, enforce_turn_budget
+from agent.tool_guardrails import (
+    ToolCallGuardrailConfig,
+    ToolCallGuardrailController,
+    ToolGuardrailDecision,
+    append_toolguard_guidance,
+    classify_tool_failure,
+    toolguard_synthetic_result,
+)
 
 # Thread pool for running sync tool calls that internally use asyncio.run()
 # (e.g., the Modal/Docker/Daytona terminal backends). Running them in a separate
@@ -141,6 +149,7 @@ class HermesAgentLoop:
         max_tokens: Optional[int] = None,
         extra_body: Optional[Dict[str, Any]] = None,
         budget_config: Optional["BudgetConfig"] = None,
+        guardrail_config: Optional[ToolCallGuardrailConfig] = None,
     ):
         """
         Initialize the agent loop.
@@ -160,6 +169,10 @@ class HermesAgentLoop:
             budget_config: Tool result persistence budget. Controls per-tool
                         thresholds, per-turn aggregate budget, and preview size.
                         If None, uses DEFAULT_BUDGET (current hardcoded values).
+            guardrail_config: Per-turn tool-call loop guardrail config.  Controls
+                        repeated-failure blocking and consecutive-call circuit
+                        breakers.  If None, uses ToolCallGuardrailConfig defaults
+                        (soft warnings only).
         """
         from tools.budget_config import DEFAULT_BUDGET
         self.server = server
@@ -171,6 +184,7 @@ class HermesAgentLoop:
         self.max_tokens = max_tokens
         self.extra_body = extra_body
         self.budget_config = budget_config or DEFAULT_BUDGET
+        self.guardrail_config = guardrail_config
 
     async def run(self, messages: List[Dict[str, Any]]) -> AgentResult:
         """
@@ -185,6 +199,7 @@ class HermesAgentLoop:
         """
         reasoning_per_turn = []
         tool_errors: List[ToolError] = []
+        guardrails = ToolCallGuardrailController(self.guardrail_config)
 
         # Per-loop TodoStore for the todo tool (ephemeral, dies with the loop)
         from tools.todo_tool import TodoStore, todo_tool as _todo_tool
@@ -375,68 +390,88 @@ class HermesAgentLoop:
 
                         # Dispatch tool only if arguments parsed successfully
                         if args is not None:
-                            try:
-                                if tool_name == "terminal":
-                                    backend = os.getenv("TERMINAL_ENV", "local")
-                                    cmd_preview = args.get("command", "")[:80]
-                                    logger.info(
-                                        "[%s] $ %s", self.task_id[:8], cmd_preview,
-                                    )
-
-                                tool_submit_time = _time.monotonic()
-
-                                # Todo tool -- handle locally (needs per-loop TodoStore)
-                                if tool_name == "todo":
-                                    tool_result = _todo_tool(
-                                        todos=args.get("todos"),
-                                        merge=args.get("merge", False),
-                                        store=_todo_store,
-                                    )
-                                    tool_elapsed = _time.monotonic() - tool_submit_time
-                                elif tool_name == "memory":
-                                    tool_result = json.dumps({"error": "Memory is not available in RL environments."})
-                                    tool_elapsed = _time.monotonic() - tool_submit_time
-                                elif tool_name == "session_search":
-                                    tool_result = json.dumps({"error": "Session search is not available in RL environments."})
-                                    tool_elapsed = _time.monotonic() - tool_submit_time
-                                else:
-                                    # Run tool calls in a thread pool so backends that
-                                    # use asyncio.run() internally (modal, docker, daytona) get
-                                    # a clean event loop instead of deadlocking.
-                                    loop = asyncio.get_event_loop()
-                                    # Capture current tool_name/args for the lambda
-                                    _tn, _ta, _tid = tool_name, args, self.task_id
-                                    tool_result = await loop.run_in_executor(
-                                        _tool_executor,
-                                        lambda: handle_function_call(
-                                            _tn, _ta, task_id=_tid,
-                                            user_task=_user_task,
-                                        ),
-                                    )
-                                    tool_elapsed = _time.monotonic() - tool_submit_time
-
-                                # Log slow tools and thread pool stats for debugging
-                                pool_active = _tool_executor._work_queue.qsize()
-                                if tool_elapsed > 30:
-                                    logger.warning(
-                                        "[%s] turn %d: %s took %.1fs (pool queue=%d)",
-                                        self.task_id[:8], turn + 1, tool_name,
-                                        tool_elapsed, pool_active,
-                                    )
-                            except Exception as e:
-                                tool_result = json.dumps(
-                                    {"error": f"Tool execution failed: {type(e).__name__}: {str(e)}"}
+                            # Pre-execution guardrail check
+                            guard_decision = guardrails.before_call(tool_name, args)
+                            if not guard_decision.allows_execution:
+                                tool_result = toolguard_synthetic_result(guard_decision)
+                                logger.info(
+                                    "[%s] turn %d: guardrail blocked %s (%s)",
+                                    self.task_id[:8], turn + 1,
+                                    tool_name, guard_decision.code,
                                 )
-                                tool_errors.append(ToolError(
-                                    turn=turn + 1, tool_name=tool_name,
-                                    arguments=tool_args_raw[:200],
-                                    error=f"{type(e).__name__}: {str(e)}",
-                                    tool_result=tool_result,
-                                ))
-                                logger.error(
-                                    "Tool '%s' execution failed on turn %d: %s",
-                                    tool_name, turn + 1, e,
+                            else:
+                                try:
+                                    if tool_name == "terminal":
+                                        backend = os.getenv("TERMINAL_ENV", "local")
+                                        cmd_preview = args.get("command", "")[:80]
+                                        logger.info(
+                                            "[%s] $ %s", self.task_id[:8], cmd_preview,
+                                        )
+
+                                    tool_submit_time = _time.monotonic()
+
+                                    # Todo tool -- handle locally (needs per-loop TodoStore)
+                                    if tool_name == "todo":
+                                        tool_result = _todo_tool(
+                                            todos=args.get("todos"),
+                                            merge=args.get("merge", False),
+                                            store=_todo_store,
+                                        )
+                                        tool_elapsed = _time.monotonic() - tool_submit_time
+                                    elif tool_name == "memory":
+                                        tool_result = json.dumps({"error": "Memory is not available in RL environments."})
+                                        tool_elapsed = _time.monotonic() - tool_submit_time
+                                    elif tool_name == "session_search":
+                                        tool_result = json.dumps({"error": "Session search is not available in RL environments."})
+                                        tool_elapsed = _time.monotonic() - tool_submit_time
+                                    else:
+                                        # Run tool calls in a thread pool so backends that
+                                        # use asyncio.run() internally (modal, docker, daytona) get
+                                        # a clean event loop instead of deadlocking.
+                                        loop = asyncio.get_event_loop()
+                                        # Capture current tool_name/args for the lambda
+                                        _tn, _ta, _tid = tool_name, args, self.task_id
+                                        tool_result = await loop.run_in_executor(
+                                            _tool_executor,
+                                            lambda: handle_function_call(
+                                                _tn, _ta, task_id=_tid,
+                                                user_task=_user_task,
+                                            ),
+                                        )
+                                        tool_elapsed = _time.monotonic() - tool_submit_time
+
+                                    # Log slow tools and thread pool stats for debugging
+                                    pool_active = _tool_executor._work_queue.qsize()
+                                    if tool_elapsed > 30:
+                                        logger.warning(
+                                            "[%s] turn %d: %s took %.1fs (pool queue=%d)",
+                                            self.task_id[:8], turn + 1, tool_name,
+                                            tool_elapsed, pool_active,
+                                        )
+                                except Exception as e:
+                                    tool_result = json.dumps(
+                                        {"error": f"Tool execution failed: {type(e).__name__}: {str(e)}"}
+                                    )
+                                    tool_errors.append(ToolError(
+                                        turn=turn + 1, tool_name=tool_name,
+                                        arguments=tool_args_raw[:200],
+                                        error=f"{type(e).__name__}: {str(e)}",
+                                        tool_result=tool_result,
+                                    ))
+                                    logger.error(
+                                        "Tool '%s' execution failed on turn %d: %s",
+                                        tool_name, turn + 1, e,
+                                    )
+
+                                # Post-execution guardrail observation
+                                failed, _ = classify_tool_failure(tool_name, tool_result)
+                                after_decision = guardrails.after_call(
+                                    tool_name, args, tool_result, failed=failed,
                                 )
+                                if after_decision.action in {"warn", "halt"}:
+                                    tool_result = append_toolguard_guidance(
+                                        tool_result, after_decision,
+                                    )
 
                         # Also check if the tool returned an error in its JSON result
                         try:

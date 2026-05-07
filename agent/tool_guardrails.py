@@ -76,12 +76,25 @@ class ToolCallGuardrailConfig:
     same_tool_failure_halt_after: int = 8
     no_progress_warn_after: int = 2
     no_progress_block_after: int = 5
+    # Per-operation retry limit: blocks when the exact same tool+args call has
+    # been made (regardless of outcome) more than this many consecutive times.
+    # 0 = disabled.  When set via the ``max_consecutive_identical_calls`` alias,
+    # hard_stop_enabled is auto-enabled.
+    consecutive_identical_block_after: int = 0
     idempotent_tools: frozenset[str] = field(default_factory=lambda: IDEMPOTENT_TOOL_NAMES)
     mutating_tools: frozenset[str] = field(default_factory=lambda: MUTATING_TOOL_NAMES)
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any] | None) -> "ToolCallGuardrailConfig":
-        """Build config from the `tool_loop_guardrails` config.yaml section."""
+        """Build config from the `tool_loop_guardrails` config.yaml section.
+
+        Supports user-friendly aliases (from issue #18504):
+        - ``max_retries_per_operation``: sets ``exact_failure_block_after`` and
+          auto-enables ``hard_stop_enabled`` when present.
+        - ``max_consecutive_identical_calls``: sets
+          ``consecutive_identical_block_after`` and auto-enables
+          ``hard_stop_enabled`` when present.
+        """
         if not isinstance(data, Mapping):
             return cls()
 
@@ -93,9 +106,33 @@ class ToolCallGuardrailConfig:
             hard_stop_after = {}
 
         defaults = cls()
+
+        # --- user-friendly aliases from issue #18504 ---
+        max_retries = _nonneg_int_or_none(data.get("max_retries_per_operation"))
+        max_consec = _nonneg_int_or_none(data.get("max_consecutive_identical_calls"))
+
+        hard_stop = _as_bool(data.get("hard_stop_enabled"), defaults.hard_stop_enabled)
+        if max_retries is not None or max_consec is not None:
+            hard_stop = True
+
+        exact_failure_block = _positive_int(
+            hard_stop_after.get("exact_failure", data.get("exact_failure_block_after")),
+            defaults.exact_failure_block_after,
+        )
+        if max_retries is not None and max_retries > 0:
+            exact_failure_block = max_retries
+
+        consec_block = _nonneg_int_or_none(
+            hard_stop_after.get("consecutive_identical", data.get("consecutive_identical_block_after"))
+        )
+        if consec_block is None:
+            consec_block = defaults.consecutive_identical_block_after
+        if max_consec is not None:
+            consec_block = max_consec
+
         return cls(
             warnings_enabled=_as_bool(data.get("warnings_enabled"), defaults.warnings_enabled),
-            hard_stop_enabled=_as_bool(data.get("hard_stop_enabled"), defaults.hard_stop_enabled),
+            hard_stop_enabled=hard_stop,
             exact_failure_warn_after=_positive_int(
                 warn_after.get("exact_failure", data.get("exact_failure_warn_after")),
                 defaults.exact_failure_warn_after,
@@ -108,10 +145,7 @@ class ToolCallGuardrailConfig:
                 warn_after.get("idempotent_no_progress", data.get("no_progress_warn_after")),
                 defaults.no_progress_warn_after,
             ),
-            exact_failure_block_after=_positive_int(
-                hard_stop_after.get("exact_failure", data.get("exact_failure_block_after")),
-                defaults.exact_failure_block_after,
-            ),
+            exact_failure_block_after=exact_failure_block,
             same_tool_failure_halt_after=_positive_int(
                 hard_stop_after.get("same_tool_failure", data.get("same_tool_failure_halt_after")),
                 defaults.same_tool_failure_halt_after,
@@ -120,6 +154,7 @@ class ToolCallGuardrailConfig:
                 hard_stop_after.get("idempotent_no_progress", data.get("no_progress_block_after")),
                 defaults.no_progress_block_after,
             ),
+            consecutive_identical_block_after=consec_block,
         )
 
 
@@ -229,6 +264,7 @@ class ToolCallGuardrailController:
         self._exact_failure_counts: dict[ToolCallSignature, int] = {}
         self._same_tool_failure_counts: dict[str, int] = {}
         self._no_progress: dict[ToolCallSignature, tuple[str, int]] = {}
+        self._consecutive_calls: list[ToolCallSignature] = []
         self._halt_decision: ToolGuardrailDecision | None = None
 
     @property
@@ -277,6 +313,31 @@ class ToolCallGuardrailController:
                     self._halt_decision = decision
                     return decision
 
+        # Consecutive identical call circuit breaker (issue #18504)
+        consec_limit = self.config.consecutive_identical_block_after
+        if consec_limit > 0:
+            run_length = 0
+            for prev in reversed(self._consecutive_calls):
+                if prev == signature:
+                    run_length += 1
+                else:
+                    break
+            if run_length >= consec_limit:
+                decision = ToolGuardrailDecision(
+                    action="block",
+                    code="consecutive_identical_call_block",
+                    message=(
+                        f"Blocked {tool_name}: the same tool call has been made "
+                        f"{run_length} times consecutively. Stop retrying and report "
+                        "the failure to the user, or change your approach."
+                    ),
+                    tool_name=tool_name,
+                    count=run_length,
+                    signature=signature,
+                )
+                self._halt_decision = decision
+                return decision
+
         return ToolGuardrailDecision(tool_name=tool_name, signature=signature)
 
     def after_call(
@@ -289,6 +350,10 @@ class ToolCallGuardrailController:
     ) -> ToolGuardrailDecision:
         args = _coerce_args(args)
         signature = ToolCallSignature.from_call(tool_name, args)
+
+        # Track consecutive identical calls (issue #18504)
+        self._consecutive_calls.append(signature)
+
         if failed is None:
             failed, _ = classify_tool_failure(tool_name, result)
 
@@ -449,6 +514,17 @@ def _positive_int(value: Any, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return parsed if parsed >= 1 else default
+
+
+def _nonneg_int_or_none(value: Any) -> int | None:
+    """Parse a non-negative integer, returning None if absent or unparseable."""
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
 
 
 def _sha256(value: str) -> str:

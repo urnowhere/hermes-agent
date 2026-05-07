@@ -308,9 +308,15 @@ browser:
 # or non-progressing tool results but still let the tool execute. Hard stops are
 # opt-in circuit breakers for autonomous/cron sessions where stopping a loop is
 # preferable to spending the full iteration budget.
+#
+# User-friendly aliases (auto-enable hard_stop_enabled when set):
+#   max_retries_per_operation: 3         # block same tool+args after 3 failures
+#   max_consecutive_identical_calls: 3   # block after 3 identical calls in a row
 tool_loop_guardrails:
   warnings_enabled: true
   hard_stop_enabled: false
+  # max_retries_per_operation: 3         # alias for hard_stop_after.exact_failure
+  # max_consecutive_identical_calls: 3   # consecutive identical call circuit breaker
   warn_after:
     exact_failure: 2
     same_tool_failure: 3
@@ -319,6 +325,7 @@ tool_loop_guardrails:
     exact_failure: 5
     same_tool_failure: 8
     idempotent_no_progress: 5
+    consecutive_identical: 0             # 0 = disabled
 
 # =============================================================================
 # Context Compression (Auto-shrinks long conversations)

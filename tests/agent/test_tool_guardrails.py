@@ -236,3 +236,147 @@ def test_reset_for_turn_clears_bounded_guardrail_state():
 
     assert controller.before_call("web_search", {"query": "same"}).action == "allow"
     assert controller.before_call("read_file", {"path": "/tmp/x"}).action == "allow"
+
+
+# ── Consecutive identical call tests (issue #18504) ──────────────────────
+
+
+def test_consecutive_identical_calls_disabled_by_default():
+    controller = ToolCallGuardrailController(
+        ToolCallGuardrailConfig(hard_stop_enabled=True)
+    )
+    args = {"command": "git pull"}
+    for _ in range(20):
+        assert controller.before_call("terminal", args).action == "allow"
+        controller.after_call("terminal", args, '{"exit_code":0}', failed=False)
+
+
+def test_consecutive_identical_calls_blocks_after_limit():
+    controller = ToolCallGuardrailController(
+        ToolCallGuardrailConfig(
+            hard_stop_enabled=True,
+            consecutive_identical_block_after=3,
+            exact_failure_block_after=99,
+        )
+    )
+    args = {"command": "git pull"}
+
+    for _ in range(3):
+        assert controller.before_call("terminal", args).action == "allow"
+        controller.after_call("terminal", args, '{"exit_code":1}', failed=True)
+
+    blocked = controller.before_call("terminal", args)
+    assert blocked.action == "block"
+    assert blocked.code == "consecutive_identical_call_block"
+    assert blocked.count == 3
+
+
+def test_consecutive_identical_calls_resets_on_different_call():
+    controller = ToolCallGuardrailController(
+        ToolCallGuardrailConfig(
+            hard_stop_enabled=True,
+            consecutive_identical_block_after=3,
+            exact_failure_block_after=99,
+        )
+    )
+    args_a = {"command": "git pull"}
+    args_b = {"command": "git status"}
+
+    controller.after_call("terminal", args_a, '{"exit_code":1}', failed=True)
+    controller.after_call("terminal", args_a, '{"exit_code":1}', failed=True)
+    # Interrupt the streak with a different call
+    controller.after_call("terminal", args_b, '{"exit_code":0}', failed=False)
+    controller.after_call("terminal", args_a, '{"exit_code":1}', failed=True)
+    controller.after_call("terminal", args_a, '{"exit_code":1}', failed=True)
+
+    # Only 2 consecutive identical calls (after the interruption)
+    assert controller.before_call("terminal", args_a).action == "allow"
+
+
+def test_consecutive_identical_calls_counts_success_too():
+    """max_consecutive_identical_calls blocks regardless of outcome."""
+    controller = ToolCallGuardrailController(
+        ToolCallGuardrailConfig(
+            hard_stop_enabled=True,
+            consecutive_identical_block_after=3,
+            exact_failure_block_after=99,
+        )
+    )
+    args = {"query": "weather"}
+
+    for _ in range(3):
+        assert controller.before_call("web_search", args).action == "allow"
+        controller.after_call("web_search", args, '{"result":"sunny"}', failed=False)
+
+    blocked = controller.before_call("web_search", args)
+    assert blocked.action == "block"
+    assert blocked.code == "consecutive_identical_call_block"
+
+
+def test_consecutive_identical_calls_cleared_by_reset_for_turn():
+    controller = ToolCallGuardrailController(
+        ToolCallGuardrailConfig(
+            hard_stop_enabled=True,
+            consecutive_identical_block_after=2,
+        )
+    )
+    args = {"command": "git pull"}
+
+    controller.after_call("terminal", args, '{"exit_code":1}', failed=True)
+    controller.after_call("terminal", args, '{"exit_code":1}', failed=True)
+    assert controller.before_call("terminal", args).action == "block"
+
+    controller.reset_for_turn()
+    assert controller.before_call("terminal", args).action == "allow"
+
+
+# ── Config alias tests (issue #18504) ────────────────────────────────────
+
+
+def test_max_retries_per_operation_alias_sets_exact_failure_block_and_enables_hard_stop():
+    cfg = ToolCallGuardrailConfig.from_mapping({
+        "max_retries_per_operation": 3,
+    })
+    assert cfg.hard_stop_enabled is True
+    assert cfg.exact_failure_block_after == 3
+
+
+def test_max_consecutive_identical_calls_alias_sets_field_and_enables_hard_stop():
+    cfg = ToolCallGuardrailConfig.from_mapping({
+        "max_consecutive_identical_calls": 4,
+    })
+    assert cfg.hard_stop_enabled is True
+    assert cfg.consecutive_identical_block_after == 4
+
+
+def test_both_aliases_together():
+    cfg = ToolCallGuardrailConfig.from_mapping({
+        "max_retries_per_operation": 2,
+        "max_consecutive_identical_calls": 3,
+    })
+    assert cfg.hard_stop_enabled is True
+    assert cfg.exact_failure_block_after == 2
+    assert cfg.consecutive_identical_block_after == 3
+
+
+def test_aliases_zero_disables():
+    cfg = ToolCallGuardrailConfig.from_mapping({
+        "max_retries_per_operation": 0,
+        "max_consecutive_identical_calls": 0,
+    })
+    # hard_stop still auto-enabled since the keys are present
+    assert cfg.hard_stop_enabled is True
+    # but 0 means the exact_failure_block stays at default (alias val=0 → keep default)
+    assert cfg.exact_failure_block_after == 5  # default
+    assert cfg.consecutive_identical_block_after == 0  # 0 = disabled
+
+
+def test_explicit_hard_stop_after_overrides_alias():
+    cfg = ToolCallGuardrailConfig.from_mapping({
+        "max_retries_per_operation": 3,
+        "hard_stop_after": {
+            "same_tool_failure": 5,
+        },
+    })
+    assert cfg.exact_failure_block_after == 3  # from alias
+    assert cfg.same_tool_failure_halt_after == 5  # from explicit
