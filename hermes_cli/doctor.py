@@ -1177,6 +1177,32 @@ def run_doctor(args):
         except Exception as e:
             print(f"\r  {color('⚠', Colors.YELLOW)} Anthropic API {color(f'({e})', Colors.DIM)}                 ")
 
+    google_gemini_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    if google_gemini_key:
+        print("  Checking Google / Gemini API...", end="", flush=True)
+        try:
+            import httpx
+
+            response = httpx.get(
+                "https://generativelanguage.googleapis.com/v1beta/models",
+                headers={"x-goog-api-key": google_gemini_key},
+                timeout=10,
+            )
+            if response.status_code == 200:
+                print(f"\r  {color('✓', Colors.GREEN)} Google / Gemini API                    ")
+            elif response.status_code == 401:
+                print(f"\r  {color('✗', Colors.RED)} Google / Gemini API {color('(invalid API key)', Colors.DIM)}      ")
+                issues.append("Check GOOGLE_API_KEY / GEMINI_API_KEY in .env")
+            else:
+                print(
+                    f"\r  {color('⚠', Colors.YELLOW)} Google / Gemini API "
+                    f"{color(f'(HTTP {response.status_code})', Colors.DIM)}      "
+                )
+        except Exception as e:
+            print(f"\r  {color('⚠', Colors.YELLOW)} Google / Gemini API {color(f'({e})', Colors.DIM)}      ")
+    else:
+        check_warn("Google / Gemini API", "(not configured)")
+
     # -- API-key providers --
     # Tuple: (name, env_vars, default_url, base_env, supports_models_endpoint)
     # If supports_models_endpoint is False, we skip the health check and just show "configured"
