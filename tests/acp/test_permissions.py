@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+pytest.importorskip("acp", reason="agent-client-protocol not installed; install with: pip install 'hermes-agent[acp]'")
 from acp.schema import (
     AllowedOutcome,
     DeniedOutcome,

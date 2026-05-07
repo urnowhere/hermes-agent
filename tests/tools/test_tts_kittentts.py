@@ -3,8 +3,9 @@
 import json
 from unittest.mock import MagicMock, patch
 
-import numpy as np
 import pytest
+
+np = pytest.importorskip("numpy", reason="numpy not installed; install with: pip install numpy")
 
 
 @pytest.fixture(autouse=True)

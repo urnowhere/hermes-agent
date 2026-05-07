@@ -2,6 +2,7 @@
 
 import pytest
 
+pytest.importorskip("acp", reason="agent-client-protocol not installed; install with: pip install 'hermes-agent[acp]'")
 from acp_adapter.tools import (
     TOOL_KIND_MAP,
     build_tool_complete,

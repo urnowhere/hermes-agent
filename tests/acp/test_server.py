@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, AsyncMock, patch
 
 import pytest
 
-import acp
+acp = pytest.importorskip("acp", reason="agent-client-protocol not installed; install with: pip install 'hermes-agent[acp]'")
 from acp.agent.router import build_agent_router
 from acp.schema import (
     AgentCapabilities,
