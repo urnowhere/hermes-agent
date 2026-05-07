@@ -53,6 +53,7 @@ _PROVIDER_PREFIXES: frozenset[str] = frozenset({
     "arcee",
     "gmi",
     "tencent-tokenhub",
+    "crofai",
     "custom", "local",
     # Common aliases
     "google", "google-gemini", "google-ai-studio",
@@ -315,6 +316,7 @@ _URL_TO_PROVIDER: Dict[str, str] = {
     "xiaomimimo.com": "xiaomi",
     "api.gmi-serving.com": "gmi",
     "tokenhub.tencentmaas.com": "tencent-tokenhub",
+    "crof.ai": "crofai",
     "ollama.com": "ollama-cloud",
 }
 

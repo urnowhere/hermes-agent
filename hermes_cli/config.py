@@ -1727,6 +1727,21 @@ OPTIONAL_ENV_VARS = {
         "category": "provider",
         "advanced": True,
     },
+    "CROFAI_API_KEY": {
+        "description": "Crof.ai API key for DeepSeek, Kimi, Qwen, GLM models (live discovery via /v1/models)",
+        "prompt": "Crof.ai API Key",
+        "url": "https://crof.ai/docs",
+        "password": True,
+        "category": "provider",
+    },
+    "CROFAI_BASE_URL": {
+        "description": "Crof.ai base URL override (default: https://crof.ai/v1)",
+        "prompt": "Crof.ai base URL (leave empty for default)",
+        "url": None,
+        "password": False,
+        "category": "provider",
+        "advanced": True,
+    },
     "AWS_REGION": {
         "description": "AWS region for Bedrock API calls (e.g. us-east-1, eu-central-1)",
         "prompt": "AWS Region",

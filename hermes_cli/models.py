@@ -326,6 +326,22 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "mimo-v2-omni",
         "mimo-v2-flash",
     ],
+    "crofai": [
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "deepseek-v3.2",
+        "kimi-k2.6",
+        "kimi-k2.5",
+        "kimi-k2.5-lightning",
+        "glm-5.1",
+        "glm-5",
+        "glm-4.7",
+        "glm-4.7-flash",
+        "qwen3.6-27b",
+        "qwen3.5-397b-a17b",
+        "gemma-4-31b-it",
+        "minimax-m2.5",
+    ],
     "tencent-tokenhub": [
         "hy3-preview",
     ],
@@ -808,6 +824,8 @@ CANONICAL_PROVIDERS: list[ProviderEntry] = [
     ProviderEntry("bedrock",        "AWS Bedrock",              "AWS Bedrock (Claude, Nova, Llama, DeepSeek — IAM or API key)"),
     ProviderEntry("azure-foundry",  "Azure Foundry",            "Azure Foundry (OpenAI-style or Anthropic-style endpoint — your Azure AI deployment)"),
     ProviderEntry("ai-gateway",     "Vercel AI Gateway",        "Vercel AI Gateway"),
+    ProviderEntry("crofai",         "Crof.ai",                 "Crof.ai (DeepSeek, Kimi, Qwen, GLM — live discovery, pay-per-use)"),
+    ProviderEntry("custom",         "Custom endpoint",          "Custom endpoint (your own base URL)"),
 ]
 
 # Auto-extend CANONICAL_PROVIDERS with any provider registered in providers/
@@ -903,6 +921,9 @@ _PROVIDER_ALIASES = {
     "nvidia-nim": "nvidia",
     "build-nvidia": "nvidia",
     "nemotron": "nvidia",
+    "crof.ai": "crofai",
+    "crof-ai": "crofai",
+    "crof": "crofai",
     "lmstudio": "lmstudio",
     "lm-studio": "lmstudio",
     "lm_studio": "lmstudio",
@@ -1998,6 +2019,10 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
         live = fetch_ollama_cloud_models(force_refresh=force_refresh)
         if live:
             return live
+    if normalized == "crofai":
+        live = fetch_crofai_models(force_refresh=force_refresh)
+        if live:
+            return live
     if normalized == "openai":
         api_key = os.getenv("OPENAI_API_KEY", "").strip()
         if api_key:
@@ -3075,6 +3100,79 @@ def fetch_ollama_cloud_models(
 
     # Total failure — return stale cache if available (ignore TTL)
     stale = _load_ollama_cloud_cache(ignore_ttl=True)
+    if stale is not None:
+        return stale["models"]
+
+    return []
+
+
+# ---------------------------------------------------------------------------
+# CrofAI — live model discovery from /v1/models with disk cache
+# ---------------------------------------------------------------------------
+
+_CROFAI_CACHE_TTL = 1800  # 30 minutes
+
+def _crofai_cache_path() -> Path:
+    from hermes_constants import get_hermes_home
+    return get_hermes_home() / "crofai_models_cache.json"
+
+
+def _load_crofai_cache(ignore_ttl: bool = False) -> Optional[dict]:
+    cache_path = _crofai_cache_path()
+    if not cache_path.exists():
+        return None
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or "models" not in data:
+            return None
+        if not ignore_ttl:
+            cached_at = data.get("cached_at", 0)
+            if time.time() - cached_at > _CROFAI_CACHE_TTL:
+                return None
+        return data
+    except Exception:
+        return None
+
+
+def _save_crofai_cache(models: list[str]):
+    try:
+        cache_path = _crofai_cache_path()
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps({
+            "models": models,
+            "cached_at": time.time(),
+        }, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def fetch_crofai_models(
+    *,
+    force_refresh: bool = False,
+) -> list[str]:
+    """Fetch CrofAI models from live /v1/models, falling back to disk cache."""
+    if not force_refresh:
+        cached = _load_crofai_cache()
+        if cached is not None:
+            return cached["models"]
+
+    api_key = os.getenv("CROFAI_API_KEY", "").strip()
+    base_url = os.getenv("CROFAI_BASE_URL", "").strip().rstrip("/") or "https://crof.ai/v1"
+
+    live_models: list[str] = []
+    if api_key:
+        try:
+            result = fetch_api_models(api_key, base_url, timeout=8.0)
+            if result:
+                live_models = result
+        except Exception:
+            pass
+
+    if live_models:
+        _save_crofai_cache(live_models)
+        return live_models
+
+    stale = _load_crofai_cache(ignore_ttl=True)
     if stale is not None:
         return stale["models"]
 
