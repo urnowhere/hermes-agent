@@ -79,6 +79,42 @@ try:
     from tools.url_safety import is_safe_url as _is_safe_url
 except Exception:
     _is_safe_url = lambda url: False  # noqa: E731 — fail-closed: block all if safety module unavailable
+
+# Known CAPTCHA / bot-challenge / anti-bot interstitial URLs.
+# Match is: host substring AND path substring, where None means "don't care."
+BLOCK_PATTERNS: list[tuple[Optional[str], Optional[str]]] = [
+    ("google.com",       "/sorry/"),            # Google anti-bot
+    ("google.com",       "/recaptcha/"),        # Google reCAPTCHA
+    ("cloudflare.com",   "/cdn-cgi/challenge"), # Cloudflare interstitial
+    (None,               "/challenge-platform/"),# Cloudflare Turnstile
+    ("captcha.",         None),                 # Generic captcha subdomain
+    ("hcaptcha.com",     None),                 # hCaptcha standalone
+    ("datadome.co",      None),                 # DataDome block page
+    ("perimeterx.net",   None),                 # PerimeterX
+]
+
+
+def _is_captcha_url(url: str) -> Optional[tuple]:
+    """Check if a URL matches known CAPTCHA / bot-challenge patterns.
+
+    Returns the matched (host_pattern, path_pattern) tuple, or None.
+    """
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        path = parsed.path.lower()
+    except Exception:
+        return None
+
+    for host_pat, path_pat in BLOCK_PATTERNS:
+        if host_pat is not None and host_pat not in host:
+            continue
+        if path_pat is not None and path_pat not in path:
+            continue
+        return (host_pat or "*", path_pat or "*")
+    return None
+
 from tools.browser_providers.base import CloudBrowserProvider
 from tools.browser_providers.browserbase import BrowserbaseProvider
 from tools.browser_providers.browser_use import BrowserUseProvider
@@ -2155,6 +2191,27 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
                 "success": False,
                 "error": "Blocked: redirect landed on a private/internal address",
             })
+
+         # Post-redirect CAPTCHA / bot-challenge detection.
+        # The browser succeeded in loading the page, but the final URL
+        # indicates we were redirected to a challenge page (e.g. Google
+        # /sorry/).  Return success=False so the model stops retrying.
+        captcha_match = _is_captcha_url(final_url)
+        if captcha_match is not None:
+            host_pat, path_pat = captcha_match
+            return json.dumps({
+                "success": False,
+                "blocked": True,
+                "block_reason": "captcha_or_bot_challenge",
+                "blocked_by": f"{host_pat}{path_pat}",
+                "url": final_url,
+                "requested_url": url,
+                "message": (
+                    "Destination was a bot-challenge / CAPTCHA page. "
+                    "Do not retry the same URL — try a different source or "
+                    "surface this to the user."
+                ),
+            }, ensure_ascii=False)
 
         response = {
             "success": True,

@@ -510,3 +510,123 @@ async def test_web_crawl_blocks_redirected_final_url(monkeypatch):
     assert result["results"][0]["content"] == ""
     assert result["results"][0]["error"] == "Blocked by website policy"
     assert result["results"][0]["blocked_by_policy"]["rule"] == "blocked.test"
+
+
+def test_google_sorry_detected(monkeypatch):
+    """Google /sorry/ redirect should return blocked=True."""
+    from tools import browser_tool
+
+    monkeypatch.setattr(browser_tool, "_is_safe_url", lambda url: True)
+    monkeypatch.setattr(browser_tool, "check_website_access", lambda url: None)
+    monkeypatch.setattr(browser_tool, "_is_camofox_mode", lambda: False)
+
+    def fake_run(task_id, cmd, args, timeout=None):
+        if cmd == "open":
+            return {
+                "success": True,
+                "data": {
+                    "url": "https://www.google.com/sorry/index?continue=https://www.google.com/search%3Fq%3Dtest",
+                    "title": "Google",
+                },
+            }
+        if cmd == "snapshot":
+            return {"success": True, "data": {"snapshot": "", "refs": {}}}
+        return {"success": True, "data": {}}
+
+    monkeypatch.setattr(browser_tool, "_run_browser_command", fake_run)
+
+    result = json.loads(browser_tool.browser_navigate("https://www.google.com/search?q=test"))
+    assert result["success"] is False
+    assert result["blocked"] is True
+    assert result["block_reason"] == "captcha_or_bot_challenge"
+    assert result["blocked_by"] == "google.com/sorry/"
+
+
+def test_cloudflare_challenge_detected(monkeypatch):
+    """Cloudflare challenge page should return blocked=True."""
+    from tools import browser_tool
+
+    monkeypatch.setattr(browser_tool, "_is_safe_url", lambda url: True)
+    monkeypatch.setattr(browser_tool, "check_website_access", lambda url: None)
+    monkeypatch.setattr(browser_tool, "_is_camofox_mode", lambda: False)
+
+    def fake_run(task_id, cmd, args, timeout=None):
+        if cmd == "open":
+            return {
+                "success": True,
+                "data": {
+                    "url": "https://example.com/cdn-cgi/challenge-platform/h/b/orange/proxy/1234",
+                    "title": "Attention Required!",
+                },
+            }
+        if cmd == "snapshot":
+            return {"success": True, "data": {"snapshot": "", "refs": {}}}
+        return {"success": True, "data": {}}
+
+    monkeypatch.setattr(browser_tool, "_run_browser_command", fake_run)
+
+    result = json.loads(browser_tool.browser_navigate("https://example.com"))
+    assert result["success"] is False
+    assert result["blocked"] is True
+    assert result["block_reason"] == "captcha_or_bot_challenge"
+
+
+def test_normal_url_unchanged(monkeypatch):
+    """Normal navigation should return success=True, no blocked fields."""
+    from tools import browser_tool
+
+    monkeypatch.setattr(browser_tool, "_is_safe_url", lambda url: True)
+    monkeypatch.setattr(browser_tool, "check_website_access", lambda url: None)
+    monkeypatch.setattr(browser_tool, "_is_camofox_mode", lambda: False)
+
+    def fake_run(task_id, cmd, args, timeout=None):
+        if cmd == "open":
+            return {
+                "success": True,
+                "data": {
+                    "url": "https://example.com/article/123",
+                    "title": "Sample Article",
+                },
+            }
+        if cmd == "snapshot":
+            return {"success": True, "data": {"snapshot": "content", "refs": {"@e1": "text"}}}
+        return {"success": True, "data": {}}
+
+    monkeypatch.setattr(browser_tool, "_run_browser_command", fake_run)
+
+    result = json.loads(browser_tool.browser_navigate("https://example.com/article/123"))
+    assert result["success"] is True
+    assert "blocked" not in result
+    assert result["url"] == "https://example.com/article/123"
+
+
+def test_redirect_chain_terminal_url_checked(monkeypatch):
+    """Initial URL is a search query, final URL after redirect is /sorry/. Detection triggers on final URL."""
+    from tools import browser_tool
+
+    monkeypatch.setattr(browser_tool, "_is_safe_url", lambda url: True)
+    monkeypatch.setattr(browser_tool, "check_website_access", lambda url: None)
+    monkeypatch.setattr(browser_tool, "_is_camofox_mode", lambda: False)
+
+    def fake_run(task_id, cmd, args, timeout=None):
+        if cmd == "open":
+            return {
+                "success": True,
+                "data": {
+                    "url": "https://www.google.com/sorry/index?continue=https://www.google.com/search%3Fq%3Dsomething+specific+query",
+                    "title": "Google",
+                },
+            }
+        if cmd == "snapshot":
+            return {"success": True, "data": {"snapshot": "", "refs": {}}}
+        return {"success": True, "data": {}}
+
+    monkeypatch.setattr(browser_tool, "_run_browser_command", fake_run)
+
+    result = json.loads(
+        browser_tool.browser_navigate("https://www.google.com/search?q=something+specific+query")
+    )
+    assert result["success"] is False
+    assert result["blocked"] is True
+    assert result["requested_url"] == "https://www.google.com/search?q=something+specific+query"
+    assert "sorry" in result["url"]
