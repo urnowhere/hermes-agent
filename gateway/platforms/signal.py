@@ -1212,7 +1212,16 @@ class SignalAdapter(BasePlatformAdapter):
 
         # Resolve image to local path
         if image_url.startswith("file://"):
-            file_path = unquote(image_url[7:])
+            from hermes_constants import get_hermes_home
+            allowed_dir = get_hermes_home() / "media"
+            raw_path = unquote(image_url[7:])
+            local_path = Path(raw_path).expanduser().resolve()
+            try:
+                if not local_path.is_relative_to(allowed_dir.resolve()):
+                    raise PermissionError(f"file:// path outside allowed media directory: {raw_path}")
+            except ValueError:
+                raise PermissionError(f"file:// path traversal rejected: {raw_path}")
+            file_path = str(local_path)
         else:
             # Download remote image to cache
             try:

@@ -241,7 +241,11 @@ DANGEROUS_PATTERNS = [
     (r'\bsystemctl\s+(-[^\s]+\s+)*(stop|restart|disable|mask)\b', "stop/restart system service"),
     (r'\bkill\s+-9\s+-1\b', "kill all processes"),
     (r'\bpkill\s+-9\b', "force kill processes"),
-    (r':\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:', "fork bomb"),
+    (r':\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;', "fork bomb"),
+    (r'\bsudo\s+-S\b', "sudo reading password from stdin"),
+    (r'\balias\s+\w+\s*=', "define command alias"),
+    (r'\bdisown\b', "remove job from shell's job table"),
+    (r'\bcrontab\s+(-e|-u)\b', "edit user crontab"),
     # Any shell invocation via -c or combined flags like -lc, -ic, etc.
     (r'\b(bash|sh|zsh|ksh)\s+-[^\s]*c(\s+|$)', "shell command via -c/-lc flag"),
     (r'\b(python[23]?|perl|ruby|node)\s+-[ec]\s+', "script execution via -e/-c flag"),
