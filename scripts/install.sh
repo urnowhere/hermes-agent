@@ -1282,10 +1282,25 @@ install_node_deps() {
             ubuntu|debian|raspbian|pop|linuxmint|elementary|zorin|kali|parrot)
                 log_info "Playwright may request sudo to install browser system dependencies (shared libraries)."
                 log_info "This is standard Playwright setup — Hermes itself does not require root access."
-                cd "$INSTALL_DIR" && npx playwright install --with-deps chromium 2>/dev/null || {
+                local machine_arch
+                machine_arch="$(uname -m)"
+                if cd "$INSTALL_DIR" && npx playwright install --with-deps chromium 2>/dev/null; then
+                    :
+                elif [[ "$machine_arch" == "aarch64" || "$machine_arch" == "arm64" ]]; then
+                    log_warn "Playwright --with-deps failed on $machine_arch; retrying browser-only install."
+                    if cd "$INSTALL_DIR" && npx playwright install chromium 2>/dev/null; then
+                        log_success "Playwright Chromium installed (without auto system dependency install)."
+                        log_info "If browser tools fail, install deps manually, then rerun:"
+                        log_info "  sudo apt install nss libatk-bridge2.0-0 libdrm2 libxkbcommon0 libgbm1 libasound2t64"
+                        log_info "  cd $INSTALL_DIR && npx playwright install chromium"
+                    else
+                        log_warn "Playwright browser installation failed — browser tools will not work."
+                        log_warn "Try running manually: cd $INSTALL_DIR && npx playwright install chromium"
+                    fi
+                else
                     log_warn "Playwright browser installation failed — browser tools will not work."
                     log_warn "Try running manually: cd $INSTALL_DIR && npx playwright install --with-deps chromium"
-                }
+                fi
                 ;;
             arch|manjaro)
                 if command -v pacman &> /dev/null; then
