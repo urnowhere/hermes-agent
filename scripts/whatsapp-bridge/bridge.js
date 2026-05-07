@@ -91,6 +91,26 @@ function getContextInfo(messageContent) {
   return {};
 }
 
+function extractQuotedText(quotedMessage) {
+  if (!quotedMessage || typeof quotedMessage !== 'object') return '';
+
+  // quotedMessage is already a message-content object shape (not wrapped in {message:{...}})
+  // Support common cases (text + media captions).
+  if (quotedMessage.conversation) return String(quotedMessage.conversation);
+  if (quotedMessage.extendedTextMessage?.text) return String(quotedMessage.extendedTextMessage.text);
+  if (quotedMessage.imageMessage?.caption) return String(quotedMessage.imageMessage.caption);
+  if (quotedMessage.videoMessage?.caption) return String(quotedMessage.videoMessage.caption);
+  if (quotedMessage.documentMessage?.caption) return String(quotedMessage.documentMessage.caption);
+
+  // Some wrappers can appear nested.
+  if (quotedMessage.ephemeralMessage?.message) return extractQuotedText(quotedMessage.ephemeralMessage.message);
+  if (quotedMessage.viewOnceMessage?.message) return extractQuotedText(quotedMessage.viewOnceMessage.message);
+  if (quotedMessage.viewOnceMessageV2?.message) return extractQuotedText(quotedMessage.viewOnceMessageV2.message);
+  if (quotedMessage.documentWithCaptionMessage?.message) return extractQuotedText(quotedMessage.documentWithCaptionMessage.message);
+
+  return '';
+}
+
 mkdirSync(SESSION_DIR, { recursive: true });
 
 // Build LID → phone reverse map from session files (lid-mapping-{phone}.json)
@@ -246,6 +266,8 @@ async function startSocket() {
       const contextInfo = getContextInfo(messageContent);
       const mentionedIds = Array.from(new Set((contextInfo?.mentionedJid || []).map(normalizeWhatsAppId).filter(Boolean)));
       const quotedParticipant = normalizeWhatsAppId(contextInfo?.participant || contextInfo?.remoteJid || '');
+      const quotedMessageId = contextInfo?.stanzaId ? String(contextInfo.stanzaId) : '';
+      const quotedText = extractQuotedText(contextInfo?.quotedMessage);
 
       // Extract message body
       let body = '';
@@ -358,6 +380,8 @@ async function startSocket() {
         mediaUrls,
         mentionedIds,
         quotedParticipant,
+        quotedMessageId: quotedMessageId || undefined,
+        quotedText: quotedText || undefined,
         botIds,
         timestamp: msg.messageTimestamp,
       };
@@ -466,6 +490,7 @@ const MIME_MAP = {
   mp4: 'video/mp4', mov: 'video/quicktime', avi: 'video/x-msvideo',
   mkv: 'video/x-matroska', '3gp': 'video/3gpp',
   pdf: 'application/pdf',
+  wav: 'audio/wav', mp3: 'audio/mpeg', m4a: 'audio/mp4', ogg: 'audio/ogg', opus: 'audio/ogg',
   doc: 'application/msword',
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
