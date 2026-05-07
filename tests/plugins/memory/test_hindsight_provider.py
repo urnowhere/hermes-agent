@@ -431,6 +431,128 @@ class TestPostSetup:
         assert saved["HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE"] == "1"
         assert saved["timeout"] == 120
 
+    def test_local_embedded_setup_writes_llm_api_key_to_config_json(self, tmp_path, monkeypatch):
+        """Fresh setup should persist llm_api_key in config.json so the daemon
+        can recover the key if .env / profile.env go stale (issue #17414)."""
+        hermes_home = tmp_path / "hermes-home"
+        user_home = tmp_path / "user-home"
+        user_home.mkdir()
+        monkeypatch.setenv("HOME", str(user_home))
+
+        selections = iter([1, 0])  # local_embedded, openai
+        monkeypatch.setattr("hermes_cli.memory_setup._curses_select", lambda *args, **kwargs: next(selections))
+        monkeypatch.setattr("shutil.which", lambda name: None)
+        monkeypatch.setattr("builtins.input", lambda prompt="": "")
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("getpass.getpass", lambda prompt="": "sk-fresh-key")
+        monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: None)
+
+        provider = HindsightMemoryProvider()
+        provider.post_setup(str(hermes_home), {"memory": {}})
+
+        saved = json.loads((hermes_home / "hindsight" / "config.json").read_text())
+        assert saved["llm_api_key"] == "sk-fresh-key", (
+            "llm_api_key must be mirrored into config.json so the daemon "
+            "falls back to it when .env / profile.env are stale"
+        )
+
+    def test_local_embedded_setup_mirrors_existing_env_key_into_config_json(self, tmp_path, monkeypatch):
+        """If the user leaves the API-key prompt blank and there's an
+        existing HINDSIGHT_LLM_API_KEY in .env, that key should also be
+        mirrored into config.json (unless already present there)."""
+        hermes_home = tmp_path / "hermes-home"
+        user_home = tmp_path / "user-home"
+        user_home.mkdir()
+        monkeypatch.setenv("HOME", str(user_home))
+
+        selections = iter([1, 0])  # local_embedded, openai
+        monkeypatch.setattr("hermes_cli.memory_setup._curses_select", lambda *args, **kwargs: next(selections))
+        monkeypatch.setattr("shutil.which", lambda name: None)
+        monkeypatch.setattr("builtins.input", lambda prompt="": "")
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("getpass.getpass", lambda prompt="": "")
+        monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: None)
+
+        env_path = hermes_home / ".env"
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        env_path.write_text("HINDSIGHT_LLM_API_KEY=env-fallback-key\n")
+
+        provider = HindsightMemoryProvider()
+        provider.post_setup(str(hermes_home), {"memory": {}})
+
+        saved = json.loads((hermes_home / "hindsight" / "config.json").read_text())
+        assert saved["llm_api_key"] == "env-fallback-key"
+
+    def test_local_embedded_setup_warns_about_macos_launchagent(self, tmp_path, monkeypatch, capsys):
+        """On macOS, detect Hindsight LaunchAgent plists and warn the user —
+        these can revive the daemon with stale config and cause port-conflict
+        dead loops (issue #17414, gap 4)."""
+        import sys as _sys
+        hermes_home = tmp_path / "hermes-home"
+        user_home = tmp_path / "user-home"
+        la_dir = user_home / "Library" / "LaunchAgents"
+        la_dir.mkdir(parents=True)
+        stale_plist = la_dir / "io.hindsight.daemon.plist"
+        stale_plist.write_text(
+            "<?xml version='1.0'?><plist><dict>"
+            "<key>KeepAlive</key><true/></dict></plist>\n"
+        )
+        monkeypatch.setenv("HOME", str(user_home))
+        monkeypatch.setattr(_sys, "platform", "darwin")
+
+        selections = iter([1, 0])
+        monkeypatch.setattr("hermes_cli.memory_setup._curses_select", lambda *args, **kwargs: next(selections))
+        monkeypatch.setattr("shutil.which", lambda name: None)
+        monkeypatch.setattr("builtins.input", lambda prompt="": "")
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("getpass.getpass", lambda prompt="": "sk-k")
+        monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: None)
+
+        provider = HindsightMemoryProvider()
+        provider.post_setup(str(hermes_home), {"memory": {}})
+
+        out = capsys.readouterr().out
+        assert "Detected existing Hindsight LaunchAgent" in out
+        assert "io.hindsight.daemon.plist" in out
+        assert "launchctl bootout" in out
+
+    def test_local_embedded_setup_does_not_warn_when_no_launchagent(self, tmp_path, monkeypatch, capsys):
+        """No LaunchAgent → no warning. Absence of the directory or absence
+        of matching plists must both be silent."""
+        import sys as _sys
+        hermes_home = tmp_path / "hermes-home"
+        user_home = tmp_path / "user-home"
+        user_home.mkdir()
+        monkeypatch.setenv("HOME", str(user_home))
+        monkeypatch.setattr(_sys, "platform", "darwin")
+
+        selections = iter([1, 0])
+        monkeypatch.setattr("hermes_cli.memory_setup._curses_select", lambda *args, **kwargs: next(selections))
+        monkeypatch.setattr("shutil.which", lambda name: None)
+        monkeypatch.setattr("builtins.input", lambda prompt="": "")
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("getpass.getpass", lambda prompt="": "sk-k")
+        monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: None)
+
+        provider = HindsightMemoryProvider()
+        provider.post_setup(str(hermes_home), {"memory": {}})
+
+        out = capsys.readouterr().out
+        assert "Detected existing Hindsight LaunchAgent" not in out
+
+    def test_detect_hindsight_launchagents_non_darwin_returns_empty(self, tmp_path, monkeypatch):
+        """On non-macOS platforms the detector short-circuits to empty."""
+        import sys as _sys
+        from plugins.memory.hindsight import _detect_hindsight_launchagents
+        user_home = tmp_path / "user-home"
+        la_dir = user_home / "Library" / "LaunchAgents"
+        la_dir.mkdir(parents=True)
+        (la_dir / "io.hindsight.daemon.plist").write_text("<plist/>")
+        monkeypatch.setenv("HOME", str(user_home))
+        monkeypatch.setattr(_sys, "platform", "linux")
+
+        assert _detect_hindsight_launchagents() == []
+
 
 
 # ---------------------------------------------------------------------------

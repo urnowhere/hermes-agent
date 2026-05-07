@@ -384,6 +384,27 @@ def _embedded_profile_name(config: dict[str, Any]) -> str:
     return str(profile or "hermes")
 
 
+def _detect_hindsight_launchagents() -> list:
+    """Return any installed io.hindsight.* LaunchAgent plists on macOS.
+
+    A stale LaunchAgent with ``KeepAlive: true`` silently revives the Hindsight
+    daemon with old config after the user kills it, producing port-conflict
+    dead loops with the Hermes-managed daemon. Only the Hermes wizard knows
+    to warn about this; detection is best-effort and never fatal.
+    """
+    import sys
+    from pathlib import Path
+    if sys.platform != "darwin":
+        return []
+    la_dir = Path.home() / "Library" / "LaunchAgents"
+    if not la_dir.is_dir():
+        return []
+    try:
+        return sorted(la_dir.glob("io.hindsight.*.plist"))
+    except OSError:
+        return []
+
+
 def _load_simple_env(path) -> dict[str, str]:
     """Parse a simple KEY=VALUE env file, ignoring comments and blank lines."""
     if not path.exists():
@@ -716,6 +737,22 @@ class HindsightMemoryProvider(MemoryProvider):
                 env_writes["HINDSIGHT_API_KEY"] = api_key
 
         else:  # local_embedded
+            # Warn about macOS LaunchAgent plists from prior hindsight-embed
+            # installs (or other programs using hindsight-embed). A plist with
+            # KeepAlive=true silently revives the daemon with stale config
+            # after Hermes kills it, producing [Errno 48] port-conflict loops.
+            stale_plists = _detect_hindsight_launchagents()
+            if stale_plists:
+                print("\n  ⚠ Detected existing Hindsight LaunchAgent(s):")
+                for plist in stale_plists:
+                    print(f"    {plist}")
+                print("  These can silently revive the daemon with stale config and")
+                print("  collide with Hermes on the daemon port. Remove with:")
+                for plist in stale_plists:
+                    print(f"    launchctl bootout gui/$(id -u) {plist}")
+                    print(f"    rm {plist}")
+                print()
+
             providers_list = list(_PROVIDER_DEFAULT_MODELS.keys())
             llm_items = [
                 (p, f"default model: {_PROVIDER_DEFAULT_MODELS[p]}")
@@ -750,6 +787,10 @@ class HindsightMemoryProvider(MemoryProvider):
             llm_key = getpass.getpass(prompt="") if sys.stdin.isatty() else sys.stdin.readline().strip()
             if llm_key:
                 env_writes["HINDSIGHT_LLM_API_KEY"] = llm_key
+                # Mirror into config.json so the daemon picks it up even when
+                # .env / profile.env go stale. _build_embedded_profile_env()
+                # falls back to config["llm_api_key"] in that case.
+                provider_config["llm_api_key"] = llm_key
             else:
                 env_path = Path(hermes_home) / ".env"
                 existing_llm_key = ""
@@ -759,6 +800,8 @@ class HindsightMemoryProvider(MemoryProvider):
                             existing_llm_key = line.split("=", 1)[1]
                             break
                 env_writes["HINDSIGHT_LLM_API_KEY"] = existing_llm_key
+                if existing_llm_key and not provider_config.get("llm_api_key"):
+                    provider_config["llm_api_key"] = existing_llm_key
 
         # Step 4: Save everything
         provider_config.setdefault("bank_id", "hermes")
