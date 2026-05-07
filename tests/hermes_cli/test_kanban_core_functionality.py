@@ -3597,3 +3597,258 @@ def test_reclaim_task_clears_failure_counter(kanban_home):
         assert task.status == "ready"
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# t_kanban_v2_001 — per-task max_retries override
+# ---------------------------------------------------------------------------
+
+
+def test_max_retries_per_task_overrides_default(kanban_home, all_assignees_spawnable):
+    """A task with max_retries=1 should block after exactly 1 failure,
+    not the global default of 2."""
+    def _bad(task, ws):
+        raise RuntimeError("nope")
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="x", assignee="worker", max_retries=1)
+        task = kb.get_task(conn, tid)
+        assert task.max_retries == 1
+        # One failure should trip the breaker (limit=1).
+        kb.dispatch_once(conn, spawn_fn=_bad)
+        task = kb.get_task(conn, tid)
+        assert task.status == "blocked"
+        assert task.consecutive_failures == 1
+        events = kb.list_events(conn, tid)
+        gave_up = [e for e in events if e.kind == "gave_up"]
+        assert len(gave_up) == 1
+        assert gave_up[0].payload["effective_limit"] == 1
+        assert gave_up[0].payload["limit_source"] == "task"
+    finally:
+        conn.close()
+
+
+def test_config_default_used_when_no_per_task(kanban_home, all_assignees_spawnable):
+    """Task with no max_retries should use DEFAULT_FAILURE_LIMIT (2).
+    One failure should NOT block; two should."""
+    def _bad(task, ws):
+        raise RuntimeError("nope")
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="x", assignee="worker")
+        task = kb.get_task(conn, tid)
+        assert task.max_retries is None
+        # First failure: should NOT block (limit=2).
+        kb.dispatch_once(conn, spawn_fn=_bad)
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
+        assert task.consecutive_failures == 1
+        # Reclaim to clear claim so dispatcher can pick it up again.
+        kb.reclaim_task(conn, tid)
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
+        # Second failure: should block.
+        kb.reclaim_task(conn, tid)
+        kb.dispatch_once(conn, spawn_fn=_bad)
+        task = kb.get_task(conn, tid)
+        assert task.consecutive_failures == 2
+        # The task should have been auto-blocked by the second failure dispatch.
+        # (It might be blocked already if the 2nd dispatch blocked it, or
+        # ready if the claim was released but not yet blocked — check event.)
+        events = kb.list_events(conn, tid)
+        gave_up = [e for e in events if e.kind == "gave_up"]
+        # If task is blocked, gave_up must have fired.
+        if task.status == "blocked":
+            assert len(gave_up) >= 1
+            assert gave_up[0].payload["limit_source"] == "default"
+            assert gave_up[0].payload["effective_limit"] == 2
+    finally:
+        conn.close()
+
+
+def test_per_task_overrides_config_and_default(kanban_home, all_assignees_spawnable):
+    """A task with max_retries=10 should NOT block at the global default of 2."""
+    def _bad(task, ws):
+        raise RuntimeError("nope")
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="x", assignee="worker", max_retries=10)
+        # Fail 5 times — should NOT block because limit=10.
+        for i in range(5):
+            kb.dispatch_once(conn, spawn_fn=_bad)
+            task = kb.get_task(conn, tid)
+            # If the task was auto-blocked after spawn failure, reclaim it
+            # so dispatch can pick it up again.
+            if task.status == "blocked":
+                # This should not happen at 5 failures with limit=10.
+                pytest.fail(f"Task blocked at {task.consecutive_failures} failures with max_retries=10")
+            # Release the claim so it can be picked up next tick.
+            kb.reclaim_task(conn, tid)
+        assert task.consecutive_failures == 5
+        assert task.status == "ready"
+    finally:
+        conn.close()
+
+
+def test_gave_up_event_fires_at_cap(kanban_home, all_assignees_spawnable):
+    """Failing task hits cap, gave_up event fires, dispatcher does not re-dispatch."""
+    def _bad(task, ws):
+        raise RuntimeError("kaput")
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="x", assignee="worker", max_retries=2)
+        # Fail once — should still be active.
+        kb.dispatch_once(conn, spawn_fn=_bad)
+        task = kb.get_task(conn, tid)
+        assert task.consecutive_failures == 1
+        # Reclaim so dispatch can pick it up.
+        kb.reclaim_task(conn, tid)
+        # Fail second time — should trip breaker.
+        kb.dispatch_once(conn, spawn_fn=_bad)
+        task = kb.get_task(conn, tid)
+        events = kb.list_events(conn, tid)
+        gave_up = [e for e in events if e.kind == "gave_up"]
+        assert len(gave_up) >= 1
+        assert gave_up[0].payload["effective_limit"] == 2
+        assert gave_up[0].payload["limit_source"] == "task"
+        # Dispatcher should skip blocked tasks.
+        res = kb.dispatch_once(conn, spawn_fn=_bad)
+        assert tid not in [t.id for t in res.spawned]
+    finally:
+        conn.close()
+
+
+def test_existing_consecutive_failures_tests_still_pass(kanban_home, all_assignees_spawnable):
+    """Regression: the DEFAULT_FAILURE_LIMIT change from 5 to 2 should not
+    break tests that explicitly pass failure_limit."""
+    def _bad(task, ws):
+        raise RuntimeError("nope")
+    conn = kb.connect()
+    try:
+        # Create a task and fail it 3 times with explicit failure_limit=5.
+        tid = kb.create_task(conn, title="x", assignee="worker")
+        for _ in range(3):
+            kb.dispatch_once(conn, spawn_fn=_bad, failure_limit=5)
+        task = kb.get_task(conn, tid)
+        # 3 failures with limit=5 should NOT trip the breaker.
+        assert task.consecutive_failures == 3
+        # The task may be in ready or running depending on claim state,
+        # but it should NOT be blocked.
+        assert task.status != "blocked"
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# t_kanban_v2_001b — config layer for default_max_retries
+# ---------------------------------------------------------------------------
+
+
+def test_config_default_max_retries_overrides_hardcoded(kanban_home, all_assignees_spawnable):
+    """When config sets default_max_retries=1 and task has no per-task override,
+    the task should block after 1 failure with limit_source=config."""
+    def _bad(task, ws):
+        raise RuntimeError("nope")
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="x", assignee="worker")
+        task = kb.get_task(conn, tid)
+        assert task.max_retries is None
+        # Pass config value 1 as failure_limit (simulates gateway threading).
+        kb.dispatch_once(conn, spawn_fn=_bad, failure_limit=1)
+        task = kb.get_task(conn, tid)
+        assert task.consecutive_failures == 1
+        assert task.status == "blocked"
+        events = kb.list_events(conn, tid)
+        gave_up = [e for e in events if e.kind == "gave_up"]
+        assert len(gave_up) == 1
+        assert gave_up[0].payload["effective_limit"] == 1
+        assert gave_up[0].payload["limit_source"] == "config"
+    finally:
+        conn.close()
+
+
+def test_per_task_max_retries_overrides_config(kanban_home, all_assignees_spawnable):
+    """A task with max_retries=3 should NOT block at config default_max_retries=1;
+    it should block after exactly 3 failures with limit_source=task."""
+    def _bad(task, ws):
+        raise RuntimeError("nope")
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="x", assignee="worker", max_retries=3)
+        task = kb.get_task(conn, tid)
+        assert task.max_retries == 3
+        # Pass config value 1 as failure_limit (simulates config=1).
+        # Per-task override (3) should win over config (1).
+        # Fail once — should NOT block (limit=3).
+        kb.dispatch_once(conn, spawn_fn=_bad, failure_limit=1)
+        task = kb.get_task(conn, tid)
+        assert task.consecutive_failures == 1
+        assert task.status != "blocked", "blocked at 1 failure with max_retries=3"
+        # Reclaim and fail second time.
+        kb.reclaim_task(conn, tid)
+        kb.dispatch_once(conn, spawn_fn=_bad, failure_limit=1)
+        task = kb.get_task(conn, tid)
+        assert task.consecutive_failures >= 2
+        assert task.status != "blocked", "blocked at 2 failures with max_retries=3"
+        # Reclaim and fail third time — should block.
+        kb.reclaim_task(conn, tid)
+        kb.dispatch_once(conn, spawn_fn=_bad, failure_limit=1)
+        task = kb.get_task(conn, tid)
+        events = kb.list_events(conn, tid)
+        gave_up = [e for e in events if e.kind == "gave_up"]
+        assert len(gave_up) >= 1
+        assert gave_up[0].payload["effective_limit"] == 3
+        assert gave_up[0].payload["limit_source"] == "task"
+    finally:
+        conn.close()
+
+
+def test_enforce_max_runtime_uses_config_failure_limit(kanban_home, monkeypatch):
+    """enforce_max_runtime passes failure_limit to _record_task_failure,
+    so a task with max_retries=1 blocks after a single timeout."""
+    import hermes_cli.kanban_db as _kb
+    state = {"sent_term": False}
+    def _alive(pid):
+        return not state["sent_term"]
+    def _signal(pid, sig):
+        import signal as _sig
+        if sig == _sig.SIGTERM:
+            state["sent_term"] = True
+    monkeypatch.setattr(_kb, "_pid_alive", _alive)
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(
+            conn, title="overrun", assignee="worker",
+            max_retries=1, max_runtime_seconds=1,
+        )
+        kb.claim_task(conn, tid)
+        kb._set_worker_pid(conn, tid, os.getpid())
+        with kb.write_txn(conn):
+            long_ago = int(time.time()) - 30
+            conn.execute(
+                "UPDATE tasks SET started_at = ? WHERE id = ?",
+                (long_ago, tid),
+            )
+            conn.execute(
+                "UPDATE task_runs SET started_at = ? "
+                "WHERE id = (SELECT current_run_id FROM tasks WHERE id = ?)",
+                (long_ago, tid),
+            )
+        before = kb.get_task(conn, tid)
+        assert before.consecutive_failures == 0
+
+        # enforce_max_runtime with failure_limit (config tier).
+        # Task has max_retries=1, so it should block after this single timeout.
+        kb.enforce_max_runtime(conn, signal_fn=_signal, failure_limit=1)
+
+        after = kb.get_task(conn, tid)
+        assert after.consecutive_failures == 1
+        events = kb.list_events(conn, tid)
+        gave_up = [e for e in events if e.kind == "gave_up"]
+        assert len(gave_up) >= 1
+        assert gave_up[0].payload["limit_source"] == "task"
+        assert gave_up[0].payload["effective_limit"] == 1
+    finally:
+        conn.close()

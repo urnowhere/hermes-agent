@@ -3645,6 +3645,16 @@ class GatewayRunner:
         if max_spawn is not None:
             logger.info(f"kanban dispatcher: max_spawn={max_spawn}")
 
+        # Read default_max_retries from kanban.budgets config.
+        # Threads through to dispatch_once → _record_task_failure as the
+        # config tier of the task.max_retries → config → DEFAULT_FAILURE_LIMIT
+        # resolution chain.
+        budgets_cfg = kanban_cfg.get("budgets", {}) or {}
+        default_max_retries = budgets_cfg.get("default_max_retries")
+        if default_max_retries is not None:
+            default_max_retries = int(default_max_retries)
+            logger.info(f"kanban dispatcher: default_max_retries={default_max_retries}")
+
         # Initial delay so the gateway finishes wiring adapters before the
         # dispatcher spawns workers (those workers may hit gateway notify
         # subscriptions etc.). Matches the notifier watcher's delay.
@@ -3673,7 +3683,11 @@ class GatewayRunner:
                     _kb.init_db(board=slug)  # idempotent, handles first-run
                 except Exception:
                     pass
-                return _kb.dispatch_once(conn, board=slug, max_spawn=max_spawn)
+                return _kb.dispatch_once(
+                    conn, board=slug,
+                    max_spawn=max_spawn,
+                    failure_limit=default_max_retries if default_max_retries is not None else _kb.DEFAULT_FAILURE_LIMIT,
+                )
             except Exception:
                 logger.exception("kanban dispatcher: tick failed on board %s", slug)
                 return None

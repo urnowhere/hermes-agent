@@ -595,6 +595,14 @@ class Task:
     # JSON array of skill names. None = use only the defaults; empty
     # list = explicitly no extra skills.
     skills: Optional[list] = None
+    # Per-task override for the consecutive-failure circuit breaker.
+    # Naming note: max_retries is the failure count at which the breaker blocks,
+    # not the count of retries allowed before blocking. A value of N means
+    # "block on Nth failure." max_retries=1 allows zero retries (block
+    # immediately); max_retries=2 allows one retry (block on second failure).
+    # When None, the resolution chain falls through to
+    # config (kanban.budgets.default_max_retries) then DEFAULT_FAILURE_LIMIT.
+    max_retries: Optional[int] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -656,6 +664,9 @@ class Task:
                 row["current_step_key"] if "current_step_key" in keys else None
             ),
             skills=skills_value,
+            max_retries=(
+                row["max_retries"] if "max_retries" in keys else None
+            ),
         )
 
 
@@ -776,7 +787,16 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- Force-loaded skills for the worker on this task, stored as JSON.
     -- Appended to the dispatcher's built-in `--skills kanban-worker`.
     -- NULL or empty array = no extras.
-    skills               TEXT
+    skills               TEXT,
+    -- Per-task override for the consecutive-failure circuit breaker.
+    -- max_retries is the failure count at which the breaker blocks, not
+    -- the count of retries allowed before blocking. A value of N means
+    -- "block on Nth failure." NULL = fall through to config
+    -- (kanban.budgets.default_max_retries) then DEFAULT_FAILURE_LIMIT (2).
+    -- 0 is not meaningful (treated like NULL — the breaker trips on the
+    -- first failure since failures >= 0 is always true); use 1 for
+    -- "fail once and give up".
+    max_retries          INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -1007,6 +1027,10 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         # worker (additive to the built-in `kanban-worker`). NULL is fine
         # for existing rows.
         conn.execute("ALTER TABLE tasks ADD COLUMN skills TEXT")
+    if "max_retries" not in cols:
+        # Per-task override for the consecutive-failure circuit breaker.
+        # NULL = use the global default (DEFAULT_FAILURE_LIMIT).
+        conn.execute("ALTER TABLE tasks ADD COLUMN max_retries INTEGER")
 
     # task_events gained a run_id column; back-fill it as NULL for
     # historical events (they predate runs and can't be attributed).
@@ -1163,6 +1187,7 @@ def create_task(
     idempotency_key: Optional[str] = None,
     max_runtime_seconds: Optional[int] = None,
     skills: Optional[Iterable[str]] = None,
+    max_retries: Optional[int] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -1187,6 +1212,13 @@ def create_task(
     ``kanban-worker``. Use this to pin a task to a specialist skill
     (e.g. ``skills=["translation"]`` so the worker loads the
     translation skill regardless of the profile's default config).
+
+    ``max_retries`` is an optional per-task override for the
+    consecutive-failure circuit breaker. ``None`` means fall through
+    to the config tier (``kanban.budgets.default_max_retries``) and
+    then the hardcode (``DEFAULT_FAILURE_LIMIT``, currently 2). An integer
+    value means the task will be blocked after that many consecutive
+    failures, regardless of config or hardcode.
     """
     assignee = _canonical_assignee(assignee)
     if not title or not title.strip():
@@ -1276,8 +1308,10 @@ def create_task(
                     INSERT INTO tasks (
                         id, title, body, assignee, status, priority,
                         created_by, created_at, workspace_kind, workspace_path,
-                        tenant, idempotency_key, max_runtime_seconds, skills
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        tenant, idempotency_key, max_runtime_seconds, skills,
+                        max_retries
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                              ?)
                     """,
                     (
                         task_id,
@@ -1294,6 +1328,7 @@ def create_task(
                         idempotency_key,
                         int(max_runtime_seconds) if max_runtime_seconds else None,
                         json.dumps(skills_list) if skills_list is not None else None,
+                        max_retries,
                     ),
                 )
                 for pid in parents:
@@ -2552,7 +2587,7 @@ def set_workspace_path(
 # stops retrying and parks the task in ``blocked`` with a reason so a human
 # can investigate. Prevents the dispatcher from thrashing forever on a task
 # whose profile doesn't exist, whose workspace is unmountable, etc.
-DEFAULT_FAILURE_LIMIT = 5
+DEFAULT_FAILURE_LIMIT = 2
 # Legacy alias — callers / tests still reference the old name.
 DEFAULT_SPAWN_FAILURE_LIMIT = DEFAULT_FAILURE_LIMIT
 
@@ -2707,6 +2742,7 @@ def enforce_max_runtime(
     conn: sqlite3.Connection,
     *,
     signal_fn=None,
+    failure_limit: Optional[int] = None,
 ) -> list[str]:
     """Terminate workers whose per-task ``max_runtime_seconds`` has elapsed.
 
@@ -2809,6 +2845,7 @@ def enforce_max_runtime(
                 outcome="timed_out",
                 release_claim=False,
                 end_run=False,
+                failure_limit=failure_limit,
                 event_payload_extra={"pid": pid, "sigkill": killed},
             )
     return timed_out
@@ -2829,7 +2866,11 @@ def set_max_runtime(
     return cur.rowcount == 1
 
 
-def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
+def detect_crashed_workers(
+    conn: sqlite3.Connection,
+    *,
+    failure_limit: Optional[int] = None,
+) -> list[str]:
     """Reclaim ``running`` tasks whose worker PID is no longer alive.
 
     Appends a ``crashed`` event and drops the task back to ``ready``.
@@ -2895,6 +2936,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
             outcome="crashed",
             release_claim=False,
             end_run=False,
+            failure_limit=failure_limit,
             event_payload_extra={"pid": pid, "claimer": claimer},
         )
     return crashed
@@ -2944,14 +2986,27 @@ def _record_task_failure(
     blocked = False
     with write_txn(conn):
         row = conn.execute(
-            "SELECT consecutive_failures, status FROM tasks WHERE id = ?", (task_id,),
+            "SELECT consecutive_failures, max_retries, status FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if row is None:
             return False
         failures = int(row["consecutive_failures"]) + 1
         cur_status = row["status"]
 
-        if failures >= failure_limit:
+        # effective_limit resolution; complete chain:
+        #   task.max_retries → failure_limit (from config or default) → DEFAULT_FAILURE_LIMIT
+        # Do not flatten — the three-tier chain is load-bearing.
+        if row["max_retries"] is not None:
+            effective_limit = row["max_retries"]
+            limit_source = "task"
+        elif failure_limit != DEFAULT_FAILURE_LIMIT:
+            effective_limit = failure_limit
+            limit_source = "config"
+        else:
+            effective_limit = DEFAULT_FAILURE_LIMIT
+            limit_source = "default"
+
+        if failures >= effective_limit:
             # Trip the breaker.
             if release_claim:
                 # Spawn path: still running, also clear claim state.
@@ -2979,10 +3034,12 @@ def _record_task_failure(
                     conn, task_id,
                     outcome="gave_up", status="gave_up",
                     error=error[:500],
-                    metadata={"failures": failures, "trigger_outcome": outcome},
+                    metadata={"failures": failures, "trigger_outcome": outcome, "effective_limit": effective_limit},
                 )
             payload = {
                 "failures": failures,
+                "effective_limit": effective_limit,
+                "limit_source": limit_source,
                 "error": error[:500],
                 "trigger_outcome": outcome,
             }
@@ -3152,8 +3209,8 @@ def dispatch_once(
     """
     result = DispatchResult()
     result.reclaimed = release_stale_claims(conn)
-    result.crashed = detect_crashed_workers(conn)
-    result.timed_out = enforce_max_runtime(conn)
+    result.crashed = detect_crashed_workers(conn, failure_limit=failure_limit)
+    result.timed_out = enforce_max_runtime(conn, failure_limit=failure_limit)
     result.promoted = recompute_ready(conn)
 
     ready_rows = conn.execute(
