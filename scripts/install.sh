@@ -114,6 +114,11 @@ while [[ $# -gt 0 ]]; do
             echo "  --hermes-home PATH  Data directory (default: ~/.hermes, or \$HERMES_HOME)"
             echo "  -h, --help     Show this help"
             echo ""
+            echo "Environment:"
+            echo "  HERMES_NODE_PACKAGE_MANAGER=npm|pnpm"
+            echo "                  JavaScript package manager for Node dependencies"
+            echo "                  (default: npm)"
+            echo ""
             echo "Notes:"
             echo "  When running as root on Linux, Hermes installs the code under"
             echo "  /usr/local/lib/hermes-agent and links the command into"
@@ -1252,6 +1257,38 @@ SOUL_EOF
     fi
 }
 
+install_node_package_deps() {
+    local install_dir="$1"
+    local failure_hint="$2"
+    local package_manager="${HERMES_NODE_PACKAGE_MANAGER:-npm}"
+
+    # Keep macOS /bin/bash 3.2 compatibility: avoid ${var,,}.
+    case "$package_manager" in
+        [nN][pP][mM])
+            package_manager="npm"
+            ;;
+        [pP][nN][pP][mM])
+            package_manager="pnpm"
+            ;;
+        *)
+            log_warn "Unsupported HERMES_NODE_PACKAGE_MANAGER=$package_manager (expected npm or pnpm)"
+            return 1
+            ;;
+    esac
+
+    if ! command -v "$package_manager" >/dev/null 2>&1; then
+        log_warn "$package_manager not found; set HERMES_NODE_PACKAGE_MANAGER=npm or install $package_manager"
+        return 1
+    fi
+
+    if ! (cd "$install_dir" && "$package_manager" install --silent 2>/dev/null); then
+        log_warn "$package_manager install failed ($failure_hint)"
+        return 1
+    fi
+
+    return 0
+}
+
 install_node_deps() {
     if [ "$HAS_NODE" = false ]; then
         log_info "Skipping Node.js dependencies (Node not installed)"
@@ -1261,17 +1298,15 @@ install_node_deps() {
     if [ "$DISTRO" = "termux" ]; then
         log_info "Skipping automatic Node/browser dependency setup on Termux"
         log_info "Browser automation is not part of the tested Termux install path yet."
-        log_info "If you want to experiment manually later, run: cd $INSTALL_DIR && npm install"
+        log_info "If you want to experiment manually later, run: cd $INSTALL_DIR && ${HERMES_NODE_PACKAGE_MANAGER:-npm} install"
         return 0
     fi
 
     if [ -f "$INSTALL_DIR/package.json" ]; then
         log_info "Installing Node.js dependencies (browser tools)..."
-        cd "$INSTALL_DIR"
-        npm install --silent 2>/dev/null || {
-            log_warn "npm install failed (browser tools may not work)"
-        }
-        log_success "Node.js dependencies installed"
+        if install_node_package_deps "$INSTALL_DIR" "browser tools may not work"; then
+            log_success "Node.js dependencies installed"
+        fi
 
         # Install Playwright browser + system dependencies.
         # Playwright's --with-deps only supports apt-based systems natively.
@@ -1335,11 +1370,9 @@ install_node_deps() {
     # Install TUI dependencies
     if [ -f "$INSTALL_DIR/ui-tui/package.json" ]; then
         log_info "Installing TUI dependencies..."
-        cd "$INSTALL_DIR/ui-tui"
-        npm install --silent 2>/dev/null || {
-            log_warn "TUI npm install failed (hermes --tui may not work)"
-        }
-        log_success "TUI dependencies installed"
+        if install_node_package_deps "$INSTALL_DIR/ui-tui" "hermes --tui may not work"; then
+            log_success "TUI dependencies installed"
+        fi
     fi
 
 

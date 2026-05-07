@@ -6,6 +6,7 @@
 #
 # Usage:
 #   irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1 | iex
+#   $env:HERMES_NODE_PACKAGE_MANAGER="pnpm"; irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1 | iex
 #
 # Or download and run with options:
 #   .\install.ps1 -NoVenv -SkipSetup
@@ -703,6 +704,41 @@ Delete the contents (or this file) to use the default personality.
     }
 }
 
+function Invoke-NodePackageInstall {
+    param(
+        [string]$Directory,
+        [string]$FailureHint
+    )
+
+    $packageManager = $env:HERMES_NODE_PACKAGE_MANAGER
+    if ([string]::IsNullOrWhiteSpace($packageManager)) {
+        $packageManager = "npm"
+    }
+    $packageManager = $packageManager.Trim().ToLowerInvariant()
+
+    if ($packageManager -notin @("npm", "pnpm")) {
+        Write-Warn "Unsupported HERMES_NODE_PACKAGE_MANAGER=$packageManager (expected npm or pnpm)"
+        return $false
+    }
+
+    if (-not (Get-Command $packageManager -ErrorAction SilentlyContinue)) {
+        Write-Warn "$packageManager not found; set HERMES_NODE_PACKAGE_MANAGER=npm or install $packageManager"
+        return $false
+    }
+
+    Push-Location $Directory
+    try {
+        & $packageManager install --silent 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "$packageManager install failed ($FailureHint)"
+            return $false
+        }
+        return $true
+    } finally {
+        Pop-Location
+    }
+}
+
 function Install-NodeDeps {
     if (-not $HasNode) {
         Write-Info "Skipping Node.js dependencies (Node not installed)"
@@ -713,11 +749,8 @@ function Install-NodeDeps {
     
     if (Test-Path "package.json") {
         Write-Info "Installing Node.js dependencies (browser tools)..."
-        try {
-            npm install --silent 2>&1 | Out-Null
+        if (Invoke-NodePackageInstall -Directory $InstallDir -FailureHint "browser tools may not work") {
             Write-Success "Node.js dependencies installed"
-        } catch {
-            Write-Warn "npm install failed (browser tools may not work)"
         }
     }
     
@@ -725,14 +758,9 @@ function Install-NodeDeps {
     $tuiDir = "$InstallDir\ui-tui"
     if (Test-Path "$tuiDir\package.json") {
         Write-Info "Installing TUI dependencies..."
-        Push-Location $tuiDir
-        try {
-            npm install --silent 2>&1 | Out-Null
+        if (Invoke-NodePackageInstall -Directory $tuiDir -FailureHint "hermes --tui may not work") {
             Write-Success "TUI dependencies installed"
-        } catch {
-            Write-Warn "TUI npm install failed (hermes --tui may not work)"
         }
-        Pop-Location
     }
 
 
