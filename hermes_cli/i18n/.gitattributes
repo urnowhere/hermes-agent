@@ -1,0 +1,2 @@
+*.mo binary
+*.po linguist-generated=false
