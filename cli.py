@@ -53,6 +53,7 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.widgets import TextArea
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit import print_formatted_text as _pt_print
 from prompt_toolkit.formatted_text import ANSI as _PT_ANSI
 try:
@@ -10518,6 +10519,26 @@ class HermesCLI:
             """Alt+Enter inserts a newline for multi-line input."""
             event.current_buffer.insert_text('\n')
 
+        # Patch: remove \x08 (BS / Ctrl+Backspace) from prompt_toolkit's
+        # ANSI_SEQUENCES so 0x08 falls through as a raw unmapped byte instead
+        # of being conflated with 0x7f (DEL) under Keys.ControlH.  This lets
+        # us bind word-delete to the raw 0x08 without interfering with plain
+        # Backspace (0x7f → Keys.ControlH → default single-char delete).
+        try:
+            _ansi_seqs = ANSI_SEQUENCES
+            if '\x08' in _ansi_seqs:
+                del _ansi_seqs['\x08']
+        except Exception:
+            pass
+
+        @kb.add('\x08', eager=True)
+        def handle_ctrl_backspace(event):
+            """Ctrl+Backspace (0x08): delete word backward."""
+            buf = event.current_buffer
+            pos = buf.document.find_start_of_previous_word(count=1)
+            if pos is not None:
+                count = buf.cursor_position - pos
+                buf.delete_before_cursor(count=count)
         # VSCode/Cursor bind Ctrl+G to "Find Next" at the editor level, so
         # the keystroke never reaches the embedded terminal. Alt+G is unbound
         # in those IDEs and arrives here as ('escape', 'g') — register it as
