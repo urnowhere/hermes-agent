@@ -509,7 +509,21 @@ def _resolve_named_custom_runtime(
             "requested_provider": requested_provider,
         }
 
-    custom_provider = _get_named_custom_provider(requested_provider)
+    # When provider="custom" and model.custom_provider names a specific entry in
+    # custom_providers:, look up that entry rather than falling through to the
+    # bare-"custom" guard in _get_named_custom_provider() which returns None for
+    # the literal string "custom".
+    # This fixes ACP sessions: hermes chat --tui resolves correctly because cli.py
+    # reads model.custom_provider directly, but _make_agent() only sees the top-level
+    # config_provider ("custom") and never the custom_provider sub-key.
+    _lookup_provider = requested_provider
+    if requested_norm == "custom":
+        _model_cfg = _get_model_config()
+        _named = str(_model_cfg.get("custom_provider") or "").strip()
+        if _named and _named.lower() != "custom":
+            _lookup_provider = _named
+
+    custom_provider = _get_named_custom_provider(_lookup_provider)
     if not custom_provider:
         return None
 

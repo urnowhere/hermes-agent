@@ -2285,3 +2285,54 @@ def test_minimax_oauth_runtime_uses_inference_base_url(monkeypatch):
     resolved = rp.resolve_runtime_provider(requested="minimax-oauth")
 
     assert MINIMAX_OAUTH_CN_INFERENCE.rstrip("/") in resolved["base_url"]
+
+
+def test_resolve_runtime_provider_custom_with_named_custom_provider(monkeypatch):
+    """When provider='custom' + model.custom_provider names a custom_providers entry,
+    the resolved base_url must use that entry's base_url — NOT the OpenRouter URL.
+
+    Regression for ACP bug: _make_agent() passes config_provider='custom' to
+    resolve_runtime_provider(); _get_named_custom_provider() guarded against bare
+    'custom' and returned None, causing fallthrough to OPENROUTER_BASE_URL in
+    _resolve_openrouter_runtime().
+    """
+    _fake_config = {
+        "model": {
+            "default": "route-llm",
+            "provider": "custom",
+            "custom_provider": "abacus-proxy",
+        },
+        "custom_providers": [
+            {
+                "name": "abacus-proxy",
+                "base_url": "http://localhost:8003/v1",
+                "api_key": "anything",
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "default": "route-llm",
+            "provider": "custom",
+            "custom_provider": "abacus-proxy",
+        },
+    )
+    # _get_named_custom_provider calls load_config() via the name imported into
+    # runtime_provider's namespace, so patch it there (not in hermes_cli.config).
+    monkeypatch.setattr(rp, "load_config", lambda: _fake_config)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    resolved = rp.resolve_runtime_provider(requested="custom")
+
+    assert resolved["base_url"] == "http://localhost:8003/v1", (
+        f"Expected localhost:8003/v1 but got {resolved['base_url']!r} — "
+        "custom_provider lookup not working"
+    )
+    assert resolved["base_url"] != rp.OPENROUTER_BASE_URL
+    assert resolved["provider"] == "custom"
+    assert resolved["api_mode"] == "chat_completions"
+    assert resolved["api_key"] == "anything"
+
