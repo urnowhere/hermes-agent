@@ -175,6 +175,43 @@ class TestJudgeGoal:
         assert verdict == "continue"
         assert reason == "not yet"
 
+    def test_filesystem_goal_without_verification_continues_before_judge(self):
+        from hermes_cli import goals
+
+        with patch("agent.auxiliary_client.get_text_auxiliary_client") as get_client:
+            verdict, reason = goals.judge_goal(
+                "Create /home/ubuntu/ml-resumo.md with a study summary",
+                "Done, I created /home/ubuntu/ml-resumo.md successfully.",
+            )
+
+        assert verdict == "continue"
+        assert "verification" in reason
+        get_client.assert_not_called()
+
+    def test_filesystem_goal_with_verification_uses_judge(self):
+        from hermes_cli import goals
+
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = MagicMock(
+            choices=[
+                MagicMock(
+                    message=MagicMock(content='{"done": true, "reason": "verified"}')
+                )
+            ]
+        )
+        with patch(
+            "agent.auxiliary_client.get_text_auxiliary_client",
+            return_value=(fake_client, "judge-model"),
+        ) as get_client:
+            verdict, reason = goals.judge_goal(
+                "Create /home/ubuntu/ml-resumo.md with a study summary",
+                "Done. Verified with `read_file /home/ubuntu/ml-resumo.md`: content present.",
+            )
+
+        assert verdict == "done"
+        assert reason == "verified"
+        get_client.assert_called_once()
+
 
 # ──────────────────────────────────────────────────────────────────────
 # GoalManager lifecycle + persistence
@@ -333,6 +370,7 @@ class TestGoalManager:
         prompt = mgr.next_continuation_prompt()
         assert prompt is not None
         assert "port goal command to hermes" in prompt
+        assert "verify the change" in prompt
         assert prompt.strip()  # non-empty
 
 

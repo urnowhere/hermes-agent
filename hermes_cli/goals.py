@@ -47,12 +47,28 @@ DEFAULT_MAX_TURNS = 20
 DEFAULT_JUDGE_TIMEOUT = 30.0
 # Cap how much of the last response + recent messages we send to the judge.
 _JUDGE_RESPONSE_SNIPPET_CHARS = 4000
+_FILESYSTEM_GOAL_RE = re.compile(
+    r"(/[\w./~:-]+|"
+    r"\b[\w.-]+\.(?:md|txt|py|json|ya?ml|toml|js|ts|tsx|jsx|html|css|csv)\b|"
+    r"\b(?:file|directory|folder|path)\b)",
+    re.IGNORECASE,
+)
+_FILESYSTEM_ACTION_RE = re.compile(
+    r"\b(?:create|write|save|modify|update|edit|append|delete|remove|rename)\b",
+    re.IGNORECASE,
+)
+_FILESYSTEM_VERIFICATION_RE = re.compile(
+    r"\b(?:read_file|list_files|ls|find|cat|stat|exists|verified|confirmed)\b",
+    re.IGNORECASE,
+)
 
 
 CONTINUATION_PROMPT_TEMPLATE = (
     "[Continuing toward your standing goal]\n"
     "Goal: {goal}\n\n"
     "Continue working toward this goal. Take the next concrete step. "
+    "If the goal involves creating or modifying files, verify the change "
+    "with a read/list command and include that evidence before claiming completion. "
     "If you believe the goal is complete, state so explicitly and stop. "
     "If you are blocked and need input from the user, say so clearly and stop."
 )
@@ -68,6 +84,10 @@ JUDGE_SYSTEM_PROMPT = (
     "- The response clearly shows the final deliverable was produced, OR\n"
     "- The response explains the goal is unachievable / blocked / needs "
     "user input (treat this as DONE with reason describing the block).\n\n"
+    "For goals that ask the agent to create, save, or modify files, a bare "
+    "claim of success is not enough. Mark DONE only when the response includes "
+    "verification evidence such as read_file/list_files output, ls/find/stat "
+    "results, or an equivalent explicit filesystem check.\n\n"
     "Otherwise the goal is NOT done — CONTINUE.\n\n"
     "Reply ONLY with a single JSON object on one line:\n"
     '{\"done\": <true|false>, \"reason\": \"<one-sentence rationale>\"}'
@@ -265,6 +285,17 @@ def _parse_judge_response(raw: str) -> Tuple[bool, str]:
     return done, reason
 
 
+def _goal_needs_filesystem_verification(goal: str) -> bool:
+    return bool(
+        _FILESYSTEM_ACTION_RE.search(goal or "")
+        and _FILESYSTEM_GOAL_RE.search(goal or "")
+    )
+
+
+def _response_has_filesystem_verification(response: str) -> bool:
+    return bool(_FILESYSTEM_VERIFICATION_RE.search(response or ""))
+
+
 def judge_goal(
     goal: str,
     last_response: str,
@@ -285,6 +316,13 @@ def judge_goal(
     if not last_response.strip():
         # No substantive reply this turn — almost certainly not done yet.
         return "continue", "empty response (nothing to evaluate)"
+    if _goal_needs_filesystem_verification(
+        goal
+    ) and not _response_has_filesystem_verification(last_response):
+        return (
+            "continue",
+            "filesystem goal needs read/list verification evidence before completion",
+        )
 
     try:
         from agent.auxiliary_client import get_text_auxiliary_client
