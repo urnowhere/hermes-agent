@@ -618,7 +618,7 @@ class TestInit:
             mock_anthropic.Anthropic.assert_called_once()
 
     def test_prompt_caching_claude_openrouter(self):
-        """Claude model via OpenRouter should enable prompt caching."""
+        """Claude via OpenRouter should not claim unsupported prompt caching."""
         with (
             patch("run_agent.get_tool_definitions", return_value=[]),
             patch("run_agent.check_toolset_requirements", return_value={}),
@@ -632,7 +632,7 @@ class TestInit:
                 skip_context_files=True,
                 skip_memory=True,
             )
-            assert a._use_prompt_caching is True
+            assert a._use_prompt_caching is False
 
     def test_prompt_caching_non_claude(self):
         """Non-Claude model should disable prompt caching."""

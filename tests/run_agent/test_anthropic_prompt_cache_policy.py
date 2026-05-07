@@ -2,8 +2,9 @@
 
 The policy returns ``(should_cache, use_native_layout)`` for five endpoint
 classes. The test matrix pins the decision for each so a regression (e.g.
-silently dropping caching on third-party Anthropic gateways, or applying
-the native layout on OpenRouter) surfaces loudly.
+silently dropping caching on third-party Anthropic gateways, or claiming
+Claude caching on OpenRouter's OpenAI-compatible wire format) surfaces
+loudly.
 """
 
 from __future__ import annotations
@@ -54,16 +55,14 @@ class TestNativeAnthropic:
 
 
 class TestOpenRouter:
-    def test_claude_on_openrouter_caches_with_envelope_layout(self):
+    def test_claude_on_openrouter_does_not_claim_prompt_caching(self):
         agent = _make_agent(
             provider="openrouter",
             base_url="https://openrouter.ai/api/v1",
             api_mode="chat_completions",
             model="anthropic/claude-sonnet-4.6",
         )
-        should, native = agent._anthropic_prompt_cache_policy()
-        assert should is True
-        assert native is False  # OpenRouter uses envelope layout
+        assert agent._anthropic_prompt_cache_policy() == (False, False)
 
     def test_non_claude_on_openrouter_does_not_cache(self):
         agent = _make_agent(
@@ -273,7 +272,7 @@ class TestExplicitOverrides:
         should, native = agent._anthropic_prompt_cache_policy(
             model="anthropic/claude-sonnet-4.6",
         )
-        assert (should, native) == (True, False)
+        assert (should, native) == (False, False)
 
     def test_fallback_target_evaluated_independently(self):
         # Starting on native Anthropic but falling back to OpenRouter.
@@ -289,4 +288,4 @@ class TestExplicitOverrides:
             api_mode="chat_completions",
             model="anthropic/claude-sonnet-4.6",
         )
-        assert (should, native) == (True, False)
+        assert (should, native) == (False, False)

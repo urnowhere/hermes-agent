@@ -2926,12 +2926,13 @@ class AIAgent:
 
         Returns ``(should_cache, use_native_layout)``:
           * ``should_cache`` — inject ``cache_control`` breakpoints for this
-            request (applies to OpenRouter Claude, native Anthropic, and
-            third-party gateways that speak the native Anthropic protocol).
+            request (applies to native Anthropic, third-party gateways that
+            speak the native Anthropic protocol, and explicit OpenAI-wire
+            provider allowlists).
           * ``use_native_layout`` — place markers on the *inner* content
             blocks (native Anthropic accepts and requires this layout);
-            when False markers go on the message envelope (OpenRouter and
-            OpenAI-wire proxies expect the looser layout).
+            when False markers go on inner message content blocks for
+            OpenAI-wire providers that explicitly support them.
 
         Third-party providers using the native Anthropic transport
         (``api_mode == 'anthropic_messages'`` + Claude-named model) get
@@ -2965,7 +2966,12 @@ class AIAgent:
         if is_native_anthropic:
             return True, True
         if is_openrouter and is_claude:
-            return True, False
+            # OpenRouter Claude runs through the OpenAI-compatible chat
+            # completions path. The Anthropic prompt-cache header/top-level
+            # system blocks required for Claude caching are not transmitted on
+            # that wire format, so enabling markers here only creates a false
+            # cache-hit signal.
+            return False, False
         if is_anthropic_wire and is_claude:
             # Third-party Anthropic-compatible gateway.
             return True, True
