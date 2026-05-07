@@ -17,6 +17,7 @@ import os
 import platform
 import subprocess
 from pathlib import Path
+from urllib.parse import urlparse
 
 from hermes_constants import get_hermes_home
 from typing import Any, Dict, List, Optional, Tuple
@@ -366,8 +367,11 @@ def _is_third_party_anthropic_endpoint(base_url: str | None) -> bool:
     normalized = _normalize_base_url_text(base_url)
     if not normalized:
         return False  # No base_url = direct Anthropic API
-    normalized = normalized.rstrip("/").lower()
-    if "anthropic.com" in normalized:
+    try:
+        host = urlparse(normalized).hostname or ""
+    except Exception:
+        host = ""
+    if host == "anthropic.com" or host.endswith(".anthropic.com"):
         return False  # Direct Anthropic API — OAuth applies
     return True  # Any other endpoint is a third-party proxy
 
@@ -1932,6 +1936,12 @@ def build_anthropic_kwargs(
                 # Anthropic requires temperature=1 when thinking is enabled on older models
                 kwargs["temperature"] = 1
                 kwargs["max_tokens"] = max(effective_max_tokens, budget + 4096)
+        elif reasoning_config.get("enabled") is False and _is_third_party_anthropic_endpoint(base_url):
+            # Third-party Anthropic-compatible endpoints (e.g. DeepSeek /anthropic)
+            # default to thinking mode when the `thinking` parameter is absent.
+            # Native Anthropic disables thinking by default, so the key is omitted
+            # there — but third-party implementations must be told explicitly.
+            kwargs["thinking"] = {"type": "disabled"}
 
     # ── Strip sampling params on 4.7+ ─────────────────────────────────
     # Opus 4.7 rejects any non-default temperature/top_p/top_k with a 400.
