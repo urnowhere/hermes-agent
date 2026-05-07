@@ -1144,8 +1144,13 @@ DEFAULT_CONFIG = {
 
     # Approval mode for dangerous commands:
     #   manual — always prompt the user (default)
-    #   smart  — use auxiliary LLM to auto-approve low-risk commands, prompt for high-risk
+    #   smart  — use an auxiliary LLM to review flagged commands:
+    #            APPROVE verdicts run, ESCALATE verdicts prompt, and high-risk
+    #            DENY verdicts follow approvals.smart_deny
     #   off    — skip all approval prompts (equivalent to --yolo)
+    # smart_deny controls smart DENY verdicts:
+    #   block  — hard-block smart DENY verdicts (default/current safety behavior)
+    #   ask    — ask the user via the normal manual/gateway approval path
     #
     # cron_mode — what to do when a cron job hits a dangerous command:
     #   deny    — block the command and let the agent find another way (default, safe)
@@ -1153,6 +1158,7 @@ DEFAULT_CONFIG = {
     "approvals": {
         "mode": "manual",
         "timeout": 60,
+        "smart_deny": "block",
         "cron_mode": "deny",
         # When true, /reload-mcp asks the user to confirm before rebuilding
         # the MCP tool set for the active session.  Reloading invalidates

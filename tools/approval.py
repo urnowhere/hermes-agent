@@ -727,6 +727,18 @@ def _get_approval_timeout() -> int:
         return 60
 
 
+def _get_smart_deny_behavior() -> str:
+    """Read how smart approval DENY verdicts are handled.
+
+    Returns 'block' (default, current safety behavior) or 'ask' (fall through
+    to the existing manual/gateway approval path).
+    """
+    behavior = str(_get_approval_config().get("smart_deny", "block")).strip().lower()
+    if behavior in {"ask", "prompt", "manual", "escalate"}:
+        return "ask"
+    return "block"
+
+
 def _get_cron_approval_mode() -> str:
     """Read the cron approval mode from config. Returns 'deny' or 'approve'."""
     try:
@@ -1029,13 +1041,21 @@ def check_all_command_guards(command: str, env_type: str,
                     "description": combined_desc_for_llm}
         elif verdict == "deny":
             combined_desc_for_llm = "; ".join(desc for _, desc, _ in warnings)
-            return {
-                "approved": False,
-                "message": f"BLOCKED by smart approval: {combined_desc_for_llm}. "
-                           "The command was assessed as genuinely dangerous. Do NOT retry.",
-                "smart_denied": True,
-            }
-        # verdict == "escalate" → fall through to manual prompt
+            if _get_smart_deny_behavior() == "ask":
+                logger.debug(
+                    "Smart approval: denied '%s' (%s); asking user due to approvals.smart_deny=ask",
+                    command[:60], combined_desc_for_llm,
+                )
+                # Fall through to the same manual/gateway approval path used
+                # for ESCALATE, preserving user-visible approval semantics.
+            else:
+                return {
+                    "approved": False,
+                    "message": f"BLOCKED by smart approval: {combined_desc_for_llm}. "
+                               "The command was assessed as genuinely dangerous. Do NOT retry.",
+                    "smart_denied": True,
+                }
+        # verdict == "escalate" or smart_deny=ask → fall through to manual prompt
 
     # --- Phase 3: Approval ---
 
