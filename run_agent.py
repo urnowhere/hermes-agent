@@ -3151,7 +3151,7 @@ class AIAgent:
         )
         # 3. Stray orphan open/close tags that slipped through.
         content = re.sub(
-            r'</?(?:think|thinking|reasoning|thought|REASONING_SCRATCHPAD)>\s*',
+            r'\n?</?(?:think|thinking|reasoning|thought|REASONING_SCRATCHPAD)>\s*',
             '',
             content,
             flags=re.IGNORECASE,
@@ -3167,6 +3167,38 @@ class AIAgent:
             flags=re.IGNORECASE,
         )
         return content
+
+    @staticmethod
+    def _extract_step3p5_tool_calls(content: str) -> list | None:
+        """
+        Fallback parser for Step 3.5 Flash's <tool_call> text format.
+        Converts it into standard OpenAI tool_calls so the agent loop
+        doesn't need any other changes.
+        """
+        import json
+        matches = re.findall(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", content, re.DOTALL)
+        if not matches:
+            return None
+        tool_calls = []
+        for i, raw in enumerate(matches):
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                try:
+                    payload = json.loads(raw.replace("'", '"'))
+                except json.JSONDecodeError:
+                    continue
+            tool_calls.append({
+                "id": f"call_{i}",
+                "type": "function",
+                "function": {
+                    "name": payload.get("name") or payload.get("tool", ""),
+                    "arguments": json.dumps(
+                        payload.get("parameters") or payload.get("arguments", {})
+                    ),
+                },
+            })
+        return tool_calls or None
 
     @staticmethod
     def _has_natural_response_ending(content: str) -> bool:
