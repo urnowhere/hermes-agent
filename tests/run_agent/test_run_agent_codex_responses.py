@@ -852,13 +852,15 @@ def test_preflight_codex_api_kwargs_allows_reasoning_and_temperature(monkeypatch
 
 
 def test_preflight_codex_api_kwargs_allows_service_tier(monkeypatch):
-    agent = _build_agent(monkeypatch)
-    kwargs = _codex_request_kwargs()
-    kwargs["service_tier"] = "priority"
+    _build_agent(monkeypatch)
 
     from agent.codex_responses_adapter import _preflight_codex_api_kwargs
-    result = _preflight_codex_api_kwargs(kwargs)
-    assert result["service_tier"] == "priority"
+    for tier in ("priority", "flex"):
+        kwargs = _codex_request_kwargs()
+        kwargs["service_tier"] = tier
+
+        result = _preflight_codex_api_kwargs(kwargs)
+        assert result["service_tier"] == tier
 
 
 def test_run_conversation_codex_replay_payload_keeps_call_id(monkeypatch):
