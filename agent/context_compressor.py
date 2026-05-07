@@ -357,6 +357,7 @@ class ContextCompressor(ContextEngine):
         api_key: str = "",
         provider: str = "",
         api_mode: str = "",
+        threshold_percent: float | None = None,
     ) -> None:
         """Update model info after a model switch or fallback activation."""
         self.model = model
@@ -365,6 +366,8 @@ class ContextCompressor(ContextEngine):
         self.provider = provider
         self.api_mode = api_mode
         self.context_length = context_length
+        if threshold_percent is not None:
+            self.threshold_percent = threshold_percent
         self.threshold_tokens = max(
             int(context_length * self.threshold_percent),
             MINIMUM_CONTEXT_LENGTH,

@@ -2446,6 +2446,7 @@ class AIAgent:
                 api_key=getattr(self, "api_key", ""),
                 provider=self.provider,
                 api_mode=self.api_mode,
+                threshold_percent=self.context_compressor.threshold_percent,
             )
 
         # ── Invalidate cached system prompt so it rebuilds next turn ──
@@ -2468,6 +2469,7 @@ class AIAgent:
             "compressor_provider": getattr(_cc, "provider", self.provider) if _cc else self.provider,
             "compressor_context_length": _cc.context_length if _cc else 0,
             "compressor_threshold_tokens": _cc.threshold_tokens if _cc else 0,
+            "compressor_threshold_percent": _cc.threshold_percent if _cc else 0.50,
         }
         if api_mode == "anthropic_messages":
             self._primary_runtime.update({
@@ -7811,6 +7813,7 @@ class AIAgent:
                     base_url=self.base_url,
                     api_key=getattr(self, "api_key", ""),
                     provider=self.provider,
+                    threshold_percent=self.context_compressor.threshold_percent,
                 )
 
             self._emit_status(
@@ -7890,6 +7893,7 @@ class AIAgent:
                 base_url=rt["compressor_base_url"],
                 api_key=rt["compressor_api_key"],
                 provider=rt["compressor_provider"],
+                threshold_percent=rt.get("compressor_threshold_percent"),
             )
 
             # ── Reset fallback chain for the new turn ──
