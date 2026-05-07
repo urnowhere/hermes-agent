@@ -226,6 +226,48 @@ class TestTryActivateFallback:
             assert agent.client is mock_client
             assert agent.model == "my-model"
 
+    def test_custom_fallback_honors_explicit_anthropic_api_mode(self):
+        """Custom fallback api_mode should override URL/provider heuristics."""
+        agent = _make_agent(
+            fallback_model={
+                "provider": "custom",
+                "model": "claude-compatible-model",
+                "base_url": "https://relay.example.com/claude-proxy",
+                "api_key": "custom-secret",
+                "api_mode": "anthropic_messages",
+            },
+        )
+        mock_client = _mock_resolve(
+            api_key="custom-secret",
+            base_url="https://relay.example.com/claude-proxy",
+        )
+        mock_anthropic_client = MagicMock()
+        with (
+            patch(
+                "agent.auxiliary_client.resolve_provider_client",
+                return_value=(mock_client, "claude-compatible-model"),
+            ) as mock_resolve,
+            patch(
+                "agent.anthropic_adapter.build_anthropic_client",
+                return_value=mock_anthropic_client,
+            ) as mock_build,
+        ):
+            assert agent._try_activate_fallback() is True
+
+        assert agent.model == "claude-compatible-model"
+        assert agent.provider == "custom"
+        assert agent.api_mode == "anthropic_messages"
+        assert agent.client is None
+        assert agent._anthropic_client is mock_anthropic_client
+        assert agent._anthropic_base_url == "https://relay.example.com/claude-proxy"
+        assert agent.context_compressor.api_mode == "anthropic_messages"
+        assert mock_resolve.call_args.kwargs["api_mode"] == "anthropic_messages"
+        mock_build.assert_called_once_with(
+            "custom-secret",
+            "https://relay.example.com/claude-proxy",
+            timeout=None,
+        )
+
     def test_prompt_caching_enabled_for_claude_on_openrouter(self):
         agent = _make_agent(
             fallback_model={"provider": "openrouter", "model": "anthropic/claude-sonnet-4"},
