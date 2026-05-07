@@ -8749,6 +8749,12 @@ def main():
     setup_parser.set_defaults(func=cmd_setup)
 
     # =========================================================================
+    # fleet command (Telegram swarm setup + roster management)
+    # =========================================================================
+    from hermes_cli.fleet import add_fleet_parser
+    add_fleet_parser(subparsers)
+
+    # =========================================================================
     # whatsapp command
     # =========================================================================
     whatsapp_parser = subparsers.add_parser(

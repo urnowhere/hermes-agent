@@ -551,6 +551,56 @@ def build_environment_hints() -> str:
     return "\n\n".join(hints)
 
 
+def build_telegram_fleet_hint() -> str:
+    """Return a one-section roster summary IFF a Telegram fleet is configured.
+
+    Layer 4 of the swarm-discovery stack (skill is layer 3).  When the user
+    has set up a manager bot AND minted at least one active child, this puts
+    the roster (with personas) directly into the system prompt so the leader
+    knows specific named workers exist before it has to call
+    ``telegram_fleet_list``.  Returns "" otherwise so we never burden a user
+    who hasn't opted into the Telegram variant.
+    """
+    if not (os.environ.get("TELEGRAM_FLEET_MANAGER_TOKEN") or "").strip():
+        return ""
+    try:
+        from gateway.telegram_fleet.roster import load_roster
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug("could not load fleet roster: %s", e)
+        return ""
+    try:
+        roster = load_roster()
+    except Exception as e:  # pragma: no cover - corrupt roster shouldn't block prompt
+        logger.debug("fleet roster unreadable: %s", e)
+        return ""
+    active = roster.active_children()
+    if not active:
+        return ""
+    lines = [
+        f"## Telegram fleet ({len(active)} active worker"
+        f"{'s' if len(active) != 1 else ''})",
+        "",
+        (
+            f"A Telegram bot fleet is configured (manager: "
+            f"@{roster.manager_bot_username or 'unknown'}).  When the user "
+            f"asks for a swarm AND wants visible Telegram bot activity, "
+            f"prefer `telegram_orchestrate_swarm` over `hermes_swarm` so each "
+            f"angle runs as the named bot below.  Otherwise default to "
+            f"`hermes_swarm` (no Telegram dependency)."
+        ),
+        "",
+    ]
+    for c in active:
+        persona = (c.persona or "").strip().replace("\n", " ")
+        if len(persona) > 120:
+            persona = persona[:117] + "…"
+        if persona:
+            lines.append(f"- @{c.username} — {persona}")
+        else:
+            lines.append(f"- @{c.username}")
+    return "\n".join(lines)
+
+
 CONTEXT_FILE_MAX_CHARS = 20_000
 CONTEXT_TRUNCATE_HEAD_RATIO = 0.7
 CONTEXT_TRUNCATE_TAIL_RATIO = 0.2

@@ -143,7 +143,20 @@ TOOLSETS = {
         "tools": ["send_message"],
         "includes": []
     },
-    
+
+    "telegram_fleet": {
+        "description": "Orchestrate a swarm of Telegram bots through a manager bot — spawn child bots via the Bot API 9.6 Managed Bots flow, fan out subtasks across the fleet, aggregate findings",
+        "tools": [
+            "telegram_spawn_bot",
+            "telegram_fleet_list",
+            "telegram_delegate",
+            "telegram_rotate_bot_token",
+            "telegram_decommission_bot",
+            "telegram_orchestrate_swarm",
+        ],
+        "includes": [],
+    },
+
     "rl": {
         "description": "RL training tools for running reinforcement learning on Tinker-Atropos",
         "tools": [
