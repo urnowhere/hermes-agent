@@ -1180,12 +1180,16 @@ class MCPServerTask:
 
         url = config["url"]
         headers = dict(config.get("headers") or {})
+        # Per-server protocol version override for servers that reject
+        # the SDK's LATEST_PROTOCOL_VERSION (e.g. MentisDB 0.9.x which
+        # maxes out at 2025-06-18 while the SDK ships 2025-11-25).
+        _proto_ver = config.get("protocol_version")
         # Some MCP servers require MCP-Protocol-Version on the initial
         # initialize request and reject session-less POSTs otherwise.
         # Seed it as a client-level default, but treat user overrides as
         # case-insensitive so conventional casing is preserved.
         if not any(key.lower() == "mcp-protocol-version" for key in headers):
-            headers["mcp-protocol-version"] = LATEST_PROTOCOL_VERSION
+            headers["mcp-protocol-version"] = _proto_ver or LATEST_PROTOCOL_VERSION
         connect_timeout = config.get("connect_timeout", _DEFAULT_CONNECT_TIMEOUT)
         ssl_verify = config.get("ssl_verify", True)
 
@@ -1245,7 +1249,17 @@ class MCPServerTask:
                     read_stream, write_stream, _get_session_id,
                 ):
                     async with ClientSession(read_stream, write_stream, **sampling_kwargs) as session:
-                        await session.initialize()
+                        # Temporarily override the SDK's LATEST_PROTOCOL_VERSION so
+                        # servers that cap at an older version (like MentisDB 0.9.x
+                        # at 2025-06-18) don't reject the initialize request outright.
+                        import mcp.types as _mcp_types
+                        _saved_lpv = _mcp_types.LATEST_PROTOCOL_VERSION
+                        if _proto_ver:
+                            _mcp_types.LATEST_PROTOCOL_VERSION = _proto_ver
+                        try:
+                            await session.initialize()
+                        finally:
+                            _mcp_types.LATEST_PROTOCOL_VERSION = _saved_lpv
                         self.session = session
                         await self._discover_tools()
                         self._ready.set()
@@ -1268,7 +1282,17 @@ class MCPServerTask:
                 read_stream, write_stream, _get_session_id,
             ):
                 async with ClientSession(read_stream, write_stream, **sampling_kwargs) as session:
-                    await session.initialize()
+                    # Temporarily override the SDK's LATEST_PROTOCOL_VERSION so
+                    # servers that cap at an older version (like MentisDB 0.9.x
+                    # at 2025-06-18) don't reject the initialize request outright.
+                    import mcp.types as _mcp_types
+                    _saved_lpv = _mcp_types.LATEST_PROTOCOL_VERSION
+                    if _proto_ver:
+                        _mcp_types.LATEST_PROTOCOL_VERSION = _proto_ver
+                    try:
+                        await session.initialize()
+                    finally:
+                        _mcp_types.LATEST_PROTOCOL_VERSION = _saved_lpv
                     self.session = session
                     await self._discover_tools()
                     self._ready.set()

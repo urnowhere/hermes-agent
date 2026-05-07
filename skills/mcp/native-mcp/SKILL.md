@@ -97,6 +97,7 @@ mcp_servers:
 | `url`             | string | --      | Server URL (HTTP transport, required)             |
 | `headers`         | dict   | `{}`    | HTTP headers sent with every request              |
 | `timeout`         | int    | `120`   | Per-tool-call timeout in seconds                  |
+| `protocol_version`| string | --      | Override the MCP protocol version (e.g. `"2025-06-18"`). Use when the server rejects the SDK's LATEST_PROTOCOL_VERSION. Affects both the `mcp-protocol-version` header and the `initialize` body. |
 | `connect_timeout` | int    | `60`    | Timeout for initial connection and discovery      |
 
 Note: A server config must have either `command` (stdio) or `url` (HTTP), not both.

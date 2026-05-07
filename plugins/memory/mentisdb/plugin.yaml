@@ -1,0 +1,5 @@
+name: mentisdb
+version: 1.1.0
+description: "MentisDB — append-only semantic memory with chain-based storage, ranked retrieval, skill registry, and agent identity tracking. Connects via synchronous JSON-RPC 2.0 over HTTP to a MentisDB MCP server."
+pip_dependencies:
+  - requests
