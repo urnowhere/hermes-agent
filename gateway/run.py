@@ -2225,6 +2225,19 @@ class GatewayRunner:
         # (sentinel) or lacks steer(), or the payload is empty, fall back
         # to queue semantics so nothing is lost.
         effective_mode = self._busy_input_mode
+        compression_in_progress = False
+        busy_summary = None
+        if running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
+            try:
+                busy_summary = running_agent.get_activity_summary()
+                compression_in_progress = bool(busy_summary.get("compression_in_progress"))
+            except Exception:
+                busy_summary = None
+        if compression_in_progress:
+            # Compression rewrites/splits the context and may be blocked in an
+            # auxiliary LLM call. Never interrupt or steer this critical
+            # section; queue the user's text for the next clean turn.
+            effective_mode = "queue"
         steered = False
         if effective_mode == "steer":
             steer_text = (event.text or "").strip()
@@ -2285,7 +2298,7 @@ class GatewayRunner:
         status_parts = []
         if running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
             try:
-                summary = running_agent.get_activity_summary()
+                summary = busy_summary or running_agent.get_activity_summary()
                 iteration = summary.get("api_call_count", 0)
                 max_iter = summary.get("max_iterations", 0)
                 current_tool = summary.get("current_tool")
@@ -2306,6 +2319,11 @@ class GatewayRunner:
             message = (
                 f"⏩ Steered into current run{status_detail}. "
                 f"Your message arrives after the next tool call."
+            )
+        elif compression_in_progress:
+            message = (
+                f"🗜️ Compression in progress; message queued for next turn{status_detail}. "
+                f"I'll respond once the context compression finishes."
             )
         elif is_queue_mode:
             message = (
@@ -2406,6 +2424,20 @@ class GatewayRunner:
         logged and swallowed so they never block the shutdown sequence.
         """
         active = self._snapshot_running_agents()
+        if not active:
+            logger.debug("Skipping shutdown notification: no active gateway tasks")
+            return
+
+        _notify_sig = (bool(self._restart_requested), tuple(sorted(active.keys())))
+        _notify_now = time.time()
+        if (
+            getattr(self, "_last_shutdown_notify_signature", None) == _notify_sig
+            and _notify_now - getattr(self, "_last_shutdown_notify_at", 0.0) < 60.0
+        ):
+            logger.debug("Skipping duplicate shutdown notification for active sessions")
+            return
+        self._last_shutdown_notify_signature = _notify_sig
+        self._last_shutdown_notify_at = _notify_now
 
         action = "restarting" if self._restart_requested else "shutting down"
         hint = (
@@ -5207,6 +5239,17 @@ class GatewayRunner:
                     if self._queue_during_drain_enabled()
                     else f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
                 )
+            try:
+                if (
+                    running_agent is not None
+                    and running_agent is not _AGENT_PENDING_SENTINEL
+                    and bool(running_agent.get_activity_summary().get("compression_in_progress"))
+                ):
+                    logger.debug("PRIORITY compression-queue follow-up for session %s", _quick_key)
+                    self._queue_or_replace_pending_event(_quick_key, event)
+                    return "🗜️ Compression in progress; message queued for next turn."
+            except Exception:
+                pass
             if self._busy_input_mode == "queue":
                 logger.debug("PRIORITY queue follow-up for session %s", _quick_key)
                 self._queue_or_replace_pending_event(_quick_key, event)

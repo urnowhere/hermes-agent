@@ -1180,6 +1180,13 @@ class AIAgent:
         self._execution_thread_id: int | None = None  # Set at run_conversation() start
         self._interrupt_thread_signal_pending = False
         self._client_lock = threading.RLock()
+        # Compression is a hot-path critical section: interrupting the worker
+        # while the compressor is rewriting/splitting context can leave stale
+        # threads and confusing queued input. UIs read this flag to force
+        # queue semantics until compression completes.
+        self._compression_in_progress = False
+        self._compression_started_at: Optional[float] = None
+        self._force_handoff_after_compression = False
 
         # /steer mechanism — inject a user note into the next tool result
         # without interrupting the agent. Unlike interrupt(), steer() does
@@ -1882,6 +1889,11 @@ class AIAgent:
         compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in ("true", "1", "yes")
         compression_target_ratio = float(_compression_cfg.get("target_ratio", 0.20))
         compression_protect_last = int(_compression_cfg.get("protect_last_n", 20))
+        try:
+            compression_preflight_max_passes = int(_compression_cfg.get("preflight_max_passes", 3))
+        except (TypeError, ValueError):
+            compression_preflight_max_passes = 3
+        compression_preflight_max_passes = max(0, compression_preflight_max_passes)
 
         # Read optional explicit context_length override for the auxiliary
         # compression model. Custom endpoints often cannot report this via
@@ -2067,6 +2079,7 @@ class AIAgent:
                 api_mode=self.api_mode,
             )
         self.compression_enabled = compression_enabled
+        self._compression_preflight_max_passes = compression_preflight_max_passes
 
         # Reject models whose context window is below the minimum required
         # for reliable tool-calling workflows (64K tokens).
@@ -4662,6 +4675,11 @@ class AIAgent:
         when it was killed, and by the periodic "still working" notifications.
         """
         elapsed = time.time() - self._last_activity_ts
+        compression_started = getattr(self, "_compression_started_at", None)
+        compression_elapsed = (
+            round(time.time() - compression_started, 1)
+            if compression_started else None
+        )
         return {
             "last_activity_ts": self._last_activity_ts,
             "last_activity_desc": self._last_activity_desc,
@@ -4671,7 +4689,36 @@ class AIAgent:
             "max_iterations": self.max_iterations,
             "budget_used": self.iteration_budget.used,
             "budget_max": self.iteration_budget.max_total,
+            "compression_in_progress": bool(getattr(self, "_compression_in_progress", False)),
+            "compression_elapsed": compression_elapsed,
+            "handoff_required_after_compression": bool(getattr(self, "_force_handoff_after_compression", False)),
         }
+
+    def _should_pre_cap_closeout(self) -> bool:
+        """Return True when the session should close out before hard iteration cap."""
+        budget = getattr(self, "iteration_budget", None)
+        max_total = getattr(budget, "max_total", 0) or 0
+        used = getattr(budget, "used", 0) or 0
+        # Avoid surprising tiny test/subagent budgets; this gate is for long
+        # interactive sessions where hitting the cap causes stuck-looking exits.
+        if max_total < 20:
+            return False
+        return used >= max(1, int(max_total * 0.85))
+
+    def _forced_closeout_response(self, reason: str) -> str:
+        """Deterministic closeout text used when another model/tool cycle is unsafe."""
+        if reason == "compression":
+            return (
+                "I need to stop this session here because the context has already "
+                "been compressed multiple times. Continuing would risk degraded or "
+                "stale reasoning. Start a fresh session and carry forward the latest "
+                "handoff/summary before continuing."
+            )
+        return (
+            "I need to stop this session before the iteration cap is exhausted. "
+            "Continuing in this session risks a hard stop mid-task. Start a fresh "
+            "session and carry forward the current task state before continuing."
+        )
 
     def shutdown_memory_provider(self, messages: list = None) -> None:
         """Shut down the memory provider and context engine — call at actual session boundaries.
@@ -9244,12 +9291,18 @@ class AIAgent:
             except Exception:
                 pass
 
+        self._compression_in_progress = True
+        self._compression_started_at = time.time()
         try:
-            compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic)
-        except TypeError:
-            # Plugin context engine with strict signature that doesn't accept
-            # focus_topic — fall back to calling without it.
-            compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens)
+            try:
+                compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic)
+            except TypeError:
+                # Plugin context engine with strict signature that doesn't accept
+                # focus_topic — fall back to calling without it.
+                compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens)
+        finally:
+            self._compression_in_progress = False
+            self._compression_started_at = None
 
         summary_error = getattr(self.context_compressor, "_last_summary_error", None)
         if summary_error:
@@ -9354,9 +9407,10 @@ class AIAgent:
         # Warn on repeated compressions (quality degrades with each pass)
         _cc = self.context_compressor.compression_count
         if _cc >= 2:
+            self._force_handoff_after_compression = True
             self._vprint(
                 f"{self.log_prefix}⚠️  Session compressed {_cc} times — "
-                f"accuracy may degrade. Consider /new to start fresh.",
+                f"forcing a fresh-session handoff before more tool/model work.",
                 force=True,
             )
 
@@ -10820,7 +10874,10 @@ class AIAgent:
                 tools=self.tools or None,
             )
 
-            if _preflight_tokens >= self.context_compressor.threshold_tokens:
+            if (
+                _preflight_tokens >= self.context_compressor.threshold_tokens
+                and self._compression_preflight_max_passes > 0
+            ):
                 logger.info(
                     "Preflight compression: ~%s tokens >= %s threshold (model %s, ctx %s)",
                     f"{_preflight_tokens:,}",
@@ -10835,7 +10892,7 @@ class AIAgent:
                 )
                 # May need multiple passes for very large sessions with small
                 # context windows (each pass summarises the middle N turns).
-                for _pass in range(3):
+                for _pass in range(self._compression_preflight_max_passes):
                     _orig_len = len(messages)
                     messages, active_system_prompt = self._compress_context(
                         messages, system_message, approx_tokens=_preflight_tokens,
@@ -10964,6 +11021,18 @@ class AIAgent:
                 _turn_exit_reason = "interrupted_by_user"
                 if not self.quiet_mode:
                     self._safe_print("\n⚡ Breaking out of tool loop due to interrupt...")
+                break
+
+            if getattr(self, "_force_handoff_after_compression", False):
+                _turn_exit_reason = "compression_handoff_required"
+                final_response = self._forced_closeout_response("compression")
+                messages.append({"role": "assistant", "content": final_response})
+                break
+
+            if self._should_pre_cap_closeout():
+                _turn_exit_reason = "pre_cap_closeout"
+                final_response = self._forced_closeout_response("pre_cap")
+                messages.append({"role": "assistant", "content": final_response})
                 break
             
             api_call_count += 1

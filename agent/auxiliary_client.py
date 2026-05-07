@@ -43,6 +43,7 @@ Payment / credit exhaustion fallback:
 import json
 import logging
 import os
+import queue
 import threading
 import time
 from pathlib import Path  # noqa: F401 — used by test mocks
@@ -3465,6 +3466,138 @@ def _validate_llm_response(response: Any, task: str = None) -> Any:
     return response
 
 
+def _deadline_from_timeout(timeout: Optional[float]) -> Optional[float]:
+    """Convert a caller timeout into a monotonic deadline for the whole call."""
+    if timeout is None:
+        return None
+    try:
+        timeout_f = float(timeout)
+    except (TypeError, ValueError):
+        return None
+    if timeout_f <= 0:
+        return None
+    return time.monotonic() + timeout_f
+
+
+def _remaining_wall_clock(deadline: Optional[float]) -> Optional[float]:
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
+
+
+def _aux_timeout_message(task: Optional[str], timeout: Optional[float]) -> str:
+    label = task or "call"
+    if timeout is None:
+        return f"Auxiliary {label}: LLM call exceeded wall-clock timeout"
+    return f"Auxiliary {label}: LLM call exceeded {float(timeout):.1f}s wall-clock timeout"
+
+
+def _close_auxiliary_client(client: Any) -> None:
+    """Best-effort close to break blocked SDK streams/sockets after timeout."""
+    for attr in ("close", "aclose"):
+        close_fn = getattr(client, attr, None)
+        if callable(close_fn):
+            try:
+                result = close_fn()
+                # In sync code we cannot await ``aclose``.  Creating the coroutine
+                # is still better than doing nothing, but prefer ``close`` when
+                # both exist so OpenAI/Anthropic clients release sockets promptly.
+                close_coro_close = getattr(result, "close", None)
+                if callable(close_coro_close):
+                    close_coro_close()
+            except Exception:
+                logger.debug("Auxiliary client close after timeout failed", exc_info=True)
+            return
+
+
+def _create_with_wall_clock_timeout(
+    client: Any,
+    kwargs: Dict[str, Any],
+    deadline: Optional[float],
+    task: Optional[str],
+) -> Any:
+    """Run sync chat.completions.create under one total wall-clock budget.
+
+    SDK request timeouts are not enough for the interactive hot path: streaming
+    clients can still leave the reply path looking stuck.  This wrapper owns the
+    *whole* auxiliary call budget, closes the underlying client on expiry, and
+    returns control to the UI while any SDK worker is abandoned as a daemon.
+    """
+    remaining = _remaining_wall_clock(deadline)
+    if remaining is None:
+        return client.chat.completions.create(**kwargs)
+    if remaining <= 0:
+        _close_auxiliary_client(client)
+        raise TimeoutError(_aux_timeout_message(task, kwargs.get("timeout")))
+
+    result_q: "queue.Queue[Tuple[str, Any]]" = queue.Queue(maxsize=1)
+
+    def _target() -> None:
+        try:
+            result_q.put(("result", client.chat.completions.create(**kwargs)), block=False)
+        except BaseException as exc:  # propagate SDK errors unchanged
+            try:
+                result_q.put(("error", exc), block=False)
+            except Exception:
+                pass
+
+    thread = threading.Thread(
+        target=_target,
+        name=f"auxiliary-{task or 'call'}-llm",
+        daemon=True,
+    )
+    thread.start()
+    thread.join(remaining)
+    if thread.is_alive():
+        _close_auxiliary_client(client)
+        raise TimeoutError(_aux_timeout_message(task, kwargs.get("timeout")))
+
+    kind, payload = result_q.get_nowait()
+    if kind == "error":
+        raise payload
+    return payload
+
+
+async def _close_auxiliary_client_async(client: Any) -> None:
+    """Best-effort async close to break blocked SDK streams/sockets."""
+    close_fn = getattr(client, "aclose", None)
+    if callable(close_fn):
+        try:
+            result = close_fn()
+            if hasattr(result, "__await__"):
+                await result
+            return
+        except Exception:
+            logger.debug("Auxiliary async client aclose after timeout failed", exc_info=True)
+    _close_auxiliary_client(client)
+
+
+async def _async_create_with_wall_clock_timeout(
+    client: Any,
+    kwargs: Dict[str, Any],
+    deadline: Optional[float],
+    task: Optional[str],
+) -> Any:
+    """Async counterpart to _create_with_wall_clock_timeout."""
+    import asyncio
+
+    remaining = _remaining_wall_clock(deadline)
+    if remaining is None:
+        return await client.chat.completions.create(**kwargs)
+    if remaining <= 0:
+        await _close_auxiliary_client_async(client)
+        raise TimeoutError(_aux_timeout_message(task, kwargs.get("timeout")))
+
+    try:
+        return await asyncio.wait_for(
+            client.chat.completions.create(**kwargs),
+            timeout=remaining,
+        )
+    except asyncio.TimeoutError as exc:
+        await _close_auxiliary_client_async(client)
+        raise TimeoutError(_aux_timeout_message(task, kwargs.get("timeout"))) from exc
+
+
 def call_llm(
     task: str = None,
     *,
@@ -3568,6 +3701,7 @@ def call_llm(
                 f"Run: hermes setup")
 
     effective_timeout = timeout if timeout is not None else _get_task_timeout(task)
+    call_deadline = _deadline_from_timeout(effective_timeout)
 
     # Log what we're about to do — makes auxiliary operations visible
     _base_info = str(getattr(client, "base_url", resolved_base_url) or "")
@@ -3594,8 +3728,10 @@ def call_llm(
     # then payment fallback.
     try:
         return _validate_llm_response(
-            client.chat.completions.create(**kwargs), task)
+            _create_with_wall_clock_timeout(client, kwargs, call_deadline, task), task)
     except Exception as first_err:
+        if isinstance(first_err, TimeoutError):
+            raise
         if "temperature" in kwargs and _is_unsupported_temperature_error(first_err):
             retry_kwargs = dict(kwargs)
             retry_kwargs.pop("temperature", None)
@@ -3605,8 +3741,10 @@ def call_llm(
             )
             try:
                 return _validate_llm_response(
-                    client.chat.completions.create(**retry_kwargs), task)
+                    _create_with_wall_clock_timeout(client, retry_kwargs, call_deadline, task), task)
             except Exception as retry_err:
+                if isinstance(retry_err, TimeoutError):
+                    raise
                 retry_err_str = str(retry_err)
                 # If retry still fails, fall through to the max_tokens /
                 # payment / auth chains below using the temperature-stripped
@@ -3633,8 +3771,10 @@ def call_llm(
             kwargs["max_completion_tokens"] = max_tokens
             try:
                 return _validate_llm_response(
-                    client.chat.completions.create(**kwargs), task)
+                    _create_with_wall_clock_timeout(client, kwargs, call_deadline, task), task)
             except Exception as retry_err:
+                if isinstance(retry_err, TimeoutError):
+                    raise
                 # If the max_tokens retry also hits a payment or connection
                 # error, fall through to the fallback chain below.
                 if not (_is_payment_error(retry_err) or _is_connection_error(retry_err) or _is_rate_limit_error(retry_err)):
@@ -3663,7 +3803,7 @@ def call_llm(
                 if refreshed_model and refreshed_model != kwargs.get("model"):
                     kwargs["model"] = refreshed_model
                 return _validate_llm_response(
-                    refreshed_client.chat.completions.create(**kwargs), task)
+                    _create_with_wall_clock_timeout(refreshed_client, kwargs, call_deadline, task), task)
 
         # ── Auth refresh retry ───────────────────────────────────────
         if (_is_auth_error(first_err)
@@ -3706,7 +3846,7 @@ def call_llm(
                     if _is_anthropic_compat_endpoint(resolved_provider, _retry_base):
                         retry_kwargs["messages"] = _convert_openai_images_to_anthropic(retry_kwargs["messages"])
                     return _validate_llm_response(
-                        retry_client.chat.completions.create(**retry_kwargs), task)
+                        _create_with_wall_clock_timeout(retry_client, retry_kwargs, call_deadline, task), task)
 
         # ── Payment / credit exhaustion fallback ──────────────────────
         # When the resolved provider returns 402 or a credit-related error,
@@ -3753,7 +3893,7 @@ def call_llm(
                     extra_body=effective_extra_body,
                     base_url=str(getattr(fb_client, "base_url", "") or ""))
                 return _validate_llm_response(
-                    fb_client.chat.completions.create(**fb_kwargs), task)
+                    _create_with_wall_clock_timeout(fb_client, fb_kwargs, call_deadline, task), task)
         raise
 
 
@@ -3887,6 +4027,7 @@ async def async_call_llm(
                 f"Run: hermes setup")
 
     effective_timeout = timeout if timeout is not None else _get_task_timeout(task)
+    call_deadline = _deadline_from_timeout(effective_timeout)
 
     # Pass the client's actual base_url (not just resolved_base_url) so
     # endpoint-specific temperature overrides can distinguish
@@ -3904,8 +4045,10 @@ async def async_call_llm(
 
     try:
         return _validate_llm_response(
-            await client.chat.completions.create(**kwargs), task)
+            await _async_create_with_wall_clock_timeout(client, kwargs, call_deadline, task), task)
     except Exception as first_err:
+        if isinstance(first_err, TimeoutError):
+            raise
         if "temperature" in kwargs and _is_unsupported_temperature_error(first_err):
             retry_kwargs = dict(kwargs)
             retry_kwargs.pop("temperature", None)
@@ -3915,8 +4058,10 @@ async def async_call_llm(
             )
             try:
                 return _validate_llm_response(
-                    await client.chat.completions.create(**retry_kwargs), task)
+                    await _async_create_with_wall_clock_timeout(client, retry_kwargs, call_deadline, task), task)
             except Exception as retry_err:
+                if isinstance(retry_err, TimeoutError):
+                    raise
                 retry_err_str = str(retry_err)
                 if not (
                     _is_payment_error(retry_err)
@@ -3939,8 +4084,10 @@ async def async_call_llm(
             kwargs["max_completion_tokens"] = max_tokens
             try:
                 return _validate_llm_response(
-                    await client.chat.completions.create(**kwargs), task)
+                    await _async_create_with_wall_clock_timeout(client, kwargs, call_deadline, task), task)
             except Exception as retry_err:
+                if isinstance(retry_err, TimeoutError):
+                    raise
                 # If the max_tokens retry also hits a payment or connection
                 # error, fall through to the fallback chain below.
                 if not (_is_payment_error(retry_err) or _is_connection_error(retry_err) or _is_rate_limit_error(retry_err)):
@@ -3968,7 +4115,7 @@ async def async_call_llm(
                 if refreshed_model and refreshed_model != kwargs.get("model"):
                     kwargs["model"] = refreshed_model
                 return _validate_llm_response(
-                    await refreshed_client.chat.completions.create(**kwargs), task)
+                    await _async_create_with_wall_clock_timeout(refreshed_client, kwargs, call_deadline, task), task)
 
         # ── Auth refresh retry (mirrors sync call_llm) ───────────────
         if (_is_auth_error(first_err)
@@ -4010,7 +4157,7 @@ async def async_call_llm(
                     if _is_anthropic_compat_endpoint(resolved_provider, _retry_base):
                         retry_kwargs["messages"] = _convert_openai_images_to_anthropic(retry_kwargs["messages"])
                     return _validate_llm_response(
-                        await retry_client.chat.completions.create(**retry_kwargs), task)
+                        await _async_create_with_wall_clock_timeout(retry_client, retry_kwargs, call_deadline, task), task)
 
         # ── Payment / connection / rate-limit fallback (mirrors sync call_llm) ──
         should_fallback = (
@@ -4044,5 +4191,5 @@ async def async_call_llm(
                 if async_fb_model and async_fb_model != fb_kwargs.get("model"):
                     fb_kwargs["model"] = async_fb_model
                 return _validate_llm_response(
-                    await async_fb.chat.completions.create(**fb_kwargs), task)
+                    await _async_create_with_wall_clock_timeout(async_fb, fb_kwargs, call_deadline, task), task)
         raise
