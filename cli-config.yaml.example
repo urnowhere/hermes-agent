@@ -120,6 +120,9 @@ model:
 #
 #   # Data policy: "allow" (default) or "deny" to exclude providers that may store data
 #   # data_collection: "deny"
+#
+#   # Restrict routing to ZDR (Zero Data Retention) providers only
+#   # zdr: true
 
 # =============================================================================
 # OpenRouter Response Caching (only applies when using OpenRouter)
