@@ -1,6 +1,21 @@
+import logging
+
 import pytest
 
 from hermes_cli import runtime_provider as rp
+
+
+def test_auto_detect_local_model_logs_debug_on_request_failure(monkeypatch, caplog):
+    def _raise_request_error(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("requests.get", _raise_request_error)
+
+    with caplog.at_level(logging.DEBUG, logger=rp.logger.name):
+        detected = rp._auto_detect_local_model("http://127.0.0.1:11434")
+
+    assert detected == ""
+    assert "Local model auto-detect failed; falling back to configured resolution" in caplog.text
 
 
 def test_resolve_runtime_provider_uses_credential_pool(monkeypatch):

@@ -103,7 +103,7 @@ def _auto_detect_local_model(base_url: str) -> str:
                 if model_id:
                     return model_id
     except Exception:
-        pass
+        logger.debug("Local model auto-detect failed; falling back to configured resolution", exc_info=True)
     return ""
 
 
