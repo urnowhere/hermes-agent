@@ -745,6 +745,8 @@ WHISPER_HALLUCINATIONS = {
     "please subscribe",
     "thank you for watching.",
     "thank you for watching",
+    "subtitles by steamteamextra.",
+    "subtitles by steamteamextra",
     "bye.",
     "bye",
     "you",
@@ -768,9 +770,48 @@ _HALLUCINATION_REPEAT_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _normalise_repeated_sentence_piece(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip().lower().strip(' \t\r\n.,!?;:\"“”‘’')).strip()
+
+
+def _is_repeated_sentence_hallucination(cleaned: str) -> bool:
+    """Detect arbitrary repeated-sentence Whisper loops.
+
+    Whisper sometimes turns low-signal or first-buffer audio into a plausible
+    sentence repeated several times.  The exact phrase varies, so the static
+    hallucination list above is not enough.  Require a sentence of at least
+    four words repeated at least three times to avoid suppressing ordinary
+    short confirmations like "yes, yes, yes".
+    """
+    pieces = [
+        _normalise_repeated_sentence_piece(piece)
+        for piece in _SENTENCE_SPLIT_RE.split(cleaned)
+    ]
+    pieces = [piece for piece in pieces if piece]
+    if len(pieces) < 3:
+        return False
+
+    counts: dict[str, int] = {}
+    for piece in pieces:
+        counts[piece] = counts.get(piece, 0) + 1
+
+    repeated_piece, repeat_count = max(counts.items(), key=lambda item: item[1])
+    if repeat_count < 3:
+        return False
+    if len(repeated_piece.split()) < 4:
+        return False
+
+    # Keep this conservative: the dominant repeated sentence should account
+    # for nearly all sentence chunks.  If there is substantial non-repeated
+    # content, pass it through.
+    return repeat_count / len(pieces) >= 0.75
+
 
 def is_whisper_hallucination(transcript: str) -> bool:
-    """Check if a transcript is a known Whisper hallucination on silence."""
+    """Check if a transcript is a known or repeated Whisper hallucination."""
     cleaned = transcript.strip().lower()
     if not cleaned:
         return True
@@ -779,6 +820,9 @@ def is_whisper_hallucination(transcript: str) -> bool:
         return True
     # Repetitive patterns (e.g. "Thank you. Thank you. Thank you. you")
     if _HALLUCINATION_REPEAT_RE.match(cleaned):
+        return True
+    # Arbitrary repeated sentence loops on bad/first voice buffers.
+    if _is_repeated_sentence_hallucination(cleaned):
         return True
     return False
 

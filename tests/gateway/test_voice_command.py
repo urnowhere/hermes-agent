@@ -1,5 +1,6 @@
 """Tests for the /voice command and auto voice reply in the gateway."""
 
+import asyncio
 import importlib.util
 import json
 import os
@@ -544,6 +545,13 @@ class TestDiscordPlayTtsSkip:
 
 class TestVoiceInHelp:
 
+    def test_float_env_invalid_uses_default(self, monkeypatch):
+        """Bad warmup env values should not break Discord module import/use."""
+        from gateway.platforms.discord import _float_env
+
+        monkeypatch.setenv("HERMES_TEST_FLOAT_ENV", "bad-goblin")
+        assert _float_env("HERMES_TEST_FLOAT_ENV", 1.25) == 1.25
+
     def test_voice_in_help_output(self):
         """The gateway help text includes /voice (generated from registry)."""
         from hermes_cli.commands import gateway_help_lines
@@ -609,6 +617,18 @@ class TestVoiceReceiver:
         receiver.map_ssrc(100, 42)
         receiver.map_ssrc(100, 99)
         assert receiver._ssrc_to_user[100] == 99
+
+    def test_infer_user_for_ssrc_is_lock_reentrant(self):
+        """SSRC inference can run while silence detection already holds the lock."""
+        receiver = self._make_receiver()
+        receiver._vc.user = SimpleNamespace(id=9999)
+        receiver._vc.channel = SimpleNamespace(members=[SimpleNamespace(id=42)])
+
+        with receiver._lock:
+            user_id = receiver._infer_user_for_ssrc(100)
+
+        assert user_id == 42
+        assert receiver._ssrc_to_user[100] == 42
 
     def test_pause_resume(self):
         receiver = self._make_receiver()
@@ -701,6 +721,40 @@ class TestVoiceReceiver:
         data[0] = 0x00  # version 0, not 2
         receiver._on_packet(bytes(data))
         assert len(receiver._buffers) == 0
+
+
+class TestWhisperHallucinationFilter:
+    """Test generic Whisper hallucination filtering."""
+
+    def test_repeated_sentence_loop_filtered(self):
+        from tools.voice_mode import is_whisper_hallucination
+
+        transcript = (
+            "I'm going to go and get my baby. "
+            "I'm going to go and get my baby. "
+            "I'm going to go and get my baby. "
+            "I'm going to go and get my baby."
+        )
+        assert is_whisper_hallucination(transcript) is True
+
+    def test_known_subtitle_credit_filtered(self):
+        from tools.voice_mode import is_whisper_hallucination
+
+        assert is_whisper_hallucination("Subtitles by SteamTeamExtra") is True
+
+    def test_short_repetition_not_filtered(self):
+        from tools.voice_mode import is_whisper_hallucination
+
+        assert is_whisper_hallucination("Yes. Yes. Yes.") is False
+
+    def test_substantial_non_repeated_content_not_filtered(self):
+        from tools.voice_mode import is_whisper_hallucination
+
+        transcript = (
+            "Start the server. Start the server. Start the server. "
+            "Then run the migration and read me the error."
+        )
+        assert is_whisper_hallucination(transcript) is False
 
 
 # =====================================================================
@@ -1164,6 +1218,99 @@ class TestDiscordVoiceChannelMethods:
         assert adapter._is_allowed_user("42") is False
 
     @pytest.mark.asyncio
+    async def test_join_warms_stt_before_listening(self):
+        """Voice join pauses capture, warms STT, then starts listen loop."""
+        adapter = self._make_adapter()
+        adapter.VOICE_STT_WARMUP_SECONDS = 0
+
+        mock_channel = MagicMock()
+        mock_channel.guild.id = 111
+        mock_vc = MagicMock()
+        mock_vc.is_connected.return_value = True
+        mock_channel.connect = AsyncMock(return_value=mock_vc)
+
+        mock_receiver = MagicMock()
+
+        async def fake_warm(guild_id):
+            assert guild_id == 111
+            mock_receiver.pause.assert_called_once()
+            assert 111 in adapter._voice_receivers
+
+        scheduled = []
+
+        def fake_ensure_future(coro):
+            scheduled.append(coro)
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+            return MagicMock()
+
+        with patch("gateway.platforms.discord.VoiceReceiver", return_value=mock_receiver), \
+             patch.object(adapter, "_warm_stt_before_voice_input", side_effect=fake_warm) as warm, \
+             patch("asyncio.ensure_future", side_effect=fake_ensure_future):
+            result = await adapter.join_voice_channel(mock_channel)
+
+        assert result is True
+        warm.assert_awaited_once_with(111)
+        mock_receiver.start.assert_called_once()
+        mock_receiver.resume.assert_called_once()
+        assert any(getattr(coro, "cr_code", None) and coro.cr_code.co_name == "_voice_listen_loop" for coro in scheduled)
+
+    @pytest.mark.asyncio
+    async def test_join_resumes_receiver_when_warmup_raises(self):
+        """Capture is resumed even if warmup fails unexpectedly."""
+        adapter = self._make_adapter()
+
+        mock_channel = MagicMock()
+        mock_channel.guild.id = 111
+        mock_vc = MagicMock()
+        mock_vc.is_connected.return_value = True
+        mock_channel.connect = AsyncMock(return_value=mock_vc)
+
+        mock_receiver = MagicMock()
+
+        async def fake_warm(_guild_id):
+            raise RuntimeError("warmup exploded")
+
+        scheduled = []
+
+        def fake_ensure_future(coro):
+            scheduled.append(coro)
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+            return MagicMock()
+
+        with patch("gateway.platforms.discord.VoiceReceiver", return_value=mock_receiver), \
+             patch.object(adapter, "_warm_stt_before_voice_input", side_effect=fake_warm), \
+             patch("asyncio.ensure_future", side_effect=fake_ensure_future):
+            result = await adapter.join_voice_channel(mock_channel)
+
+        assert result is True
+        mock_receiver.start.assert_called_once()
+        mock_receiver.pause.assert_called_once()
+        mock_receiver.resume.assert_called_once()
+        assert any(getattr(coro, "cr_code", None) and coro.cr_code.co_name == "_voice_listen_loop" for coro in scheduled)
+
+    @pytest.mark.asyncio
+    async def test_stt_warmup_has_timeout(self, caplog):
+        """Hung STT warmup should not block voice join forever."""
+        import logging
+
+        adapter = self._make_adapter()
+        adapter.VOICE_STT_WARMUP_SECONDS = 0
+        adapter.VOICE_STT_WARMUP_TIMEOUT = 0.1
+
+        async def fake_to_thread(_fn):
+            await asyncio.sleep(1)
+
+        with caplog.at_level(logging.DEBUG, logger="gateway.platforms.discord"), \
+             patch("asyncio.to_thread", side_effect=fake_to_thread):
+            await adapter._warm_stt_before_voice_input(111)
+
+        assert "Voice STT warmup timed out for guild 111" in caplog.text
+
+    @pytest.mark.asyncio
     async def test_process_voice_input_success(self):
         """Successful voice input: PCM->WAV->STT->callback."""
         adapter = self._make_adapter()
@@ -1182,19 +1329,23 @@ class TestDiscordVoiceChannelMethods:
         callback.assert_called_once_with(guild_id=111, user_id=42, transcript="Hello")
 
     @pytest.mark.asyncio
-    async def test_process_voice_input_hallucination_filtered(self):
-        """Whisper hallucination is filtered out."""
+    async def test_process_voice_input_hallucination_filtered(self, caplog):
+        """Whisper hallucination is filtered out and logged."""
+        import logging
+
         adapter = self._make_adapter()
         callback = AsyncMock()
         adapter._voice_input_callback = callback
 
-        with patch("gateway.platforms.discord.VoiceReceiver.pcm_to_wav"), \
+        with caplog.at_level(logging.INFO, logger="gateway.platforms.discord"), \
+             patch("gateway.platforms.discord.VoiceReceiver.pcm_to_wav"), \
              patch("tools.transcription_tools.transcribe_audio",
                    return_value={"success": True, "transcript": "Thank you."}), \
              patch("tools.voice_mode.is_whisper_hallucination", return_value=True):
             await adapter._process_voice_input(111, 42, b"\x00" * 96000)
 
         callback.assert_not_called()
+        assert "Filtered voice STT hallucination from user 42: Thank you." in caplog.text
 
     @pytest.mark.asyncio
     async def test_process_voice_input_stt_failure(self):
@@ -1281,6 +1432,17 @@ class TestVoiceReceiverThreadSafety:
         assert found_lock_with_extend, (
             "_on_packet must hold self._lock when extending buffers"
         )
+
+    def test_on_packet_infers_user_before_dave_decrypt(self):
+        """DAVE packets need SSRC->user inference before Opus decode."""
+        import inspect
+        from gateway.platforms.discord import VoiceReceiver
+
+        source = inspect.getsource(VoiceReceiver._on_packet)
+        infer_pos = source.index("user_id = self._infer_user_for_ssrc(ssrc)")
+        dave_decrypt_pos = source.index("self._dave_session.decrypt")
+        opus_decode_pos = source.index("self._decoders[ssrc].decode")
+        assert infer_pos < dave_decrypt_pos < opus_decode_pos
 
     def test_concurrent_buffer_access_safe(self):
         """Simulate concurrent buffer writes and reads under lock."""
