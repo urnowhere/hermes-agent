@@ -78,6 +78,36 @@ def _ensure_slack_mock(monkeypatch):
 
 
 class TestSendMessageTool:
+    def test_telegram_username_target_is_explicit(self):
+        config, telegram_cfg = _make_config()
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("gateway.channel_directory.resolve_channel_name") as resolve_mock, \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True):
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "telegram:@some_channel",
+                        "message": "hello",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        resolve_mock.assert_not_called()
+        send_mock.assert_awaited_once_with(
+            Platform.TELEGRAM,
+            telegram_cfg,
+            "@some_channel",
+            "hello",
+            thread_id=None,
+            media_files=[],
+        )
+
     def test_cron_duplicate_target_is_skipped_and_explained(self):
         home = SimpleNamespace(chat_id="-1001")
         config, _telegram_cfg = _make_config()
@@ -661,6 +691,17 @@ class TestSendTelegramHtmlDetection:
         bot.send_message.assert_awaited_once()
         kwargs = bot.send_message.await_args.kwargs
         assert kwargs["parse_mode"] == "MarkdownV2"
+
+    def test_username_chat_id_passes_through(self, monkeypatch):
+        bot = self._make_bot()
+        _install_telegram_mock(monkeypatch, bot)
+
+        asyncio.run(
+            _send_telegram("tok", "@some_channel", "Just plain text, no tags")
+        )
+
+        kwargs = bot.send_message.await_args.kwargs
+        assert kwargs["chat_id"] == "@some_channel"
 
     def test_disable_link_previews_sets_disable_web_page_preview(self, monkeypatch):
         bot = self._make_bot()

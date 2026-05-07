@@ -16,6 +16,7 @@ from email.utils import formatdate
 from typing import Dict, Optional
 
 from agent.redact import redact_sensitive_text
+from gateway.telegram_ids import normalize_telegram_chat_id, parse_telegram_username_target
 
 logger = logging.getLogger(__name__)
 
@@ -314,6 +315,9 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         match = _TELEGRAM_TOPIC_TARGET_RE.fullmatch(target_ref)
         if match:
             return match.group(1), match.group(2), True
+        username = parse_telegram_username_target(target_ref)
+        if username:
+            return username, None, True
     if platform_name == "feishu":
         match = _FEISHU_TARGET_RE.fullmatch(target_ref)
         if match:
@@ -698,7 +702,7 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
             send_parse_mode = ParseMode.MARKDOWN_V2
 
         bot = Bot(token=token)
-        int_chat_id = int(chat_id)
+        api_chat_id = normalize_telegram_chat_id(chat_id)
         media_files = media_files or []
         thread_kwargs = {}
         if thread_id is not None:
@@ -713,7 +717,7 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
             try:
                 last_msg = await _send_telegram_message_with_retry(
                     bot,
-                    chat_id=int_chat_id, text=formatted,
+                    chat_id=api_chat_id, text=formatted,
                     parse_mode=send_parse_mode, **thread_kwargs
                 )
             except Exception as md_error:
@@ -734,7 +738,7 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                         plain = message
                     last_msg = await _send_telegram_message_with_retry(
                         bot,
-                        chat_id=int_chat_id, text=plain,
+                        chat_id=api_chat_id, text=plain,
                         parse_mode=None, **thread_kwargs
                     )
                 else:
@@ -752,23 +756,23 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                 with open(media_path, "rb") as f:
                     if ext in _IMAGE_EXTS:
                         last_msg = await bot.send_photo(
-                            chat_id=int_chat_id, photo=f, **thread_kwargs
+                            chat_id=api_chat_id, photo=f, **thread_kwargs
                         )
                     elif ext in _VIDEO_EXTS:
                         last_msg = await bot.send_video(
-                            chat_id=int_chat_id, video=f, **thread_kwargs
+                            chat_id=api_chat_id, video=f, **thread_kwargs
                         )
                     elif ext in _VOICE_EXTS and is_voice:
                         last_msg = await bot.send_voice(
-                            chat_id=int_chat_id, voice=f, **thread_kwargs
+                            chat_id=api_chat_id, voice=f, **thread_kwargs
                         )
                     elif ext in _TELEGRAM_SEND_AUDIO_EXTS:
                         last_msg = await bot.send_audio(
-                            chat_id=int_chat_id, audio=f, **thread_kwargs
+                            chat_id=api_chat_id, audio=f, **thread_kwargs
                         )
                     else:
                         last_msg = await bot.send_document(
-                            chat_id=int_chat_id, document=f, **thread_kwargs
+                            chat_id=api_chat_id, document=f, **thread_kwargs
                         )
             except Exception as e:
                 warning = _sanitize_error_text(f"Failed to send media {media_path}: {e}")
