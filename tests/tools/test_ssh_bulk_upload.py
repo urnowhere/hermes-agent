@@ -2,7 +2,7 @@
 
 import os
 import subprocess
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -51,6 +51,25 @@ class TestSSHBulkUpload:
             mock_run.assert_not_called()
             mock_popen.assert_not_called()
 
+    def test_single_upload_uses_posix_parent_on_windows_host(self, mock_env, monkeypatch, tmp_path):
+        """Single-file scp upload must mkdir the POSIX remote parent."""
+        monkeypatch.setattr(ssh_env, "Path", PureWindowsPath)
+        src = tmp_path / "a.txt"
+        src.write_text("aaa")
+
+        run_calls = []
+
+        def capture_run(cmd, **kwargs):
+            run_calls.append(cmd)
+            return subprocess.CompletedProcess([], 0)
+
+        with patch.object(subprocess, "run", side_effect=capture_run):
+            mock_env._scp_upload(str(src), "/home/testuser/.hermes/skills/a.txt")
+
+        mkdir_cmd = " ".join(run_calls[0])
+        assert "mkdir -p /home/testuser/.hermes/skills" in mkdir_cmd
+        assert "\\home\\testuser" not in mkdir_cmd
+
     def test_mkdir_batched_into_single_call(self, mock_env, tmp_path):
         """All parent directories should be created in one SSH call."""
         # Create test files
@@ -90,8 +109,8 @@ class TestSSHBulkUpload:
         assert "/home/testuser/.hermes/skills" in mkdir_str
         assert "/home/testuser/.hermes/credentials" in mkdir_str
 
-    def test_staging_symlinks_mirror_remote_layout(self, mock_env, tmp_path):
-        """Symlinks in staging dir should mirror the remote path structure."""
+    def test_staging_files_mirror_remote_layout(self, mock_env, tmp_path):
+        """Staging entries should mirror the remote path structure."""
         f1 = tmp_path / "local_a.txt"
         f1.write_text("content a")
 
@@ -111,8 +130,11 @@ class TestSSHBulkUpload:
                     staging_dir, "home/testuser/.hermes/skills/my_skill.md"
                 )
                 staging_paths.append(expected)
-                assert os.path.islink(expected), f"Expected symlink at {expected}"
-                assert os.readlink(expected) == os.path.abspath(str(f1))
+                if os.path.islink(expected):
+                    assert os.readlink(expected) == os.path.abspath(str(f1))
+                else:
+                    assert os.path.isfile(expected), f"Expected staged file at {expected}"
+                    assert Path(expected).read_text() == "content a"
 
             mock = MagicMock()
             mock.stdout = MagicMock()
@@ -129,6 +151,40 @@ class TestSSHBulkUpload:
             mock_env._ssh_bulk_upload(files)
 
         assert len(staging_paths) == 1, "tar command should have been called"
+
+    def test_staging_falls_back_to_copy_when_symlink_unavailable(self, mock_env, tmp_path):
+        """Windows without Developer Mode should still stage files for tar."""
+        f1 = tmp_path / "local_a.txt"
+        f1.write_text("content a")
+        files = [(str(f1), "/home/testuser/.hermes/skills/my_skill.md")]
+        staged_files = []
+
+        def capture_tar_cmd(cmd, **kwargs):
+            if cmd[0] == "tar":
+                c_idx = cmd.index("-C")
+                staged = os.path.join(
+                    cmd[c_idx + 1], "home/testuser/.hermes/skills/my_skill.md"
+                )
+                staged_files.append(staged)
+                assert os.path.isfile(staged)
+                assert Path(staged).read_text() == "content a"
+
+            mock = MagicMock()
+            mock.stdout = MagicMock()
+            mock.returncode = 0
+            mock.poll.return_value = 0
+            mock.communicate.return_value = (b"", b"")
+            mock.stderr = MagicMock()
+            mock.stderr.read.return_value = b""
+            return mock
+
+        with patch.object(subprocess, "run",
+                          return_value=subprocess.CompletedProcess([], 0)), \
+             patch.object(os, "symlink", side_effect=OSError("symlink denied")), \
+             patch.object(subprocess, "Popen", side_effect=capture_tar_cmd):
+            mock_env._ssh_bulk_upload(files)
+
+        assert len(staged_files) == 1
 
     def test_tar_pipe_commands(self, mock_env, tmp_path):
         """Verify tar and SSH commands are wired correctly."""

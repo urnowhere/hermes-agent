@@ -2,12 +2,18 @@
 
 import os
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tools.environments.file_sync import FileSyncManager, _FORCE_SYNC_ENV
+from tools.environments import file_sync as file_sync_mod
+from tools.environments.file_sync import (
+    FileSyncManager,
+    _FORCE_SYNC_ENV,
+    remote_parent_dir,
+    unique_parent_dirs,
+)
 
 
 @pytest.fixture
@@ -309,3 +315,22 @@ class TestBulkUpload:
         mgr.sync(force=True)
         bulk_upload.assert_called_once()
         assert len(bulk_upload.call_args[0][0]) == 3
+
+
+class TestRemotePathHandling:
+    """Remote sandbox paths must stay POSIX even on Windows hosts."""
+
+    def test_remote_parent_dir_uses_posix_semantics(self):
+        assert remote_parent_dir("/home/user/.hermes/skills/a.py") == "/home/user/.hermes/skills"
+
+    def test_unique_parent_dirs_not_host_os_dependent(self, monkeypatch):
+        monkeypatch.setattr(file_sync_mod, "Path", PureWindowsPath)
+        files = [
+            (r"C:\Users\me\.hermes\skills\a.py", "/home/user/.hermes/skills/a.py"),
+            (r"C:\Users\me\.hermes\credentials\b.json", "/home/user/.hermes/credentials/b.json"),
+        ]
+
+        assert unique_parent_dirs(files) == [
+            "/home/user/.hermes/credentials",
+            "/home/user/.hermes/skills",
+        ]

@@ -1,16 +1,20 @@
 """Tests for FileSyncManager.sync_back() — pull remote changes to host."""
 
-import fcntl
 import io
 import logging
 import os
 import signal
 import tarfile
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 
 from tools.environments.file_sync import (
     FileSyncManager,
@@ -18,6 +22,7 @@ from tools.environments.file_sync import (
     _SYNC_BACK_BACKOFF,
     _SYNC_BACK_MAX_RETRIES,
 )
+from tools.environments import file_sync as file_sync_mod
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +312,7 @@ class TestPushedHashesPopulated:
 class TestSyncBackFileLock:
     """Verify that fcntl.flock is used during sync-back."""
 
+    @pytest.mark.skipif(fcntl is None, reason="fcntl is not available on this platform")
     @patch("tools.environments.file_sync.fcntl.flock")
     def test_sync_back_file_lock(self, mock_flock, tmp_path):
         download_fn = _make_download_fn({})
@@ -376,6 +382,21 @@ class TestInferHostPath:
         )
         expected = str(tmp_path / "host" / "skills" / "b.py")
         assert result == expected
+
+    def test_infer_uses_posix_remote_prefix_on_windows_host(self, monkeypatch):
+        """Remote path prefix matching must not depend on the host pathlib flavor."""
+        monkeypatch.setattr(file_sync_mod, "Path", PureWindowsPath)
+        mapping = [
+            (r"C:\Users\me\.hermes\skills\a.py", "/root/.hermes/skills/a.py"),
+        ]
+
+        mgr = _make_manager(Path("/tmp"), file_mapping=mapping)
+        result = mgr._infer_host_path(
+            "/root/.hermes/skills/b.py",
+            file_mapping=mapping,
+        )
+
+        assert result == r"C:\Users\me\.hermes\skills\b.py"
 
 
 class TestSyncBackSIGINT:

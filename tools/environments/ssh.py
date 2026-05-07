@@ -15,6 +15,7 @@ from tools.environments.file_sync import (
     iter_sync_files,
     quoted_mkdir_command,
     quoted_rm_command,
+    remote_parent_dir,
     unique_parent_dirs,
 )
 
@@ -140,7 +141,7 @@ class SSHEnvironment(BaseEnvironment):
 
     def _scp_upload(self, host_path: str, remote_path: str) -> None:
         """Upload a single file via scp over ControlMaster."""
-        parent = str(Path(remote_path).parent)
+        parent = remote_parent_dir(remote_path)
         mkdir_cmd = self._build_ssh_command()
         mkdir_cmd.append(f"mkdir -p {shlex.quote(parent)}")
         subprocess.run(mkdir_cmd, capture_output=True, text=True, timeout=10)
@@ -182,7 +183,13 @@ class SSHEnvironment(BaseEnvironment):
             for host_path, remote_path in files:
                 staged = os.path.join(staging, remote_path.lstrip("/"))
                 os.makedirs(os.path.dirname(staged), exist_ok=True)
-                os.symlink(os.path.abspath(host_path), staged)
+                try:
+                    os.symlink(os.path.abspath(host_path), staged)
+                except OSError:
+                    # Windows requires Developer Mode or elevated privileges
+                    # for symlinks. Falling back to a copy preserves the
+                    # archive layout and keeps SSH bulk upload usable.
+                    shutil.copy2(host_path, staged)
 
             tar_cmd = ["tar", "-chf", "-", "-C", staging, "."]
             ssh_cmd = self._build_ssh_command()
