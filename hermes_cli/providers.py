@@ -97,6 +97,11 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         extra_env_vars=("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"),
         base_url_env_var="GLM_BASE_URL",
     ),
+    "zai-coding-cn": HermesOverlay(
+        transport="openai_chat",
+        extra_env_vars=("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"),
+        base_url_env_var="GLM_BASE_URL",
+    ),
     "kimi-for-coding": HermesOverlay(
         transport="openai_chat",
         base_url_env_var="KIMI_BASE_URL",
@@ -234,6 +239,9 @@ ALIASES: Dict[str, str] = {
     "z-ai": "zai",
     "z.ai": "zai",
     "zhipu": "zai",
+    "glm-cn": "zai-coding-cn",
+    "zai-cn": "zai-coding-cn",
+    "zhipu-cn": "zai-coding-cn",
 
     # xai
     "x-ai": "xai",

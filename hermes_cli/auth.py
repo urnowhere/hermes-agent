@@ -213,6 +213,14 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"),
         base_url_env_var="GLM_BASE_URL",
     ),
+    "zai-coding-cn": ProviderConfig(
+        id="zai-coding-cn",
+        name="Z.AI / GLM (China Coding Plan)",
+        auth_type="api_key",
+        inference_base_url="https://open.bigmodel.cn/api/coding/paas/v4",
+        api_key_env_vars=("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"),
+        base_url_env_var="GLM_BASE_URL",
+    ),
     "kimi-coding": ProviderConfig(
         id="kimi-coding",
         name="Kimi / Moonshot",
@@ -588,10 +596,12 @@ def _resolve_api_key_provider_secret(
 
 ZAI_ENDPOINTS = [
     # (id, base_url, probe_models, label)
-    ("global",        "https://api.z.ai/api/paas/v4",        ["glm-5"],   "Global"),
-    ("cn",            "https://open.bigmodel.cn/api/paas/v4", ["glm-5"],   "China"),
-    ("coding-global", "https://api.z.ai/api/coding/paas/v4",  ["glm-5.1", "glm-5v-turbo", "glm-4.7"], "Global (Coding Plan)"),
+    # 优先尝试 Coding Plan 端点（更便宜）
     ("coding-cn",     "https://open.bigmodel.cn/api/coding/paas/v4", ["glm-5.1", "glm-5v-turbo", "glm-4.7"], "China (Coding Plan)"),
+    ("coding-global", "https://api.z.ai/api/coding/paas/v4",  ["glm-5.1", "glm-5v-turbo", "glm-4.7"], "Global (Coding Plan)"),
+    # 然后尝试普通端点
+    ("cn",            "https://open.bigmodel.cn/api/paas/v4", ["glm-5"],   "China"),
+    ("global",        "https://api.z.ai/api/paas/v4",        ["glm-5"],   "Global"),
 ]
 
 
