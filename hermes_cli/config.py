@@ -93,6 +93,8 @@ _EXTRA_ENV_KEYS = frozenset({
     "LANGFUSE_PUBLIC_KEY",
     "LANGFUSE_SECRET_KEY",
     "LANGFUSE_BASE_URL",
+    "XFYUN_API_KEY",
+    "XFYUN_API_BASE_URL",
 })
 import yaml
 
