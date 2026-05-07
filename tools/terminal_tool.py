@@ -922,6 +922,11 @@ _creation_locks_lock = threading.Lock()  # Protects _creation_locks dict itself
 _cleanup_thread = None
 _cleanup_running = False
 
+
+def _activity_now() -> float:
+    """Return a monotonic timestamp for in-process inactivity bookkeeping."""
+    return time.monotonic()
+
 # Per-task environment overrides registry.
 # Allows environments (e.g., TerminalBench2Env) to specify a custom Docker/Modal
 # image for a specific task_id BEFORE the agent loop starts. When the terminal or
@@ -1249,7 +1254,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
 
 def _cleanup_inactive_envs(lifetime_seconds: int = 300):
     """Clean up environments that have been inactive for longer than lifetime_seconds."""
-    current_time = time.time()
+    current_time = _activity_now()
 
     # Check the process registry -- skip cleanup for sandboxes with active
     # background processes (their _last_activity gets refreshed to keep them alive).
@@ -1741,7 +1746,7 @@ def terminal_tool(
         # instead of each creating their own (wasting Modal resources).
         with _env_lock:
             if effective_task_id in _active_environments:
-                _last_activity[effective_task_id] = time.time()
+                _last_activity[effective_task_id] = _activity_now()
                 env = _active_environments[effective_task_id]
                 needs_creation = False
             else:
@@ -1758,7 +1763,7 @@ def terminal_tool(
                 # Double-check after acquiring the per-task lock
                 with _env_lock:
                     if effective_task_id in _active_environments:
-                        _last_activity[effective_task_id] = time.time()
+                        _last_activity[effective_task_id] = _activity_now()
                         env = _active_environments[effective_task_id]
                         needs_creation = False
 
@@ -1820,7 +1825,7 @@ def terminal_tool(
 
                     with _env_lock:
                         _active_environments[effective_task_id] = new_env
-                        _last_activity[effective_task_id] = time.time()
+                        _last_activity[effective_task_id] = _activity_now()
                         env = new_env
                     logger.info("%s environment ready for task %s", env_type, effective_task_id[:8])
 
