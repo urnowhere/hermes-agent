@@ -7,25 +7,25 @@ This directory contains the integration layer between **hermes-agent's** tool-ca
 ```
                         Atropos Framework
                     ┌───────────────────────┐
-                    │       BaseEnv          │  (atroposlib)
-                    │  - Server management   │
-                    │  - Worker scheduling   │
-                    │  - Wandb logging       │
-                    │  - CLI (serve/process/ │
-                    │    evaluate)           │
+                    │       BaseEnv         │  (atroposlib)
+                    │ - Server management   │
+                    │ - Worker scheduling   │
+                    │ - Wandb logging       │
+                    │ - CLI (serve/process/ │
+                    │    evaluate)          │
                     └───────────┬───────────┘
                                 │ inherits
                     ┌───────────┴───────────┐
-                    │  HermesAgentBaseEnv    │  hermes_base_env.py
-                    │  - Terminal backend    │
-                    │  - Tool resolution     │
-                    │  - Agent loop          │
-                    │  - ToolContext          │
-                    │  - Async patches       │
+                    │  HermesAgentBaseEnv   │  hermes_base_env.py
+                    │  - Terminal backend   │
+                    │  - Tool resolution    │
+                    │  - Agent loop         │
+                    │  - ToolContext        │
+                    │  - Async patches      │
                     └───────────┬───────────┘
                                 │ inherits
               ┌─────────────────┼─────────────────┐
-              │                 │                  │
+              │                 │                 │
      TerminalTestEnv     HermesSweEnv    TerminalBench2EvalEnv
      (stack testing)     (SWE training)   (TB2 benchmark eval)
 ```
