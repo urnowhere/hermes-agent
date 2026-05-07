@@ -1087,6 +1087,43 @@ def _wrap_pcm_as_wav(
     return riff_header + fmt_chunk + data_chunk_header + pcm_bytes
 
 
+def _build_gemini_tts_prompt(text: str, gemini_config: Dict[str, Any]) -> str:
+    """Compile optional Gemini TTS persona config into a natural-language prompt."""
+    persona = gemini_config.get("persona") if isinstance(gemini_config, dict) else None
+    if not isinstance(persona, dict):
+        return text
+
+    field_labels = (
+        ("profile", "Voice profile"),
+        ("scene", "Scene"),
+        ("sample_context", "Sample context"),
+        ("style", "Style"),
+        ("pacing", "Pacing"),
+        ("pace", "Pacing"),
+        ("accent", "Accent"),
+        ("director_notes", "Director notes"),
+        ("constraints", "Constraints"),
+    )
+    lines = []
+    seen_labels = set()
+    for key, label in field_labels:
+        if label in seen_labels:
+            continue
+        value = persona.get(key)
+        if isinstance(value, (list, tuple)):
+            value = "; ".join(str(v).strip() for v in value if str(v).strip())
+        elif value is not None:
+            value = str(value).strip()
+        if value:
+            lines.append(f"{label}: {value}")
+            seen_labels.add(label)
+
+    if not lines:
+        return text
+
+    return "\n".join(lines) + "\n\nSpeak this text exactly:\n" + text
+
+
 def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
     """Generate audio using Google Gemini TTS.
 
@@ -1115,6 +1152,8 @@ def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]
     gemini_config = tts_config.get("gemini", {})
     model = str(gemini_config.get("model", DEFAULT_GEMINI_TTS_MODEL)).strip() or DEFAULT_GEMINI_TTS_MODEL
     voice = str(gemini_config.get("voice", DEFAULT_GEMINI_TTS_VOICE)).strip() or DEFAULT_GEMINI_TTS_VOICE
+    temperature = gemini_config.get("temperature")
+    prompt_text = _build_gemini_tts_prompt(text, gemini_config)
     base_url = str(
         gemini_config.get("base_url")
         or get_env_value("GEMINI_BASE_URL")
@@ -1122,7 +1161,7 @@ def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]
     ).strip().rstrip("/")
 
     payload: Dict[str, Any] = {
-        "contents": [{"parts": [{"text": text}]}],
+        "contents": [{"parts": [{"text": prompt_text}]}],
         "generationConfig": {
             "responseModalities": ["AUDIO"],
             "speechConfig": {
@@ -1132,6 +1171,12 @@ def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]
             },
         },
     }
+
+    if temperature is not None:
+        try:
+            payload["generationConfig"]["temperature"] = float(temperature)
+        except (TypeError, ValueError):
+            logger.warning("Ignoring invalid Gemini TTS temperature: %r", temperature)
 
     endpoint = f"{base_url}/models/{model}:generateContent"
     response = requests.post(

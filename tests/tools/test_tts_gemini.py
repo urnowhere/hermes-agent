@@ -174,6 +174,50 @@ class TestGenerateGeminiTts:
         payload = mock_post.call_args[1]["json"]
         assert payload["generationConfig"]["responseModalities"] == ["AUDIO"]
 
+    def test_temperature_is_included_when_configured(self, tmp_path, monkeypatch, mock_gemini_response):
+        from tools.tts_tool import _generate_gemini_tts
+
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+        config = {"gemini": {"temperature": 0.75}}
+
+        with patch("requests.post", return_value=mock_gemini_response) as mock_post:
+            _generate_gemini_tts("Hi", str(tmp_path / "test.wav"), config)
+
+        payload = mock_post.call_args[1]["json"]
+        assert payload["generationConfig"]["temperature"] == 0.75
+
+    def test_persona_fields_are_compiled_into_tts_prompt(self, tmp_path, monkeypatch, mock_gemini_response):
+        from tools.tts_tool import _generate_gemini_tts
+
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+        config = {
+            "gemini": {
+                "persona": {
+                    "profile": "Assistant: warm and lucid.",
+                    "scene": "A private voice note to the user.",
+                    "sample_context": "Helpful assistant response.",
+                    "style": "Empathetic",
+                    "pacing": "Natural",
+                    "accent": "Neutral",
+                    "director_notes": "Do not sound like an announcer.",
+                }
+            }
+        }
+
+        with patch("requests.post", return_value=mock_gemini_response) as mock_post:
+            _generate_gemini_tts("Hello there.", str(tmp_path / "test.wav"), config)
+
+        prompt = mock_post.call_args[1]["json"]["contents"][0]["parts"][0]["text"]
+        assert "Voice profile: Assistant: warm and lucid." in prompt
+        assert "Scene: A private voice note to the user." in prompt
+        assert "Sample context: Helpful assistant response." in prompt
+        assert "Style: Empathetic" in prompt
+        assert "Pacing: Natural" in prompt
+        assert "Accent: Neutral" in prompt
+        assert "Director notes: Do not sound like an announcer." in prompt
+        assert "Speak this text exactly:" in prompt
+        assert prompt.rstrip().endswith("Hello there.")
+
     def test_http_error_raises_runtime_error(self, tmp_path, monkeypatch):
         from tools.tts_tool import _generate_gemini_tts
 
