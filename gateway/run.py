@@ -12962,9 +12962,14 @@ class GatewayRunner:
         # - Telegram uses message_thread_id only for forum topics; passing a
         #   normal DM/group message id as thread_id causes send failures
         # - Feishu only honors reply_in_thread when sending a reply, so topic
-        #   progress uses the triggering event message as the reply target
+        #   progress uses the triggering event message as the reply target.
+        #   Some inbound events don't populate source.thread_id even though
+        #   replies should stay under the message thread, so fall back to
+        #   event_message_id.
         # - Other platforms should use explicit source.thread_id only
         if source.platform == Platform.SLACK:
+            _progress_thread_id = source.thread_id or event_message_id
+        elif source.platform == Platform.FEISHU:
             _progress_thread_id = source.thread_id or event_message_id
         else:
             _progress_thread_id = source.thread_id
