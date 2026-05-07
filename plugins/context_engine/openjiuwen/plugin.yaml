@@ -1,0 +1,4 @@
+name: openjiuwen
+version: "0.1.0"
+description: openJiuwen context engine adapter for Hermes (optional dependency).
+author: openJiuwen / Hermes contributors
