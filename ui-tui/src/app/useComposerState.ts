@@ -102,7 +102,8 @@ export function useComposerState({
   gw,
   onClipboardPaste,
   onImageAttached,
-  submitRef
+  submitRef,
+  dispatchRef
 }: UseComposerStateOptions): UseComposerStateResult {
   const [input, setInput] = useState('')
   const [inputBuf, setInputBuf] = useState<string[]>([])
@@ -288,13 +289,17 @@ export function useComposerState({
         return
       }
 
-      setInput('')
-      setInputBuf([])
-      submitRef.current(text)
+      // Clear the composer state first so the input field is empty
+      // immediately when Ink repaints after the editor exits. (#20640)
+      clearIn()
+      // Use dispatchRef (pointing at dispatchSubmission) rather than
+      // submitRef (pointing at submit) so we avoid submit()'s stale-closure
+      // inputBuf prepend — the file already contains the full composed text. (#20640)
+      dispatchRef.current(text)
     } finally {
       rmSync(dir, { force: true, recursive: true })
     }
-  }, [input, inputBuf, submitRef])
+  }, [clearIn, dispatchRef, input, inputBuf])
 
   const actions = useMemo(
     () => ({
