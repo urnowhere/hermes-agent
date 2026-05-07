@@ -2903,11 +2903,15 @@ class TelegramAdapter(BasePlatformAdapter):
         """Apply Telegram group trigger rules.
 
         DMs remain unrestricted. Group/supergroup messages are accepted when:
-        - the chat is explicitly allowlisted in ``free_response_chats``
         - ``require_mention`` is disabled
+        - the chat is explicitly allowlisted in ``free_response_chats``
         - the message replies to the bot
         - the bot is @mentioned
         - the text/caption matches a configured regex wake-word pattern
+
+        ``require_mention`` takes precedence over ``free_response_chats``
+        so that both settings can coexist: a chat in ``free_response_chats``
+        with ``require_mention`` enabled still requires an explicit @mention.
 
         When ``require_mention`` is enabled, slash commands are not given
         special treatment — they must pass the same mention/reply checks
@@ -2925,9 +2929,9 @@ class TelegramAdapter(BasePlatformAdapter):
                     return False
             except (TypeError, ValueError):
                 logger.warning("[%s] Ignoring non-numeric Telegram message_thread_id: %r", self.name, thread_id)
-        if str(getattr(getattr(message, "chat", None), "id", "")) in self._telegram_free_response_chats():
-            return True
         if not self._telegram_require_mention():
+            return True
+        if str(getattr(getattr(message, "chat", None), "id", "")) in self._telegram_free_response_chats():
             return True
         if self._is_reply_to_bot(message):
             return True
