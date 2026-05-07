@@ -626,3 +626,102 @@ class TestWaitForReconnection:
         assert not result.success
         assert result.retryable is True
         assert "Not connected" in result.error
+
+
+# ---------------------------------------------------------------------------
+# _listen_loop — reconnect exhaustion notifies gateway via _set_fatal_error
+# ---------------------------------------------------------------------------
+
+class TestListenLoopReconnectExhaustion:
+    """Verify _listen_loop calls _set_fatal_error + _notify_fatal_error on all exhaustion paths."""
+
+    def _make_adapter(self, **extra):
+        from gateway.platforms.qqbot import QQAdapter
+        adapter = QQAdapter(_make_config(app_id="a", client_secret="b", **extra))
+        adapter._notify_fatal_error = mock.AsyncMock()
+        return adapter
+
+    def test_exception_path_sets_fatal_error(self):
+        """Exception branch: exhausted backoff marks adapter as fatal and notifies gateway."""
+        adapter = self._make_adapter()
+        adapter._running = True
+        adapter._mark_disconnected = mock.MagicMock()
+        adapter._fail_pending = mock.MagicMock()
+
+        call_count = 0
+
+        async def _raise_once():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("persistent network failure")
+            adapter._running = False
+
+        adapter._read_events = _raise_once
+        adapter._reconnect = mock.AsyncMock(return_value=False)
+
+        with mock.patch("gateway.platforms.qqbot.adapter.MAX_RECONNECT_ATTEMPTS", 0):
+            asyncio.run(adapter._listen_loop())
+
+        assert adapter.has_fatal_error
+        assert adapter._fatal_error_code == "qq_reconnect_exhausted"
+        assert adapter._fatal_error_retryable is False
+        adapter._notify_fatal_error.assert_awaited_once()
+
+    def test_qqcloseerror_path_sets_fatal_error(self):
+        """QQCloseError branch: exhausted backoff marks adapter as fatal and notifies gateway."""
+        from gateway.platforms.qqbot.adapter import QQCloseError
+
+        adapter = self._make_adapter()
+        adapter._running = True
+        adapter._mark_disconnected = mock.MagicMock()
+        adapter._fail_pending = mock.MagicMock()
+
+        call_count = 0
+
+        async def _raise_close():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise QQCloseError(1006, "abnormal closure")
+            adapter._running = False
+
+        adapter._read_events = _raise_close
+        adapter._reconnect = mock.AsyncMock(return_value=False)
+
+        with mock.patch("gateway.platforms.qqbot.adapter.MAX_RECONNECT_ATTEMPTS", 1):
+            asyncio.run(adapter._listen_loop())
+
+        assert adapter.has_fatal_error
+        assert adapter._fatal_error_code == "qq_reconnect_exhausted"
+        assert adapter._fatal_error_retryable is False
+        adapter._notify_fatal_error.assert_awaited_once()
+
+    def test_rate_limit_4008_path_sets_fatal_error(self):
+        """4008 rate-limit branch: exhausted backoff marks adapter as fatal and notifies gateway."""
+        from gateway.platforms.qqbot.adapter import QQCloseError
+
+        adapter = self._make_adapter()
+        adapter._running = True
+        adapter._mark_disconnected = mock.MagicMock()
+        adapter._fail_pending = mock.MagicMock()
+
+        call_count = 0
+
+        async def _raise_rate_limit():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise QQCloseError(4008, "rate limited")
+            adapter._running = False
+
+        adapter._read_events = _raise_rate_limit
+        adapter._reconnect = mock.AsyncMock(return_value=False)
+
+        with mock.patch("gateway.platforms.qqbot.adapter.MAX_RECONNECT_ATTEMPTS", 0):
+            asyncio.run(adapter._listen_loop())
+
+        assert adapter.has_fatal_error
+        assert adapter._fatal_error_code == "qq_reconnect_exhausted"
+        assert adapter._fatal_error_retryable is False
+        adapter._notify_fatal_error.assert_awaited_once()
