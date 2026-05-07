@@ -1487,8 +1487,8 @@ class AIAgent:
                     if _provider_timeout is not None:
                         client_kwargs["timeout"] = _provider_timeout
                     # Preserve any default_headers the router set
-                    if hasattr(_routed_client, '_default_headers') and _routed_client._default_headers:
-                        client_kwargs["default_headers"] = dict(_routed_client._default_headers)
+                    if hasattr(_routed_client, 'default_headers') and _routed_client.default_headers:
+                        client_kwargs["default_headers"] = dict(_routed_client.default_headers)
                 else:
                     # When the user explicitly chose a non-OpenRouter provider
                     # but no credentials were found, fail fast with a clear
