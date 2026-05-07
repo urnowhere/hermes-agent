@@ -19,6 +19,8 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
 
+from utils import atomic_jsonl_write
+
 logger = logging.getLogger(__name__)
 
 
@@ -1294,11 +1296,12 @@ class SessionStore:
             except Exception as e:
                 logger.debug("Failed to rewrite transcript in DB: %s", e)
         
-        # JSONL: overwrite the file
+        # JSONL: overwrite the file atomically. A crash between truncate and
+        # final flush would otherwise leave the transcript empty or partial,
+        # losing history for pre-DB sessions (see GH-1193 for the read-side
+        # counterpart that skips corrupt lines after the fact).
         transcript_path = self.get_transcript_path(session_id)
-        with open(transcript_path, "w", encoding="utf-8") as f:
-            for msg in messages:
-                f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        atomic_jsonl_write(transcript_path, messages)
 
     def load_transcript(self, session_id: str) -> List[Dict[str, Any]]:
         """Load all messages from a session's transcript."""

@@ -188,6 +188,52 @@ def atomic_yaml_write(
         raise
 
 
+def atomic_jsonl_write(
+    path: Union[str, Path],
+    items: Any,
+    **dump_kwargs: Any,
+) -> None:
+    """Write an iterable of JSON-serializable items to a file atomically as JSONL.
+
+    Each item is serialized on its own line via ``json.dumps``. Uses temp
+    file + fsync + os.replace so the target file is never observable in a
+    partially-written state — if the process crashes mid-write, the
+    previous version of the file remains intact.
+
+    Args:
+        path: Target file path (will be created or overwritten).
+        items: Iterable of JSON-serializable items, one per line.
+        **dump_kwargs: Additional keyword args forwarded to ``json.dumps``.
+            ``ensure_ascii`` defaults to ``False`` to preserve non-ASCII text.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    dump_kwargs.setdefault("ensure_ascii", False)
+
+    original_mode = _preserve_file_mode(path)
+
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(path.parent),
+        prefix=f".{path.stem}_",
+        suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            for item in items:
+                f.write(json.dumps(item, **dump_kwargs) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        _restore_file_mode(path, original_mode)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 # ─── JSON Helpers ─────────────────────────────────────────────────────────────
 
 

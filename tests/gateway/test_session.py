@@ -474,6 +474,83 @@ class TestSessionStoreRewriteTranscript:
         assert reloaded == []
 
 
+class TestSessionStoreRewriteTranscriptAtomicity:
+    """Regression: rewrite_transcript must never leave the JSONL file in a
+    partially-written state. A crash between truncate and final flush would
+    otherwise wipe out transcript history — catastrophic for pre-DB sessions
+    where the JSONL is the only source of truth, and harmful for /retry,
+    /undo, /compress, /reset flows even when SQLite is present.
+
+    Pairs with TestLoadTranscriptCorruptLines (GH-1193) which handles the
+    read-side fallback; this class verifies the write-side guarantee."""
+
+    @pytest.fixture()
+    def store(self, tmp_path):
+        config = GatewayConfig()
+        with patch("gateway.session.SessionStore._ensure_loaded"):
+            s = SessionStore(sessions_dir=tmp_path, config=config)
+        s._db = None  # exercise the JSONL path directly
+        s._loaded = True
+        return s
+
+    def test_mid_write_crash_preserves_previous_transcript(self, store):
+        session_id = "atomic_crash"
+        original = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ]
+        store.rewrite_transcript(session_id, original)
+
+        # Simulate a crash during json serialization of the *new* payload.
+        with patch("utils.json.dumps", side_effect=IOError("disk full")):
+            with pytest.raises(IOError):
+                store.rewrite_transcript(
+                    session_id,
+                    [{"role": "user", "content": "replacement"}],
+                )
+
+        # Transcript must still hold the pre-crash content.
+        reloaded = store.load_transcript(session_id)
+        assert reloaded == original
+
+    def test_no_stray_temp_files_after_successful_rewrite(self, store, tmp_path):
+        session_id = "atomic_cleanup"
+        store.rewrite_transcript(
+            session_id,
+            [{"role": "user", "content": "ok"}],
+        )
+
+        session_dir = store.get_transcript_path(session_id).parent
+        stray = [p for p in session_dir.iterdir() if ".tmp" in p.name]
+        assert stray == []
+
+    def test_no_stray_temp_files_after_failed_rewrite(self, store):
+        session_id = "atomic_failure_cleanup"
+        store.rewrite_transcript(session_id, [{"role": "user", "content": "seed"}])
+
+        with patch("utils.json.dumps", side_effect=IOError("disk full")):
+            with pytest.raises(IOError):
+                store.rewrite_transcript(
+                    session_id,
+                    [{"role": "user", "content": "attempt"}],
+                )
+
+        session_dir = store.get_transcript_path(session_id).parent
+        stray = [p for p in session_dir.iterdir() if ".tmp" in p.name]
+        assert stray == []
+
+    def test_unicode_roundtrip(self, store):
+        session_id = "atomic_unicode"
+        messages = [
+            {"role": "user", "content": "hello 🎉"},
+            {"role": "assistant", "content": "日本語"},
+        ]
+        store.rewrite_transcript(session_id, messages)
+
+        reloaded = store.load_transcript(session_id)
+        assert reloaded == messages
+
+
 class TestLoadTranscriptCorruptLines:
     """Regression: corrupt JSONL lines (e.g. from mid-write crash) must be
     skipped instead of crashing the entire transcript load.  GH-1193."""
