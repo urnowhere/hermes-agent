@@ -591,8 +591,8 @@ class TelegramAdapter(BasePlatformAdapter):
         # giving up, so the old session has time to expire.
         self._polling_conflict_count += 1
 
-        MAX_CONFLICT_RETRIES = 3
-        RETRY_DELAY = 10  # seconds
+        MAX_CONFLICT_RETRIES = 5  # Increased from 3 for longer Telegram session release time
+        RETRY_DELAY = 15  # Increased from 10 seconds
 
         if self._polling_conflict_count <= MAX_CONFLICT_RETRIES:
             logger.warning(
@@ -605,6 +605,16 @@ class TelegramAdapter(BasePlatformAdapter):
                     await self._app.updater.stop()
             except Exception:
                 pass
+            
+            # Clear any stale webhook that might interfere with polling
+            delete_webhook = getattr(self._bot, "delete_webhook", None)
+            if callable(delete_webhook):
+                try:
+                    await delete_webhook(drop_pending_updates=True)
+                    logger.info("[%s] Cleared webhook before polling retry", self.name)
+                except Exception as e:
+                    logger.warning("[%s] delete_webhook failed: %s", self.name, e)
+            
             await asyncio.sleep(RETRY_DELAY)
             await self._drain_polling_connections()
             try:

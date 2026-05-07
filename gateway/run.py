@@ -14933,14 +14933,45 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             "Gateway runtime lock is already held by another instance. Exiting."
         )
         return False
-    try:
-        write_pid_file()
-    except FileExistsError:
-        release_gateway_runtime_lock()
-        logger.error(
-            "PID file race lost to another gateway instance. Exiting."
-        )
-        return False
+    # Retry PID file acquisition when stale files from SIGKILL'd processes remain.
+    # The gap between get_running_pid() (cleanup) and write_pid_file() (creation)
+    # can be exploited by another restart race, leaving a stale file that blocks us.
+    MAX_PID_RETRIES = 3
+    PID_RETRY_DELAY = 0.5  # seconds
+    import time
+    for pid_attempt in range(MAX_PID_RETRIES):
+        try:
+            write_pid_file()
+            break  # Success
+        except FileExistsError:
+            # Check if another gateway is actually running
+            other_pid = get_running_pid()
+            if other_pid is not None and other_pid != os.getpid():
+                release_gateway_runtime_lock()
+                logger.error(
+                    "Another gateway instance (PID %d) is running. Exiting.",
+                    other_pid
+                )
+                return False
+            # Stale PID file from a killed process — clean it and retry
+            logger.warning(
+                "Stale PID file detected (attempt %d/%d), cleaning up...",
+                pid_attempt + 1, MAX_PID_RETRIES
+            )
+            from gateway.status import _get_pid_path
+            try:
+                _get_pid_path().unlink(missing_ok=True)
+            except Exception:
+                pass
+            if pid_attempt == MAX_PID_RETRIES - 1:
+                release_gateway_runtime_lock()
+                logger.error(
+                    "PID file race lost after %d retries. Exiting.",
+                    MAX_PID_RETRIES
+                )
+                return False
+            # Brief pause to reduce race window with concurrent restarts
+            time.sleep(PID_RETRY_DELAY)
     atexit.register(remove_pid_file)
     atexit.register(release_gateway_runtime_lock)
 
