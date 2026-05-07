@@ -1348,6 +1348,8 @@ def skill_view(
             "success": True,
             "name": skill_name,
             "description": frontmatter.get("description", ""),
+            "model_override": frontmatter.get("model") or None,
+            "provider_override": frontmatter.get("provider") or None,
             "tags": tags,
             "related_skills": related_skills,
             "content": rendered_content,

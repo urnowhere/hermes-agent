@@ -1847,6 +1847,14 @@ class AIAgent:
         except Exception:
             pass
 
+        # Skill-level model override stack. When skill_view() loads a skill
+        # with model:/provider: in its SKILL.md frontmatter, the current
+        # (model, provider) is pushed onto this stack and the agent switches
+        # to the skill's preferred model. On the next user turn the stack
+        # is popped to restore the previous model. Using a stack allows
+        # cascading switches (skill A loads skill B, each with their own model).
+        self._pre_skill_model_stack: list[tuple[str, str | None]] = []
+
         # Tool-use enforcement config: "auto" (default — matches hardcoded
         # model list), true (always), false (never), or list of substrings.
         _agent_section = _agent_cfg.get("agent", {})
@@ -4604,6 +4612,51 @@ class AIAgent:
             len(steer_text),
             steer_text[:120] + ("..." if len(steer_text) > 120 else ""),
         )
+
+    def _maybe_apply_skill_model_override(self, function_result: str) -> None:
+        """Detect and apply per-skill model overrides from skill_view results.
+
+        When a skill declares ``model:`` and optionally ``provider:`` in its
+        SKILL.md frontmatter, skill_view() returns these as model_override
+        and provider_override in its JSON response. This method checks for
+        those fields and, if present, pushes the current (model, provider)
+        onto ``_pre_skill_model_stack`` and calls ``switch_model()`` to
+        activate the skill's preferred model.
+
+        The stack is popped at the start of the next user turn
+        (see ``run_conversation``) to restore the previous model.
+        """
+        try:
+            _result = json.loads(function_result)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return  # Not valid JSON — not a skill_view result
+
+        skill_model = _result.get("model_override")
+        if not skill_model:
+            return  # No model override declared
+
+        skill_provider = _result.get("provider_override")
+        prev_model = self.model
+        prev_provider = self.provider
+        self._pre_skill_model_stack.append((prev_model, prev_provider))
+        logger.debug(
+            "Skill model override: switching from %s/%s to %s/%s",
+            prev_provider, prev_model,
+            skill_provider, skill_model,
+        )
+        try:
+            self.switch_model(skill_model, skill_provider)
+        except Exception as exc:
+            # Best-effort: pop the stack entry we just pushed so
+            # restoration doesn't try to restore to a model we never
+            # actually switched away from.
+            if self._pre_skill_model_stack and \
+               self._pre_skill_model_stack[-1] == (prev_model, prev_provider):
+                self._pre_skill_model_stack.pop()
+            logger.debug(
+                "Skill model override failed for %s/%s: %s",
+                skill_provider, skill_model, exc,
+            )
 
     def _touch_activity(self, desc: str) -> None:
         """Update the last-activity timestamp and description (thread-safe)."""
@@ -9948,6 +10001,10 @@ class AIAgent:
             # result so the steer lands as early as possible.
             self._apply_pending_steer_to_tool_results(messages, 1)
 
+            # ── Skill model override ───────────────────────────────────
+            if name == "skill_view":
+                self._maybe_apply_skill_model_override(function_result)
+
         # ── Per-turn aggregate budget enforcement ─────────────────────────
         num_tools = len(parsed_calls)
         if num_tools > 0:
@@ -10338,6 +10395,10 @@ class AIAgent:
             # entire batch.  The model sees it on the next API iteration.
             self._apply_pending_steer_to_tool_results(messages, 1)
 
+            # ── Skill model override ───────────────────────────────────
+            if function_name == "skill_view":
+                self._maybe_apply_skill_model_override(function_result)
+
             if not self.quiet_mode:
                 if self.verbose_logging:
                     print(f"  ✅ Tool {i} completed in {tool_duration:.2f}s")
@@ -10622,6 +10683,23 @@ class AIAgent:
         # runtime so this turn gets a fresh attempt with the preferred model.
         # No-op when _fallback_activated is False (gateway, first turn, etc.).
         self._restore_primary_runtime()
+
+        # Restore model after a skill with model_override/provider_override
+        # completed in the previous turn. Skills declare preferred models in
+        # their SKILL.md frontmatter (model:/provider: fields). The switch
+        # happens when skill_view loads the skill; restoration happens here
+        # so the next user message uses the original model.
+        # Using a stack allows cascading switches (skill A loads skill B).
+        while self._pre_skill_model_stack:
+            prev_model, prev_provider = self._pre_skill_model_stack.pop()
+            try:
+                self.switch_model(prev_model, prev_provider)
+            except Exception as exc:
+                logger.debug(
+                    "Skill model restore failed for %s/%s: %s",
+                    prev_provider, prev_model, exc,
+                )
+                # Continue popping — don't leave stale entries on the stack
 
         # Sanitize surrogate characters from user input.  Clipboard paste from
         # rich-text editors (Google Docs, Word, etc.) can inject lone surrogates

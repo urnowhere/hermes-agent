@@ -450,6 +450,33 @@ def build_skill_invocation_message(
     )
 
 
+def get_skill_model_override(skill_identifier: str, task_id: str | None = None) -> tuple[str | None, str | None]:
+    """Return (model, provider) overrides declared by a skill, or (None, None).
+
+    This is a lightweight helper for CLI/gateway slash-command handlers to
+    check whether a skill has declared a preferred model in its SKILL.md
+    frontmatter BEFORE injecting the skill content into the conversation.
+
+    The caller is responsible for calling agent.switch_model() with the
+    returned values if non-None.
+
+    Args:
+        skill_identifier: Skill name or path (same as skill_view first arg).
+        task_id: Optional task/session ID.
+
+    Returns:
+        (model_override, provider_override) tuple, each string or None.
+    """
+    loaded = _load_skill_payload(skill_identifier, task_id=task_id)
+    if not loaded:
+        return None, None
+    loaded_skill, _skill_dir, _skill_name = loaded
+    return (
+        loaded_skill.get("model_override") or None,
+        loaded_skill.get("provider_override") or None,
+    )
+
+
 def build_preloaded_skills_prompt(
     skill_identifiers: list[str],
     task_id: str | None = None,
