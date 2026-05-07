@@ -185,10 +185,10 @@ def test_formsy_engine_memory_read_tool_queries_runtime():
         },
     )
 
-    data = json.loads(result)
-    assert data["ok"] is True
-    assert data["path"] == "parser.py"
-    assert data["content"] == "def parse():\n    return state"
+    assert "ok: true" in result
+    assert "path: parser.py" in result
+    assert "lines: 10-12" in result
+    assert "```python\ndef parse():\n    return state\n```" in result
     assert calls == [{
         "repo_id": "django__django-14053",
         "session_id": "session-123",

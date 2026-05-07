@@ -299,10 +299,54 @@ class FormsyContextEngine(ContextEngine):
         if result is None:
             return json.dumps({"ok": False, "path": path, "error": "Formsy memory read failed"})
 
-        payload = {"ok": True}
-        if isinstance(result, dict):
-            payload.update(result)
-        return json.dumps(payload)
+        return self._format_memory_read_result(path, result)
+
+    @staticmethod
+    def _format_memory_read_result(requested_path: str, result: Any) -> str:
+        if not isinstance(result, dict):
+            return json.dumps({"ok": True, "path": requested_path, "result": result})
+
+        path = str(result.get("path") or requested_path)
+        content = str(result.get("content") or "")
+        start_line = result.get("start_line")
+        end_line = result.get("end_line")
+        total_lines = result.get("total_lines")
+        truncated = bool(result.get("truncated", False))
+        suffix = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+        language = {
+            "py": "python",
+            "js": "javascript",
+            "jsx": "jsx",
+            "ts": "typescript",
+            "tsx": "tsx",
+            "html": "html",
+            "css": "css",
+            "json": "json",
+            "md": "markdown",
+            "yaml": "yaml",
+            "yml": "yaml",
+        }.get(suffix, "")
+
+        line_label = "unknown"
+        if start_line is not None and end_line is not None:
+            line_label = f"{start_line}-{end_line}"
+        elif start_line is not None:
+            line_label = f"{start_line}+"
+
+        metadata = [
+            "ok: true",
+            f"path: {path}",
+            f"lines: {line_label}",
+        ]
+        if total_lines is not None:
+            metadata.append(f"total_lines: {total_lines}")
+        if truncated:
+            metadata.append("truncated: true")
+        metadata.append("")
+        metadata.append(f"```{language}")
+        metadata.append(content)
+        metadata.append("```")
+        return "\n".join(metadata)
 
     def _run_async(self, coro):
         """Run Formsy async API calls from the synchronous ContextEngine API."""
