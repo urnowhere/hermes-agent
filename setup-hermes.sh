@@ -51,6 +51,46 @@ get_command_link_display_dir() {
     fi
 }
 
+prompt_yes_no() {
+    local question="$1"
+    local default="$2"
+    local prompt_suffix
+    local answer=""
+
+    case "$default" in
+        [nN]|[nN][oO]|0|false|FALSE)
+            prompt_suffix="[y/N]"
+            ;;
+        *)
+            prompt_suffix="[Y/n]"
+            ;;
+    esac
+
+    if [ -t 0 ]; then
+        read -r -p "$question $prompt_suffix " answer || answer=""
+    elif [ -r /dev/tty ] && [ -w /dev/tty ]; then
+        printf "%s %s " "$question" "$prompt_suffix" > /dev/tty
+        IFS= read -r answer < /dev/tty || answer=""
+    else
+        return 1
+    fi
+
+    answer="${answer#"${answer%%[![:space:]]*}"}"
+    answer="${answer%"${answer##*[![:space:]]}"}"
+
+    if [ -z "$answer" ]; then
+        case "$default" in
+            [nN]|[nN][oO]|0|false|FALSE) return 1 ;;
+            *) return 0 ;;
+        esac
+    fi
+
+    case "$answer" in
+        [yY]|[yY][eE][sS]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 echo ""
 echo -e "${CYAN}⚕ Hermes Agent Setup${NC}"
 echo ""
@@ -220,9 +260,7 @@ if command -v rg &> /dev/null; then
     echo -e "${GREEN}✓${NC} ripgrep found"
 else
     echo -e "${YELLOW}⚠${NC} ripgrep not found (file search will use grep fallback)"
-    read -p "Install ripgrep for faster search? [Y/n] " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
+    if prompt_yes_no "Install ripgrep for faster search?" yes; then
         INSTALLED=false
 
         if is_termux; then
@@ -390,9 +428,7 @@ echo "  hermes doctor        # Diagnose issues"
 echo ""
 
 # Ask if they want to run setup wizard now
-read -p "Would you like to run the setup wizard now? [Y/n] " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
+if prompt_yes_no "Would you like to run the setup wizard now?" yes; then
     echo ""
     # Run directly with venv Python (no activation needed)
     "$SCRIPT_DIR/venv/bin/python" -m hermes_cli.main setup

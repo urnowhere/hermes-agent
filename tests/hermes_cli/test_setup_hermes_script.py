@@ -19,3 +19,16 @@ def test_setup_hermes_script_has_termux_path():
     assert "constraints-termux.txt" in content
     assert "$PREFIX/bin" in content
     assert "Skipping tinker-atropos on Termux" in content
+
+
+def test_setup_script_uses_tty_safe_yes_no_prompt():
+    content = SETUP_SCRIPT.read_text(encoding="utf-8")
+
+    assert "prompt_yes_no()" in content
+    assert (
+        'prompt_yes_no "Install ripgrep for faster search?" yes' in content
+    )
+    assert (
+        'prompt_yes_no "Would you like to run the setup wizard now?" yes' in content
+    )
+    assert "read -p" not in content
