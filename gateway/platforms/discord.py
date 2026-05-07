@@ -3422,14 +3422,38 @@ class DiscordAdapter(BasePlatformAdapter):
         from gateway.platforms.base import resolve_channel_prompt
         return resolve_channel_prompt(self.config.extra, channel_id, parent_id)
 
+    @staticmethod
+    def _truthy_config(value: Any) -> bool:
+        """Parse a config/env value as a boolean, treating common false strings as false."""
+        if isinstance(value, str):
+            return value.lower() not in ("false", "0", "no", "off")
+        return bool(value)
+
     def _discord_require_mention(self) -> bool:
         """Return whether Discord channel messages require a bot mention."""
         configured = self.config.extra.get("require_mention")
         if configured is not None:
-            if isinstance(configured, str):
-                return configured.lower() not in ("false", "0", "no", "off")
-            return bool(configured)
+            return self._truthy_config(configured)
         return os.getenv("DISCORD_REQUIRE_MENTION", "true").lower() not in ("false", "0", "no", "off")
+
+    def _discord_strict_mention(self) -> bool:
+        """Return whether Discord channel/thread messages require explicit mentions.
+
+        When enabled, previously participated threads do not bypass mention
+        gating. Defaults to false to preserve the existing thread-continuation
+        behavior.
+        """
+        configured = self.config.extra.get("strict_mention")
+        if configured is not None:
+            if isinstance(configured, str):
+                return configured.lower() in ("true", "1", "yes", "on")
+            return bool(configured)
+        return os.getenv("DISCORD_STRICT_MENTION", "false").lower() in (
+            "true",
+            "1",
+            "yes",
+            "on",
+        )
 
     def _discord_free_response_channels(self) -> set:
         """Return Discord channel IDs where no bot mention is required.
@@ -4007,9 +4031,14 @@ class DiscordAdapter(BasePlatformAdapter):
                 or is_voice_linked_channel
             )
 
-            # Skip the mention check if the message is in a thread where
-            # the bot has previously participated (auto-created or replied in).
-            in_bot_thread = is_thread and thread_id in self._threads
+            # Skip the mention check unless strict mode is enabled and the
+            # message is in a thread where the bot has previously participated
+            # (auto-created or replied in).
+            in_bot_thread = (
+                not self._discord_strict_mention()
+                and is_thread
+                and thread_id in self._threads
+            )
 
             if require_mention and not is_free_channel and not in_bot_thread:
                 if self._client.user not in message.mentions and not mention_prefix:

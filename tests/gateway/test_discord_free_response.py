@@ -356,11 +356,34 @@ async def test_discord_auto_thread_can_be_disabled(adapter, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_discord_strict_mention_defaults_to_false(adapter, monkeypatch):
+    monkeypatch.delenv("DISCORD_STRICT_MENTION", raising=False)
+
+    assert adapter._discord_strict_mention() is False
+
+
+@pytest.mark.asyncio
+async def test_discord_strict_mention_env_var_fallback(adapter, monkeypatch):
+    monkeypatch.setenv("DISCORD_STRICT_MENTION", "true")
+
+    assert adapter._discord_strict_mention() is True
+
+
+@pytest.mark.asyncio
+async def test_discord_strict_mention_malformed_stays_false(adapter, monkeypatch):
+    monkeypatch.delenv("DISCORD_STRICT_MENTION", raising=False)
+    adapter.config.extra["strict_mention"] = "maybe"
+
+    assert adapter._discord_strict_mention() is False
+
+
+@pytest.mark.asyncio
 async def test_discord_bot_thread_skips_mention_requirement(adapter, monkeypatch):
     """Messages in a thread the bot has participated in should not require @mention."""
     monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
     monkeypatch.delenv("DISCORD_FREE_RESPONSE_CHANNELS", raising=False)
     monkeypatch.setenv("DISCORD_AUTO_THREAD", "false")
+    monkeypatch.delenv("DISCORD_STRICT_MENTION", raising=False)
 
     # Simulate bot having previously participated in thread 456
     adapter._threads.mark("456")
@@ -374,6 +397,43 @@ async def test_discord_bot_thread_skips_mention_requirement(adapter, monkeypatch
     event = adapter.handle_message.await_args.args[0]
     assert event.text == "follow-up without mention"
     assert event.source.chat_type == "thread"
+
+
+@pytest.mark.asyncio
+async def test_discord_bot_thread_requires_mention_in_strict_mode(adapter, monkeypatch):
+    """Strict mode should enforce mentions even in known threads."""
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
+    monkeypatch.delenv("DISCORD_FREE_RESPONSE_CHANNELS", raising=False)
+    monkeypatch.setenv("DISCORD_AUTO_THREAD", "false")
+    monkeypatch.setenv("DISCORD_STRICT_MENTION", "true")
+
+    adapter._threads.mark("456")
+
+    thread = FakeThread(channel_id=456, name="existing thread")
+    message = make_message(channel=thread, content="follow-up without mention")
+
+    await adapter._handle_message(message)
+
+    adapter.handle_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_discord_config_extra_can_enable_strict_mention(adapter, monkeypatch):
+    """Config extra should be able to enable strict mention mode without env vars."""
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
+    monkeypatch.delenv("DISCORD_FREE_RESPONSE_CHANNELS", raising=False)
+    monkeypatch.delenv("DISCORD_STRICT_MENTION", raising=False)
+    monkeypatch.setenv("DISCORD_AUTO_THREAD", "false")
+    adapter.config.extra["strict_mention"] = True
+
+    adapter._threads.mark("456")
+
+    thread = FakeThread(channel_id=456, name="existing thread")
+    message = make_message(channel=thread, content="follow-up without mention")
+
+    await adapter._handle_message(message)
+
+    adapter.handle_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -1103,6 +1103,7 @@ DEFAULT_CONFIG = {
     # Discord platform settings (gateway mode)
     "discord": {
         "require_mention": True,       # Require @mention to respond in server channels
+        "strict_mention": False,       # Require @mention on every channel/thread message (disables known-thread auto-engagement)
         "free_response_channels": "",  # Comma-separated channel IDs where bot responds without mention
         "allowed_channels": "",        # If set, bot ONLY responds in these channel IDs (whitelist)
         "auto_thread": True,           # Auto-create threads on @mention in channels (like Slack)

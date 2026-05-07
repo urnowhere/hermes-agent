@@ -758,6 +758,10 @@ def load_gateway_config() -> GatewayConfig:
                     bridged["require_mention"] = platform_cfg["require_mention"]
                 if "free_response_channels" in platform_cfg:
                     bridged["free_response_channels"] = platform_cfg["free_response_channels"]
+                if plat == Platform.DISCORD and "strict_mention" in platform_cfg:
+                    bridged["strict_mention"] = platform_cfg[
+                        "strict_mention"
+                    ]
                 if "mention_patterns" in platform_cfg:
                     bridged["mention_patterns"] = platform_cfg["mention_patterns"]
                 if "dm_policy" in platform_cfg:
@@ -824,6 +828,13 @@ def load_gateway_config() -> GatewayConfig:
                     os.environ["DISCORD_AUTO_THREAD"] = str(discord_cfg["auto_thread"]).lower()
                 if "reactions" in discord_cfg and not os.getenv("DISCORD_REACTIONS"):
                     os.environ["DISCORD_REACTIONS"] = str(discord_cfg["reactions"]).lower()
+                if (
+                    "strict_mention" in discord_cfg
+                    and not os.getenv("DISCORD_STRICT_MENTION")
+                ):
+                    os.environ["DISCORD_STRICT_MENTION"] = str(
+                        discord_cfg["strict_mention"]
+                    ).lower()
                 # ignored_channels: channels where bot never responds (even when mentioned)
                 ic = discord_cfg.get("ignored_channels")
                 if ic is not None and not os.getenv("DISCORD_IGNORED_CHANNELS"):
