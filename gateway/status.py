@@ -129,11 +129,27 @@ def _read_process_cmdline(pid: int) -> Optional[str]:
     try:
         raw = cmdline_path.read_bytes()
     except (FileNotFoundError, PermissionError, OSError):
-        return None
+        raw = None
 
-    if not raw:
+    if raw:
+        return raw.replace(b"\x00", b" ").decode("utf-8", errors="ignore").strip()
+
+    # macOS does not expose /proc, so fall back to ps.  This is important for
+    # stale-lock detection when kernel start_time is unavailable and a PID has
+    # been reused by a non-Hermes process.
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
         return None
-    return raw.replace(b"\x00", b" ").decode("utf-8", errors="ignore").strip()
+    if result.returncode != 0:
+        return None
+    cmdline = result.stdout.strip()
+    return cmdline or None
 
 
 def _looks_like_gateway_process(pid: int) -> bool:
@@ -514,6 +530,13 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
                     existing.get("start_time") is not None
                     and current_start is not None
                     and current_start != existing.get("start_time")
+                ):
+                    stale = True
+                if (
+                    not stale
+                    and existing.get("start_time") is None
+                    and current_start is None
+                    and not _looks_like_gateway_process(existing_pid)
                 ):
                     stale = True
                 # Check if process is stopped (Ctrl+Z / SIGTSTP) — stopped
