@@ -2079,6 +2079,45 @@ OPTIONAL_ENV_VARS = {
         "password": True,
         "category": "messaging",
     },
+    "GOOGLE_CHAT_PROJECT_ID": {
+        "description": "GCP project ID hosting the Pub/Sub topic for Chat events. "
+                       "Falls back to GOOGLE_CLOUD_PROJECT.",
+        "prompt": "GCP project ID",
+        "url": "https://console.cloud.google.com/",
+        "password": False,
+        "category": "messaging",
+    },
+    "GOOGLE_CHAT_SUBSCRIPTION_NAME": {
+        "description": "Full Pub/Sub subscription path: projects/<proj>/subscriptions/<sub>. "
+                       "Legacy alias: GOOGLE_CHAT_SUBSCRIPTION.",
+        "prompt": "Pub/Sub subscription name",
+        "url": None,
+        "password": False,
+        "category": "messaging",
+    },
+    "GOOGLE_CHAT_SERVICE_ACCOUNT_JSON": {
+        "description": "Path to Service Account JSON key (or inline JSON). "
+                       "Leave empty to use Application Default Credentials on Cloud Run / GCE. "
+                       "Falls back to GOOGLE_APPLICATION_CREDENTIALS.",
+        "prompt": "Path to SA JSON (or empty for ADC)",
+        "url": None,
+        "password": True,
+        "category": "messaging",
+    },
+    "GOOGLE_CHAT_ALLOWED_USERS": {
+        "description": "Comma-separated user emails allowed to interact with the bot.",
+        "prompt": "Allowed user emails (comma-separated)",
+        "url": None,
+        "password": False,
+        "category": "messaging",
+    },
+    "GOOGLE_CHAT_HOME_CHANNEL": {
+        "description": "Default space for cron / notification delivery (e.g. spaces/AAAA...).",
+        "prompt": "Home space ID (or empty)",
+        "url": None,
+        "password": False,
+        "category": "messaging",
+    },
     "MATTERMOST_URL": {
         "description": "Mattermost server URL (e.g. https://mm.example.com)",
         "prompt": "Mattermost server URL",

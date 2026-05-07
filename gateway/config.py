@@ -108,6 +108,8 @@ class Platform(Enum):
     BLUEBUBBLES = "bluebubbles"
     QQBOT = "qqbot"
     YUANBAO = "yuanbao"
+    GOOGLE_CHAT = "google_chat"
+
     @classmethod
     def _missing_(cls, value):
         """Accept unknown platform names only for known plugin adapters.
@@ -393,6 +395,16 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
     Platform.DINGTALK: lambda cfg: bool(
         (cfg.extra.get("client_id") or os.getenv("DINGTALK_CLIENT_ID"))
         and (cfg.extra.get("client_secret") or os.getenv("DINGTALK_CLIENT_SECRET"))
+    ),
+    # Google Chat needs both a Pub/Sub project and a subscription to be reachable.
+    # Functionally redundant with the plugin's _is_connected callback (registered
+    # via plugins/platforms/google_chat/adapter.py), but kept here because
+    # _BUILTIN_PLATFORM_VALUES still contains GOOGLE_CHAT (we keep the explicit
+    # enum entry to avoid touching ~15 call sites that use ``Platform.GOOGLE_CHAT``
+    # attribute access). ``test_platform_connected_checkers`` enforces that every
+    # built-in has a checker; this entry satisfies that contract.
+    Platform.GOOGLE_CHAT: lambda cfg: bool(
+        cfg.extra.get("project_id") and cfg.extra.get("subscription_name")
     ),
 }
 
@@ -1405,6 +1417,31 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
                 chat_id=feishu_home,
                 name=os.getenv("FEISHU_HOME_CHANNEL_NAME", "Home"),
                 thread_id=os.getenv("FEISHU_HOME_CHANNEL_THREAD_ID") or None,
+            )
+
+    # Google Chat
+    # Uses Service Account credentials for authentication (google-auth picks up
+    # GOOGLE_APPLICATION_CREDENTIALS automatically). Event delivery via Pub/Sub
+    # pull subscription; outbound via Chat REST API.
+    gc_project = os.getenv("GOOGLE_CHAT_PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT")
+    gc_subscription = os.getenv("GOOGLE_CHAT_SUBSCRIPTION_NAME") or os.getenv("GOOGLE_CHAT_SUBSCRIPTION")
+    if gc_project and gc_subscription:
+        if Platform.GOOGLE_CHAT not in config.platforms:
+            config.platforms[Platform.GOOGLE_CHAT] = PlatformConfig()
+        config.platforms[Platform.GOOGLE_CHAT].enabled = True
+        config.platforms[Platform.GOOGLE_CHAT].extra.update({
+            "project_id": gc_project,
+            "subscription_name": gc_subscription,
+        })
+        gc_sa_json = os.getenv("GOOGLE_CHAT_SERVICE_ACCOUNT_JSON") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        if gc_sa_json:
+            config.platforms[Platform.GOOGLE_CHAT].extra["service_account_json"] = gc_sa_json
+        gc_home = os.getenv("GOOGLE_CHAT_HOME_CHANNEL")
+        if gc_home:
+            config.platforms[Platform.GOOGLE_CHAT].home_channel = HomeChannel(
+                platform=Platform.GOOGLE_CHAT,
+                chat_id=gc_home,
+                name=os.getenv("GOOGLE_CHAT_HOME_CHANNEL_NAME", "Home"),
             )
 
     # WeCom (Enterprise WeChat)

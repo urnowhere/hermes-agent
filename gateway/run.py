@@ -4357,6 +4357,7 @@ class GatewayRunner:
             return YuanbaoAdapter(config)
 
         return None
+
     def _is_user_authorized(self, source: SessionSource) -> bool:
         """
         Check if a user is authorized to use the bot.

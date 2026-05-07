@@ -1,0 +1,15 @@
+name: google_chat-platform
+kind: platform
+version: 1.0.0
+description: >
+  Google Chat gateway adapter for Hermes Agent.
+  Connects via Cloud Pub/Sub pull subscription for inbound events and the
+  Google Chat REST API for outbound messages — same ergonomics as Slack
+  Socket Mode or Telegram long-polling, no public URL required. Native
+  file attachments are delivered via per-user OAuth (each user runs
+  /setup-files once in their own DM).
+author: Ramón Fernández
+requires_env:
+  - GOOGLE_CHAT_PROJECT_ID
+  - GOOGLE_CHAT_SUBSCRIPTION_NAME
+  - GOOGLE_CHAT_SERVICE_ACCOUNT_JSON
