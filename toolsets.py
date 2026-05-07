@@ -56,6 +56,8 @@ _HERMES_CORE_TOOLS = [
     "execute_code", "delegate_task",
     # Cronjob management
     "cronjob",
+    # Desktop computer-use (gated on COMPUTER_USE_ENABLED via check_fn)
+    "computer_use",
     # Cross-platform messaging (gated on gateway running via check_fn)
     "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
