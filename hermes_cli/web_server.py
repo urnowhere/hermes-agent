@@ -16,7 +16,7 @@ import json
 import logging
 import os
 import secrets
-import subprocess
+import subprocess  # nosec B404
 import sys
 import threading
 import time
@@ -509,9 +509,11 @@ def _probe_gateway_health() -> tuple[bool, dict | None]:
         base = base[: -len("/health")]
 
     for path in (f"{base}/health/detailed", f"{base}/health"):
+        if not path.startswith(("http://", "https://")):
+            continue
         try:
             req = urllib.request.Request(path, method="GET")
-            with urllib.request.urlopen(req, timeout=_GATEWAY_HEALTH_TIMEOUT) as resp:
+            with urllib.request.urlopen(req, timeout=_GATEWAY_HEALTH_TIMEOUT) as resp:  # nosec B310
                 if resp.status == 200:
                     body = json.loads(resp.read())
                     return True, body
@@ -700,8 +702,9 @@ def _tail_lines(path: Path, n: int) -> List[str]:
 
 
 @app.post("/api/gateway/restart")
-async def restart_gateway():
+async def restart_gateway(request: Request):
     """Kick off a ``hermes gateway restart`` in the background."""
+    _require_token(request)
     try:
         proc = _spawn_hermes_action(["gateway", "restart"], "gateway-restart")
     except Exception as exc:
@@ -715,8 +718,9 @@ async def restart_gateway():
 
 
 @app.post("/api/hermes/update")
-async def update_hermes():
+async def update_hermes(request: Request):
     """Kick off ``hermes update`` in the background."""
+    _require_token(request)
     try:
         proc = _spawn_hermes_action(["update"], "hermes-update")
     except Exception as exc:
@@ -730,8 +734,9 @@ async def update_hermes():
 
 
 @app.get("/api/actions/{name}/status")
-async def get_action_status(name: str, lines: int = 200):
+async def get_action_status(name: str, request: Request, lines: int = 200):
     """Tail an action log and report whether the process is still running."""
+    _require_token(request)
     log_file_name = _ACTION_LOG_FILES.get(name)
     if log_file_name is None:
         raise HTTPException(status_code=404, detail=f"Unknown action: {name}")
