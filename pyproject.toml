@@ -166,4 +166,4 @@ exclude = ["tinker-atropos"]
 select = [] # disable all lints for now, until we've wrangled typechecks a bit more :3
 
 [tool.uv]
-exclude-newer = "7 days"
+# exclude-newer removed — uv requires an absolute ISO date, not a relative string like "7 days"
