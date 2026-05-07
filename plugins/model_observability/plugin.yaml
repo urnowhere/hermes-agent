@@ -1,0 +1,8 @@
+name: model_observability
+version: 1.0.0
+description: "Log every LLM API call with requested model, returned model, provider, tokens, and duration. Writes JSONL to ~/.hermes/logs/model_usage.jsonl. Enables evidence-based verification of which models actually answer subagent delegations."
+author: Jordan
+requires_env: []
+hooks:
+  - post_api_request
+  - on_session_start
