@@ -12249,10 +12249,25 @@ class GatewayRunner:
 
     def _evict_cached_agent(self, session_key: str) -> None:
         """Remove a cached agent for a session (called on /new, /model, etc)."""
+        entry = None
         _lock = getattr(self, "_agent_cache_lock", None)
         if _lock:
             with _lock:
-                self._agent_cache.pop(session_key, None)
+                entry = self._agent_cache.pop(session_key, None)
+        else:
+            entry = self._agent_cache.pop(session_key, None)
+
+        agent = entry[0] if isinstance(entry, tuple) and entry else entry
+        if agent is None:
+            return
+
+        t = threading.Thread(
+            target=self._release_evicted_agent_soft,
+            args=(agent,),
+            daemon=True,
+            name=f"agent-evict-{session_key[:24]}",
+        )
+        t.start()
 
     @staticmethod
     def _init_cached_agent_for_turn(agent: Any, interrupt_depth: int) -> None:
@@ -14920,7 +14935,12 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # Telegram polling, Discord gateway sockets, etc. The loser exits
     # cleanly before touching any external service.
     import atexit
-    from gateway.status import write_pid_file, remove_pid_file, get_running_pid
+    from gateway.status import (
+        write_pid_file,
+        remove_pid_file,
+        get_running_pid,
+        force_remove_pid_file,
+    )
     _current_pid = get_running_pid()
     if _current_pid is not None and _current_pid != os.getpid():
         logger.error(
@@ -14936,11 +14956,19 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     try:
         write_pid_file()
     except FileExistsError:
-        release_gateway_runtime_lock()
-        logger.error(
-            "PID file race lost to another gateway instance. Exiting."
+        logger.warning(
+            "Gateway PID file already existed after claiming the runtime lock; "
+            "removing the stale file and retrying once."
         )
-        return False
+        force_remove_pid_file()
+        try:
+            write_pid_file()
+        except FileExistsError:
+            release_gateway_runtime_lock()
+            logger.error(
+                "PID file still exists after stale-file recovery. Exiting."
+            )
+            return False
     atexit.register(remove_pid_file)
     atexit.register(release_gateway_runtime_lock)
 
