@@ -599,7 +599,7 @@ class CopilotACPClient:
                 block_error = get_read_block_error(str(path))
                 if block_error:
                     raise PermissionError(block_error)
-                content = path.read_text() if path.exists() else ""
+                content = path.read_text(encoding="utf-8") if path.exists() else ""
                 line = params.get("line")
                 limit = params.get("limit")
                 if isinstance(line, int) and line > 1:
@@ -626,7 +626,7 @@ class CopilotACPClient:
                         f"Write denied: '{path}' is a protected system/credential file."
                     )
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(str(params.get("content") or ""))
+                path.write_text(str(params.get("content") or ""), encoding="utf-8")
                 response = {
                     "jsonrpc": "2.0",
                     "id": message_id,

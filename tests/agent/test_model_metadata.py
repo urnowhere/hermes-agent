@@ -1022,3 +1022,65 @@ class TestContextLengthCache:
         with patch("agent.model_metadata._get_context_cache_path", return_value=cache_file):
             save_context_length(model, url, 200000)
             assert get_cached_context_length(model, url) == 200000
+
+
+# =========================================================================
+# Encoding regressions (Refs #18637)
+# =========================================================================
+
+
+class TestContextCacheEncoding:
+    """Regression for #18637: the context-length YAML cache was opened
+    without ``encoding="utf-8"`` on read and write. On Windows Chinese/
+    Japanese/Korean locales (GBK/CP932/CP949) the platform default decoder
+    rejects UTF-8 bytes and raises ``UnicodeDecodeError`` as soon as the
+    cache file contains any non-ASCII character (e.g. a model name with
+    a CJK alias, or a YAML comment with an em dash).
+    """
+
+    @staticmethod
+    def _install_gbk_like_open(monkeypatch, tracked_path: Path):
+        """Replace builtins.open so reads/writes against ``tracked_path``
+        only succeed when the caller explicitly passes encoding='utf-8'.
+        Mimics the effect of a GBK system locale on Windows."""
+        import builtins
+
+        real_open = builtins.open
+
+        def guarded_open(file, mode="r", *args, **kwargs):
+            same_path = False
+            try:
+                same_path = Path(file) == tracked_path
+            except TypeError:
+                same_path = False
+            text_mode = "b" not in mode
+            if same_path and text_mode and kwargs.get("encoding") != "utf-8":
+                raise UnicodeDecodeError(
+                    "gbk", b"\x94", 0, 1, "illegal multibyte sequence"
+                )
+            return real_open(file, mode, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", guarded_open)
+
+    def test_save_and_load_roundtrip_survives_non_utf8_locale(
+        self, monkeypatch, tmp_path
+    ):
+        cache_file = tmp_path / "context_cache.yaml"
+        with patch(
+            "agent.model_metadata._get_context_cache_path", return_value=cache_file
+        ):
+            # Pre-seed with non-ASCII content so the read path is
+            # exercised with actual UTF-8 bytes on disk.
+            cache_file.write_text(
+                "context_lengths:\n  # 中文注释 em dash —\n  foo@http://x: 4096\n",
+                encoding="utf-8",
+            )
+
+            self._install_gbk_like_open(monkeypatch, cache_file)
+
+            # Without encoding="utf-8" the read would raise here.
+            assert get_cached_context_length("foo", "http://x") == 4096
+
+            # And the write path must stay UTF-8 too.
+            save_context_length("bar", "http://x", 8192)
+            assert get_cached_context_length("bar", "http://x") == 8192
