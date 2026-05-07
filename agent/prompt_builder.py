@@ -12,7 +12,7 @@ import threading
 from collections import OrderedDict
 from pathlib import Path
 
-from hermes_constants import get_hermes_home, get_skills_dir, is_wsl
+from hermes_constants import get_hermes_home, get_skills_dir, is_container, is_wsl
 from typing import Optional
 
 from agent.skill_utils import (
@@ -538,15 +538,25 @@ WSL_ENVIRONMENT_HINT = (
     "the Windows username if needed."
 )
 
+CONTAINER_IN_WSL_ENVIRONMENT_HINT = (
+    "You are running inside a Podman/Docker container on WSL "
+    "(Windows Subsystem for Linux)."
+)
+
 
 def build_environment_hints() -> str:
     """Return environment-specific guidance for the system prompt.
 
-    Detects WSL, and can be extended for Termux, Docker, etc.
+    Detects container-in-WSL, plain WSL, and can be extended for
+    Termux, Docker, etc.  Container-in-WSL is checked first because
+    ``is_wsl()`` returns True even inside a container on a WSL host,
+    but the container environment differs from bare-metal WSL.
     Returns an empty string when no special environment is detected.
     """
     hints: list[str] = []
-    if is_wsl():
+    if is_container() and is_wsl():
+        hints.append(CONTAINER_IN_WSL_ENVIRONMENT_HINT)
+    elif is_wsl():
         hints.append(WSL_ENVIRONMENT_HINT)
     return "\n\n".join(hints)
 

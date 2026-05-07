@@ -28,6 +28,7 @@ from agent.prompt_builder import (
     SESSION_SEARCH_GUIDANCE,
     PLATFORM_HINTS,
     WSL_ENVIRONMENT_HINT,
+    CONTAINER_IN_WSL_ENVIRONMENT_HINT,
 )
 from hermes_cli.nous_subscription import NousFeatureState, NousSubscriptionFeatures
 
@@ -836,9 +837,15 @@ class TestEnvironmentHints:
         assert "/mnt/c/" in WSL_ENVIRONMENT_HINT
         assert "WSL" in WSL_ENVIRONMENT_HINT
 
+    def test_container_in_wsl_hint_constant(self):
+        assert "Podman" in CONTAINER_IN_WSL_ENVIRONMENT_HINT
+        assert "container" in CONTAINER_IN_WSL_ENVIRONMENT_HINT.lower()
+        assert "WSL" in CONTAINER_IN_WSL_ENVIRONMENT_HINT
+
     def test_build_environment_hints_on_wsl(self, monkeypatch):
         import agent.prompt_builder as _pb
         monkeypatch.setattr(_pb, "is_wsl", lambda: True)
+        monkeypatch.setattr(_pb, "is_container", lambda: False)
         result = _pb.build_environment_hints()
         assert "/mnt/" in result
         assert "WSL" in result
@@ -846,7 +853,26 @@ class TestEnvironmentHints:
     def test_build_environment_hints_not_wsl(self, monkeypatch):
         import agent.prompt_builder as _pb
         monkeypatch.setattr(_pb, "is_wsl", lambda: False)
+        monkeypatch.setattr(_pb, "is_container", lambda: False)
         result = _pb.build_environment_hints()
+        assert result == ""
+
+    def test_build_environment_hints_container_in_wsl(self, monkeypatch):
+        import agent.prompt_builder as _pb
+        monkeypatch.setattr(_pb, "is_wsl", lambda: True)
+        monkeypatch.setattr(_pb, "is_container", lambda: True)
+        result = _pb.build_environment_hints()
+        assert "Podman" in result or "Docker" in result
+        assert "container" in result.lower()
+        # Should NOT contain the plain-WSL /mnt/c guidance
+        assert "/mnt/c/" not in result
+
+    def test_build_environment_hints_container_not_wsl(self, monkeypatch):
+        import agent.prompt_builder as _pb
+        monkeypatch.setattr(_pb, "is_wsl", lambda: False)
+        monkeypatch.setattr(_pb, "is_container", lambda: True)
+        result = _pb.build_environment_hints()
+        # Container without WSL — no hint currently defined for that
         assert result == ""
 
 
