@@ -9287,7 +9287,7 @@ training_args = GRPOConfig(
 
 Overall, Unsloth now with VLM vLLM fast inference enables for both 90% reduced memory usage but also 1.5-2x faster speed with GRPO and GSPO!
 
-If you'd like to read more about reinforcement learning, check out out RL guide:
+If you'd like to read more about reinforcement learning, check out our RL guide:
 
 [reinforcement-learning-rl-guide](https://docs.unsloth.ai/get-started/reinforcement-learning-rl-guide "mention")
 
