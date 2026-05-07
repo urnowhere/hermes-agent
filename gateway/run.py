@@ -9203,8 +9203,19 @@ class GatewayRunner:
 
         user_config = _load_gateway_config()
         model = _resolve_gateway_model(user_config)
-        if not model_supports_fast_mode(model):
-            return "⚡ /fast is only available for OpenAI models that support Priority Processing."
+
+        candidate_models = [model]
+        fallback_config = user_config.get("fallback_providers") or user_config.get("fallback_model") or []
+        if isinstance(fallback_config, dict):
+            fallback_config = [fallback_config]
+        if isinstance(fallback_config, list):
+            candidate_models.extend(
+                str(entry.get("model") or "")
+                for entry in fallback_config
+                if isinstance(entry, dict)
+            )
+        if not any(model_supports_fast_mode(candidate) for candidate in candidate_models):
+            return "⚡ /fast is only available for OpenAI/Anthropic models that support fast mode."
 
         def _save_config_key(key_path: str, value):
             """Save a dot-separated key to config.yaml."""

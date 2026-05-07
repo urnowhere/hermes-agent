@@ -7813,6 +7813,18 @@ class AIAgent:
                     provider=self.provider,
                 )
 
+            # Recompute fast/priority request overrides after fallback swaps the
+            # active model. A turn can start on a non-fast primary (e.g. GLM)
+            # and later fall back to a fast-capable model (e.g. GPT-5.x). In
+            # that case the per-turn request_overrides were computed for the
+            # primary and would otherwise omit service_tier/speed on fallback.
+            if getattr(self, "service_tier", None):
+                try:
+                    from hermes_cli.models import resolve_fast_mode_overrides
+                    self.request_overrides = resolve_fast_mode_overrides(fb_model) or {}
+                except Exception:
+                    self.request_overrides = {}
+
             self._emit_status(
                 f"🔄 Primary model failed — switching to fallback: "
                 f"{fb_model} via {fb_provider}"
