@@ -146,6 +146,9 @@ See `references/full-prompt-library.md` for 30+ additional constraints across co
 
 After the user picks one, start building — create the project, write the code, iterate.
 
+## Diversity-Aware Generation
+To ensure maximum diversity for this plan, first output a 16-character <random_string>. Then, in a <thinking> block, calculate the sum of their ASCII values modulo 3 to select the structural archetype of your response. Then execute the plan.
+
 ## Attribution
 
 Constraint approach inspired by [wttdotm.com/prompts.html](https://wttdotm.com/prompts.html). Adapted and expanded for software development and general-purpose ideation.
