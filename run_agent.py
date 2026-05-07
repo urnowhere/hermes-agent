@@ -10869,9 +10869,11 @@ class AIAgent:
                         break  # Under threshold
 
         # Plugin hook: pre_llm_call
-        # Fired once per turn before the tool-calling loop.  Plugins can
-        # return a dict with a ``context`` key (or a plain string) whose
-        # value is appended to the current turn's user message.
+        # Fired once per turn before the tool-calling loop. Plugins can:
+        # - return a dict with a ``context`` key (or a plain string) whose
+        #   value is appended to the current turn's user message, and/or
+        # - return a dict with ``short_circuit_response`` to skip the model
+        #   call entirely and respond immediately.
         #
         # Context is ALWAYS injected into the user message, never the
         # system prompt.  This preserves the prompt cache prefix — the
@@ -10881,6 +10883,7 @@ class AIAgent:
         #
         # All injected context is ephemeral (not persisted to session DB).
         _plugin_user_context = ""
+        _plugin_short_circuit_response = None
         try:
             from hermes_cli.plugins import invoke_hook as _invoke_hook
             _pre_results = _invoke_hook(
@@ -10895,8 +10898,14 @@ class AIAgent:
             )
             _ctx_parts: list[str] = []
             for r in _pre_results:
-                if isinstance(r, dict) and r.get("context"):
-                    _ctx_parts.append(str(r["context"]))
+                if isinstance(r, dict):
+                    if r.get("context"):
+                        _ctx_parts.append(str(r["context"]))
+                    if (
+                        _plugin_short_circuit_response is None
+                        and r.get("short_circuit_response") is not None
+                    ):
+                        _plugin_short_circuit_response = str(r["short_circuit_response"])
                 elif isinstance(r, str) and r.strip():
                     _ctx_parts.append(r)
             if _ctx_parts:
@@ -10931,6 +10940,16 @@ class AIAgent:
             self._interrupt_message = None
             self._interrupt_thread_signal_pending = False
 
+        if self._interrupt_requested:
+            interrupted = True
+            _turn_exit_reason = "interrupted_by_user"
+            if not self.quiet_mode:
+                self._safe_print("\n⚡ Breaking out of tool loop due to interrupt...")
+        elif _plugin_short_circuit_response is not None:
+            final_response = _plugin_short_circuit_response
+            messages.append({"role": "assistant", "content": final_response})
+            _turn_exit_reason = "plugin_short_circuit"
+
         # Notify memory providers of the new turn so cadence tracking works.
         # Must happen BEFORE prefetch_all() so providers know which turn it is
         # and can gate context/dialectic refresh via contextCadence/dialecticCadence.
@@ -10946,15 +10965,17 @@ class AIAgent:
         # prefetch_all() on each tool call (10 tool calls = 10x latency + cost).
         # Use original_user_message (clean input) — user_message may contain
         # injected skill content that bloats / breaks provider queries.
+        # Skip prefetch entirely when the turn is already interrupted or a
+        # plugin has short-circuited before any model call.
         _ext_prefetch_cache = ""
-        if self._memory_manager:
+        if self._memory_manager and not interrupted and _plugin_short_circuit_response is None:
             try:
                 _query = original_user_message if isinstance(original_user_message, str) else ""
                 _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
             except Exception:
                 pass
 
-        while (api_call_count < self.max_iterations and self.iteration_budget.remaining > 0) or self._budget_grace_call:
+        while _plugin_short_circuit_response is None and ((api_call_count < self.max_iterations and self.iteration_budget.remaining > 0) or self._budget_grace_call):
             # Reset per-turn checkpoint dedup so each iteration can take one snapshot
             self._checkpoint_mgr.new_turn()
 
@@ -13979,7 +14000,14 @@ class AIAgent:
             final_response = self._handle_max_iterations(messages, api_call_count)
         
         # Determine if conversation completed successfully
-        completed = final_response is not None and api_call_count < self.max_iterations
+        completed = (
+            final_response is not None
+            and not interrupted
+            and (
+                _turn_exit_reason == "plugin_short_circuit"
+                or api_call_count < self.max_iterations
+            )
+        )
 
         # Save trajectory if enabled.  ``user_message`` may be a multimodal
         # list of parts; the trajectory format wants a plain string.
