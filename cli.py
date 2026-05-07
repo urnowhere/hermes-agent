@@ -5806,6 +5806,7 @@ class HermesCLI:
         # Copilot, and Nous-enforced caps win over the raw models.dev entry
         # (e.g. gpt-5.5 is 1.05M on openai but 272K on Codex OAuth).
         mi = result.model_info
+        ctx = None
         try:
             from hermes_cli.model_switch import resolve_display_context_length
             ctx = resolve_display_context_length(
@@ -5839,9 +5840,20 @@ class HermesCLI:
             save_config_value("model.default", result.new_model)
             if result.provider_changed:
                 save_config_value("model.provider", result.target_provider)
+            if ctx:
+                save_config_value("model.context_length", ctx)
             _cprint("    Saved to config.yaml (--global)")
         else:
             _cprint("    (session only — add --global to persist)")
+
+        # Print updated context limit so the user sees the runtime effect
+        # immediately — mirrors the startup 📊 banner.
+        if self.agent is not None and hasattr(self.agent, "context_compressor") and self.agent.context_compressor:
+            _new_cl = self.agent.context_compressor.context_length
+            _threshold_pct = int(self.agent.context_compressor.threshold_ratio * 100)
+            _threshold_tokens = self.agent.context_compressor.threshold_tokens
+            if _new_cl and _threshold_tokens:
+                _cprint(f"    📊 Context limit updated: {_new_cl:,} tokens (compress at {_threshold_pct}% = {_threshold_tokens:,})")
 
     def _handle_model_picker_selection(self, persist_global: bool = False) -> None:
         state = self._model_picker_state

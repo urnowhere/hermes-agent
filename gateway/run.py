@@ -7914,6 +7914,10 @@ class GatewayRunner:
                 model_cfg["provider"] = result.target_provider
                 if result.base_url:
                     model_cfg["base_url"] = result.base_url
+                # Persist context_length so the next session starts with
+                # the correct value instead of the old model's default.
+                if ctx:
+                    model_cfg["context_length"] = ctx
                 from hermes_cli.config import save_config
                 save_config(cfg)
             except Exception as e:
@@ -7971,6 +7975,14 @@ class GatewayRunner:
             lines.append("Saved to config.yaml (`--global`)")
         else:
             lines.append("_(session only -- add `--global` to persist)_")
+
+        # Show updated context limit so the user sees runtime effect immediately.
+        if cached_entry and hasattr(cached_entry[0], "context_compressor") and cached_entry[0].context_compressor:
+            _new_cl = cached_entry[0].context_compressor.context_length
+            _threshold_pct = int(cached_entry[0].context_compressor.threshold_ratio * 100)
+            _threshold_tokens = cached_entry[0].context_compressor.threshold_tokens
+            if _new_cl and _threshold_tokens:
+                lines.append(f"📊 Context limit updated: {_new_cl:,} tokens (compress at {_threshold_pct}% = {_threshold_tokens:,})")
 
         return "\n".join(lines)
 
