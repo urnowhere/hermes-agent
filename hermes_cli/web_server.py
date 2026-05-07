@@ -4055,7 +4055,24 @@ def start_server(
 
         def _open():
             time.sleep(1.0)
-            webbrowser.open(f"http://{host}:{port}")
+            url = f"http://{host}:{port}"
+            # WSL: webbrowser.open() fails because no browser is registered
+            # in the Linux subsystem.  Use powershell.exe to open the URL
+            # in the Windows host browser instead.
+            try:
+                from hermes_constants import is_wsl
+                if is_wsl():
+                    import subprocess
+                    subprocess.Popen(
+                        ["powershell.exe", "-NoProfile", "-Command",
+                         f"Start-Process '{url}'"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    return
+            except Exception:
+                pass  # Fall through to standard webbrowser
+            webbrowser.open(url)
 
         threading.Thread(target=_open, daemon=True).start()
 
