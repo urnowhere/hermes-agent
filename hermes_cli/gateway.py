@@ -3148,6 +3148,38 @@ _PLATFORMS = [
         ],
     },
     {
+        "key": "napcat",
+        "label": "NapCat (QQ / OneBot 11)",
+        "emoji": "🐱",
+        "token_var": "NAPCAT_TOKEN",
+        "setup_instructions": [
+            "1. Install NapCatQQ on the machine running QQ (https://github.com/NapNeko/NapCatQQ)",
+            "2. Pick a shared access token and bind address/port for Hermes",
+            "3. In NapCat Web UI → Network → Add → WebSocket Client:",
+            "     URL:  ws://<hermes-host>:<NAPCAT_PORT><NAPCAT_PATH>",
+            "     access_token: <NAPCAT_TOKEN>",
+            "     messagePostFormat: array",
+            "4. Start the gateway with `hermes gateway run`",
+        ],
+        "vars": [
+            {"name": "NAPCAT_TOKEN", "prompt": "NapCat access token (shared secret)", "password": True,
+             "help": "Any strong random string — must match NapCat's websocketClients access_token."},
+            {"name": "NAPCAT_HOST", "prompt": "Bind host (default 0.0.0.0)", "password": False, "optional": True,
+             "help": "Host interface to bind. Use 0.0.0.0 to accept connections from any network interface."},
+            {"name": "NAPCAT_PORT", "prompt": "Bind port (default 8646)", "password": False, "optional": True,
+             "help": "TCP port Hermes listens on for NapCat reverse-WS upgrade."},
+            {"name": "NAPCAT_PATH", "prompt": "Endpoint path (default /napcat/ws)", "password": False, "optional": True,
+             "help": "WebSocket path — must match the URL configured in NapCat."},
+            {"name": "NAPCAT_ALLOWED_USERS", "prompt": "Allowed user QQ numbers (comma-separated, leave empty for open access)", "password": False,
+             "is_allowlist": True,
+             "help": "Optional — restrict DM access to specific QQ numbers (user_id in OneBot events)."},
+            {"name": "NAPCAT_ALLOWED_GROUPS", "prompt": "Allowed QQ group numbers (comma-separated, * = any group)", "password": False, "optional": True,
+             "help": "Any member of a listed group can chat with the bot without per-user allowlisting."},
+            {"name": "NAPCAT_HOME_CHANNEL", "prompt": "Home channel (QQ number for private, 'group:<id>' for group — or empty)", "password": False,
+             "help": "Chat to deliver cron results and notifications to."},
+        ],
+    },
+    {
         "key": "yuanbao",
         "label": "Yuanbao",
         "emoji": "💎",
@@ -3609,6 +3641,12 @@ def _setup_wecom():
 
     print()
     print_success("💬 WeCom configured!")
+
+
+def _setup_napcat():
+    """Configure NapCat via the standard platform setup."""
+    napcat_platform = next(p for p in _PLATFORMS if p["key"] == "napcat")
+    _setup_standard_platform(napcat_platform)
 
 
 def _setup_yuanbao():
@@ -4216,7 +4254,11 @@ def _builtin_setup_fn(key: str):
         "feishu": _setup_feishu,
         "wecom": _setup_wecom,
         "qqbot": _setup_qqbot,
+        "napcat": _setup_napcat,
+        "yuanbao": _setup_yuanbao,
     }.get(key)
+
+
 def _configure_platform(platform: dict) -> None:
     """Run the interactive setup flow for a single platform.
 

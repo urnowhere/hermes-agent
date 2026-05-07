@@ -10,6 +10,7 @@ Each adapter handles:
 
 from .base import BasePlatformAdapter, MessageEvent, SendResult
 from .qqbot import QQAdapter
+from .napcat import NapCatAdapter
 from .yuanbao import YuanbaoAdapter
 
 __all__ = [
@@ -17,5 +18,6 @@ __all__ = [
     "MessageEvent",
     "SendResult",
     "QQAdapter",
+    "NapCatAdapter",
     "YuanbaoAdapter",
 ]

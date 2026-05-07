@@ -1636,7 +1636,7 @@ class BasePlatformAdapter(ABC):
         images: List[Tuple[str, str]],
         metadata: Optional[Dict[str, Any]] = None,
         human_delay: float = 0.0,
-    ) -> None:
+    ) -> List[SendResult]:
         """Send a batch of images.
 
         Accepts ``http(s)://``, ``file://`` URIs in the first tuple
@@ -1651,6 +1651,7 @@ class BasePlatformAdapter(ABC):
         """
         from urllib.parse import unquote as _unquote
 
+        results: List[SendResult] = []
         for image_url, alt_text in images:
             if human_delay > 0:
                 await asyncio.sleep(human_delay)
@@ -1684,8 +1685,11 @@ class BasePlatformAdapter(ABC):
                     )
                 if not img_result.success:
                     logger.error("[%s] Failed to send image: %s", self.name, img_result.error)
+                results.append(img_result)
             except Exception as img_err:
                 logger.error("[%s] Error sending image: %s", self.name, img_err, exc_info=True)
+                results.append(SendResult(success=False, error=str(img_err)))
+        return results
 
     async def send_image(
         self,
@@ -1747,6 +1751,10 @@ class BasePlatformAdapter(ABC):
         """
         images = []
         cleaned = content
+
+        def _is_malformed_image_url(url: str) -> bool:
+            lowered = (url or "").strip().lower()
+            return "```" in lowered or "\\n" in lowered or "\n" in lowered
         
         # Match markdown images: ![alt](url)
         md_pattern = r'!\[([^\]]*)\]\((https?://[^\s\)]+)\)'
@@ -1754,6 +1762,8 @@ class BasePlatformAdapter(ABC):
             alt_text = match.group(1)
             url = match.group(2)
             # Only extract URLs that look like actual images
+            if _is_malformed_image_url(url):
+                continue
             if any(url.lower().endswith(ext) or ext in url.lower() for ext in
                    ['.png', '.jpg', '.jpeg', '.gif', '.webp', 'fal.media', 'fal-cdn', 'replicate.delivery']):
                 images.append((url, alt_text))
@@ -1762,6 +1772,8 @@ class BasePlatformAdapter(ABC):
         html_pattern = r'<img\s+src=["\']?(https?://[^\s"\'<>]+)["\']?\s*/?>\s*(?:</img>)?'
         for match in re.finditer(html_pattern, content):
             url = match.group(1)
+            if _is_malformed_image_url(url):
+                continue
             images.append((url, ""))
         
         # Remove only the matched image tags from content (not all markdown images)
@@ -1871,6 +1883,59 @@ class BasePlatformAdapter(ABC):
         return await self.send(chat_id=chat_id, content=text, reply_to=reply_to)
 
     @staticmethod
+    def _looks_like_placeholder_media_path(path: str) -> bool:
+        """Return True for documentation/example paths that must not send.
+
+        Skills and system prompts describe media delivery with examples such as
+        ``MEDIA:/path/to/meme.png``.  Small models sometimes echo those examples
+        verbatim; treating them as real attachments makes platform adapters
+        attempt impossible file reads (NapCat reports ENOENT and sends
+        "图片发送失败").  Keep this intentionally narrow so genuine local paths,
+        URLs, and tool-produced cache paths still work.
+        """
+        raw = (path or "").strip().strip("`\"'")
+        if not raw:
+            return False
+        lowered = raw.replace("\\", "/").lower()
+        if lowered.startswith(("http://", "https://", "base64://", "data:")):
+            if "```" in lowered or "\\n" in lowered or "\n" in lowered:
+                return True
+            return False
+        if lowered.startswith("file://"):
+            lowered = lowered[7:]
+
+        placeholder_examples = {
+            "path/to/meme.png",
+            "abs/path/to/img.png",
+            "abs/path/to/audio.ogg",
+            "absolute/path/to/img.png",
+            "absolute/path/to/audio.ogg",
+            "absolute/path/to/file",
+            "absolute/path",
+            "home/user/cache/meme.png",
+        }
+        normalized = lowered.lstrip("/")
+        if normalized in placeholder_examples:
+            return True
+
+        placeholder_markers = (
+            "/path/to/meme.png",
+            "/abs/path/to/img.png",
+            "/abs/path/to/audio.ogg",
+            "/absolute/path/to/img.png",
+            "/absolute/path/to/audio.ogg",
+            "/absolute/path/to/file",
+            "/home/user/cache/meme.png",
+        )
+        if any(marker in lowered for marker in placeholder_markers):
+            return True
+        if re.search(r"(^|/)absolute/path($|/)", lowered):
+            return True
+        if "```" in lowered or "\\n" in lowered:
+            return True
+        return False
+
+    @staticmethod
     def extract_media(content: str) -> Tuple[List[Tuple[str, bool]], str]:
         """
         Extract MEDIA:<path> tags and [[audio_as_voice]] directives from response text.
@@ -1886,29 +1951,42 @@ class BasePlatformAdapter(ABC):
             Tuple of (list of (path, is_voice) pairs, cleaned content with tags removed).
         """
         media = []
-        cleaned = content
         
         # Check for [[audio_as_voice]] directive
         has_voice_tag = "[[audio_as_voice]]" in content
-        cleaned = cleaned.replace("[[audio_as_voice]]", "")
         
         # Extract MEDIA:<path> tags, allowing optional whitespace after the colon
         # and quoted/backticked paths for LLM-formatted outputs.
         media_pattern = re.compile(
             r'''[`"']?MEDIA:\s*(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|(?:~/|/)\S+(?:[^\S\n]+\S+)*?\.(?:png|jpe?g|gif|webp|mp4|mov|avi|mkv|webm|ogg|opus|mp3|wav|m4a|flac|epub|pdf|zip|rar|7z|docx?|xlsx?|pptx?|txt|csv|apk|ipa)(?=[\s`"',;:)\]}]|$)|\S+)[`"']?'''
         )
+        accepted_spans = set()
         for match in media_pattern.finditer(content):
             path = match.group("path").strip()
             if len(path) >= 2 and path[0] == path[-1] and path[0] in "`\"'":
                 path = path[1:-1].strip()
             path = path.lstrip("`\"'").rstrip("`\"',.;:)}]")
+            if BasePlatformAdapter._looks_like_placeholder_media_path(path):
+                continue
             if path:
                 media.append((os.path.expanduser(path), has_voice_tag))
+                accepted_spans.add(match.span())
 
-        # Remove MEDIA tags from content (including surrounding quote/backtick wrappers)
-        if media:
-            cleaned = media_pattern.sub('', cleaned)
+        # Remove only accepted MEDIA tags from content.  Placeholder/example
+        # tags are preserved as plain text so they do not silently disappear
+        # when a response mixes one real attachment with documentation prose.
+        if accepted_spans:
+            def _remove_accepted(match):
+                return '' if match.span() in accepted_spans else match.group(0)
+            cleaned = media_pattern.sub(_remove_accepted, content)
             cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+        else:
+            cleaned = content
+
+        # Strip the internal voice directive from visible text even if the
+        # following MEDIA tag was ignored as a placeholder.
+        cleaned = cleaned.replace("[[audio_as_voice]]", "")
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
         
         return media, cleaned
 
@@ -2772,6 +2850,25 @@ class BasePlatformAdapter(ABC):
             if not response:
                 logger.debug("[%s] Handler returned empty/None response for %s", self.name, event.source.chat_id)
             if response:
+                media_delivery_errors: List[str] = []
+
+                def _record_media_delivery_result(kind: str, path: str, result: Any) -> None:
+                    _record_delivery(result)
+                    if getattr(result, "success", False):
+                        return
+                    _record_media_delivery_error(kind, path, getattr(result, "error", None))
+
+                def _record_media_delivery_error(kind: str, path: str, error: Any) -> None:
+                    error_text = str(error or "unknown error").strip()
+                    path_text = str(path or "").strip()
+                    if len(path_text) > 240:
+                        path_text = path_text[:237] + "..."
+                    if len(error_text) > 500:
+                        error_text = error_text[:497] + "..."
+                    media_delivery_errors.append(
+                        f"{kind} failed for {path_text}: {error_text}"
+                    )
+
                 # Extract MEDIA:<path> tags (from TTS tool) before other processing
                 media_files, response = self.extract_media(response)
                 
@@ -2865,14 +2962,19 @@ class BasePlatformAdapter(ABC):
                 if images:
                     logger.info("[%s] Extracted %d image(s) to send as attachments", self.name, len(images))
                     try:
-                        await self.send_multiple_images(
+                        image_results = await self.send_multiple_images(
                             chat_id=event.source.chat_id,
                             images=images,
                             metadata=_thread_metadata,
                             human_delay=human_delay,
                         )
+                        for idx, image_result in enumerate(image_results or []):
+                            if not image_result.success:
+                                image_path = images[idx][0] if idx < len(images) else "image"
+                                _record_media_delivery_result("image", image_path, image_result)
                     except Exception as batch_err:
                         logger.warning("[%s] Error batching images: %s", self.name, batch_err, exc_info=True)
+                        _record_media_delivery_error("image batch", f"{len(images)} image(s)", batch_err)
 
 
                 # Send extracted media files — route by file type
@@ -2900,14 +3002,19 @@ class BasePlatformAdapter(ABC):
                 if _image_paths:
                     try:
                         _batch = [(f"file://{_quote(p)}", "") for p in _image_paths]
-                        await self.send_multiple_images(
+                        image_results = await self.send_multiple_images(
                             chat_id=event.source.chat_id,
                             images=_batch,
                             metadata=_thread_metadata,
                             human_delay=human_delay,
                         )
+                        for idx, image_result in enumerate(image_results or []):
+                            if not image_result.success:
+                                image_path = _image_paths[idx] if idx < len(_image_paths) else "image"
+                                _record_media_delivery_result("image", image_path, image_result)
                     except Exception as batch_err:
                         logger.warning("[%s] Error batching images: %s", self.name, batch_err, exc_info=True)
+                        _record_media_delivery_error("image batch", f"{len(_image_paths)} image(s)", batch_err)
 
                 for media_path, is_voice in _non_image_media:
                     if human_delay > 0:
@@ -2935,8 +3042,10 @@ class BasePlatformAdapter(ABC):
 
                         if not media_result.success:
                             logger.warning("[%s] Failed to send media (%s): %s", self.name, ext, media_result.error)
+                        _record_media_delivery_result("media", media_path, media_result)
                     except Exception as media_err:
                         logger.warning("[%s] Error sending media: %s", self.name, media_err)
+                        _record_media_delivery_error("media", media_path, media_err)
 
                 # Send auto-detected local non-image files as native attachments
                 for file_path in _non_image_local:
@@ -2945,19 +3054,42 @@ class BasePlatformAdapter(ABC):
                     try:
                         ext = Path(file_path).suffix.lower()
                         if ext in _VIDEO_EXTS:
-                            await self.send_video(
+                            file_result = await self.send_video(
                                 chat_id=event.source.chat_id,
                                 video_path=file_path,
                                 metadata=_thread_metadata,
                             )
                         else:
-                            await self.send_document(
+                            file_result = await self.send_document(
                                 chat_id=event.source.chat_id,
                                 file_path=file_path,
                                 metadata=_thread_metadata,
                             )
+                        if not file_result.success:
+                            logger.warning("[%s] Failed to send local file (%s): %s", self.name, ext, file_result.error)
+                        _record_media_delivery_result("file", file_path, file_result)
                     except Exception as file_err:
                         logger.error("[%s] Error sending local file %s: %s", self.name, file_path, file_err)
+                        _record_media_delivery_error("file", file_path, file_err)
+
+                if media_delivery_errors:
+                    feedback = (
+                        "[Hermes gateway delivery feedback]\n"
+                        + "\n".join(f"- {item}" for item in media_delivery_errors)
+                        + "\nIf this was a local path, remember the messaging platform may run on a different machine; use a URL, base64://, or a shared path readable by the platform host."
+                    )
+                    try:
+                        session_entry = self._session_store.get_or_create_session(event.source)
+                        self._session_store.append_to_transcript(
+                            session_entry.session_id,
+                            {
+                                "role": "user",
+                                "content": feedback,
+                                "timestamp": datetime.now().isoformat(),
+                            },
+                        )
+                    except Exception as feedback_err:
+                        logger.debug("[%s] Failed to persist media delivery feedback: %s", self.name, feedback_err)
 
             # Determine overall success for the processing hook
             processing_ok = delivery_succeeded if delivery_attempted else not bool(response)

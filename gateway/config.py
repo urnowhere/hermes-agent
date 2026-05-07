@@ -107,6 +107,7 @@ class Platform(Enum):
     WEIXIN = "weixin"
     BLUEBUBBLES = "bluebubbles"
     QQBOT = "qqbot"
+    NAPCAT = "napcat"
     YUANBAO = "yuanbao"
     @classmethod
     def _missing_(cls, value):
@@ -387,6 +388,7 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
     Platform.QQBOT: lambda cfg: bool(
         cfg.extra.get("app_id") and cfg.extra.get("client_secret")
     ),
+    Platform.NAPCAT: lambda cfg: bool(cfg.token or cfg.extra.get("token")),
     Platform.YUANBAO: lambda cfg: bool(
         cfg.extra.get("app_id") and cfg.extra.get("app_secret")
     ),
@@ -1555,6 +1557,44 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
                 ),
             )
 
+    # NapCat (OneBot 11 reverse WebSocket)
+    napcat_token = os.getenv("NAPCAT_TOKEN")
+    napcat_host = os.getenv("NAPCAT_HOST")
+    napcat_port = os.getenv("NAPCAT_PORT")
+    napcat_path = os.getenv("NAPCAT_PATH")
+    napcat_enabled_env = os.getenv("NAPCAT_ENABLED", "").strip().lower()
+    if napcat_token or napcat_enabled_env in ("true", "1", "yes"):
+        if Platform.NAPCAT not in config.platforms:
+            config.platforms[Platform.NAPCAT] = PlatformConfig()
+        config.platforms[Platform.NAPCAT].enabled = True
+        if napcat_token:
+            config.platforms[Platform.NAPCAT].token = napcat_token
+            config.platforms[Platform.NAPCAT].extra["token"] = napcat_token
+        extra = config.platforms[Platform.NAPCAT].extra
+        if napcat_host:
+            extra["host"] = napcat_host
+        if napcat_port:
+            try:
+                extra["port"] = int(napcat_port)
+            except ValueError:
+                pass
+        if napcat_path:
+            extra["path"] = napcat_path
+        napcat_allowed = os.getenv("NAPCAT_ALLOWED_USERS", "").strip()
+        if napcat_allowed:
+            extra["allow_from"] = napcat_allowed
+        napcat_group_allowed = os.getenv("NAPCAT_GROUP_ALLOWED_USERS", "").strip()
+        if napcat_group_allowed:
+            extra["group_allow_from"] = napcat_group_allowed
+        napcat_home = os.getenv("NAPCAT_HOME_CHANNEL", "").strip()
+        if napcat_home:
+            config.platforms[Platform.NAPCAT].home_channel = HomeChannel(
+                platform=Platform.NAPCAT,
+                chat_id=napcat_home,
+                name=os.getenv("NAPCAT_HOME_CHANNEL_NAME", "Home"),
+            )
+
+
     # Yuanbao — YUANBAO_APP_ID preferred
     yuanbao_app_id = os.getenv("YUANBAO_APP_ID") or os.getenv("YUANBAO_APP_KEY")
     yuanbao_app_secret = os.getenv("YUANBAO_APP_SECRET")
@@ -1597,6 +1637,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         yuanbao_group_allow_from = os.getenv("YUANBAO_GROUP_ALLOW_FROM")
         if yuanbao_group_allow_from:
             extra["group_allow_from"] = yuanbao_group_allow_from
+
 
     # Session settings
     idle_minutes = os.getenv("SESSION_IDLE_MINUTES")

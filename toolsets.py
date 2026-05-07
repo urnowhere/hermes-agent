@@ -255,6 +255,12 @@ TOOLSETS = {
         "includes": []
     },
 
+    "napcat": {
+        "description": "NapCat / OneBot 11 generic action proxy for QQ operations",
+        "tools": ["napcat_call"],
+        "includes": [],
+    },
+
     "feishu_doc": {
         "description": "Read Feishu/Lark document content",
         "tools": ["feishu_doc_read"],
@@ -463,6 +469,12 @@ TOOLSETS = {
         "includes": []
     },
 
+    "hermes-napcat": {
+        "description": "NapCat toolset - QQ messaging via NapCat/OneBot 11 reverse WebSocket (full access). Adds napcat_call for arbitrary OneBot 11 actions (group history, profile edits, file upload, recall, etc.).",
+        "tools": _HERMES_CORE_TOOLS + ["napcat_call"],
+        "includes": []
+    },
+
     "hermes-wecom": {
         "description": "WeCom bot toolset - enterprise WeChat messaging (full access)",
         "tools": _HERMES_CORE_TOOLS,
@@ -503,7 +515,7 @@ TOOLSETS = {
     "hermes-gateway": {
         "description": "Gateway toolset - union of all messaging platform tools",
         "tools": [],
-        "includes": ["hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-bluebubbles", "hermes-homeassistant", "hermes-email", "hermes-sms", "hermes-mattermost", "hermes-matrix", "hermes-dingtalk", "hermes-feishu", "hermes-wecom", "hermes-wecom-callback", "hermes-weixin", "hermes-qqbot", "hermes-webhook", "hermes-yuanbao"]
+        "includes": ["hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-bluebubbles", "hermes-homeassistant", "hermes-email", "hermes-sms", "hermes-mattermost", "hermes-matrix", "hermes-dingtalk", "hermes-feishu", "hermes-wecom", "hermes-wecom-callback", "hermes-weixin", "hermes-qqbot", "hermes-napcat", "hermes-webhook", "hermes-yuanbao"]
     }
 }
 

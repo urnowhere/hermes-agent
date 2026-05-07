@@ -356,7 +356,31 @@ For cloud sandbox backends, persistence is filesystem-oriented. `TERMINAL_LIFETI
 | `QQ_ALLOW_ALL_USERS` | Allow all users (`true`/`false`, overrides `QQ_ALLOWED_USERS`) |
 | `QQBOT_HOME_CHANNEL` | QQ user/group openID for cron delivery and notifications |
 | `QQBOT_HOME_CHANNEL_NAME` | Display name for the QQ home channel |
+| `QQ_HOME_CHANNEL` | Legacy QQ user/group openID for cron delivery and notifications |
 | `QQ_PORTAL_HOST` | Override the QQ portal host (set to `sandbox.q.qq.com` to route through the sandbox gateway; default: `q.qq.com`). |
+| `NAPCAT_TOKEN` | Shared access token used to authenticate NapCat's reverse-WebSocket upgrade |
+| `NAPCAT_ENABLED` | Enable the NapCat adapter even without a token in `.env` (`true`/`false`) |
+| `NAPCAT_HOST` | Bind host for the NapCat reverse-WS server (default: `0.0.0.0`) |
+| `NAPCAT_PORT` | Bind port for the NapCat reverse-WS server (default: `8646`) |
+| `NAPCAT_PATH` | WebSocket path NapCat connects to (default: `/napcat/ws`) |
+| `NAPCAT_ALLOWED_USERS` | Comma-separated QQ user numbers allowed to DM the bot |
+| `NAPCAT_GROUP_ALLOWED_USERS` | Comma-separated QQ user numbers allowed to talk in group chats |
+| `NAPCAT_ALLOWED_GROUPS` | Comma-separated QQ group numbers whose members are all authorized (use `*` for any group) |
+| `NAPCAT_ALLOW_ALL_USERS` | Allow all NapCat users without an allowlist (`true`/`false`) |
+| `NAPCAT_HOME_CHANNEL` | Default NapCat chat for cron delivery (`10001` for private, `group:987654` for group) |
+| `NAPCAT_HOME_CHANNEL_NAME` | Display name for the NapCat home channel |
+| `YUANBAO_APP_ID` | Yuanbao IM Bot App ID |
+| `YUANBAO_APP_SECRET` | Yuanbao IM Bot App Secret |
+| `YUANBAO_BOT_ID` | Optional Yuanbao bot ID returned by sign-token |
+| `YUANBAO_WS_URL` | Override Yuanbao WebSocket gateway URL |
+| `YUANBAO_API_DOMAIN` | Override Yuanbao API domain |
+| `YUANBAO_ROUTE_ENV` | Optional Yuanbao route environment override |
+| `YUANBAO_HOME_CHANNEL` | Yuanbao chat/group for cron delivery and notifications |
+| `YUANBAO_HOME_CHANNEL_NAME` | Display name for the Yuanbao home channel |
+| `YUANBAO_DM_POLICY` | Yuanbao DM policy: `open`, `allowlist`, or `disabled` |
+| `YUANBAO_DM_ALLOW_FROM` | Comma-separated Yuanbao user IDs allowed by DM allowlist policy |
+| `YUANBAO_GROUP_POLICY` | Yuanbao group policy: `open`, `allowlist`, or `disabled` |
+| `YUANBAO_GROUP_ALLOW_FROM` | Comma-separated Yuanbao group IDs allowed by group allowlist policy |
 | `MATTERMOST_URL` | Mattermost server URL (e.g. `https://mm.example.com`) |
 | `MATTERMOST_TOKEN` | Bot token or personal access token for Mattermost |
 | `MATTERMOST_ALLOWED_USERS` | Comma-separated Mattermost user IDs allowed to message the bot |

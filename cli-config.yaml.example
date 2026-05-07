@@ -601,7 +601,7 @@ agent:
 #   - A preset like "hermes-cli" or "hermes-telegram" (curated tool set)
 #   - A list of individual toolsets to compose your own (see list below)
 #
-# Supported platform keys: cli, telegram, discord, whatsapp, slack, qqbot, teams
+# Supported platform keys: cli, telegram, discord, whatsapp, slack, qqbot, napcat, yuanbao, teams
 #
 # Examples:
 #
@@ -631,6 +631,8 @@ agent:
 #   signal:        hermes-signal         (same as telegram)
 #   homeassistant: hermes-homeassistant  (same as telegram)
 #   qqbot:            hermes-qqbot            (same as telegram)
+#   napcat:           hermes-napcat           (same as telegram; QQ via NapCat/OneBot 11)
+#   yuanbao:          hermes-yuanbao          (same as telegram; Tencent Yuanbao)
 #   teams:            hermes-teams            (same as telegram)
 #
 platform_toolsets:
@@ -642,6 +644,7 @@ platform_toolsets:
   signal: [hermes-signal]
   homeassistant: [hermes-homeassistant]
   qqbot: [hermes-qqbot]
+  napcat: [hermes-napcat]
   yuanbao: [hermes-yuanbao]
   teams: [hermes-teams]
 

@@ -35,6 +35,17 @@ class _MediaRoutingAdapter(BasePlatformAdapter):
         return {"id": chat_id, "type": "dm"}
 
 
+class _FeedbackStore:
+    def __init__(self):
+        self.messages = []
+
+    def get_or_create_session(self, source):
+        return SimpleNamespace(session_id="sid-1")
+
+    def append_to_transcript(self, session_id, message, skip_db=False):
+        self.messages.append((session_id, message))
+
+
 def _event(thread_id=None):
     source = SessionSource(
         platform=Platform.TELEGRAM,
@@ -107,6 +118,28 @@ async def test_base_adapter_routes_voice_tagged_telegram_ogg_media_tag_to_voice_
 
 
 @pytest.mark.asyncio
+async def test_base_adapter_persists_media_delivery_failure_feedback():
+    adapter = _MediaRoutingAdapter()
+    store = _FeedbackStore()
+    adapter.set_session_store(store)
+    event = _event()
+    adapter._message_handler = AsyncMock(return_value="MEDIA:/tmp/missing.ogg")
+    adapter.send_voice = AsyncMock(return_value=SendResult(success=True, message_id="voice"))
+    adapter.send_document = AsyncMock(
+        return_value=SendResult(success=False, error="BAD_FILE")
+    )
+
+    await adapter._process_message_background(event, build_session_key(event.source))
+
+    assert len(store.messages) == 1
+    _, message = store.messages[0]
+    assert message["role"] == "user"
+    assert "[Hermes gateway delivery feedback]" in message["content"]
+    assert "/tmp/missing.ogg" in message["content"]
+    assert "BAD_FILE" in message["content"]
+
+
+@pytest.mark.asyncio
 async def test_streaming_delivery_routes_telegram_flac_media_tag_to_document_sender():
     event = _event(thread_id="topic-1")
     adapter = SimpleNamespace(
@@ -133,6 +166,36 @@ async def test_streaming_delivery_routes_telegram_flac_media_tag_to_document_sen
         metadata={"thread_id": "topic-1"},
     )
     adapter.send_voice.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_streaming_delivery_persists_media_delivery_failure_feedback():
+    event = _event(thread_id="topic-1")
+    store = _FeedbackStore()
+    adapter = SimpleNamespace(
+        name="test",
+        extract_media=BasePlatformAdapter.extract_media,
+        extract_images=BasePlatformAdapter.extract_images,
+        extract_local_files=BasePlatformAdapter.extract_local_files,
+        send_voice=AsyncMock(return_value=SendResult(success=True, message_id="voice")),
+        send_document=AsyncMock(return_value=SendResult(success=False, error="BAD_FILE")),
+        send_image_file=AsyncMock(return_value=SendResult(success=True, message_id="image")),
+        send_video=AsyncMock(return_value=SendResult(success=True, message_id="video")),
+    )
+
+    await GatewayRunner._deliver_media_from_response(
+        SimpleNamespace(session_store=store),
+        "MEDIA:/tmp/speech.flac",
+        event,
+        adapter,
+    )
+
+    assert len(store.messages) == 1
+    _, message = store.messages[0]
+    assert message["role"] == "user"
+    assert "[Hermes gateway delivery feedback]" in message["content"]
+    assert "/tmp/speech.flac" in message["content"]
+    assert "BAD_FILE" in message["content"]
 
 
 @pytest.mark.asyncio
