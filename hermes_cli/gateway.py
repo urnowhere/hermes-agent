@@ -2924,6 +2924,40 @@ _PLATFORMS = [
         ],
     },
     {
+        "key": "msteams",
+        "label": "Microsoft Teams",
+        "emoji": "🪟",
+        "token_var": "MSTEAMS_APP_ID",
+        "setup_instructions": [
+            "1. Azure Portal → App registrations → New registration.",
+            "   Copy the Application (client) ID and Directory (tenant) ID.",
+            "2. For secret auth: Certificates & secrets → New client secret → copy the value.",
+            "   For federated auth: upload a certificate or use an Azure Managed Identity.",
+            "3. https://dev.botframework.com/bots → Create a Bot → 'Use existing app registration'",
+            "   and paste the Application (client) ID from step 1.",
+            "4. Set the messaging endpoint to: https://<your-public-host>:3978/api/messages",
+            "   (expose the Hermes port publicly — ngrok or Cloudflare Tunnel work locally).",
+            "5. In Teams Admin Center upload a Teams app manifest that references",
+            "   the same App ID, with scopes personal/team/groupChat and RSC permissions.",
+            "6. Install the app in your tenant, then DM the bot or @mention it in a channel.",
+        ],
+        "vars": [
+            {"name": "MSTEAMS_APP_ID", "prompt": "Application (client) ID", "password": False,
+             "help": "Azure App Registration → Overview."},
+            {"name": "MSTEAMS_TENANT_ID", "prompt": "Directory (tenant) ID", "password": False,
+             "help": "Azure App Registration → Overview."},
+            {"name": "MSTEAMS_AUTH_TYPE", "prompt": "Auth type — 'secret' (default) or 'federated'", "password": False,
+             "help": "'secret' uses a client secret, 'federated' uses a certificate or Azure Managed Identity."},
+            {"name": "MSTEAMS_APP_PASSWORD", "prompt": "Client secret (only if authType=secret)", "password": True,
+             "help": "From Azure App Registration → Certificates & secrets."},
+            {"name": "MSTEAMS_ALLOWED_USERS", "prompt": "Allowed AAD Object IDs (comma-separated)", "password": False,
+             "is_allowlist": True,
+             "help": "Azure AD → Users → your profile → Object ID."},
+            {"name": "MSTEAMS_HOME_CHANNEL", "prompt": "Home conversation ID for cron delivery (optional)", "password": False,
+             "help": "Conversation ID shown in the bot's debug log on first message."},
+        ],
+    },
+    {
         "key": "whatsapp",
         "label": "WhatsApp",
         "emoji": "📲",
@@ -3611,6 +3645,46 @@ def _setup_wecom():
     print_success("💬 WeCom configured!")
 
 
+def _setup_msteams():
+    """Configure Microsoft Teams with auth-type-aware follow-up.
+
+    Delegates the App ID / tenant / secret / allowlist prompts to
+    ``_setup_standard_platform``.  Afterwards, if the user picked
+    ``MSTEAMS_AUTH_TYPE=federated`` we ask for certificate or Managed
+    Identity details that the standard wizard doesn't know about.
+    """
+    msteams_platform = next(p for p in _PLATFORMS if p["key"] == "msteams")
+    _setup_standard_platform(msteams_platform)
+
+    auth_type = (get_env_value("MSTEAMS_AUTH_TYPE") or "secret").strip().lower()
+    if auth_type != "federated":
+        return
+
+    print()
+    print_info(
+        "Federated auth: supply a certificate OR enable Azure Managed Identity.",
+    )
+    use_mi = prompt_yes_no(
+        "  Use Azure Managed Identity (only works on Azure compute)?", False,
+    )
+    if use_mi:
+        save_env_value("MSTEAMS_USE_MANAGED_IDENTITY", "true")
+        mi_id = prompt(
+            "  Managed Identity client ID (blank = system-assigned)",
+            password=False,
+        )
+        save_env_value("MSTEAMS_MANAGED_IDENTITY_CLIENT_ID", (mi_id or "").strip())
+        return
+
+    cert_path = prompt(
+        "  Path to PEM file with private key + certificate", password=False,
+    )
+    save_env_value("MSTEAMS_CERTIFICATE_PATH", (cert_path or "").strip())
+    cert_thumb = prompt(
+        "  Certificate thumbprint (SHA-1, registered in Entra ID)",
+        password=False,
+    )
+    save_env_value("MSTEAMS_CERTIFICATE_THUMBPRINT", (cert_thumb or "").strip())
 def _setup_yuanbao():
     """Configure Yuanbao via the standard platform setup."""
     yuanbao_platform = next(p for p in _PLATFORMS if p["key"] == "yuanbao")
@@ -4216,6 +4290,7 @@ def _builtin_setup_fn(key: str):
         "feishu": _setup_feishu,
         "wecom": _setup_wecom,
         "qqbot": _setup_qqbot,
+        "msteams": _setup_msteams,
     }.get(key)
 def _configure_platform(platform: dict) -> None:
     """Run the interactive setup flow for a single platform.

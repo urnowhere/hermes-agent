@@ -33,6 +33,10 @@ hermes-agent/
 ├── hermes_cli/           # CLI subcommands, setup wizard, plugins loader, skin engine
 ├── tools/                # Tool implementations — auto-discovered via tools/registry.py
 │   └── environments/     # Terminal backends (local, docker, ssh, modal, daytona, singularity)
+├── gateway/              # Messaging platform gateway
+│   ├── run.py            # Main loop, slash commands, message dispatch
+│   ├── session.py        # SessionStore — conversation persistence
+│   └── platforms/        # Adapters: telegram, discord, slack, msteams, whatsapp, homeassistant, signal, qqbot
 ├── gateway/              # Messaging gateway — run.py + session.py + platforms/
 │   ├── platforms/        # Adapter per platform (telegram, discord, slack, whatsapp,
 │   │                     #   homeassistant, signal, matrix, mattermost, email, sms,

@@ -133,7 +133,7 @@ SEND_MESSAGE_SCHEMA = {
             },
             "target": {
                 "type": "string",
-                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org', 'yuanbao:direct:<account_id>' (DM), 'yuanbao:group:<group_code>' (group chat)"
+                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org', 'yuanbao:direct:<account_id>' (DM), 'yuanbao:group:<group_code>' (group chat), 'msteams:19:abcdef@thread.tacv2'"
             },
             "message": {
                 "type": "string",
@@ -347,6 +347,10 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         return target_ref, None, True
     # Matrix room IDs (start with !) and user IDs (start with @) are explicit
     if platform_name == "matrix" and (target_ref.startswith("!") or target_ref.startswith("@")):
+        return target_ref, None, True
+    # Teams conversation IDs ("19:xxx@thread.tacv2", "a:xxx", AAD object IDs)
+    # contain colons and letters; treat any non-empty ref as an explicit chat_id.
+    if platform_name == "msteams" and target_ref:
         return target_ref, None, True
     return None, None, False
 
@@ -637,6 +641,11 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             result = await _send_mattermost(pconfig.token, pconfig.extra, chat_id, chunk)
         elif platform == Platform.MATRIX:
             result = await _send_matrix(pconfig.token, pconfig.extra, chat_id, chunk)
+        elif platform == Platform.MSTEAMS:
+            result = await _send_msteams(
+                pconfig.extra, chat_id, chunk,
+                thread_id=thread_id, media_files=media_files,
+            )
         elif platform == Platform.HOMEASSISTANT:
             result = await _send_homeassistant(pconfig.token, pconfig.extra, chat_id, chunk)
         elif platform == Platform.DINGTALK:
@@ -1405,6 +1414,171 @@ async def _send_matrix(token, extra, chat_id, message):
         return {"success": True, "platform": "matrix", "chat_id": chat_id, "message_id": data.get("event_id")}
     except Exception as e:
         return _error(f"Matrix send failed: {e}")
+
+
+async def _send_msteams(extra, chat_id, message, thread_id=None, media_files=None):
+    """Send a message directly to Microsoft Teams without the gateway.
+
+    Used by :func:`send_message_tool` and the cron scheduler when the
+    gateway process is not running (e.g. a cron job fires while the
+    gateway is stopped).  The flow mirrors what the live adapter does
+    on :meth:`MsTeamsAdapter.send`:
+
+    1. Look up the conversation's ``serviceUrl`` in the sidecar file
+       ``$HERMES_HOME/msteams/service_urls.json`` — every inbound
+       activity the adapter ever saw records one here.  If the chat
+       isn't cached, the bot has never talked to that conversation and
+       we can't reach it from scratch.
+    2. Mint a Bot Framework bearer token via :mod:`msal` using the
+       ``MSTEAMS_APP_ID`` + ``MSTEAMS_APP_PASSWORD`` + ``MSTEAMS_TENANT_ID``
+       env vars (the wizard writes these to ``$HERMES_HOME/.env``).
+       Certificate and Managed Identity flows are deferred to the
+       adapter path — this standalone helper covers the default
+       client-secret case, which is what most cron deployments use.
+    3. POST the activity to
+       ``{serviceUrl}/v3/conversations/{chat_id}/activities`` with the
+       same textFormat=xml + markdown→HTML conversion the adapter
+       applies.  ``thread_id`` (when supplied) is used as the
+       ``replyToId`` so cron results land inside the triggering thread.
+    """
+    # MEDIA: tokens are not deliverable through the gateway-less helper —
+    # FileConsent (DM) and SharePoint upload (channel) require the live
+    # adapter's pending-upload state and aiohttp session.  Fail loudly
+    # with an instructive message so the agent learns to put MEDIA:/path
+    # in its REPLY TEXT instead of routing it through this tool.
+    if media_files:
+        names = ", ".join(p for p, _ in media_files[:3])
+        return _error(
+            "Microsoft Teams file delivery does NOT go through the "
+            "send_message tool.  To send the file(s) to the user "
+            "(" + names + "), put MEDIA:/absolute/path/to/file directly in "
+            "your normal reply text — the gateway adapter's media "
+            "extraction will route it through FileConsent (DMs) or "
+            "SharePoint (channels).  send_message only carries plain "
+            "text on Teams.  Do NOT tell the user Teams 'doesn't allow' "
+            "files — the platform supports PDFs, DOCX, XLSX, PPTX, ZIP, "
+            "TXT and images; the limitation is purely which transport "
+            "you used."
+        )
+
+    try:
+        import aiohttp
+    except ImportError:
+        return _error("aiohttp is required for MSTeams direct-send")
+    try:
+        import msal
+    except ImportError:
+        return _error(
+            "MSTeams direct-send needs the [msteams] extra: "
+            "pip install 'hermes-agent[msteams]'"
+        )
+
+    # 1. serviceUrl from the sidecar
+    try:
+        from hermes_constants import get_hermes_home
+        sidecar = get_hermes_home() / "msteams" / "service_urls.json"
+    except Exception:
+        return _error("Could not resolve HERMES_HOME for msteams sidecar")
+    if not sidecar.exists():
+        return _error(
+            "No MSTeams conversations cached yet — the gateway must "
+            "receive at least one message from this chat before cron "
+            "delivery can reach it."
+        )
+    try:
+        service_urls = json.loads(sidecar.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return _error(f"MSTeams service_urls.json is malformed: {exc}")
+    service_url = service_urls.get(chat_id)
+    if not service_url:
+        return _error(
+            f"No cached serviceUrl for MSTeams chat '{chat_id}' — the "
+            "bot has never received a message from this conversation."
+        )
+
+    # 2. Credentials — env first, extra second (ADAPTER_EXTRA_SNAPSHOT
+    # is populated by load_gateway_config when the caller goes through
+    # the regular platform_map dispatch).
+    app_id = os.getenv("MSTEAMS_APP_ID") or str((extra or {}).get("app_id") or "").strip()
+    app_password = (
+        os.getenv("MSTEAMS_APP_PASSWORD")
+        or str((extra or {}).get("app_password") or "")
+    )
+    tenant_id = (
+        os.getenv("MSTEAMS_TENANT_ID")
+        or str((extra or {}).get("tenant_id") or "")
+        or "common"
+    )
+    if not app_id or not app_password:
+        return _error(
+            "MSTEAMS_APP_ID / MSTEAMS_APP_PASSWORD are not configured — "
+            "cron direct-send requires client-secret auth"
+        )
+
+    try:
+        msal_app = msal.ConfidentialClientApplication(
+            client_id=app_id,
+            authority=f"https://login.microsoftonline.com/{tenant_id.strip() or 'common'}",
+            client_credential=app_password,
+        )
+        # MSAL's I/O is sync; this runs out of band on a gateway-less
+        # code path so offloading to a thread isn't worth the code.
+        result = msal_app.acquire_token_for_client(
+            scopes=["https://api.botframework.com/.default"],
+        )
+    except Exception as exc:
+        return _error(f"MSTeams token acquisition failed: {exc}")
+    if "access_token" not in result:
+        err = result.get("error_description") or result.get("error") or "unknown"
+        return _error(f"MSTeams token acquisition failed: {err}")
+    token = result["access_token"]
+
+    # 3. Markdown → Teams HTML so the same formatting the agent emits
+    # through the live adapter also holds for cron-delivered messages.
+    try:
+        from gateway.platforms.msteams.cards import markdown_to_teams_html
+        html_text = markdown_to_teams_html(message)
+    except Exception:
+        html_text = message
+
+    base = service_url.rstrip("/")
+    if "v3" not in [s for s in base.split("/") if s]:
+        base = f"{base}/v3"
+    url = f"{base}/conversations/{chat_id}/activities"
+
+    payload = {"type": "message", "textFormat": "xml", "text": html_text}
+    if thread_id:
+        payload["replyToId"] = thread_id
+
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as session:
+            async with session.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            ) as resp:
+                if resp.status not in (200, 201, 202):
+                    body = await resp.text()
+                    return _error(
+                        f"MSTeams send failed ({resp.status}): {body[:200]}"
+                    )
+                try:
+                    data = await resp.json(content_type=None)
+                except Exception:
+                    data = {}
+        return {
+            "success": True,
+            "platform": "msteams",
+            "chat_id": chat_id,
+            "message_id": data.get("id") if isinstance(data, dict) else None,
+        }
+    except aiohttp.ClientError as exc:
+        return _error(f"MSTeams send transport error: {exc}")
 
 
 async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, thread_id=None):

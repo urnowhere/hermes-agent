@@ -95,6 +95,7 @@ class Platform(Enum):
     SIGNAL = "signal"
     MATTERMOST = "mattermost"
     MATRIX = "matrix"
+    MSTEAMS = "msteams"
     HOMEASSISTANT = "homeassistant"
     EMAIL = "email"
     SMS = "sms"
@@ -377,6 +378,7 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
     Platform.API_SERVER: lambda cfg: True,
     Platform.WEBHOOK: lambda cfg: True,
     Platform.FEISHU: lambda cfg: bool(cfg.extra.get("app_id")),
+    Platform.MSTEAMS: lambda cfg: bool(cfg.extra.get("app_id")),
     Platform.WECOM: lambda cfg: bool(cfg.extra.get("bot_id")),
     Platform.WECOM_CALLBACK: lambda cfg: bool(
         cfg.extra.get("corp_id") or cfg.extra.get("apps")
@@ -1051,6 +1053,7 @@ def _validate_gateway_config(config: "GatewayConfig") -> None:
         Platform.SLACK: "SLACK_BOT_TOKEN",
         Platform.MATTERMOST: "MATTERMOST_TOKEN",
         Platform.MATRIX: "MATRIX_ACCESS_TOKEN",
+        Platform.MSTEAMS: "MSTEAMS_APP_ID",
         Platform.WEIXIN: "WEIXIN_TOKEN",
     }
     for platform, pconfig in config.platforms.items():
@@ -1232,6 +1235,65 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             chat_id=mattermost_home,
             name=os.getenv("MATTERMOST_HOME_CHANNEL_NAME", "Home"),
             thread_id=os.getenv("MATTERMOST_HOME_CHANNEL_THREAD_ID") or None,
+        )
+
+    # Microsoft Teams
+    msteams_app_id = os.getenv("MSTEAMS_APP_ID")
+    if msteams_app_id:
+        if Platform.MSTEAMS not in config.platforms:
+            config.platforms[Platform.MSTEAMS] = PlatformConfig()
+        pc = config.platforms[Platform.MSTEAMS]
+        pc.enabled = True
+        pc.token = msteams_app_id  # used by placeholder-token warning only
+        pc.extra["app_id"] = msteams_app_id
+        pc.extra["app_password"] = os.getenv("MSTEAMS_APP_PASSWORD", "")
+        pc.extra["tenant_id"] = os.getenv("MSTEAMS_TENANT_ID", "")
+        pc.extra["auth_type"] = (os.getenv("MSTEAMS_AUTH_TYPE") or "secret").lower()
+        pc.extra["certificate_path"] = os.getenv("MSTEAMS_CERTIFICATE_PATH", "")
+        pc.extra["certificate_thumbprint"] = os.getenv("MSTEAMS_CERTIFICATE_THUMBPRINT", "")
+        pc.extra["use_managed_identity"] = (
+            os.getenv("MSTEAMS_USE_MANAGED_IDENTITY", "").lower() in ("true", "1", "yes")
+        )
+        pc.extra["managed_identity_client_id"] = os.getenv("MSTEAMS_MANAGED_IDENTITY_CLIENT_ID", "")
+        pc.extra["host"] = os.getenv("MSTEAMS_HOST", "0.0.0.0")
+        port_str = os.getenv("MSTEAMS_PORT", "")
+        if port_str:
+            try:
+                pc.extra["port"] = int(port_str)
+            except ValueError:
+                logger.warning("Invalid MSTEAMS_PORT=%r, using default 3978", port_str)
+                pc.extra["port"] = 3978
+        else:
+            pc.extra["port"] = 3978
+        pc.extra["path"] = os.getenv("MSTEAMS_PATH", "/api/messages")
+        pc.extra["sharepoint_site_id"] = os.getenv("MSTEAMS_SHAREPOINT_SITE_ID", "")
+        pc.extra["require_mention"] = (
+            os.getenv("MSTEAMS_REQUIRE_MENTION", "true").lower() not in ("false", "0", "no", "off")
+        )
+        pc.extra["reply_style"] = os.getenv("MSTEAMS_REPLY_STYLE", "thread")
+        try:
+            pc.extra["history_limit"] = int(os.getenv("MSTEAMS_HISTORY_LIMIT", "50"))
+        except ValueError:
+            pc.extra["history_limit"] = 50
+        pc.extra["dm_policy"] = os.getenv("MSTEAMS_DM_POLICY", "pairing")
+        raw_af = os.getenv("MSTEAMS_ALLOW_FROM", "")
+        if raw_af:
+            pc.extra["allow_from"] = [s.strip() for s in raw_af.split(",") if s.strip()]
+        raw_gaf = os.getenv("MSTEAMS_GROUP_ALLOW_FROM", "")
+        if raw_gaf:
+            pc.extra["group_allow_from"] = [s.strip() for s in raw_gaf.split(",") if s.strip()]
+        raw_hosts = os.getenv("MSTEAMS_MEDIA_ALLOW_HOSTS", "")
+        if raw_hosts:
+            pc.extra["media_allow_hosts"] = [s.strip() for s in raw_hosts.split(",") if s.strip()]
+        raw_frc = os.getenv("MSTEAMS_FREE_RESPONSE_CHANNELS", "")
+        if raw_frc:
+            pc.extra["free_response_channels"] = [s.strip() for s in raw_frc.split(",") if s.strip()]
+    msteams_home = os.getenv("MSTEAMS_HOME_CHANNEL")
+    if msteams_home and Platform.MSTEAMS in config.platforms:
+        config.platforms[Platform.MSTEAMS].home_channel = HomeChannel(
+            platform=Platform.MSTEAMS,
+            chat_id=msteams_home,
+            name=os.getenv("MSTEAMS_HOME_CHANNEL_NAME", "Teams Home"),
         )
 
     # Matrix
