@@ -87,6 +87,70 @@ def test_is_session_expired_rejects_empty_message():
     assert _is_session_expired_error(Exception()) is False
 
 
+def test_is_session_expired_detects_session_terminated():
+    """The MCP SDK's streamable-http server sends
+    ``McpError(ErrorData(code=32600, message="Session terminated"))``
+    when the client POSTs to a session ID that no longer exists
+    (server restart, idle TTL expiry, pod rotation, etc.).
+    This must be recognised as a session-expired error so the
+    transport reconnect path fires instead of surfacing a generic
+    tool failure.
+    """
+    from tools.mcp_tool import _is_session_expired_error
+    # Exact message from mcp.client.streamable_http (code 32600)
+    assert _is_session_expired_error(RuntimeError("Session terminated")) is True
+    # Case-insensitive match
+    assert _is_session_expired_error(RuntimeError("SESSION TERMINATED")) is True
+
+
+def test_call_tool_handler_reconnects_on_session_terminated(monkeypatch, tmp_path):
+    """When a streamable-http MCP server restarts, it drops the old
+    session and the SDK raises ``McpError("Session terminated")``.
+    The handler must trigger a transport reconnect, retry once, and
+    return the retry's result — same as the ``"Invalid or expired
+    session"`` path exercised by test_call_tool_handler_reconnects_on_session_expired.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from tools import mcp_tool
+    from tools.mcp_tool import _make_tool_handler
+
+    server, reconnect_flag = _install_stub_server("crg")
+    mcp_tool._servers["crg"] = server
+    mcp_tool._server_error_counts.pop("crg", None)
+
+    call_count = {"n": 0}
+
+    async def _call_sequence(*a, **kw):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # Exact error from mcp.client.streamable_http on stale session
+            raise RuntimeError("Session terminated")
+        result = MagicMock()
+        result.isError = False
+        result.content = [MagicMock(type="text", text="reconnected ok")]
+        result.structuredContent = None
+        return result
+
+    server.session.call_tool = _call_sequence
+
+    try:
+        handler = _make_tool_handler("crg", "crg-tool", 10.0)
+        out = handler({"query": "test"})
+        parsed = json.loads(out)
+        assert "error" not in parsed, (
+            f"Expected retry to succeed after reconnect; got: {parsed}"
+        )
+        assert reconnect_flag.is_set(), (
+            "Handler did not trigger transport reconnect on "
+            "'Session terminated' error"
+        )
+        assert call_count["n"] == 2
+    finally:
+        mcp_tool._servers.pop("crg", None)
+        mcp_tool._server_error_counts.pop("crg", None)
+
+
 # ---------------------------------------------------------------------------
 # Handler integration — verify the recovery plumbing wires end-to-end
 # ---------------------------------------------------------------------------
@@ -116,13 +180,66 @@ def _install_stub_server(name: str = "wpcom"):
     # is polled by _handle_session_expired_and_retry until the timeout).
     ready_flag = threading.Event()
     ready_flag.set()
-    server._ready = MagicMock()
-    server._ready.is_set = ready_flag.is_set
+
+    class _ReadyProxy:
+        """Threading.Event-backed _ready that supports both is_set() and
+        clear().  _handle_session_expired_and_retry calls clear() to
+        mark the server as not-ready during reconnect, then the
+        lifecycle loop would normally set() it again — here we
+        simulate that by re-setting after a short delay."""
+        def is_set(self):
+            return ready_flag.is_set()
+        def clear(self):
+            ready_flag.clear()
+        def set(self):
+            ready_flag.set()
+
+    server._ready = _ReadyProxy()
 
     # session attr must be truthy for the handler's initial check
     # (``if not server or not server.session``) and for the post-
     # reconnect readiness probe (``srv.session is not None``).
-    server.session = MagicMock()
+    # _handle_session_expired_and_retry clears srv.session on
+    # session-expired; we simulate reconnect by restoring it.
+    _original_session = MagicMock()
+
+    class _SessionProxy:
+        """Proxy that delegates to the current session MagicMock.
+        After _handle_session_expired_and_retry sets srv.session = None,
+        we detect the clear and schedule a "reconnect" that restores
+        both srv.session and srv._ready."""
+        def __init__(self):
+            self._real = _original_session
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+        def __bool__(self):
+            return True
+
+    session_proxy = _SessionProxy()
+    server.session = session_proxy
+
+    # When the handler clears session/ready, simulate the lifecycle
+    # loop's reconnect by restoring them after a short delay.
+    _reconnect_scheduled = threading.Event()
+
+    def _schedule_reconnect():
+        """Wait for the handler to clear session, then restore both."""
+        # Poll until srv.session is None (cleared by handler)
+        for _ in range(200):  # up to 10s
+            if mcp_tool._servers.get(name) is server and server.session is None:
+                break
+            time.sleep(0.05)
+        else:
+            return
+        # Simulate reconnect completing
+        time.sleep(0.1)
+        server.session = session_proxy
+        server._ready.set()
+        _reconnect_scheduled.set()
+
+    t = threading.Thread(target=_schedule_reconnect, daemon=True)
+    t.start()
+
     return server, reconnect_flag
 
 
