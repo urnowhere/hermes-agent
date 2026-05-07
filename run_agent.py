@@ -8365,8 +8365,11 @@ class AIAgent:
         )
 
     def _is_qwen_portal(self) -> bool:
-        """Return True when the base URL targets Qwen Portal."""
-        return base_url_host_matches(self._base_url_lower, "portal.qwen.ai")
+        """Return True when the base URL targets Qwen Portal or DashScope compatible endpoint."""
+        return (
+            base_url_host_matches(self._base_url_lower, "portal.qwen.ai")
+            or base_url_host_matches(self._base_url_lower, "dashscope.aliyuncs.com")
+        )
 
     def _qwen_prepare_chat_messages(self, api_messages: list) -> list:
         prepared = copy.deepcopy(api_messages)
