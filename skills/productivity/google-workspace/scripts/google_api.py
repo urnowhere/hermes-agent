@@ -19,6 +19,11 @@ Usage:
   python google_api.py sheets append SHEET_ID RANGE --values '[[...]]'
   python google_api.py docs get DOC_ID
 """
+# ``from __future__ import annotations`` (PEP 563) defers annotation
+# evaluation so PEP 604 unions (``X | None``) don't fire at import time on
+# Python 3.9.  The agent's terminal tool routinely invokes this script via
+# the plain system ``python3``, which on macOS is still 3.9 (#14688).
+from __future__ import annotations
 
 import argparse
 import base64

@@ -3,6 +3,14 @@
 Import-safe module with no dependencies — can be imported from anywhere
 without risk of circular imports.
 """
+# ``from __future__ import annotations`` (PEP 563) defers annotation
+# evaluation so PEP 604 unions (``X | None``) don't fire at import time on
+# Python 3.9.  This module is intentionally kept import-safe: skill scripts
+# (google-workspace ``setup.py``, others) invoke it via whatever ``python3``
+# the agent's terminal tool picks up, and macOS ships ``/usr/bin/python3`` =
+# 3.9 by default.  Without this, ``def f(x: Path | None = None)`` crashed
+# the skill setup flow (#14688).
+from __future__ import annotations
 
 import os
 from pathlib import Path
