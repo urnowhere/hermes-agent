@@ -1966,26 +1966,29 @@ def delegate_task(
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
+            # Per-task model/provider override (falls back to batch creds
+            # when neither is set on the task).
+            task_creds = _resolve_task_credentials(t, creds)
             child = _build_child_agent(
                 task_index=i,
                 goal=t["goal"],
                 context=t.get("context"),
                 toolsets=t.get("toolsets") or toolsets,
-                model=creds["model"],
+                model=task_creds["model"],
                 max_iterations=effective_max_iter,
                 task_count=n_tasks,
                 parent_agent=parent_agent,
-                override_provider=creds["provider"],
-                override_base_url=creds["base_url"],
-                override_api_key=creds["api_key"],
-                override_api_mode=creds["api_mode"],
+                override_provider=task_creds["provider"],
+                override_base_url=task_creds["base_url"],
+                override_api_key=task_creds["api_key"],
+                override_api_mode=task_creds["api_mode"],
                 override_acp_command=t.get("acp_command")
                 or acp_command
-                or creds.get("command"),
+                or task_creds.get("command"),
                 override_acp_args=(
                     task_acp_args
                     if task_acp_args is not None
-                    else (acp_args if acp_args is not None else creds.get("args"))
+                    else (acp_args if acp_args is not None else task_creds.get("args"))
                 ),
                 role=effective_role,
             )
@@ -2350,6 +2353,62 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     }
 
 
+def _resolve_task_credentials(task: dict, delegation_creds: dict) -> dict:
+    """Resolve credentials for a single task, applying any per-task override.
+
+    A task entry may include ``model`` and/or ``provider`` to run on a
+    different provider than the batch default::
+
+        delegate_task(tasks=[
+            {"goal": "...", "provider": "anthropic", "model": "claude-opus-4-7"},
+            {"goal": "...", "provider": "openai", "model": "gpt-5"},
+        ])
+
+    Resolution priority: task-level provider/model > delegation-level creds.
+
+    Returns a creds dict in the same shape as
+    :func:`_resolve_delegation_credentials` so it drops into the existing
+    ``_build_child_agent`` override kwargs without further plumbing.
+
+    On resolution failure (e.g. a misconfigured provider name), logs a
+    warning and returns ``delegation_creds`` unchanged so the batch keeps
+    running on the default provider — preferable to failing every task in
+    the batch over one bad entry.
+    """
+    task_provider = task.get("provider")
+    task_model = task.get("model")
+
+    if not task_provider and not task_model:
+        return delegation_creds
+
+    if task_model and not task_provider:
+        # Model-only override: keep the delegation provider, swap the model.
+        creds = dict(delegation_creds)
+        creds["model"] = task_model
+        return creds
+
+    # Provider override: re-run runtime resolution for the named provider.
+    try:
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+        runtime = resolve_runtime_provider(requested=task_provider)
+    except Exception as exc:
+        logger.warning(
+            "Per-task provider %r failed to resolve (%s); using batch default",
+            task_provider, exc,
+        )
+        return delegation_creds
+
+    return {
+        "model": task_model or runtime.get("model") or delegation_creds.get("model"),
+        "provider": runtime.get("provider") or runtime.get("requested_provider"),
+        "base_url": runtime.get("base_url"),
+        "api_key": runtime.get("api_key"),
+        "api_mode": runtime.get("api_mode"),
+        "command": runtime.get("command"),
+        "args": list(runtime.get("args") or []),
+    }
+
+
 def _load_config() -> dict:
     """Load delegation config from CLI_CONFIG or persistent config.
 
@@ -2490,6 +2549,27 @@ DELEGATE_TASK_SCHEMA = {
                             "type": "string",
                             "enum": ["leaf", "orchestrator"],
                             "description": "Per-task role override. See top-level 'role' for semantics.",
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": (
+                                "Per-task model override. When set, this task runs on "
+                                "the specified model instead of the batch default. "
+                                "Combine with 'provider' to route to a different "
+                                "provider, or use alone to keep the delegation "
+                                "provider but swap the model."
+                            ),
+                        },
+                        "provider": {
+                            "type": "string",
+                            "description": (
+                                "Per-task provider override (e.g. 'anthropic', "
+                                "'openai', 'openrouter'). Re-runs the runtime "
+                                "provider resolution so this task can target a "
+                                "different provider:model than the batch default. "
+                                "If resolution fails the task falls back to the "
+                                "batch default and logs a warning."
+                            ),
                         },
                     },
                     "required": ["goal"],
