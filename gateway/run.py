@@ -599,6 +599,8 @@ def _try_resolve_fallback_provider() -> dict | None:
             return None
         with open(cfg_path, encoding="utf-8") as _f:
             cfg = _y.safe_load(_f) or {}
+        from hermes_cli.config import _expand_env_vars
+        cfg = _expand_env_vars(cfg)
         fb = cfg.get("fallback_providers") or cfg.get("fallback_model")
         if not fb:
             return None
@@ -2155,6 +2157,8 @@ class GatewayRunner:
             if cfg_path.exists():
                 with open(cfg_path, encoding="utf-8") as _f:
                     cfg = _y.safe_load(_f) or {}
+                from hermes_cli.config import _expand_env_vars
+                cfg = _expand_env_vars(cfg)
                 fb = cfg.get("fallback_providers") or cfg.get("fallback_model") or None
                 if fb:
                     return fb
