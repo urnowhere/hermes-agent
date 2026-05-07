@@ -148,7 +148,21 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   );
 
   const resumeRef = useRef<string | null>(searchParams.get("resume"));
-  const channel = useMemo(() => generateChannelId(), []);
+  // `channel` is bumped to force a full PTY teardown + rebuild whenever the
+  // user asks to resume a different session via `/chat?resume=<id>`.
+  // ChatPage is mounted persistently across tab switches (see App.tsx),
+  // so the WS-setup effect (keyed on [channel]) would otherwise never
+  // re-run — clicking "Play" on /sessions would silently keep the
+  // previous PTY child / session attached. See #resume-button bug.
+  const [channel, setChannel] = useState<string>(() => generateChannelId());
+
+  useEffect(() => {
+    const next = searchParams.get("resume");
+    if (!next) return;
+    if (next === resumeRef.current && wsRef.current) return;
+    resumeRef.current = next;
+    setChannel(generateChannelId());
+  }, [searchParams]);
 
   useEffect(() => {
     const mql = window.matchMedia("(max-width: 1023px)");
