@@ -82,6 +82,7 @@ VALID_HOOKS: Set[str] = {
     "transform_tool_result",
     "pre_llm_call",
     "post_llm_call",
+    "error_llm_call",
     "pre_api_request",
     "post_api_request",
     "on_session_start",

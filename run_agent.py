@@ -12876,6 +12876,29 @@ class AIAgent:
                     ) and not is_context_length_error
 
                     if is_client_error:
+                        try:
+                            from hermes_cli.plugins import invoke_hook as _invoke_hook
+                            _hook_results = _invoke_hook(
+                                "error_llm_call",
+                                session_id=self.session_id,
+                                user_message=original_user_message,
+                                conversation_history=list(messages),
+                                model=self.model,
+                                platform=getattr(self, "platform", None) or "",
+                                provider=_provider,
+                                base_url=_base,
+                                error=str(api_error),
+                                status_code=status_code,
+                                reason=classified.reason.value,
+                                retryable=classified.retryable,
+                                is_auth=classified.is_auth,
+                                retry_count=retry_count,
+                                api_call_count=api_call_count,
+                            )
+                            for _hook_result in (_hook_results or []):
+                                self._emit_status(f"⚠️ {self.log_prefix}{_hook_result}")
+                        except Exception:
+                            pass
                         # Try fallback before aborting — a different provider
                         # may not have the same issue (rate limit, auth, etc.)
                         self._emit_status(f"⚠️ Non-retryable error (HTTP {status_code}) — trying fallback...")

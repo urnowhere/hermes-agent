@@ -7,6 +7,7 @@ Covers all error paths in run_agent.py's run_conversation() for api_mode=anthrop
 - 401 unauthorized → credential refresh + retry
 - 500 server error → retried with backoff
 - "prompt is too long" → context length error triggers compression
+- error_llm_call hook fires on is_client_error, not on retryable errors
 """
 
 import asyncio
@@ -536,3 +537,99 @@ def test_prompt_too_long_triggers_compression(monkeypatch):
 
     assert result["final_response"] == "Compressed and recovered"
     assert _PromptTooLongThenSuccessAgent.compress_called >= 1
+
+
+# ---------------------------------------------------------------------------
+# error_llm_call hook tests
+# ---------------------------------------------------------------------------
+
+
+def test_error_llm_call_in_valid_hooks():
+    """error_llm_call must be registered so plugins can subscribe to it."""
+    from hermes_cli.plugins import VALID_HOOKS
+    assert "error_llm_call" in VALID_HOOKS
+
+
+def test_error_llm_call_hook_fires_on_client_error(monkeypatch):
+    """error_llm_call hook fires exactly once when a non-retryable client error (400) occurs."""
+    import hermes_cli.plugins as _plugins_mod
+
+    hook_calls = []
+
+    def _capture_hook(hook_name, **kwargs):
+        hook_calls.append((hook_name, kwargs))
+
+    monkeypatch.setattr(_plugins_mod, "invoke_hook", _capture_hook)
+
+    agent_cls = _make_agent_cls(_BadRequestError)
+    _run_with_agent(monkeypatch, agent_cls)
+
+    error_hook_calls = [(n, kw) for n, kw in hook_calls if n == "error_llm_call"]
+    assert len(error_hook_calls) == 1
+    _, kw = error_hook_calls[0]
+    assert kw["status_code"] == 400
+    assert "400" in kw["error"]
+    assert kw["session_id"] == "test-session"
+    assert isinstance(kw["retryable"], bool)
+    assert isinstance(kw["reason"], str)
+    assert isinstance(kw["api_call_count"], int)
+
+
+def test_error_llm_call_hook_not_fired_on_retryable_error(monkeypatch):
+    """error_llm_call hook must NOT fire for retryable errors like 429 rate limit."""
+    import hermes_cli.plugins as _plugins_mod
+
+    fired_hooks = []
+
+    def _capture_hook(hook_name, **kwargs):
+        fired_hooks.append(hook_name)
+
+    monkeypatch.setattr(_plugins_mod, "invoke_hook", _capture_hook)
+
+    agent_cls = _make_agent_cls(_RateLimitError, recover_after=1)
+    result = _run_with_agent(monkeypatch, agent_cls)
+
+    assert result["final_response"] == "Recovered"
+    assert "error_llm_call" not in fired_hooks
+
+
+def test_error_llm_call_hook_exception_is_suppressed(monkeypatch):
+    """A raising error_llm_call hook must not propagate — the error path must still complete."""
+    import hermes_cli.plugins as _plugins_mod
+
+    def _raising_hook(hook_name, **kwargs):
+        if hook_name == "error_llm_call":
+            raise RuntimeError("hook exploded")
+
+    monkeypatch.setattr(_plugins_mod, "invoke_hook", _raising_hook)
+
+    agent_cls = _make_agent_cls(_BadRequestError)
+    result = _run_with_agent(monkeypatch, agent_cls)
+
+    assert "api_calls" in result
+    assert result.get("failed") is True or "400" in str(result.get("final_response", ""))
+
+
+def test_error_llm_call_hook_return_is_printed(monkeypatch):
+    """Strings returned by error_llm_call hooks are printed via _vprint."""
+    import hermes_cli.plugins as _plugins_mod
+
+    def _returning_hook(hook_name, **kwargs):
+        if hook_name == "error_llm_call":
+            return ["plugin error message"]
+
+    monkeypatch.setattr(_plugins_mod, "invoke_hook", _returning_hook)
+
+    printed = []
+    original_vprint = run_agent.AIAgent._vprint
+
+    def _capturing_vprint(self, *args, **kwargs):
+        printed.extend(args)
+        original_vprint(self, *args, **kwargs)
+
+    monkeypatch.setattr(run_agent.AIAgent, "_vprint", _capturing_vprint)
+
+    agent_cls = _make_agent_cls(_BadRequestError)
+    _run_with_agent(monkeypatch, agent_cls)
+
+    assert any("plugin error message" in str(m) for m in printed)

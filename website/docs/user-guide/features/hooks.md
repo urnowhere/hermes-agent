@@ -359,6 +359,7 @@ def register(ctx):
     ctx.register_hook("post_tool_call", my_tool_logger)
     ctx.register_hook("pre_llm_call", my_memory_callback)
     ctx.register_hook("post_llm_call", my_sync_callback)
+    ctx.register_hook("error_llm_call", my_error_callback)
     ctx.register_hook("on_session_start", my_init_callback)
     ctx.register_hook("on_session_end", my_cleanup_callback)
 ```
@@ -376,7 +377,8 @@ def register(ctx):
 | [`pre_tool_call`](#pre_tool_call) | Before any tool executes | `{"action": "block", "message": str}` to veto the call |
 | [`post_tool_call`](#post_tool_call) | After any tool returns | ignored |
 | [`pre_llm_call`](#pre_llm_call) | Once per turn, before the tool-calling loop | `{"context": str}` to prepend context to the user message |
-| [`post_llm_call`](#post_llm_call) | Once per turn, after the tool-calling loop | ignored |
+| [`post_llm_call`](#post_llm_call) | Once per turn, after the tool-calling loop (successful turns only) | ignored |
+| [`error_llm_call`](#error_llm_call) | Non-retryable API error, before any fallback attempt | `str` or `list[str]` printed to the CLI |
 | [`on_session_start`](#on_session_start) | New session created (first turn only) | ignored |
 | [`on_session_end`](#on_session_end) | Session ends | ignored |
 | [`on_session_finalize`](#on_session_finalize) | CLI/gateway tears down an active session (flush, save, stats) | ignored |
@@ -641,6 +643,71 @@ def log_response_length(session_id, assistant_response, model, **kwargs):
 
 def register(ctx):
     ctx.register_hook("post_llm_call", log_response_length)
+```
+
+---
+
+### `error_llm_call`
+
+Fires **before any fallback is attempted** whenever the agent encounters a non-retryable API error (`is_client_error = True`). Fires even if a fallback provider is configured and later succeeds — the error event is observable regardless of recovery outcome.
+
+**Callback signature:**
+
+```python
+def my_callback(session_id: str, user_message: str, conversation_history: list,
+                model: str, platform: str, provider: str, base_url: str,
+                error: str, status_code: int | None, reason: str,
+                retryable: bool, is_auth: bool, retry_count: int,
+                api_call_count: int, **kwargs):
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `session_id` | `str` | Unique identifier for the current session |
+| `user_message` | `str` | The user's original message for this turn |
+| `conversation_history` | `list` | Copy of the full message list at the time of the error |
+| `model` | `str` | The configured model identifier (e.g. `"anthropic/claude-sonnet-4.6"`) |
+| `platform` | `str` | Where the session is running: `"cli"`, `"telegram"`, `"discord"`, etc. |
+| `provider` | `str` | The active provider name (e.g. `"anthropic"`, `"openai"`) |
+| `base_url` | `str` | The API base URL that was in use |
+| `error` | `str` | String representation of the caught exception |
+| `status_code` | `int \| None` | HTTP status code, if available (e.g. `400`, `401`) |
+| `reason` | `str` | Error classification reason string (e.g. `"auth"`, `"format_error"`, `"model_not_found"`) |
+| `retryable` | `bool` | Whether the classifier marked this error as retryable (always `False` for client errors) |
+| `is_auth` | `bool` | `True` if the reason is an auth or auth_permanent failure |
+| `retry_count` | `int` | Number of retries already attempted before this error was classified as non-retryable |
+| `api_call_count` | `int` | Total API calls made in this turn up to the point of failure |
+
+**Fires:** In `run_agent.py`, inside the `is_client_error` branch, as the very first action — before the status message is emitted and before any fallback provider is tried.
+
+**Return value:** A string or list of strings to print to the CLI. Each non-`None` return value from a registered callback is printed via `_vprint(force=True)`. Return `None` for no output.
+
+**Use cases:** Error alerting, per-provider failure metrics, audit logs for auth failures, dead-letter queues for failed turns.
+
+**Example — alert on auth failures:**
+
+```python
+import httpx, logging
+logger = logging.getLogger(__name__)
+
+ALERT_WEBHOOK = "https://your-alerts.example.com/hermes"
+
+def on_llm_error(session_id, reason, is_auth, status_code, provider, **kwargs):
+    logger.warning("LLM_ERROR session=%s provider=%s status=%s reason=%s",
+                   session_id, provider, status_code, reason)
+    if is_auth:
+        try:
+            httpx.post(ALERT_WEBHOOK, json={
+                "event": "auth_failure",
+                "session_id": session_id,
+                "provider": provider,
+                "status_code": status_code,
+            }, timeout=3)
+        except Exception:
+            pass
+
+def register(ctx):
+    ctx.register_hook("error_llm_call", on_llm_error)
 ```
 
 ---
