@@ -967,6 +967,13 @@ DEFAULT_CONFIG = {
         "provider": "",
     },
 
+    # Adaptive immunity -- piggybacks on the native background skill review.
+    # When enabled, skill review gets a short security-analysis addendum so
+    # repeated suspicious chains can be saved as security skills.
+    "adaptive_immunity": {
+        "enabled": False,
+    },
+
     # Subagent delegation — override the provider:model used by delegate_task
     # so child agents can run on a different (cheaper/faster) provider and model.
     # Uses the same runtime provider resolution as CLI/gateway startup, so all
