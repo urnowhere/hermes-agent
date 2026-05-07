@@ -6,15 +6,21 @@ Implements a multi-strategy matching chain to robustly find and replace text,
 accommodating variations in whitespace, indentation, and escaping common
 in LLM-generated code.
 
-The 8-strategy chain (inspired by OpenCode), tried in order:
+The 9-strategy chain (inspired by OpenCode), tried in order:
 1. Exact match - Direct string comparison
-2. Line-trimmed - Strip leading/trailing whitespace per line
-3. Whitespace normalized - Collapse multiple spaces/tabs to single space
-4. Indentation flexible - Ignore indentation differences entirely
+2. Indentation flexible - Strip leading whitespace per line (lstrip)
+3. Line-trimmed - Strip leading AND trailing whitespace per line (strip)
+4. Whitespace normalized - Collapse multiple spaces/tabs to single space
 5. Escape normalized - Convert \\n literals to actual newlines
 6. Trimmed boundary - Trim first/last line whitespace only
-7. Block anchor - Match first+last lines, use similarity for middle
-8. Context-aware - 50% line similarity threshold
+7. Unicode normalized - Map smart quotes, em-dashes, etc. to ASCII
+8. Block anchor - Match first+last lines, use similarity for middle
+9. Context-aware - 50% line similarity threshold
+
+Note: indentation_flexible (lstrip) is ordered before line_trimmed (strip)
+so that trailing whitespace precision is preserved when only indentation
+differs. Since strip() is strictly more aggressive than lstrip(), placing
+line_trimmed first would make indentation_flexible dead code.
 
 Multi-occurrence matching is handled via the replace_all flag.
 
@@ -72,9 +78,9 @@ def fuzzy_find_and_replace(content: str, old_string: str, new_string: str,
     # Try each matching strategy in order
     strategies: List[Tuple[str, Callable]] = [
         ("exact", _strategy_exact),
+        ("indentation_flexible", _strategy_indentation_flexible),
         ("line_trimmed", _strategy_line_trimmed),
         ("whitespace_normalized", _strategy_whitespace_normalized),
-        ("indentation_flexible", _strategy_indentation_flexible),
         ("escape_normalized", _strategy_escape_normalized),
         ("trimmed_boundary", _strategy_trimmed_boundary),
         ("unicode_normalized", _strategy_unicode_normalized),
