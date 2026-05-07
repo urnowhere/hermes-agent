@@ -8477,6 +8477,17 @@ def _build_provider_choices() -> list[str]:
 
 def main():
     """Main entry point for hermes CLI."""
+    # Issue #16480: refuse to run (or transparently drop privileges) when
+    # the CLI is launched as root inside a Docker container that declares
+    # a non-root runtime user. Must run before any code that could create
+    # files under $HERMES_HOME.
+    try:
+        from hermes_cli.docker_guard import enforce_docker_non_root
+
+        enforce_docker_non_root()
+    except Exception:  # pragma: no cover - guard must never break startup
+        pass
+
     from hermes_cli._parser import build_top_level_parser
 
     parser, subparsers, chat_parser = build_top_level_parser()
