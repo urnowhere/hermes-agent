@@ -103,6 +103,57 @@ class TestHermesTimeNow:
         assert r2.utcoffset() == timedelta(hours=5, minutes=30)
 
 
+class TestCurrentTimeContext:
+    """Test API-facing current-time context helpers."""
+
+    def setup_method(self):
+        _reset_hermes_time_cache()
+
+    def teardown_method(self):
+        _reset_hermes_time_cache()
+        os.environ.pop("HERMES_TIMEZONE", None)
+
+    def test_format_current_time_note_includes_timezone(self):
+        """Current-time note uses Hermes timezone and a stable system-note shape."""
+        os.environ["HERMES_TIMEZONE"] = "Asia/Singapore"
+        _reset_hermes_time_cache()
+
+        note = hermes_time.format_current_time_note()
+
+        assert note.startswith("[System note: Current time is ")
+        assert note.endswith(".]")
+        assert "Current time is" in note
+        assert "+08" in note or "SGT" in note
+
+    def test_prepend_current_time_context_to_string_once(self):
+        """String user turns get exactly one current-time note."""
+        os.environ["HERMES_TIMEZONE"] = "UTC"
+        _reset_hermes_time_cache()
+
+        content = hermes_time.prepend_current_time_context("What time is it?")
+        again = hermes_time.prepend_current_time_context(content)
+
+        assert content.startswith("[System note: Current time is ")
+        assert content.endswith("\n\nWhat time is it?")
+        assert again == content
+        assert content.count("[System note: Current time is ") == 1
+
+    def test_prepend_current_time_context_to_multimodal_parts(self):
+        """Multimodal user turns get the note as the first text part without mutating input."""
+        original = [
+            {"type": "text", "text": "Describe this"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+        ]
+
+        content = hermes_time.prepend_current_time_context(original)
+
+        assert content is not original
+        assert content[0]["type"] == "text"
+        assert content[0]["text"].startswith("[System note: Current time is ")
+        assert content[1:] == original
+        assert original[0]["text"] == "Describe this"
+
+
 class TestGetTimezone:
     """Test get_timezone()."""
 

@@ -2390,6 +2390,35 @@ class TestRunConversation:
         assert result["final_response"] == "Final answer"
         assert result["completed"] is True
 
+    def test_current_time_context_is_api_only_user_context(self, agent, monkeypatch):
+        self._setup_agent(agent)
+        monkeypatch.setenv("HERMES_TIMEZONE", "UTC")
+        import hermes_time
+        hermes_time._cached_tz = None
+        hermes_time._cached_tz_name = None
+        hermes_time._cache_resolved = False
+
+        resp = _mock_response(content="Final answer", finish_reason="stop")
+        agent.client.chat.completions.create.return_value = resp
+
+        with (
+            patch.object(agent, "_save_session_log"),
+            patch.object(agent, "_flush_messages_to_session_db"),
+            patch.object(agent, "_save_trajectory") as mock_save_trajectory,
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello")
+
+        api_messages = agent.client.chat.completions.create.call_args.kwargs["messages"]
+        assert api_messages[0]["role"] == "system"
+        assert "Current time:" not in api_messages[0]["content"]
+        assert api_messages[-1]["role"] == "user"
+        assert api_messages[-1]["content"].startswith("[System note: Current time is ")
+        assert api_messages[-1]["content"].endswith("\n\nhello")
+        assert result["messages"][0]["content"] == "hello"
+        assert mock_save_trajectory.call_args.args[0][0]["content"] == "hello"
+        assert mock_save_trajectory.call_args.args[1] == "hello"
+
     def test_tool_calls_then_stop(self, agent):
         self._setup_agent(agent)
         tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")

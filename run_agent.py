@@ -10726,6 +10726,19 @@ class AIAgent:
         # Preserve the original user message (no nudge injection).
         original_user_message = persist_user_message if persist_user_message is not None else user_message
 
+        # Add fresh wall-clock context to the API-facing user turn only. Keeping
+        # this out of the system prompt preserves prompt-cache stability, while
+        # _persist_user_message_override keeps transcripts/session history clean.
+        try:
+            from hermes_time import prepend_current_time_context
+            _api_user_message = prepend_current_time_context(user_message)
+            if _api_user_message != user_message:
+                user_message = _api_user_message
+                if persist_user_message is None:
+                    self._persist_user_message_override = original_user_message
+        except Exception:
+            pass
+
         # Track memory nudge trigger (turn-based, checked here).
         # Skill trigger is checked AFTER the agent loop completes, based on
         # how many tool iterations THIS turn used.
@@ -13983,7 +13996,10 @@ class AIAgent:
 
         # Save trajectory if enabled.  ``user_message`` may be a multimodal
         # list of parts; the trajectory format wants a plain string.
-        self._save_trajectory(messages, _summarize_user_message_for_log(user_message), completed)
+        # Rewrite API-only user context before trajectory/persistence so synthetic
+        # time notes never leak into saved transcripts or training artifacts.
+        self._apply_persist_user_message_override(messages)
+        self._save_trajectory(messages, _summarize_user_message_for_log(original_user_message), completed)
 
         # Clean up VM and browser for this task after conversation completes
         self._cleanup_task_resources(effective_task_id)

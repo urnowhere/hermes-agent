@@ -17,7 +17,7 @@ import logging
 import os
 from datetime import datetime
 from hermes_constants import get_config_path
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -100,5 +100,63 @@ def now() -> datetime:
         return datetime.now(tz)
     # No timezone configured — use server-local (still tz-aware)
     return datetime.now().astimezone()
+
+
+_CURRENT_TIME_NOTE_PREFIX = "[System note: Current time is "
+
+
+def format_current_time_note(current: Optional[datetime] = None) -> str:
+    """Return the standard ephemeral current-time note for LLM turns.
+
+    The note is intentionally shaped as a user-message system note instead of
+    a dynamic system-prompt fragment. That keeps Hermes' cached system prompt
+    stable while still giving the model fresh wall-clock awareness each turn.
+    """
+    current = current or now()
+    formatted = current.strftime("%A, %B %d, %Y %I:%M %p")
+    tz_label = current.strftime("%Z").strip()
+    if tz_label:
+        formatted = f"{formatted} {tz_label}"
+    return f"{_CURRENT_TIME_NOTE_PREFIX}{formatted}.]"
+
+
+def _content_has_current_time_note(content: Any) -> bool:
+    """Return True when a user-message content value already starts with the note."""
+    if isinstance(content, str):
+        return content.lstrip().startswith(_CURRENT_TIME_NOTE_PREFIX)
+    if isinstance(content, list):
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "text" and isinstance(part.get("text"), str):
+                return part["text"].lstrip().startswith(_CURRENT_TIME_NOTE_PREFIX)
+            # Only inspect the leading text part. If the first meaningful part
+            # is an image, no note has been injected yet.
+            if part.get("type"):
+                return False
+    return False
+
+
+def prepend_current_time_context(content: Any) -> Any:
+    """Prepend the current-time note to API-facing user-message content.
+
+    Supports plain string turns and OpenAI-style multimodal content lists. The
+    input list is never mutated, so callers can persist the clean user message
+    separately from the API-facing variant.
+    """
+    if _content_has_current_time_note(content):
+        return content
+
+    note = format_current_time_note()
+    if isinstance(content, str):
+        return f"{note}\n\n{content}"
+
+    if isinstance(content, list):
+        return [{"type": "text", "text": note}] + [
+            dict(part) if isinstance(part, dict) else part
+            for part in content
+        ]
+
+    return content
 
 
