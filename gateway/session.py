@@ -1327,6 +1327,13 @@ class SessionStore:
                                 session_id, line[:120],
                             )
 
+        if self._is_resume_pending_session_id(session_id):
+            return self._merge_resume_pending_transcript(
+                session_id,
+                jsonl_messages,
+                db_messages,
+            )
+
         # Prefer whichever source has more messages.
         #
         # Background: when a session pre-dates SQLite storage (or when the DB
@@ -1347,6 +1354,87 @@ class SessionStore:
             return jsonl_messages
 
         return db_messages
+
+    def _is_resume_pending_session_id(self, session_id: str) -> bool:
+        """Return True when a live SessionEntry is waiting for restart resume."""
+        with self._lock:
+            self._ensure_loaded_locked()
+            return any(
+                entry.session_id == session_id and entry.resume_pending
+                for entry in self._entries.values()
+            )
+
+    @staticmethod
+    def _message_identity(message: Dict[str, Any]) -> str:
+        """Canonicalize the fields that identify the visible conversation turn."""
+        comparable = {
+            "role": message.get("role"),
+            "content": message.get("content"),
+            "tool_call_id": message.get("tool_call_id"),
+            "tool_calls": message.get("tool_calls"),
+            "tool_name": message.get("tool_name"),
+        }
+        return json.dumps(comparable, sort_keys=True, ensure_ascii=False, default=str)
+
+    @classmethod
+    def _merge_resume_pending_transcript(
+        cls,
+        session_id: str,
+        jsonl_messages: List[Dict[str, Any]],
+        db_messages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Merge restart-resume transcripts without dropping an interrupted tail.
+
+        Normal sessions keep the legacy "longer source wins" behavior above.
+        Resume-pending sessions are different: SQLite may contain the newest
+        interrupted messages while JSONL still has the longer pre-restart
+        history.  Preserve JSONL history, then append only the SQLite suffix
+        that is not already represented.
+        """
+        if not jsonl_messages:
+            return db_messages
+        if not db_messages:
+            return jsonl_messages
+
+        jsonl_ids = [cls._message_identity(msg) for msg in jsonl_messages]
+        db_ids = [cls._message_identity(msg) for msg in db_messages]
+
+        if cls._contains_contiguous_subsequence(jsonl_ids, db_ids):
+            return jsonl_messages
+        if cls._contains_contiguous_subsequence(db_ids, jsonl_ids):
+            return db_messages
+
+        max_overlap = min(len(jsonl_ids), len(db_ids))
+        overlap = 0
+        for size in range(max_overlap, 0, -1):
+            if jsonl_ids[-size:] == db_ids[:size]:
+                overlap = size
+                break
+
+        merged = jsonl_messages + db_messages[overlap:]
+        logger.debug(
+            "Session %s: merged resume-pending transcript from JSONL (%d) "
+            "and SQLite (%d) with %d-message overlap -> %d messages",
+            session_id, len(jsonl_messages), len(db_messages),
+            overlap, len(merged),
+        )
+        return merged
+
+    @staticmethod
+    def _contains_contiguous_subsequence(
+        haystack: List[str],
+        needle: List[str],
+    ) -> bool:
+        """Return True if *needle* appears contiguously inside *haystack*."""
+        if not needle:
+            return True
+        if len(needle) > len(haystack):
+            return False
+        limit = len(haystack) - len(needle) + 1
+        for start in range(limit):
+            if haystack[start:start + len(needle)] == needle:
+                return True
+        return False
 
 
 def build_session_context(

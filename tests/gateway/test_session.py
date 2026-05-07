@@ -617,6 +617,73 @@ class TestLoadTranscriptPreferLongerSource:
         # Should be the SQLite version (equal count → prefers SQLite)
         assert result[0]["content"] == "db-q"
 
+    def test_resume_pending_merges_newer_sqlite_tail(self, store_with_db):
+        """Restart resume must not drop SQLite-only interrupted-turn messages."""
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="resume-chat",
+            chat_type="group",
+            user_id="u1",
+        )
+        entry = store_with_db.get_or_create_session(source)
+        sid = entry.session_id
+
+        for i in range(6):
+            role = "user" if i % 2 == 0 else "assistant"
+            store_with_db.append_to_transcript(
+                sid, {"role": role, "content": f"old-jsonl-{i}"}, skip_db=True,
+            )
+
+        store_with_db._db.append_message(
+            session_id=sid,
+            role="user",
+            content="start long interrupted task",
+        )
+        store_with_db._db.append_message(
+            session_id=sid,
+            role="assistant",
+            content="working on interrupted task",
+        )
+        store_with_db.mark_resume_pending(entry.session_key)
+
+        result = store_with_db.load_transcript(sid)
+
+        assert [msg["content"] for msg in result] == [
+            "old-jsonl-0",
+            "old-jsonl-1",
+            "old-jsonl-2",
+            "old-jsonl-3",
+            "old-jsonl-4",
+            "old-jsonl-5",
+            "start long interrupted task",
+            "working on interrupted task",
+        ]
+
+    def test_resume_pending_does_not_duplicate_sqlite_tail_already_in_jsonl(
+        self,
+        store_with_db,
+    ):
+        """Already synchronized JSONL/SQLite transcripts should stay unchanged."""
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="resume-chat-synced",
+            chat_type="group",
+            user_id="u1",
+        )
+        entry = store_with_db.get_or_create_session(source)
+        sid = entry.session_id
+
+        for msg in [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ]:
+            store_with_db.append_to_transcript(sid, msg)
+        store_with_db.mark_resume_pending(entry.session_key)
+
+        result = store_with_db.load_transcript(sid)
+
+        assert [msg["content"] for msg in result] == ["hello", "hi"]
+
 
 class TestSessionStoreSwitchSession:
     """Regression coverage for gateway /resume session switching semantics."""
