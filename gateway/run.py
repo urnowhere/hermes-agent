@@ -5684,7 +5684,10 @@ class GatewayRunner:
             thread_sessions_per_user=_thread_sessions_per_user,
         )
         if _is_shared_multi_user and source.user_name:
-            message_text = f"[{source.user_name}] {message_text}"
+            sender_label = source.user_name
+            if source.platform == Platform.SLACK and source.user_id:
+                sender_label = f"{source.user_name} | Slack user <@{source.user_id}>"
+            message_text = f"[{sender_label}] {message_text}"
 
         if event.media_urls:
             image_paths = []
