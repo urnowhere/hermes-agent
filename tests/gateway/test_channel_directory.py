@@ -15,6 +15,7 @@ from gateway.channel_directory import (
     load_directory,
     _build_from_sessions,
     _build_slack,
+    _verify_telegram_reachability,
     DIRECTORY_PATH,
 )
 
@@ -49,8 +50,125 @@ class TestLoadDirectory:
             result = load_directory()
         assert result["updated_at"] is None
 
+    def test_merges_user_overrides_when_cache_missing(self, tmp_path):
+        cache_file = tmp_path / "channel_directory.json"
+        overrides = tmp_path / "channel_directory_overrides.json"
+        overrides.write_text(json.dumps({
+            "platforms": {
+                "telegram": [
+                    {"id": "-1001", "name": "SageWiz", "type": "group"},
+                ]
+            }
+        }))
+
+        with patch("gateway.channel_directory.DIRECTORY_PATH", cache_file):
+            result = load_directory()
+
+        assert result["platforms"]["telegram"] == [
+            {"id": "-1001", "name": "SageWiz", "type": "group"}
+        ]
+
+    def test_user_overrides_update_existing_entry(self, tmp_path):
+        cache_file = _write_directory(tmp_path, {
+            "telegram": [{"id": "-1001", "name": "Old Name", "type": "group"}]
+        })
+        overrides = tmp_path / "channel_directory_overrides.json"
+        overrides.write_text(json.dumps({
+            "platforms": {
+                "telegram": [
+                    {"id": "-1001", "name": "SageWiz", "type": "group", "source": "override"},
+                ]
+            }
+        }))
+
+        with patch("gateway.channel_directory.DIRECTORY_PATH", cache_file):
+            result = load_directory()
+
+        assert result["platforms"]["telegram"] == [
+            {"id": "-1001", "name": "SageWiz", "type": "group", "source": "override"}
+        ]
+
+
+class TestTelegramReachabilityProbe:
+    def test_marks_group_sendable_without_sending_message(self):
+        bot = SimpleNamespace(
+            get_me=AsyncMock(return_value=SimpleNamespace(id=42)),
+            get_chat=AsyncMock(return_value=SimpleNamespace(type="supergroup", title="SageWiz", is_forum=False)),
+            get_chat_member=AsyncMock(return_value=SimpleNamespace(status="member")),
+        )
+        entries = [{"id": "-1001", "name": "SageWiz", "type": "group"}]
+
+        asyncio.run(_verify_telegram_reachability(SimpleNamespace(_bot=bot), entries))
+
+        assert entries[0]["reachable"] is True
+        assert entries[0]["can_send_messages"] is True
+        assert entries[0]["bot_status"] == "member"
+        assert entries[0]["verified_name"] == "SageWiz"
+        bot.get_chat.assert_awaited_once_with(-1001)
+        bot.get_chat_member.assert_awaited_once_with(-1001, 42)
+
+    def test_marks_unreachable_without_sending_message(self):
+        bot = SimpleNamespace(
+            get_me=AsyncMock(return_value=SimpleNamespace(id=42)),
+            get_chat=AsyncMock(side_effect=RuntimeError("Forbidden: bot is not a member")),
+            get_chat_member=AsyncMock(),
+        )
+        entries = [{"id": "-1002", "name": "Financials", "type": "group"}]
+
+        asyncio.run(_verify_telegram_reachability(SimpleNamespace(_bot=bot), entries))
+
+        assert entries[0]["reachable"] is False
+        assert entries[0]["can_send_messages"] is False
+        assert "Forbidden" in entries[0]["reachability_error"]
+        bot.get_chat.assert_awaited_once_with(-1002)
+        bot.get_chat_member.assert_not_awaited()
+
+    def test_dm_get_chat_success_is_sendable(self):
+        bot = SimpleNamespace(
+            get_me=AsyncMock(return_value=SimpleNamespace(id=42)),
+            get_chat=AsyncMock(return_value=SimpleNamespace(type="private", full_name="SKT Trader")),
+            get_chat_member=AsyncMock(),
+        )
+        entries = [{"id": "7685032119", "name": "SKT Trader", "type": "dm"}]
+
+        asyncio.run(_verify_telegram_reachability(SimpleNamespace(_bot=bot), entries))
+
+        assert entries[0]["reachable"] is True
+        assert entries[0]["can_send_messages"] is True
+        assert entries[0]["type"] == "dm"
+        bot.get_chat_member.assert_not_awaited()
+
 
 class TestBuildChannelDirectoryWrites:
+    def test_build_probes_telegram_overrides_without_sending(self, tmp_path):
+        from gateway.config import Platform
+
+        cache_file = tmp_path / "channel_directory.json"
+        (tmp_path / "channel_directory_overrides.json").write_text(json.dumps({
+            "platforms": {
+                "telegram": [
+                    {"id": "-1001", "name": "SageWiz", "type": "group"},
+                ]
+            }
+        }))
+        bot = SimpleNamespace(
+            get_me=AsyncMock(return_value=SimpleNamespace(id=42)),
+            get_chat=AsyncMock(return_value=SimpleNamespace(type="supergroup", title="SageWiz", is_forum=False)),
+            get_chat_member=AsyncMock(return_value=SimpleNamespace(status="member")),
+        )
+
+        with patch("gateway.channel_directory.DIRECTORY_PATH", cache_file), \
+             patch("gateway.channel_directory._build_from_sessions", return_value=[]):
+            directory = asyncio.run(build_channel_directory({
+                Platform.TELEGRAM: SimpleNamespace(_bot=bot),
+            }))
+
+        entry = directory["platforms"]["telegram"][0]
+        assert entry["name"] == "SageWiz"
+        assert entry["reachable"] is True
+        assert entry["can_send_messages"] is True
+        assert json.loads(cache_file.read_text())["platforms"]["telegram"][0]["reachable"] is True
+
     def test_failed_write_preserves_previous_cache(self, tmp_path, monkeypatch):
         cache_file = _write_directory(tmp_path, {
             "telegram": [{"id": "123", "name": "Alice", "type": "dm"}]
@@ -289,6 +407,25 @@ class TestFormatDirectoryForDisplay:
         assert "telegram:Alice" in result
         assert "telegram:Dev Group" in result
         assert "telegram:Coaching Chat / topic 17585" in result
+
+    def test_telegram_display_keeps_target_line_clean_with_status_note(self, tmp_path):
+        cache_file = _write_directory(tmp_path, {
+            "telegram": [
+                {
+                    "id": "456",
+                    "name": "Dev Group",
+                    "type": "group",
+                    "reachable": True,
+                    "can_send_messages": True,
+                    "bot_status": "member",
+                },
+            ]
+        })
+        with patch("gateway.channel_directory.DIRECTORY_PATH", cache_file):
+            result = format_directory_for_display()
+
+        assert "  telegram:Dev Group (group)\n    status: verified sendable (member)" in result
+        assert "telegram:Dev Group (group) [" not in result
 
     def test_discord_grouped_by_guild(self, tmp_path):
         cache_file = _write_directory(tmp_path, {

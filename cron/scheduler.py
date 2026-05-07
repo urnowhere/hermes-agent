@@ -109,10 +109,20 @@ _LEGACY_HOME_TARGET_ENV_VARS = {
 
 from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run
 
-# Sentinel: when a cron agent has nothing new to report, it can start its
-# response with this marker to suppress delivery.  Output is still saved
-# locally for audit.
+# Sentinels: when a cron agent has nothing new to report, it can include one of
+# these markers to suppress delivery. Output is still saved locally for audit.
 SILENT_MARKER = "[SILENT]"
+NO_REPLY_MARKER = "NO_REPLY"
+
+
+def _should_suppress_delivery(content: str, *, success: bool) -> bool:
+    """Return True when cron output asks the scheduler not to deliver."""
+    normalized = (content or "").strip().upper()
+    if not normalized:
+        return False
+    if NO_REPLY_MARKER in normalized:
+        return True
+    return success and SILENT_MARKER in normalized
 
 # Backward-compatible module override used by tests and emergency monkeypatches.
 _hermes_home: Path | None = None
@@ -794,9 +804,9 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         "the output yourself. Just produce your report/output as your "
         "final response and the system handles the rest. "
         "SILENT: If there is genuinely nothing new to report, respond "
-        "with exactly \"[SILENT]\" (nothing else) to suppress delivery. "
-        "Never combine [SILENT] with content — either report your "
-        "findings normally, or say [SILENT] and nothing more.]\n\n"
+        "with exactly \"[SILENT]\" or \"NO_REPLY\" (nothing else) to suppress delivery. "
+        "Never combine [SILENT] or NO_REPLY with content — either report your "
+        "findings normally, or use one suppression marker and nothing more.]\n\n"
     )
     prompt = cron_hint + prompt
     if skills is None:
@@ -1513,12 +1523,22 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                     logger.info("Output saved to: %s", output_file)
 
                 # Deliver the final response to the origin/target chat.
-                # If the agent responded with [SILENT], skip delivery (but
-                # output is already saved above).  Failed jobs always deliver.
+                # Suppression markers skip delivery (but output is already saved).
+                # [SILENT] suppresses successful no-op runs; NO_REPLY is explicit
+                # user intent and suppresses any cron message containing it.
                 deliver_content = final_response if success else f"⚠️ Cron job '{job.get('name', job['id'])}' failed:\n{error}"
                 should_deliver = bool(deliver_content)
-                if should_deliver and success and SILENT_MARKER in deliver_content.strip().upper():
-                    logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
+                suppression_content = deliver_content
+                if not success:
+                    suppression_content = "\n".join(
+                        part for part in (deliver_content, final_response, error) if part
+                    )
+                if should_deliver and _should_suppress_delivery(suppression_content, success=success):
+                    logger.info(
+                        "Job '%s': agent returned %s/NO_REPLY suppression marker — skipping delivery",
+                        job["id"],
+                        SILENT_MARKER,
+                    )
                     should_deliver = False
 
                 delivery_error = None

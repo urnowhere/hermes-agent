@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 DIRECTORY_PATH = get_hermes_home() / "channel_directory.json"
 
 
+def _overrides_path():
+    """Return the optional user-maintained channel directory override path."""
+    return DIRECTORY_PATH.with_name("channel_directory_overrides.json")
+
+
 def _normalize_channel_query(value: str) -> str:
     return value.lstrip("#").strip().lower()
 
@@ -51,6 +56,225 @@ def _session_entry_name(origin: Dict[str, Any]) -> str:
 
     topic_label = origin.get("chat_topic") or f"topic {thread_id}"
     return f"{base_name} / {topic_label}"
+
+
+def _load_channel_overrides() -> Dict[str, List[Dict[str, Any]]]:
+    """Load manually configured channel entries.
+
+    Some platforms (notably Telegram) do not expose a reliable bot-side list of
+    every reachable group. Session history only discovers chats after the bot has
+    spoken there in Hermes. This optional override file lets a user keep a small,
+    machine-readable registry of known lanes without fabricating sessions.
+    """
+    path = _overrides_path()
+    if not path.exists():
+        return {}
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        logger.debug("Channel directory: failed to read overrides: %s", e)
+        return {}
+
+    platforms = data.get("platforms", data) if isinstance(data, dict) else {}
+    if not isinstance(platforms, dict):
+        return {}
+
+    cleaned: Dict[str, List[Dict[str, Any]]] = {}
+    for platform_name, entries in platforms.items():
+        if not isinstance(platform_name, str) or not isinstance(entries, list):
+            continue
+
+        valid_entries: List[Dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            channel_id = str(entry.get("id", "")).strip()
+            name = str(entry.get("name", "")).strip()
+            if not channel_id or not name:
+                continue
+
+            normalized = {k: v for k, v in entry.items() if v is not None}
+            normalized["id"] = channel_id
+            normalized["name"] = name
+            normalized["type"] = str(normalized.get("type") or "channel")
+            valid_entries.append(normalized)
+
+        if valid_entries:
+            cleaned[platform_name.strip().lower()] = valid_entries
+
+    return cleaned
+
+
+def _merge_channel_overrides(directory: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge user-maintained channel overrides into a directory payload."""
+    overrides = _load_channel_overrides()
+    if not overrides:
+        return directory
+
+    platforms = directory.setdefault("platforms", {})
+    if not isinstance(platforms, dict):
+        platforms = {}
+        directory["platforms"] = platforms
+
+    for platform_name, override_entries in overrides.items():
+        existing = platforms.setdefault(platform_name, [])
+        if not isinstance(existing, list):
+            existing = []
+            platforms[platform_name] = existing
+
+        index_by_id = {
+            str(entry.get("id")): idx
+            for idx, entry in enumerate(existing)
+            if isinstance(entry, dict) and entry.get("id") is not None
+        }
+        for override_entry in override_entries:
+            channel_id = override_entry["id"]
+            if channel_id in index_by_id:
+                idx = index_by_id[channel_id]
+                merged = dict(existing[idx])
+                merged.update(override_entry)
+                existing[idx] = merged
+            else:
+                index_by_id[channel_id] = len(existing)
+                existing.append(dict(override_entry))
+
+    return directory
+
+
+def _base_chat_id(channel_id: str) -> str:
+    """Return the Telegram chat id part of a possible chat_id:thread_id entry."""
+    return str(channel_id).split(":", 1)[0]
+
+
+def _telegram_api_chat_id(chat_id: str):
+    """Coerce numeric Telegram ids to int while allowing username-style ids."""
+    text = str(chat_id).strip()
+    return int(text) if text.lstrip("-").isdigit() else text
+
+
+def _enum_value(value: Any) -> str:
+    raw = getattr(value, "value", value)
+    return str(raw or "").lower()
+
+
+def _telegram_chat_type(chat: Any) -> str:
+    chat_type = _enum_value(getattr(chat, "type", ""))
+    if chat_type in {"group", "supergroup"}:
+        return "forum" if bool(getattr(chat, "is_forum", False)) else "group"
+    if chat_type == "private":
+        return "dm"
+    if chat_type == "channel":
+        return "channel"
+    return chat_type or "chat"
+
+
+def _telegram_chat_name(chat: Any, fallback: str) -> str:
+    return str(
+        getattr(chat, "title", None)
+        or getattr(chat, "full_name", None)
+        or getattr(chat, "username", None)
+        or fallback
+    )
+
+
+def _telegram_member_can_send(chat_type: str, member: Any) -> bool:
+    status = _enum_value(getattr(member, "status", ""))
+    if status in {"left", "kicked", "banned"}:
+        return False
+    if status == "restricted":
+        can_send = getattr(member, "can_send_messages", None)
+        return bool(can_send) if can_send is not None else True
+    if chat_type == "channel":
+        if status == "creator":
+            return True
+        return status == "administrator" and getattr(member, "can_post_messages", False) is not False
+    return bool(status)
+
+
+def _sanitize_probe_error(error: Exception) -> str:
+    text = str(error).strip().splitlines()[0] if str(error).strip() else error.__class__.__name__
+    try:
+        from agent.redact import redact_sensitive_text
+        text = redact_sensitive_text(text)
+    except Exception:
+        pass
+    return text[:240]
+
+
+async def _verify_telegram_reachability(adapter: Any, entries: List[Dict[str, Any]]) -> None:
+    """Annotate Telegram entries with non-sending Bot API reachability checks."""
+    bot = getattr(adapter, "_bot", None)
+    if not bot or not entries:
+        return
+
+    checked_at = datetime.now().isoformat()
+    bot_user_id = None
+    try:
+        me = await bot.get_me()
+        bot_user_id = getattr(me, "id", None)
+    except Exception as e:
+        logger.debug("Channel directory: Telegram get_me probe failed: %s", _sanitize_probe_error(e))
+
+    probe_cache: Dict[str, Dict[str, Any]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict) or not entry.get("id"):
+            continue
+        chat_id = _base_chat_id(str(entry["id"]))
+        if chat_id in probe_cache:
+            entry.update(probe_cache[chat_id])
+            continue
+
+        try:
+            chat = await bot.get_chat(_telegram_api_chat_id(chat_id))
+            chat_type = _telegram_chat_type(chat)
+            fields: Dict[str, Any] = {
+                "reachable": True,
+                "reachability_checked_at": checked_at,
+                "reachability_source": "telegram:getChat",
+                "verified_name": _telegram_chat_name(chat, entry.get("name", chat_id)),
+            }
+            if chat_type:
+                fields["type"] = chat_type
+
+            if chat_type == "dm" or bot_user_id is None:
+                fields["can_send_messages"] = True
+            else:
+                member = await bot.get_chat_member(_telegram_api_chat_id(chat_id), bot_user_id)
+                fields["bot_status"] = _enum_value(getattr(member, "status", ""))
+                fields["can_send_messages"] = _telegram_member_can_send(chat_type, member)
+                fields["reachability_source"] = "telegram:getChat+getChatMember"
+
+            entry.update(fields)
+            entry.pop("reachability_error", None)
+            probe_cache[chat_id] = fields
+        except Exception as e:
+            fields = {
+                "reachable": False,
+                "can_send_messages": False,
+                "reachability_checked_at": checked_at,
+                "reachability_source": "telegram:getChat",
+                "reachability_error": _sanitize_probe_error(e),
+            }
+            entry.update(fields)
+            probe_cache[chat_id] = fields
+
+
+def _channel_status_note(channel: Dict[str, Any]) -> str:
+    """Return an optional human-readable delivery status line for a directory entry."""
+    if "reachable" not in channel and "can_send_messages" not in channel:
+        return ""
+    if channel.get("reachable") is False:
+        detail = channel.get("reachability_error") or "bot cannot access this chat"
+        return f"unreachable — {detail}"
+    if channel.get("can_send_messages") is False:
+        status = channel.get("bot_status")
+        return f"reachable, but bot may not be allowed to post{f' ({status})' if status else ''}"
+    if channel.get("reachable") is True:
+        status = channel.get("bot_status")
+        return f"verified sendable{f' ({status})' if status else ''}"
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +324,17 @@ async def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
         "updated_at": datetime.now().isoformat(),
         "platforms": platforms,
     }
+    directory = _merge_channel_overrides(directory)
+
+    telegram_adapter = adapters.get(Platform.TELEGRAM) if adapters else None
+    if telegram_adapter is not None:
+        try:
+            await _verify_telegram_reachability(
+                telegram_adapter,
+                directory.get("platforms", {}).get("telegram", []),
+            )
+        except Exception as e:
+            logger.debug("Channel directory: Telegram reachability probe failed: %s", e)
 
     try:
         atomic_json_write(DIRECTORY_PATH, directory)
@@ -247,12 +482,12 @@ def _build_from_sessions(platform_name: str) -> List[Dict[str, str]]:
 def load_directory() -> Dict[str, Any]:
     """Load the cached channel directory from disk."""
     if not DIRECTORY_PATH.exists():
-        return {"updated_at": None, "platforms": {}}
+        return _merge_channel_overrides({"updated_at": None, "platforms": {}})
     try:
         with open(DIRECTORY_PATH, encoding="utf-8") as f:
-            return json.load(f)
+            return _merge_channel_overrides(json.load(f))
     except Exception:
-        return {"updated_at": None, "platforms": {}}
+        return _merge_channel_overrides({"updated_at": None, "platforms": {}})
 
 
 def lookup_channel_type(platform_name: str, chat_id: str) -> Optional[str]:
@@ -340,15 +575,24 @@ def format_directory_for_display() -> str:
                 lines.append(f"Discord ({guild_name}):")
                 for ch in sorted(guild_channels, key=lambda c: c["name"]):
                     lines.append(f"  discord:{_channel_target_name(plat_name, ch)}")
+                    status_note = _channel_status_note(ch)
+                    if status_note:
+                        lines.append(f"    status: {status_note}")
             if dms:
                 lines.append("Discord (DMs):")
                 for ch in dms:
                     lines.append(f"  discord:{_channel_target_name(plat_name, ch)}")
+                    status_note = _channel_status_note(ch)
+                    if status_note:
+                        lines.append(f"    status: {status_note}")
             lines.append("")
         else:
             lines.append(f"{plat_name.title()}:")
             for ch in channels:
                 lines.append(f"  {plat_name}:{_channel_target_name(plat_name, ch)}")
+                status_note = _channel_status_note(ch)
+                if status_note:
+                    lines.append(f"    status: {status_note}")
             lines.append("")
 
     lines.append('Use these as the "target" parameter when sending.')
