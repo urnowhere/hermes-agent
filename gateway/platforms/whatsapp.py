@@ -1090,6 +1090,9 @@ class WhatsAppAdapter(BasePlatformAdapter):
                         except Exception as e:
                             print(f"[{self.name}] Failed to read document text: {e}", flush=True)
 
+            reply_to_message_id = data.get("quotedMessageId") or data.get("replyToMessageId") or data.get("reply_to_message_id")
+            reply_to_text = data.get("quotedText") or data.get("replyToText") or data.get("reply_to_text")
+
             return MessageEvent(
                 text=body,
                 message_type=msg_type,
@@ -1098,6 +1101,8 @@ class WhatsAppAdapter(BasePlatformAdapter):
                 message_id=data.get("messageId"),
                 media_urls=cached_urls,
                 media_types=media_types,
+                reply_to_message_id=reply_to_message_id,
+                reply_to_text=reply_to_text,
             )
         except Exception as e:
             print(f"[{self.name}] Error building event: {e}")
