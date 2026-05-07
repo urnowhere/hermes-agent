@@ -225,7 +225,10 @@ async def host_header_middleware(request: Request, call_next):
 async def auth_middleware(request: Request, call_next):
     """Require the session token on all /api/ routes except the public list."""
     path = request.url.path
-    if path.startswith("/api/") and path not in _PUBLIC_API_PATHS and not path.startswith("/api/plugins/"):
+    if path.startswith("/api/") and path not in _PUBLIC_API_PATHS:
+        # Plugin API routes (/api/plugins/*) are no longer exempted — they
+        # may access sensitive Hermes internals and must be protected the same
+        # way as every other /api/ endpoint.
         if not _has_valid_session_token(request):
             return JSONResponse(
                 status_code=401,
@@ -3589,6 +3592,16 @@ def _discover_dashboard_plugins() -> list:
             try:
                 data = json.loads(manifest_file.read_text(encoding="utf-8"))
                 name = data.get("name", child.name)
+                # Validate name: only lowercase letters, digits, hyphens.
+                # Prevents path injection via /api/plugins/<name>/ URL prefix.
+                import re as _re
+                if not _re.fullmatch(r"[a-z0-9][a-z0-9\-]*", name):
+                    _log.warning(
+                        "Skipping plugin at %s: invalid name %r "
+                        "(must match [a-z0-9][a-z0-9-]*)",
+                        manifest_file, name,
+                    )
+                    continue
                 if name in seen_names:
                     continue
                 seen_names.add(name)
@@ -3978,7 +3991,15 @@ def _mount_plugin_api_routes():
         api_file_name = plugin.get("_api_file")
         if not api_file_name:
             continue
-        api_path = Path(plugin["_dir"]) / api_file_name
+        api_path = (Path(plugin["_dir"]) / api_file_name).resolve()
+        base_dir = Path(plugin["_dir"]).resolve()
+        # Block path traversal: api file must stay inside dashboard/ dir.
+        if not api_path.is_relative_to(base_dir):
+            _log.warning(
+                "Plugin %s: api path %r escapes dashboard/ directory — skipped",
+                plugin["name"], api_file_name,
+            )
+            continue
         if not api_path.exists():
             _log.warning("Plugin %s declares api=%s but file not found", plugin["name"], api_file_name)
             continue
