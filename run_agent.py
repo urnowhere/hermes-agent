@@ -5095,6 +5095,19 @@ class AIAgent:
             except Exception:
                 pass
 
+        # PII FILTER: instruct LLM to preserve placeholder tokens verbatim
+        try:
+            from hermes_cli.config import load_config as _load_pii_cfg
+            if _load_pii_cfg().get("pii_filter", {}).get("enabled", False):
+                prompt_parts.append(
+                    "IMPORTANT: Messages may contain privacy placeholders like "
+                    "[PERSON_a1b2c3] or [EMAIL_d4e5f6]. Treat them as real values "
+                    "and reproduce them verbatim in your responses — never guess, "
+                    "replace, or omit them."
+                )
+        except Exception:
+            pass
+
         return "\n\n".join(p.strip() for p in prompt_parts if p.strip())
 
     # =========================================================================
@@ -7089,6 +7102,26 @@ class AIAgent:
 
             # Build mock response matching non-streaming shape
             full_content = "".join(content_parts) or None
+
+            # PII FILTER: restore masked PII in streamed response
+            _pii_map = getattr(self, "_active_pii_map", {})
+            if _pii_map:
+                try:
+                    from agent.pii_filter import get_pii_filter as _get_pii_r
+                    _pii_r = _get_pii_r()
+                    if full_content:
+                        full_content = _pii_r.restore_text(full_content, _pii_map)
+                    for _tc in tool_calls_acc.values():
+                        if _tc["function"].get("arguments"):
+                            _tc["function"]["arguments"] = _pii_r.restore_text(
+                                _tc["function"]["arguments"], _pii_map
+                            )
+                except Exception:
+                    pass
+                finally:
+                    self._active_pii_map = {}
+            # END PII FILTER
+
             mock_tool_calls = None
             has_truncated_tool_args = False
             if tool_calls_acc:
@@ -11322,6 +11355,27 @@ class AIAgent:
                 try:
                     self._reset_stream_delivery_tracking()
                     api_kwargs = self._build_api_kwargs(api_messages)
+
+                    # PII FILTER: mask outgoing messages before sending to provider
+                    self._active_pii_map = {}
+                    try:
+                        from hermes_cli.config import load_config as _load_cfg
+                        _pii_cfg = _load_cfg().get("pii_filter", {})
+                    except Exception:
+                        _pii_cfg = {}
+                    if _pii_cfg.get("enabled", False) and self.api_mode not in ("anthropic_messages", "bedrock_converse", "codex_responses"):
+                        try:
+                            from agent.pii_filter import get_pii_filter as _get_pii
+                            _mask_roles = set(_pii_cfg.get("mask_roles", ["user", "tool", "assistant"]))
+                            _msgs = api_kwargs.get("messages", [])
+                            _masked_msgs, self._active_pii_map = _get_pii().mask_messages(_msgs, _mask_roles)
+                            api_kwargs = dict(api_kwargs)
+                            api_kwargs["messages"] = _masked_msgs
+                        except Exception as _pii_err:
+                            import logging as _log
+                            _log.getLogger(__name__).warning("PII filter masking failed: %s", _pii_err)
+                    # END PII FILTER
+
                     if self._force_ascii_payload:
                         _sanitize_structure_non_ascii(api_kwargs)
                     if self.api_mode == "codex_responses":
