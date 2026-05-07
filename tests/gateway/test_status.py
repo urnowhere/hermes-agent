@@ -8,6 +8,50 @@ from types import SimpleNamespace
 from gateway import status
 
 
+class TestGetProcessStartTime:
+    """Verify the cross-platform start-time fingerprint behaviour.
+
+    On Linux this reads /proc; on macOS / *BSD it falls back to ``ps -o
+    lstart=``. The fallback path is critical: without it, the scoped-lock
+    staleness check stores ``start_time: None`` and a recycled PID will
+    appear to own the lock forever (silent platform lockout).
+    """
+
+    def test_returns_stable_value_for_self(self):
+        """Repeated calls for the same live process must return equal results."""
+        v1 = status._get_process_start_time(os.getpid())
+        v2 = status._get_process_start_time(os.getpid())
+        assert v1 is not None, (
+            "expected a non-None start time for the current process "
+            "(both /proc and `ps` fallback failed — staleness check is broken)"
+        )
+        assert v1 == v2
+
+    def test_returns_none_for_nonexistent_pid(self):
+        # Pick a PID extremely unlikely to exist.
+        assert status._get_process_start_time(99_999_999) is None
+
+    def test_ps_fallback_when_proc_missing(self, monkeypatch):
+        """Force the /proc read to fail and confirm the `ps` fallback fires.
+
+        This simulates the macOS / *BSD code path on any host (including
+        Linux CI runners) so the bug that caused the original incident
+        cannot silently regress.
+        """
+        from pathlib import Path as _Path
+
+        real_read_text = _Path.read_text
+
+        def fake_read_text(self, *a, **kw):
+            if str(self).startswith("/proc/"):
+                raise FileNotFoundError(str(self))
+            return real_read_text(self, *a, **kw)
+
+        monkeypatch.setattr(_Path, "read_text", fake_read_text)
+        v = status._get_process_start_time(os.getpid())
+        assert v is not None, "ps fallback failed to produce a fingerprint"
+
+
 class TestGatewayPidState:
     def test_write_pid_file_records_gateway_metadata(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))

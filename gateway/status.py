@@ -109,13 +109,43 @@ def _get_scope_lock_path(scope: str, identity: str) -> Path:
 
 
 def _get_process_start_time(pid: int) -> Optional[int]:
-    """Return the kernel start time for a process when available."""
+    """Return a stable per-PID start-time fingerprint when available.
+
+    On Linux this reads field 22 of /proc/<pid>/stat (start time in clock
+    ticks). On platforms without /proc (macOS, *BSD, Windows) we fall back
+    to ``ps -o lstart=`` which prints the process start timestamp; we
+    return its hash so the caller can compare equality across reads.
+
+    A stable value is critical for the scoped-lock staleness check: without
+    it, ``start_time`` is recorded as None and a recycled PID will appear
+    to still own the lock forever (silent platform lockout).
+    """
     stat_path = Path(f"/proc/{pid}/stat")
     try:
         # Field 22 in /proc/<pid>/stat is process start time (clock ticks).
         return int(stat_path.read_text().split()[21])
     except (FileNotFoundError, IndexError, PermissionError, ValueError, OSError):
-        return None
+        pass
+
+    # Fallback: ask `ps` for the process start timestamp. Works on macOS,
+    # *BSD, and Linux distributions that ship procps. We hash the string
+    # to a stable signed-int fingerprint so callers can equality-compare.
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        lstart = result.stdout.strip()
+        if result.returncode == 0 and lstart:
+            # Truncate sha256 to fit comfortably in a positive 63-bit int.
+            digest = hashlib.sha256(lstart.encode("utf-8")).hexdigest()[:15]
+            return int(digest, 16)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError, ValueError):
+        pass
+
+    return None
 
 
 def get_process_start_time(pid: int) -> Optional[int]:
