@@ -180,11 +180,51 @@ class FormsyContextEngine(ContextEngine):
                     },
                     "required": ["query"],
                 },
-            }
+            },
+            {
+                "name": "memory_read",
+                "description": (
+                    "Read exact source context from Formsy's compiled repository memory. "
+                    "Use memory_read after memory_search returns a relevant file path or "
+                    "line range. This is the preferred way to inspect source code for "
+                    "SWE-bench tasks when direct file-content reads are discouraged."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Repository-relative file path to read.",
+                        },
+                        "repo_id": {
+                            "type": "string",
+                            "description": "External repository identifier required by Formsy query API. Use the task metadata repo_id directly, e.g. django__django-14053.",
+                        },
+                        "revision": {
+                            "type": "string",
+                            "description": "Logical revision label to query. Use the task metadata revision directly when provided; otherwise use latest.",
+                            "default": "latest",
+                        },
+                        "start_line": {
+                            "type": "integer",
+                            "description": "Optional 1-indexed first source line to read.",
+                            "minimum": 1,
+                        },
+                        "end_line": {
+                            "type": "integer",
+                            "description": "Optional inclusive 1-indexed last source line to read.",
+                            "minimum": 1,
+                        },
+                    },
+                    "required": ["path"],
+                },
+            },
         ]
 
     def handle_tool_call(self, name: str, args: dict[str, Any], **kwargs) -> str:
         """Handle Formsy context-engine tool calls."""
+        if name == "memory_read":
+            return self._handle_memory_read(args)
         if name != "memory_search":
             return super().handle_tool_call(name, args, **kwargs)
 
@@ -217,11 +257,52 @@ class FormsyContextEngine(ContextEngine):
         if result is None:
             return json.dumps({"ok": False, "query": query, "error": "Formsy memory search failed"})
 
-        return json.dumps({
+        payload = {
             "ok": True,
             "query": query,
             "extra_context": self._extract_extra_context(result),
-        })
+        }
+        for key in ("matches", "suggested_queries", "coverage", "missing_context"):
+            if key in result:
+                payload[key] = result[key]
+        return json.dumps(payload)
+
+    def _handle_memory_read(self, args: dict[str, Any]) -> str:
+        path = str(args.get("path") or "").strip()
+        if not path:
+            return json.dumps({"ok": False, "error": "memory_read requires a non-empty path"})
+
+        if not self._engine_client:
+            return json.dumps({"ok": False, "path": path, "error": "Formsy engine client is not initialized"})
+
+        session_id = self._session_id or self._context.get("session_id") or "unknown"
+        repo_id = str(args.get("repo_id") or (self._config.repo_id if self._config else "") or "").strip()
+        if not repo_id:
+            return json.dumps({
+                "ok": False,
+                "path": path,
+                "error": "memory_read requires repo_id. Set formsy.repo_id or pass repo_id in the tool call.",
+            })
+        revision = str(args.get("revision") or (self._config.revision if self._config else "latest") or "latest")
+        start_line = self._optional_positive_int(args.get("start_line"))
+        end_line = self._optional_positive_int(args.get("end_line"))
+        result = self._run_async(
+            self._engine_client.memory_read(
+                repo_id=repo_id,
+                session_id=session_id,
+                path=path,
+                revision=revision,
+                start_line=start_line,
+                end_line=end_line,
+            )
+        )
+        if result is None:
+            return json.dumps({"ok": False, "path": path, "error": "Formsy memory read failed"})
+
+        payload = {"ok": True}
+        if isinstance(result, dict):
+            payload.update(result)
+        return json.dumps(payload)
 
     def _run_async(self, coro):
         """Run Formsy async API calls from the synchronous ContextEngine API."""
@@ -238,6 +319,16 @@ class FormsyContextEngine(ContextEngine):
             number = int(value)
         except (TypeError, ValueError):
             number = default
+        return max(1, number)
+
+    @staticmethod
+    def _optional_positive_int(value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return None
         return max(1, number)
 
     @staticmethod

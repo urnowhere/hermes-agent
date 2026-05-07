@@ -89,7 +89,7 @@ def test_formsy_engine_exposes_memory_search_tool():
 
     schemas = engine.get_tool_schemas()
 
-    assert [schema["name"] for schema in schemas] == ["memory_search"]
+    assert [schema["name"] for schema in schemas] == ["memory_search", "memory_read"]
     params = schemas[0]["parameters"]
     assert params["required"] == ["query"]
     assert "query" in params["properties"]
@@ -99,6 +99,10 @@ def test_formsy_engine_exposes_memory_search_tool():
     assert "limit" in params["properties"]
     assert "proactively" in schemas[0]["description"]
     assert "django__django-14053" in schemas[0]["description"]
+    read_params = schemas[1]["parameters"]
+    assert read_params["required"] == ["path"]
+    assert "start_line" in read_params["properties"]
+    assert "end_line" in read_params["properties"]
 
 
 def test_formsy_engine_memory_search_tool_queries_runtime():
@@ -111,6 +115,9 @@ def test_formsy_engine_memory_search_tool_queries_runtime():
             return {
                 "extra_context": "Relevant parser notes",
                 "matches": [{"path": "parser.py", "score": 0.91}],
+                "suggested_queries": ["tests for parser state handling"],
+                "coverage": "partial",
+                "missing_context": ["No test constraints were selected for this query."],
                 "_latency_ms": 17,
             }
 
@@ -131,14 +138,63 @@ def test_formsy_engine_memory_search_tool_queries_runtime():
     assert data["ok"] is True
     assert data["query"] == "parser state handling"
     assert data["extra_context"] == "Relevant parser notes"
+    assert data["matches"] == [{"path": "parser.py", "score": 0.91}]
+    assert data["suggested_queries"] == ["tests for parser state handling"]
+    assert data["coverage"] == "partial"
+    assert data["missing_context"] == ["No test constraints were selected for this query."]
     assert "results" not in data
-    assert "matches" not in data
     assert calls == [{
         "repo_id": "django__django-14053",
         "session_id": "session-123",
         "query": "parser state handling",
         "revision": "latest",
         "budget": 3000,
+    }]
+
+
+def test_formsy_engine_memory_read_tool_queries_runtime():
+    engine = FormsyContextEngine()
+    calls = []
+
+    class FakeClient:
+        async def memory_read(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "path": "parser.py",
+                "start_line": 10,
+                "end_line": 12,
+                "content": "def parse():\n    return state",
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "django__django-14053",
+        "revision": "latest",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+
+    result = engine.handle_tool_call(
+        "memory_read",
+        {
+            "path": "parser.py",
+            "repo_id": "django__django-14053",
+            "start_line": 10,
+            "end_line": 12,
+        },
+    )
+
+    data = json.loads(result)
+    assert data["ok"] is True
+    assert data["path"] == "parser.py"
+    assert data["content"] == "def parse():\n    return state"
+    assert calls == [{
+        "repo_id": "django__django-14053",
+        "session_id": "session-123",
+        "path": "parser.py",
+        "revision": "latest",
+        "start_line": 10,
+        "end_line": 12,
     }]
 
 

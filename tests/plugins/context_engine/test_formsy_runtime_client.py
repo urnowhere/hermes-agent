@@ -89,3 +89,49 @@ async def test_runtime_client_memory_search_uses_configured_endpoint(monkeypatch
         "profiling_top_n": 20,
         "metadata": {"instance_id": "django__django-14053"},
     }
+
+
+@pytest.mark.asyncio
+async def test_runtime_client_memory_read_uses_read_endpoint(monkeypatch):
+    monkeypatch.setenv("FORMALCC_API_KEY", "fsy_test_secret_token")
+    client = RuntimeClient(
+        base_url="https://runtime.example",
+        api_key_env="FORMALCC_API_KEY",
+    )
+    calls = []
+
+    class FakeAsyncClient:
+        async def request(self, method, url, json=None, headers=None):
+            calls.append({
+                "method": method,
+                "url": url,
+                "json": json,
+                "headers": headers,
+            })
+            return httpx.Response(
+                200,
+                json={"content": "def parser():\n    pass"},
+                request=httpx.Request(method, url, json=json, headers=headers),
+            )
+
+    client._client = FakeAsyncClient()
+
+    result = await client.memory_read(
+        repo_id="django__django-14053",
+        session_id="session-1",
+        path="django/contrib/staticfiles/storage.py",
+        revision="latest",
+        start_line=203,
+        end_line=249,
+    )
+
+    assert result == {"content": "def parser():\n    pass"}
+    assert calls[0]["method"] == "POST"
+    assert calls[0]["url"] == "https://runtime.example/api/v1/read"
+    assert calls[0]["json"] == {
+        "repo_id": "django__django-14053",
+        "revision": "latest",
+        "path": "django/contrib/staticfiles/storage.py",
+        "start_line": 203,
+        "end_line": 249,
+    }

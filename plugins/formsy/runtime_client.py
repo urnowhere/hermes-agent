@@ -274,3 +274,31 @@ class RuntimeClient:
             data=request_body,
             session_id=session_id,
         )
+
+    async def memory_read(
+        self,
+        repo_id: str,
+        session_id: str,
+        path: str,
+        revision: str = "latest",
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> dict[str, Any]:
+        """Call repository source read endpoint (for tool calls)."""
+        logger.debug(f"Memory read: path={path}...")
+        request_body: dict[str, Any] = {
+            "repo_id": repo_id,
+            "revision": revision,
+            "path": path,
+        }
+        if start_line is not None:
+            request_body["start_line"] = start_line
+        if end_line is not None:
+            request_body["end_line"] = end_line
+
+        return await self._request(
+            "POST",
+            "/api/v1/read",
+            data=request_body,
+            session_id=session_id,
+        )
