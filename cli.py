@@ -55,6 +55,34 @@ from prompt_toolkit.widgets import TextArea
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit import print_formatted_text as _pt_print
 from prompt_toolkit.formatted_text import ANSI as _PT_ANSI
+
+
+def _register_prompt_toolkit_ignored_terminal_sequences() -> None:
+    """Teach prompt_toolkit to consume terminal focus reports.
+
+    Ghostty/macOS tab or window navigation can send VT100 focus events
+    (``CSI I`` / ``CSI O``) to the foreground application. prompt_toolkit does
+    not map those sequences by default, so its parser falls back to literal
+    key presses (ESC, ``[``, ``I``/``O``), which inserts ``[I``/``[O`` into the
+    prompt after the ESC byte is handled.
+
+    Register them as ``Keys.Ignore`` at the VT100 parser table so they are
+    swallowed before key bindings or the input buffer ever see them. This is
+    intentionally parser-level rather than a post-hoc text sanitizer.
+    """
+    try:
+        from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
+        from prompt_toolkit.keys import Keys
+
+        ANSI_SEQUENCES.setdefault("\x1b[I", Keys.Ignore)  # focus in
+        ANSI_SEQUENCES.setdefault("\x1b[O", Keys.Ignore)  # focus out
+    except Exception:
+        # Defensive: never make CLI startup depend on prompt_toolkit internals.
+        pass
+
+
+_register_prompt_toolkit_ignored_terminal_sequences()
+
 try:
     from prompt_toolkit.cursor_shapes import CursorShape
     _STEADY_CURSOR = CursorShape.BLOCK  # Non-blinking block cursor
@@ -10351,6 +10379,12 @@ class HermesCLI:
         
         # Key bindings for the input area
         kb = KeyBindings()
+        from prompt_toolkit.keys import Keys
+
+        @kb.add(Keys.Ignore, eager=True)
+        def handle_ignored_terminal_sequence(event):
+            """Consume parser-level ignored terminal sequences before self-insert."""
+            return None
         
         def handle_enter(event):
             """Handle Enter key - submit input.
@@ -11016,8 +11050,6 @@ class HermesCLI:
 
                 threading.Thread(target=_start_recording, daemon=True).start()
                 event.app.invalidate()
-        from prompt_toolkit.keys import Keys
-
         @kb.add(Keys.BracketedPaste, eager=True)
         def handle_paste(event):
             """Handle terminal paste — detect clipboard images.
