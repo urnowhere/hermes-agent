@@ -5082,6 +5082,22 @@ class AIAgent:
         if _env_hints:
             prompt_parts.append(_env_hints)
 
+        # ── Recent Sessions Summary (Context Recovery) ───────────────────────
+        # Auto-inject summaries of recent sessions so the agent can recover
+        # context after a restart or context reset WITHOUT needing to "realize"
+        # it lost context. The summary is simply there in the system prompt.
+        try:
+            from agent.prompt_builder import build_recent_sessions_prompt
+            _recent_sessions = build_recent_sessions_prompt(
+                current_session_id=self.session_id if self.pass_session_id else None,
+                platform_filter=self.platform if self.platform else None,
+                limit=2,
+            )
+            if _recent_sessions:
+                prompt_parts.append(_recent_sessions)
+        except Exception as _e:
+            logger.debug("Could not inject recent sessions: %s", _e)
+
         platform_key = (self.platform or "").lower().strip()
         if platform_key in PLATFORM_HINTS:
             prompt_parts.append(PLATFORM_HINTS[platform_key])

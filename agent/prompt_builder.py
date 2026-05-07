@@ -1184,3 +1184,125 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
     if not sections:
         return ""
     return "# Project Context\n\nThe following project context files have been loaded and should be followed:\n\n" + "\n".join(sections)
+
+
+# =========================================================================
+# Recent Sessions Summary — auto-inject on context reset
+# =========================================================================
+
+def build_recent_sessions_prompt(
+    db_path: Optional[str] = None,
+    limit: int = 2,
+    current_session_id: Optional[str] = None,
+    platform_filter: Optional[str] = None,
+) -> str:
+    """Build a summary of recent sessions for context recovery.
+
+    This is injected into the system prompt to help the agent recover context
+    after a restart or context reset. The agent doesn't need to "know" it
+    lost context — the summary is simply there.
+
+    Args:
+        db_path: Path to state.db. Defaults to ~/.hermes/state.db
+        limit: Number of recent sessions to include (default 2)
+        current_session_id: Exclude this session from results
+        platform_filter: Only include sessions from this platform (e.g., "telegram")
+
+    Returns:
+        Formatted string with recent session summaries, or empty string if none.
+    """
+    from hermes_constants import get_hermes_home
+
+    if db_path is None:
+        db_path = os.path.join(get_hermes_home(), "state.db")
+
+    if not os.path.exists(db_path):
+        return ""
+
+    try:
+        import sqlite3
+
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+
+        # Get recent sessions with last activity
+        query = """
+            SELECT s.id, s.source, s.started_at, s.model,
+                   COALESCE(m.last_active, s.started_at) AS last_active
+            FROM sessions s
+            LEFT JOIN (
+                SELECT session_id, MAX(timestamp) AS last_active
+                FROM messages GROUP BY session_id
+            ) m ON m.session_id = s.id
+            WHERE 1=1
+        """
+        params = []
+
+        if current_session_id:
+            query += " AND s.id != ?"
+            params.append(current_session_id)
+
+        if platform_filter:
+            query += " AND s.source = ?"
+            params.append(platform_filter)
+
+        query += " ORDER BY last_active DESC LIMIT ?"
+        params.append(limit)
+
+        cursor = conn.execute(query, params)
+        sessions = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+
+        if not sessions:
+            return ""
+
+        lines = ["# Recent Sessions (Context Recovery)", ""]
+        lines.append("The following recent sessions may contain relevant context from prior conversations.")
+        lines.append("If the user refers to past work, check these sessions first with `session_search`.")
+        lines.append("")
+
+        for sess in sessions:
+            session_id = sess.get("id", "unknown")
+            source = sess.get("source", "unknown")
+            last_active = sess.get("last_active", "unknown")
+            model = sess.get("model", "unknown")
+
+            # Get a brief preview from messages
+            try:
+                conn2 = sqlite3.connect(db_path)
+                conn2.row_factory = sqlite3.Row
+                cursor2 = conn2.execute("""
+                    SELECT role, content FROM messages
+                    WHERE session_id = ?
+                    ORDER BY timestamp ASC
+                    LIMIT 10
+                """, (session_id,))
+                messages = [dict(row) for row in cursor2.fetchall()]
+                conn2.close()
+
+                # Extract first user message as preview
+                preview = ""
+                for msg in messages:
+                    if msg.get("role") == "user":
+                        content = msg.get("content", "")
+                        if content:
+                            preview = content[:200] + "..." if len(content) > 200 else content
+                            break
+
+            except Exception:
+                preview = "(unable to load preview)"
+
+            lines.append(f"## Session: {session_id[:16]}...")
+            lines.append(f"- **Platform:** {source}")
+            lines.append(f"- **Last active:** {last_active}")
+            lines.append(f"- **First message:** {preview}")
+            lines.append("")
+
+        lines.append("**Recovery instruction:** If context was lost, use `session_search(query=\"...\")` to find relevant past conversations.")
+        lines.append("")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        logger.debug("Could not build recent sessions prompt: %s", e)
+        return ""
