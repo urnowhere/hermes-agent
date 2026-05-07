@@ -31,6 +31,17 @@ _DISCORD_COMMAND_SYNC_STATE_FILENAME = "discord_command_sync_state.json"
 _DISCORD_COMMAND_SYNC_MUTATION_INTERVAL_SECONDS = 4.5
 _DISCORD_COMMAND_SYNC_MAX_RATE_LIMIT_SLEEP_SECONDS = 30.0
 
+# Allow overriding the auto-thread archive duration via env var (e.g. DISCORD_AUTO_THREAD_AUTO_ARCHIVE_DURATION=60).
+# Defaults to 1440 to preserve existing behaviour.
+_DISCORD_AUTO_THREAD_AUTO_ARCHIVE_DURATION = int(os.getenv("DISCORD_AUTO_THREAD_AUTO_ARCHIVE_DURATION", "1440"))
+if _DISCORD_AUTO_THREAD_AUTO_ARCHIVE_DURATION not in VALID_THREAD_AUTO_ARCHIVE_MINUTES:
+    logger.warning(
+        "DISCORD_AUTO_THREAD_AUTO_ARCHIVE_DURATION=%s is invalid; must be one of %s. Falling back to 1440.",
+        _DISCORD_AUTO_THREAD_AUTO_ARCHIVE_DURATION,
+        ", ".join(str(v) for v in sorted(VALID_THREAD_AUTO_ARCHIVE_MINUTES)),
+    )
+    _DISCORD_AUTO_THREAD_AUTO_ARCHIVE_DURATION = 1440
+
 try:
     import discord
     from discord import Message as DiscordMessage, Intents
@@ -3570,7 +3581,7 @@ class DiscordAdapter(BasePlatformAdapter):
             thread_name = thread_name[:77] + "..."
 
         try:
-            thread = await message.create_thread(name=thread_name, auto_archive_duration=1440)
+            thread = await message.create_thread(name=thread_name, auto_archive_duration=_DISCORD_AUTO_THREAD_AUTO_ARCHIVE_DURATION)
             return thread
         except Exception as direct_error:
             display_name = getattr(getattr(message, "author", None), "display_name", None) or "unknown user"
@@ -3579,7 +3590,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 seed_msg = await message.channel.send(f"\U0001f9f5 Thread created by Hermes: **{thread_name}**")
                 thread = await seed_msg.create_thread(
                     name=thread_name,
-                    auto_archive_duration=1440,
+                    auto_archive_duration=_DISCORD_AUTO_THREAD_AUTO_ARCHIVE_DURATION,
                     reason=reason,
                 )
                 return thread
