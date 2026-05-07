@@ -5,6 +5,7 @@ from agent.usage_pricing import (
     estimate_usage_cost,
     get_pricing_entry,
     normalize_usage,
+    resolve_billing_route,
 )
 
 
@@ -190,3 +191,127 @@ def test_custom_endpoint_models_api_pricing_is_supported(monkeypatch):
 
     assert float(entry.input_cost_per_million) == 0.5
     assert float(entry.output_cost_per_million) == 2.0
+
+def test_proxy_upstream_pricing_hook_invoked_after_standard_probe(monkeypatch):
+    """When a proxy's /v1/models returns no pricing, the fallback hook is called.
+
+    LiteLLM and similar proxies follow the OpenAI spec: /v1/models returns
+    only {id, object, created, owned_by} with no cost fields.  The standard
+    fetch_endpoint_model_metadata probe comes up empty.  The secondary
+    _try_proxy_upstream_pricing hook must be called so upstream model IDs
+    and pricing can be resolved from the proxy's own metadata endpoint.
+    """
+    # Standard endpoint probe returns empty pricing
+    monkeypatch.setattr(
+        "agent.usage_pricing.fetch_endpoint_model_metadata",
+        lambda base_url, api_key=None: {},
+    )
+
+    # Simulate a LiteLLM proxy lookup: model "grok" → upstream "openrouter/x-ai/grok-4.3"
+    def _fake_proxy_probe(route, api_key=""):
+        if route.model == "grok":
+            from agent.usage_pricing import get_pricing_entry as _gpe
+            return _gpe("openrouter/x-ai/grok-4.3")
+        return None
+
+    monkeypatch.setattr(
+        "agent.usage_pricing._try_proxy_upstream_pricing",
+        _fake_proxy_probe,
+    )
+
+    # OpenRouter models API pricing for the upstream
+    monkeypatch.setattr(
+        "agent.usage_pricing.fetch_model_metadata",
+        lambda: {
+            "x-ai/grok-4.3": {
+                "pricing": {
+                    "prompt": "0.00000125",
+                    "completion": "0.0000025",
+                    "input_cache_read": "0.0000002",
+                }
+            }
+        },
+    )
+
+    entry = get_pricing_entry(
+        "grok",
+        provider="litellm",
+        base_url="http://127.0.0.1:4000/v1",
+    )
+
+    assert entry is not None
+    assert float(entry.input_cost_per_million) == 1.25
+    assert float(entry.output_cost_per_million) == 2.5
+    assert float(entry.cache_read_cost_per_million) == 0.2
+    assert entry.source == "provider_models_api"
+    assert "openrouter" in (entry.source_url or "")
+
+
+def test_litellm_route_preserves_slash_model_alias():
+    route = resolve_billing_route(
+        "team/grok",
+        provider="litellm",
+        base_url="http://127.0.0.1:4000/v1",
+    )
+
+    assert route.provider == "litellm"
+    assert route.model == "team/grok"
+
+
+def test_proxy_model_info_pricing_is_used_directly(monkeypatch):
+    monkeypatch.setattr(
+        "agent.usage_pricing.fetch_endpoint_model_metadata",
+        lambda base_url, api_key=None: {},
+    )
+    monkeypatch.setattr(
+        "agent.usage_pricing._fetch_proxy_model_info",
+        lambda base_url, api_key="": {
+            "data": [
+                {
+                    "model_name": "internal-alias",
+                    "litellm_params": {"model": "internal/model"},
+                    "model_info": {
+                        "input_cost_per_token": "0.0000007",
+                        "output_cost_per_token": "0.000003",
+                    },
+                }
+            ]
+        },
+    )
+
+    entry = get_pricing_entry(
+        "internal-alias",
+        provider="litellm",
+        base_url="http://127.0.0.1:4000/v1",
+    )
+
+    assert entry is not None
+    assert float(entry.input_cost_per_million) == 0.7
+    assert float(entry.output_cost_per_million) == 3.0
+    assert entry.pricing_version == "litellm-model-info"
+
+
+def test_proxy_model_info_negative_result_is_cached(monkeypatch):
+    monkeypatch.setattr(
+        "agent.usage_pricing.fetch_endpoint_model_metadata",
+        lambda base_url, api_key=None: {},
+    )
+
+    calls = []
+
+    def _fake_urlopen(req, timeout=0):
+        calls.append((req.full_url, timeout))
+        raise TimeoutError("slow proxy")
+
+    monkeypatch.setattr("agent.usage_pricing.urlopen", _fake_urlopen)
+
+    for _ in range(2):
+        entry = get_pricing_entry(
+            "missing-model",
+            provider="litellm",
+            base_url="http://127.0.0.1:4000/v1",
+        )
+        assert entry is None
+
+    assert len(calls) == 1
+    assert calls[0][1] <= 2
