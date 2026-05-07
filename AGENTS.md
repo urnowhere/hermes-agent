@@ -622,7 +622,7 @@ Roles:
 Key config knobs (under `delegation:` in `config.yaml`):
 `max_concurrent_children`, `max_spawn_depth`, `child_timeout_seconds`,
 `orchestrator_enabled`, `subagent_auto_approve`, `inherit_mcp_toolsets`,
-`max_iterations`.
+`max_iterations`, `max_tokens`.
 
 Synchronicity rule: delegate_task is **not** durable. For long-running
 work that must outlive the current turn, use `cronjob` or

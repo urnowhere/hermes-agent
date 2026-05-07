@@ -447,6 +447,35 @@ def _get_inherit_mcp_toolsets() -> bool:
     return is_truthy_value(cfg.get("inherit_mcp_toolsets"), default=True)
 
 
+def _resolve_child_max_tokens(parent_agent: Any) -> Optional[int]:
+    """Resolve the output-token budget for delegated child agents.
+
+    Defaults to the parent's max_tokens for backwards compatibility. Operators
+    can set ``delegation.max_tokens`` to give subagents more room for valid tool
+    calls and final summaries without raising the parent agent's output budget.
+    """
+    parent_max_tokens = getattr(parent_agent, "max_tokens", None)
+    cfg = _load_config()
+    raw_value = cfg.get("max_tokens")
+    if raw_value is None or raw_value == "":
+        return parent_max_tokens
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid delegation.max_tokens value %r; inheriting parent max_tokens",
+            raw_value,
+        )
+        return parent_max_tokens
+    if value <= 0:
+        logger.warning(
+            "Invalid delegation.max_tokens value %r; inheriting parent max_tokens",
+            raw_value,
+        )
+        return parent_max_tokens
+    return value
+
+
 def _is_mcp_toolset_name(name: str) -> bool:
     """Return True for canonical MCP toolsets and their registered aliases."""
     if not name:
@@ -569,6 +598,8 @@ def _build_child_system_prompt(
         "- Any issues encountered\n\n"
         "Important workspace rule: Never assume a repository lives at /workspace/... or any other container-style path unless the task/context explicitly gives that path. "
         "If no exact local path is provided, discover it first before issuing git/workdir-specific commands.\n\n"
+        "Avoid oversized tool calls: prefer small targeted patches, file-backed artifacts, and incremental writes over giant patch/write_file payloads. "
+        "For large generated content, create or update repo-local artifacts in manageable chunks, then summarize the artifact paths.\n\n"
         "Be thorough but concise -- your response is returned to the "
         "parent agent as a summary."
     )
@@ -1049,6 +1080,8 @@ def _build_child_agent(
         child_providers_order = None
         child_provider_sort = None
 
+    child_max_tokens = _resolve_child_max_tokens(parent_agent)
+
     child = AIAgent(
         base_url=effective_base_url,
         api_key=effective_api_key,
@@ -1058,7 +1091,7 @@ def _build_child_agent(
         acp_command=effective_acp_command,
         acp_args=effective_acp_args,
         max_iterations=max_iterations,
-        max_tokens=getattr(parent_agent, "max_tokens", None),
+        max_tokens=child_max_tokens,
         reasoning_config=child_reasoning,
         prefill_messages=getattr(parent_agent, "prefill_messages", None),
         fallback_model=parent_fallback,

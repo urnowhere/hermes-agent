@@ -226,6 +226,7 @@ Restricting toolsets keeps the subagent focused and prevents accidental side eff
 |--------|---------|-------|--------|
 | `max_concurrent_children` | 3 | >=1 | Parallel batch size per `delegate_task` call |
 | `max_spawn_depth` | 1 | 1-3 | How many delegation levels can spawn further |
+| `max_tokens` | parent value | >0 | Optional child output-token budget override for long summaries or tool-call-heavy work |
 
 Example: running 30 parallel workers with nested subagents:
 
