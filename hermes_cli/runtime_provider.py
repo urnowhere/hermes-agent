@@ -507,6 +507,7 @@ def _resolve_named_custom_runtime(
             "api_key": api_key,
             "source": "direct-alias",
             "requested_provider": requested_provider,
+            "requests_per_minute": _requests_per_minute,
         }
 
     custom_provider = _get_named_custom_provider(requested_provider)
@@ -778,6 +779,7 @@ def _resolve_explicit_runtime(
             "api_key": api_key,
             "source": "explicit",
             "requested_provider": requested_provider,
+            "requests_per_minute": _requests_per_minute,
         }
 
     if provider == "openai-codex":
@@ -798,6 +800,7 @@ def _resolve_explicit_runtime(
             "source": "explicit",
             "last_refresh": last_refresh,
             "requested_provider": requested_provider,
+            "requests_per_minute": _requests_per_minute,
         }
 
     if provider == "nous":
@@ -829,6 +832,7 @@ def _resolve_explicit_runtime(
             "source": "explicit",
             "expires_at": expires_at,
             "requested_provider": requested_provider,
+            "requests_per_minute": _requests_per_minute,
         }
 
     # Azure Foundry: user-configured endpoint with selectable API mode
@@ -884,6 +888,7 @@ def _resolve_explicit_runtime(
             "api_key": api_key,
             "source": "explicit",
             "requested_provider": requested_provider,
+            "requests_per_minute": _requests_per_minute,
         }
 
     return None
@@ -908,6 +913,10 @@ def resolve_runtime_provider(
     """
     requested_provider = resolve_requested_provider(requested)
 
+    # Read per-model rate limit from config (0 = disabled).
+    _model_cfg_rpm = _get_model_config()
+    _requests_per_minute = int(_model_cfg_rpm.get("requests_per_minute", 0) or 0)
+
     # Azure Anthropic short-circuit: when explicitly targeting an Azure endpoint
     # with provider="anthropic", bypass _resolve_named_custom_runtime (which would
     # return provider="custom" with chat_completions api_mode and no valid key).
@@ -926,6 +935,7 @@ def resolve_runtime_provider(
             "api_key": _azure_key,
             "source": "azure-explicit",
             "requested_provider": requested_provider,
+            "requests_per_minute": _requests_per_minute,
         }
 
     # Azure Foundry: user-configured endpoint with selectable API mode
@@ -941,6 +951,7 @@ def resolve_runtime_provider(
             explicit_base_url=explicit_base_url,
             target_model=target_model,
         )
+        azure_runtime["requests_per_minute"] = _requests_per_minute
         return azure_runtime
 
     custom_runtime = _resolve_named_custom_runtime(
@@ -950,6 +961,7 @@ def resolve_runtime_provider(
     )
     if custom_runtime:
         custom_runtime["requested_provider"] = requested_provider
+        custom_runtime["requests_per_minute"] = _requests_per_minute
         return custom_runtime
 
     provider = resolve_provider(
@@ -966,6 +978,7 @@ def resolve_runtime_provider(
         explicit_base_url=explicit_base_url,
     )
     if explicit_runtime:
+        explicit_runtime["requests_per_minute"] = _requests_per_minute
         return explicit_runtime
 
     should_use_pool = provider != "openrouter"
@@ -1016,7 +1029,7 @@ def resolve_runtime_provider(
                 logger.debug("Nous pool entry agent_key expired/missing, falling through to runtime resolution")
                 pool_api_key = ""
         if entry is not None and pool_api_key:
-            return _resolve_runtime_from_pool_entry(
+            _pool_rt = _resolve_runtime_from_pool_entry(
                 provider=provider,
                 entry=entry,
                 requested_provider=requested_provider,
@@ -1024,6 +1037,8 @@ def resolve_runtime_provider(
                 pool=pool,
                 target_model=target_model,
             )
+            _pool_rt["requests_per_minute"] = _requests_per_minute
+            return _pool_rt
 
     if provider == "nous":
         try:
@@ -1039,6 +1054,7 @@ def resolve_runtime_provider(
                 "source": creds.get("source", "portal"),
                 "expires_at": creds.get("expires_at"),
                 "requested_provider": requested_provider,
+                "requests_per_minute": _requests_per_minute,
             }
         except AuthError:
             if requested_provider != "auto":
@@ -1059,6 +1075,7 @@ def resolve_runtime_provider(
                 "source": creds.get("source", "hermes-auth-store"),
                 "last_refresh": creds.get("last_refresh"),
                 "requested_provider": requested_provider,
+                "requests_per_minute": _requests_per_minute,
             }
         except AuthError:
             if requested_provider != "auto":
@@ -1079,6 +1096,7 @@ def resolve_runtime_provider(
                 "source": creds.get("source", "qwen-cli"),
                 "expires_at_ms": creds.get("expires_at_ms"),
                 "requested_provider": requested_provider,
+                "requests_per_minute": _requests_per_minute,
             }
         except AuthError:
             if requested_provider != "auto":
@@ -1098,6 +1116,7 @@ def resolve_runtime_provider(
                 "api_key": creds["api_key"],
                 "source": creds.get("source", "oauth"),
                 "requested_provider": requested_provider,
+                "requests_per_minute": _requests_per_minute,
             }
 
     if provider == "google-gemini-cli":
@@ -1113,6 +1132,7 @@ def resolve_runtime_provider(
                 "email": creds.get("email", ""),
                 "project_id": creds.get("project_id", ""),
                 "requested_provider": requested_provider,
+                "requests_per_minute": _requests_per_minute,
             }
         except AuthError:
             if requested_provider != "auto":
@@ -1131,6 +1151,7 @@ def resolve_runtime_provider(
             "args": list(creds.get("args") or []),
             "source": creds.get("source", "process"),
             "requested_provider": requested_provider,
+            "requests_per_minute": _requests_per_minute,
         }
 
     # Anthropic (native Messages API)
@@ -1198,6 +1219,7 @@ def resolve_runtime_provider(
             "api_key": token,
             "source": "env",
             "requested_provider": requested_provider,
+            "requests_per_minute": _requests_per_minute,
         }
 
     # AWS Bedrock (native Converse API via boto3)
@@ -1254,6 +1276,7 @@ def resolve_runtime_provider(
                 "region": region,
                 "bedrock_anthropic": True,  # Signal to use AnthropicBedrock client
                 "requested_provider": requested_provider,
+                "requests_per_minute": _requests_per_minute,
             }
         else:
             # Non-Claude (Nova, DeepSeek, Llama, etc.) → Converse API
@@ -1265,6 +1288,7 @@ def resolve_runtime_provider(
                 "source": auth_source,
                 "region": region,
                 "requested_provider": requested_provider,
+                "requests_per_minute": _requests_per_minute,
             }
         if guardrail_config:
             runtime["guardrail_config"] = guardrail_config
@@ -1323,6 +1347,7 @@ def resolve_runtime_provider(
             "api_key": creds.get("api_key", ""),
             "source": creds.get("source", "env"),
             "requested_provider": requested_provider,
+            "requests_per_minute": _requests_per_minute,
         }
 
     runtime = _resolve_openrouter_runtime(
@@ -1331,6 +1356,7 @@ def resolve_runtime_provider(
         explicit_base_url=explicit_base_url,
     )
     runtime["requested_provider"] = requested_provider
+    runtime["requests_per_minute"] = _requests_per_minute
     return runtime
 
 
