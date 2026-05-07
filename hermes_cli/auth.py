@@ -4098,8 +4098,12 @@ def _prompt_model_selection(
     pricing: Optional[Dict[str, Dict[str, str]]] = None,
     unavailable_models: Optional[List[str]] = None,
     portal_url: str = "",
-) -> Optional[str]:
-    """Interactive model selection. Puts current_model first with a marker. Returns chosen model ID or None.
+    multi_select: bool = False,
+) -> Optional[str] | list[str]:
+    """Interactive model selection. Puts current_model first with a marker.
+
+    Returns the chosen model ID, a list of chosen model IDs when
+    ``multi_select`` is enabled, or None.
 
     If *pricing* is provided (``{model_id: {prompt, completion}}``), a compact
     price indicator is shown next to each model in aligned columns.
@@ -4166,7 +4170,7 @@ def _prompt_model_selection(
     default_idx = 0
 
     # Build a pricing header hint for the menu title
-    menu_title = "Select default model:"
+    menu_title = "Select model(s):" if multi_select else "Select default model:"
     if has_pricing:
         # Align the header with the model column.
         # Each choice is "  {label}" (2 spaces) and simple_term_menu prepends
@@ -4206,22 +4210,42 @@ def _prompt_model_selection(
         else:
             effective_title = menu_title
 
-        menu = TerminalMenu(
-            choices,
-            cursor_index=default_idx,
-            menu_cursor="-> ",
-            menu_cursor_style=("fg_green", "bold"),
-            menu_highlight_style=("fg_green",),
-            cycle_cursor=True,
-            clear_screen=False,
-            title=effective_title,
-        )
+        menu_kwargs = {
+            "cursor_index": default_idx,
+            "menu_cursor": "-> ",
+            "menu_cursor_style": ("fg_green", "bold"),
+            "menu_highlight_style": ("fg_green",),
+            "cycle_cursor": True,
+            "clear_screen": False,
+            "title": effective_title,
+        }
+        if multi_select:
+            menu_kwargs.update(
+                {
+                    "multi_select": True,
+                    "multi_select_empty_ok": False,
+                    "multi_select_select_on_accept": False,
+                    "show_multi_select_hint": True,
+                }
+            )
+        menu = TerminalMenu(choices, **menu_kwargs)
         idx = menu.show()
         from hermes_cli.curses_ui import flush_stdin
         flush_stdin()
         if idx is None:
             return None
         print()
+        if multi_select and isinstance(idx, (list, tuple, set)):
+            selected = [
+                ordered[i]
+                for i in idx
+                if isinstance(i, int) and 0 <= i < len(ordered)
+            ]
+            if len(ordered) in idx:
+                custom = input("Enter model name: ").strip()
+                if custom and custom not in selected:
+                    selected.append(custom)
+            return selected or None
         if idx < len(ordered):
             return ordered[idx]
         elif idx == len(ordered):
@@ -4248,14 +4272,34 @@ def _prompt_model_selection(
             print(f"  {'':>{num_width}}  {_DIM}{_label(mid)}{_RESET}")
     print()
 
+    if multi_select:
+        print("Select one or more models with comma-separated numbers.")
+        print(
+            "The first selected model becomes the default; "
+            "the rest become fallbacks."
+        )
+
     while True:
         try:
             choice = input(f"Choice [1-{n + 2}] (default: skip): ").strip()
             if not choice:
                 return None
+            if multi_select and "," in choice:
+                selected: list[str] = []
+                for part in choice.split(","):
+                    raw = part.strip()
+                    if not raw:
+                        continue
+                    idx = int(raw)
+                    if not (1 <= idx <= n):
+                        raise ValueError
+                    mid = ordered[idx - 1]
+                    if mid not in selected:
+                        selected.append(mid)
+                return selected or None
             idx = int(choice)
             if 1 <= idx <= n:
-                return ordered[idx - 1]
+                return [ordered[idx - 1]] if multi_select else ordered[idx - 1]
             elif idx == n + 1:
                 custom = input("Enter model name: ").strip()
                 return custom if custom else None

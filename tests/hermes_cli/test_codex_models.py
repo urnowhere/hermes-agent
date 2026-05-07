@@ -88,7 +88,7 @@ def test_model_command_uses_runtime_access_token_for_codex_list(monkeypatch):
         captured["access_token"] = access_token
         return ["gpt-5.2-codex", "gpt-5.2"]
 
-    def _fake_prompt_model_selection(model_ids, current_model=""):
+    def _fake_prompt_model_selection(model_ids, current_model="", **kwargs):
         captured["model_ids"] = list(model_ids)
         captured["current_model"] = current_model
         return None

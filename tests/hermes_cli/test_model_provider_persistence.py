@@ -97,6 +97,57 @@ class TestProviderPersistsAfterModelSave:
         assert mock_write.call_count == 1
         assert config_path.read_text(encoding="utf-8") == original_text
 
+    def test_openrouter_multi_select_saves_primary_and_fallbacks(
+        self,
+        config_home,
+        monkeypatch,
+    ):
+        """`hermes model` can accept multiple selected models in one provider flow.
+
+        The first selected model remains the primary default; extra selections
+        are appended to the fallback chain in order.
+        """
+        from hermes_cli.main import _model_flow_openrouter
+        from hermes_cli.config import load_config
+
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test-key")
+
+        with (
+            patch(
+                "hermes_cli.models.model_ids",
+                return_value=["model-a", "model-b", "model-c"],
+            ),
+            patch("hermes_cli.models.get_pricing_for_provider", return_value={}),
+            patch(
+                "hermes_cli.auth._prompt_model_selection",
+                return_value=["model-a", "model-b", "model-c"],
+            ),
+            patch("hermes_cli.auth.deactivate_provider"),
+        ):
+            _model_flow_openrouter(load_config(), "old-model")
+
+        import yaml
+
+        config = yaml.safe_load((config_home / "config.yaml").read_text()) or {}
+        model = config.get("model")
+        assert isinstance(model, dict)
+        assert model.get("provider") == "openrouter"
+        assert model.get("default") == "model-a"
+        assert config.get("fallback_providers") == [
+            {
+                "provider": "openrouter",
+                "model": "model-b",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_mode": "chat_completions",
+            },
+            {
+                "provider": "openrouter",
+                "model": "model-c",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_mode": "chat_completions",
+            },
+        ]
+
     def test_api_key_provider_saved_when_model_was_string(self, config_home, monkeypatch):
         """_model_flow_api_key_provider must persist the provider even when
         config.model started as a plain string."""
@@ -293,7 +344,7 @@ class TestProviderPersistsAfterModelSave:
         monkeypatch.setenv("LM_API_KEY", "lm-token")
         monkeypatch.setattr(
             "hermes_cli.auth._prompt_model_selection",
-            lambda models, current_model="": "publisher/model-a",
+            lambda models, current_model="", **kwargs: "publisher/model-a",
         )
         monkeypatch.setattr("hermes_cli.auth.deactivate_provider", lambda: None)
         monkeypatch.setattr(
