@@ -1856,6 +1856,60 @@ def _snapshot_child_pids() -> set:
     return set()
 
 
+def _descendant_pids(pid: int) -> set:
+    """Return every descendant PID of ``pid`` (not ``pid`` itself).
+
+    Order of preference:
+      1. psutil (cross-platform, recursive=True does the tree walk)
+      2. Linux ``/proc/*/status`` PPid recursive walk
+      3. empty set (caller degrades to pid-only kill)
+
+    MCP stdio subprocesses frequently are Node.js / Python parents that
+    spawn their own helpers (e.g. puppeteer-mcp → headless Chrome →
+    renderer + GPU helpers).  When we orphan-reap an MCP server, the
+    grandchildren get reparented to init and keep running at 100 % CPU
+    unless we walk the tree and kill them too.  Same failure mode as
+    agent-browser in #17388 / #17547 — helper adapted here.
+    """
+    # psutil first — handles macOS / Windows / Linux uniformly
+    try:
+        import psutil  # type: ignore[import-not-found]
+
+        try:
+            return {c.pid for c in psutil.Process(pid).children(recursive=True)}
+        except psutil.NoSuchProcess:
+            return set()
+    except ImportError:
+        pass
+
+    # Linux fallback: walk /proc
+    try:
+        all_pids = [int(p) for p in os.listdir("/proc") if p.isdigit()]
+    except OSError:
+        return set()
+
+    ppid_map: Dict[int, int] = {}
+    for p in all_pids:
+        try:
+            with open(f"/proc/{p}/status") as fh:
+                for line in fh:
+                    if line.startswith("PPid:"):
+                        ppid_map[p] = int(line.split()[1])
+                        break
+        except (OSError, ValueError):
+            continue
+
+    descendants: set = set()
+    stack = [pid]
+    while stack:
+        parent = stack.pop()
+        for child, pp in ppid_map.items():
+            if pp == parent and child not in descendants:
+                descendants.add(child)
+                stack.append(child)
+    return descendants
+
+
 def _mcp_loop_exception_handler(loop, context):
     """Suppress benign 'Event loop is closed' noise during shutdown.
 
@@ -3128,19 +3182,36 @@ def _kill_orphaned_mcp_children(include_active: bool = False) -> None:
     if not pids:
         return
 
-    # Phase 1: SIGTERM (graceful)
+    # Collect the full descendant tree for every doomed MCP pid BEFORE we
+    # signal, because once the direct stdio child exits, init reparents
+    # its grandchildren (node → chrome → renderers for puppeteer-mcp-style
+    # servers) and the walk would miss them.  Same failure mode as
+    # agent-browser in #17388; helper lives alongside _snapshot_child_pids.
+    descendants_by_pid: Dict[int, set] = {
+        pid: _descendant_pids(pid) for pid in pids
+    }
+
+    # Phase 1: SIGTERM (graceful) — daemon first, then descendants.  Killing
+    # the daemon first avoids it respawning its own helpers while we iterate.
     for pid, server_name in pids.items():
         try:
             os.kill(pid, _signal.SIGTERM)
             logger.debug("Sent SIGTERM to orphaned MCP process %d (%s)", pid, server_name)
         except (ProcessLookupError, PermissionError, OSError):
             pass
+        for dpid in descendants_by_pid.get(pid, ()):
+            try:
+                os.kill(dpid, _signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
 
     # Phase 2: Wait for graceful exit
     _time.sleep(2)
 
-    # Phase 3: SIGKILL any survivors
+    # Phase 3: SIGKILL any survivors — both the daemon PID and every
+    # lingering descendant (Chrome renderers etc. that ignored SIGTERM).
     _sigkill = getattr(_signal, "SIGKILL", _signal.SIGTERM)
+    killed_descendants = 0
     for pid, server_name in pids.items():
         try:
             os.kill(pid, 0)  # Check if still alive
@@ -3151,6 +3222,19 @@ def _kill_orphaned_mcp_children(include_active: bool = False) -> None:
             )
         except (ProcessLookupError, PermissionError, OSError):
             pass  # Good — exited after SIGTERM
+        for dpid in descendants_by_pid.get(pid, ()):
+            try:
+                os.kill(dpid, 0)
+                os.kill(dpid, _sigkill)
+                killed_descendants += 1
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+    if killed_descendants:
+        logger.info(
+            "Force-killed %d lingering MCP-descendant process(es) "
+            "(renderers / helpers reparented to init)",
+            killed_descendants,
+        )
 
 
 def _stop_mcp_loop():

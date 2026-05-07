@@ -170,6 +170,76 @@ class TestStdioPidTracking:
         with _lock:
             assert fake_pid not in _orphan_stdio_pids
 
+    def test_kill_orphaned_signals_full_descendant_tree(self, monkeypatch):
+        """Issue #17388 variant for MCP: when reaping an orphaned stdio
+        daemon, also SIGTERM + SIGKILL any descendants so Chrome / python
+        grandchildren (common for puppeteer-mcp, browser-mcp, etc.)
+        don't get reparented to init and keep running at 100% CPU."""
+        from tools import mcp_tool
+        from tools.mcp_tool import (
+            _kill_orphaned_mcp_children,
+            _orphan_stdio_pids,
+            _lock,
+        )
+
+        fake_pid = 454545
+        descendants = {999001, 999002, 999003}
+
+        with _lock:
+            _orphan_stdio_pids.clear()
+            _orphan_stdio_pids.add(fake_pid)
+
+        monkeypatch.setattr(signal, "SIGKILL", 9, raising=False)
+        monkeypatch.setattr(mcp_tool, "_descendant_pids",
+                            lambda pid: descendants if pid == fake_pid else set())
+
+        with patch("tools.mcp_tool.os.kill") as mock_kill, \
+             patch("time.sleep"):
+            _kill_orphaned_mcp_children()
+
+        # Phase 1: SIGTERM to daemon and each descendant.
+        term_calls = [c for c in mock_kill.call_args_list
+                      if c.args[1] == signal.SIGTERM]
+        term_pids = {c.args[0] for c in term_calls}
+        assert fake_pid in term_pids
+        assert descendants.issubset(term_pids)
+
+        # Phase 3: SIGKILL escalation fires for daemon and each survivor.
+        kill_calls = [c for c in mock_kill.call_args_list if c.args[1] == 9]
+        kill_pids = {c.args[0] for c in kill_calls}
+        assert fake_pid in kill_pids
+        assert descendants.issubset(kill_pids)
+
+    def test_kill_orphaned_descendant_errors_are_swallowed(self, monkeypatch):
+        """A ProcessLookupError / PermissionError while signalling a
+        descendant must not abort the reap for peers."""
+        from tools import mcp_tool
+        from tools.mcp_tool import (
+            _kill_orphaned_mcp_children,
+            _orphan_stdio_pids,
+            _lock,
+        )
+
+        fake_pid = 464646
+        descendants = {111, 222, 333}
+
+        with _lock:
+            _orphan_stdio_pids.clear()
+            _orphan_stdio_pids.add(fake_pid)
+
+        monkeypatch.setattr(signal, "SIGKILL", 9, raising=False)
+        monkeypatch.setattr(mcp_tool, "_descendant_pids",
+                            lambda pid: descendants if pid == fake_pid else set())
+
+        def _raise_for_222(pid, sig):
+            if pid == 222:
+                raise PermissionError("not ours")
+
+        with patch("tools.mcp_tool.os.kill", side_effect=_raise_for_222), \
+             patch("time.sleep"):
+            # Must not propagate the PermissionError
+            _kill_orphaned_mcp_children()
+
 
 # ---------------------------------------------------------------------------
 # Fix 3: MCP reload timeout (cli.py)
