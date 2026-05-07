@@ -7845,6 +7845,16 @@ class AIAgent:
         if getattr(self, "_rate_limited_until", 0) > time.monotonic():
             return False  # primary still in rate-limit cooldown, stay on fallback
 
+        # Also defer if the credential pool for the primary provider reports
+        # all credentials still exhausted — avoids burning retries while the
+        # provider's own cooldown hasn't elapsed.
+        if hasattr(self, '_credential_pool') and self._credential_pool is not None:
+            primary_provider = (self._primary_runtime or {}).get("provider", "")
+            if (primary_provider
+                    and self._credential_pool.provider == primary_provider
+                    and not self._credential_pool.has_available()):
+                return False
+
         rt = self._primary_runtime
         try:
             # ── Core runtime state ──
