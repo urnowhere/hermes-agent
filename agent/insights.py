@@ -108,6 +108,18 @@ class InsightsEngine:
         self.db = db
         self._conn = db._conn
 
+    def get_skill_breakdown(self, days: int = 30, source: str = None) -> Dict[str, Any]:
+        """Compute only the per-skill usage summary + ranked list.
+
+        This is a narrow public entry point for callers (e.g. the dashboard
+        analytics endpoint) that need just the `skills` section of the full
+        insights report. It avoids the full `generate()` pass, which also
+        scans sessions, models, platforms, tools, activity, and top sessions.
+        """
+        cutoff = time.time() - (days * 86400)
+        skill_usage = self._get_skill_usage(cutoff, source)
+        return self._compute_skill_breakdown(skill_usage)
+
     def generate(self, days: int = 30, source: str = None) -> Dict[str, Any]:
         """
         Generate a complete insights report.
@@ -300,13 +312,23 @@ class InsightsEngine:
         """Extract per-skill usage from assistant tool calls."""
         skill_counts: Dict[str, Dict[str, Any]] = {}
 
+        # Pre-filter at SQL: only the two skill-related tool names ever count
+        # toward skill usage, so any row whose tool_calls JSON does not contain
+        # the literal substring "skill_view" or "skill_manage" cannot
+        # contribute. This avoids parsing tens of thousands of unrelated
+        # tool_calls JSON blobs in Python on dashboards / large session DBs.
+        # `instr()` is used (not LIKE) because LIKE treats `_` as a single-char
+        # wildcard, which would also match e.g. "skillXview" / "skill?manage"
+        # and weaken the prefilter's selectivity.
         if source:
             cursor = self._conn.execute(
                 """SELECT m.tool_calls, m.timestamp
                    FROM messages m
                    JOIN sessions s ON s.id = m.session_id
                    WHERE s.started_at >= ? AND s.source = ?
-                     AND m.role = 'assistant' AND m.tool_calls IS NOT NULL""",
+                     AND m.role = 'assistant' AND m.tool_calls IS NOT NULL
+                     AND (instr(m.tool_calls, 'skill_view') > 0
+                          OR instr(m.tool_calls, 'skill_manage') > 0)""",
                 (cutoff, source),
             )
         else:
@@ -315,7 +337,9 @@ class InsightsEngine:
                    FROM messages m
                    JOIN sessions s ON s.id = m.session_id
                    WHERE s.started_at >= ?
-                     AND m.role = 'assistant' AND m.tool_calls IS NOT NULL""",
+                     AND m.role = 'assistant' AND m.tool_calls IS NOT NULL
+                     AND (instr(m.tool_calls, 'skill_view') > 0
+                          OR instr(m.tool_calls, 'skill_manage') > 0)""",
                 (cutoff,),
             )
 
