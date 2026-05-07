@@ -312,20 +312,6 @@ class FormsyContextEngine(ContextEngine):
         end_line = result.get("end_line")
         total_lines = result.get("total_lines")
         truncated = bool(result.get("truncated", False))
-        suffix = path.rsplit(".", 1)[-1].lower() if "." in path else ""
-        language = {
-            "py": "python",
-            "js": "javascript",
-            "jsx": "jsx",
-            "ts": "typescript",
-            "tsx": "tsx",
-            "html": "html",
-            "css": "css",
-            "json": "json",
-            "md": "markdown",
-            "yaml": "yaml",
-            "yml": "yaml",
-        }.get(suffix, "")
 
         line_label = "unknown"
         if start_line is not None and end_line is not None:
@@ -343,7 +329,7 @@ class FormsyContextEngine(ContextEngine):
         if truncated:
             metadata.append("truncated: true")
         metadata.append("")
-        metadata.append(f"```{language}")
+        metadata.append("```python")
         metadata.append(content)
         metadata.append("```")
         return "\n".join(metadata)
