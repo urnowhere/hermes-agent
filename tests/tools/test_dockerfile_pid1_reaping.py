@@ -121,6 +121,24 @@ def test_dockerfile_builds_tui_assets(dockerfile_text):
     )
 
 
+def test_dockerfile_runtime_path_exposes_hermes_entrypoint(dockerfile_text):
+    """docker exec should find the installed hermes console script on PATH."""
+    path_envs = [
+        instruction
+        for instruction in _dockerfile_instructions(dockerfile_text)
+        if instruction.startswith("ENV PATH=")
+    ]
+
+    assert path_envs, "Dockerfile must set a runtime PATH"
+    final_path_env = path_envs[-1]
+
+    assert "/opt/hermes/.venv/bin" in final_path_env
+    assert "/opt/data/.local/bin" in final_path_env
+    assert final_path_env.index("/opt/hermes/.venv/bin") < final_path_env.index(
+        "/opt/data/.local/bin"
+    )
+
+
 def test_dockerfile_materializes_local_tui_ink_package(dockerfile_text):
     assert any(
         "ui-tui" in step
