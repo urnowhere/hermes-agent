@@ -784,7 +784,7 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertEqual(creds["base_url"], "https://openrouter.ai/api/v1")
         self.assertEqual(creds["api_key"], "sk-or-test-key")
         self.assertEqual(creds["api_mode"], "chat_completions")
-        mock_resolve.assert_called_once_with(requested="openrouter")
+        mock_resolve.assert_called_once_with(requested="openrouter", target_model="google/gemini-3-flash-preview")
 
     @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_provider_resolution_uses_runtime_model_when_config_model_missing(self, mock_resolve):
@@ -868,7 +868,24 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertEqual(creds["provider"], "nous")
         self.assertEqual(creds["base_url"], "https://inference-api.nousresearch.com/v1")
         self.assertEqual(creds["api_key"], "nous-agent-key-xyz")
-        mock_resolve.assert_called_once_with(requested="nous")
+        mock_resolve.assert_called_once_with(requested="nous", target_model="hermes-3-llama-3.1-8b")
+
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
+    def test_target_model_forwarded_for_api_mode_resolution(self, mock_resolve):
+        """target_model kwarg lets resolve_runtime_provider pick the correct api_mode."""
+        mock_resolve.return_value = {
+            "provider": "opencode-zen",
+            "base_url": "https://opencode-zen.example/v1",
+            "api_key": "sk-test",
+            "api_mode": "anthropic_messages",
+        }
+        parent = _make_mock_parent(depth=0)
+        cfg = {"model": "claude-opus-4-6", "provider": "opencode-zen"}
+        creds = _resolve_delegation_credentials(cfg, parent)
+        mock_resolve.assert_called_once_with(
+            requested="opencode-zen", target_model="claude-opus-4-6"
+        )
+        self.assertEqual(creds["api_mode"], "anthropic_messages")
 
     @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_provider_resolution_failure_raises_valueerror(self, mock_resolve):
@@ -880,6 +897,7 @@ class TestDelegationCredentialResolution(unittest.TestCase):
             _resolve_delegation_credentials(cfg, parent)
         self.assertIn("openrouter", str(ctx.exception).lower())
         self.assertIn("Cannot resolve", str(ctx.exception))
+        mock_resolve.assert_called_once_with(requested="openrouter", target_model="some-model")
 
     @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_provider_resolves_but_no_api_key_raises(self, mock_resolve):
@@ -895,6 +913,7 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             _resolve_delegation_credentials(cfg, parent)
         self.assertIn("no API key", str(ctx.exception))
+        mock_resolve.assert_called_once_with(requested="openrouter", target_model="some-model")
 
     def test_missing_config_keys_inherit_parent(self):
         """When config dict has no model/provider keys at all, inherits parent."""
