@@ -200,6 +200,90 @@ def test_runtime_resolution_rebuilds_agent_on_routing_change(monkeypatch):
     assert shell.api_mode == "codex_responses"
 
 
+def test_runtime_fallback_model_dict_forwards_api_key_and_base_url(monkeypatch):
+    cli = _import_cli()
+    calls = []
+
+    def _runtime_resolve(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise AuthError("missing primary key", code="missing_primary")
+        return {
+            "provider": "deepseek",
+            "api_mode": "chat_completions",
+            "base_url": kwargs["explicit_base_url"],
+            "api_key": kwargs["explicit_api_key"],
+            "source": "explicit",
+        }
+
+    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", _runtime_resolve)
+    monkeypatch.setattr("hermes_cli.runtime_provider.format_runtime_provider_error", lambda exc: str(exc))
+    config_copy = dict(cli.CLI_CONFIG)
+    config_copy["fallback_model"] = {
+        "provider": "deepseek",
+        "model": "deepseek-v4-pro",
+        "base_url": "https://api.deepseek.com/v1",
+        "api_key": "sk-fallback",
+    }
+    monkeypatch.setattr(cli, "CLI_CONFIG", config_copy)
+
+    shell = cli.HermesCLI(model="primary-model", provider="missing-provider", compact=True, max_turns=1)
+
+    assert shell._ensure_runtime_credentials() is True
+    assert calls[1] == {
+        "requested": "deepseek",
+        "explicit_api_key": "sk-fallback",
+        "explicit_base_url": "https://api.deepseek.com/v1",
+        "target_model": "deepseek-v4-pro",
+    }
+    assert shell.provider == "deepseek"
+    assert shell.model == "deepseek-v4-pro"
+    assert shell.api_key == "sk-fallback"
+
+
+def test_runtime_fallback_model_list_forwards_api_key_and_base_url(monkeypatch):
+    cli = _import_cli()
+    calls = []
+
+    def _runtime_resolve(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise AuthError("missing primary key", code="missing_primary")
+        return {
+            "provider": "deepseek",
+            "api_mode": "chat_completions",
+            "base_url": kwargs["explicit_base_url"],
+            "api_key": kwargs["explicit_api_key"],
+            "source": "explicit",
+        }
+
+    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", _runtime_resolve)
+    monkeypatch.setattr("hermes_cli.runtime_provider.format_runtime_provider_error", lambda exc: str(exc))
+    config_copy = dict(cli.CLI_CONFIG)
+    config_copy["fallback_model"] = [
+        {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "base_url": "https://api.deepseek.com/v1",
+            "api_key": "sk-chain-fallback",
+        }
+    ]
+    monkeypatch.setattr(cli, "CLI_CONFIG", config_copy)
+
+    shell = cli.HermesCLI(model="primary-model", provider="missing-provider", compact=True, max_turns=1)
+
+    assert shell._ensure_runtime_credentials() is True
+    assert calls[1] == {
+        "requested": "deepseek",
+        "explicit_api_key": "sk-chain-fallback",
+        "explicit_base_url": "https://api.deepseek.com/v1",
+        "target_model": "deepseek-v4-flash",
+    }
+    assert shell.provider == "deepseek"
+    assert shell.model == "deepseek-v4-flash"
+    assert shell.api_key == "sk-chain-fallback"
+
+
 def test_cli_turn_routing_uses_primary_when_disabled(monkeypatch):
     cli = _import_cli()
     shell = cli.HermesCLI(model="gpt-5", compact=True, max_turns=1)

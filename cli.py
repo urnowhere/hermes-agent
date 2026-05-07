@@ -3594,14 +3594,24 @@ class HermesCLI:
         if runtime is None and _primary_exc is not None:
             from hermes_cli.auth import AuthError
             if isinstance(_primary_exc, AuthError):
-                _fb_chain = self._fallback_model if isinstance(self._fallback_model, list) else []
+                if isinstance(self._fallback_model, list):
+                    _fb_chain = self._fallback_model
+                elif isinstance(self._fallback_model, dict):
+                    _fb_chain = [self._fallback_model]
+                else:
+                    _fb_chain = []
                 for _fb in _fb_chain:
                     _fb_provider = (_fb.get("provider") or "").strip().lower()
                     _fb_model = (_fb.get("model") or "").strip()
                     if not _fb_provider or not _fb_model:
                         continue
                     try:
-                        runtime = resolve_runtime_provider(requested=_fb_provider)
+                        runtime = resolve_runtime_provider(
+                            requested=_fb_provider,
+                            explicit_api_key=_fb.get("api_key"),
+                            explicit_base_url=_fb.get("base_url"),
+                            target_model=_fb_model,
+                        )
                         logger.warning(
                             "Primary provider auth failed (%s). Falling through to fallback: %s/%s",
                             _primary_exc, _fb_provider, _fb_model,
