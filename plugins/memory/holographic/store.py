@@ -184,6 +184,26 @@ class MemoryStore:
 
             return fact_id
 
+    def increment_retrieval_count(self, results: list[dict]) -> None:
+        """Increment retrieval_count for returned facts.
+
+        Batch-updates the retrieval_count column for all fact IDs in the
+        results list using a single parameterized SQL statement. Safe to
+        call with empty results or results missing fact_id keys.
+        """
+        if not results:
+            return
+        ids = [r["fact_id"] for r in results if "fact_id" in r]
+        if not ids:
+            return
+        placeholders = ",".join("?" * len(ids))
+        self._conn.execute(
+            f"UPDATE facts SET retrieval_count = retrieval_count + 1 "
+            f"WHERE fact_id IN ({placeholders})",
+            ids,
+        )
+        self._conn.commit()
+
     def search_facts(
         self,
         query: str,
@@ -223,15 +243,7 @@ class MemoryStore:
 
             rows = self._conn.execute(sql, params).fetchall()
             results = [self._row_to_dict(r) for r in rows]
-
-            if results:
-                ids = [r["fact_id"] for r in results]
-                placeholders = ",".join("?" * len(ids))
-                self._conn.execute(
-                    f"UPDATE facts SET retrieval_count = retrieval_count + 1 WHERE fact_id IN ({placeholders})",
-                    ids,
-                )
-                self._conn.commit()
+            self.increment_retrieval_count(results)
 
             return results
 

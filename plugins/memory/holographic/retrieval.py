@@ -109,6 +109,10 @@ class FactRetriever:
         # Strip raw HRR bytes — callers expect JSON-serializable dicts
         for fact in results:
             fact.pop("hrr_vector", None)
+
+        # Increment retrieval_count for returned facts
+        self._record_retrieval(results)
+
         return results
 
     def probe(
@@ -187,7 +191,9 @@ class FactRetriever:
             scored.append(fact)
 
         scored.sort(key=lambda x: x["score"], reverse=True)
-        return scored[:limit]
+        results = scored[:limit]
+        self._record_retrieval(results)
+        return results
 
     def related(
         self,
@@ -255,7 +261,9 @@ class FactRetriever:
             scored.append(fact)
 
         scored.sort(key=lambda x: x["score"], reverse=True)
-        return scored[:limit]
+        results = scored[:limit]
+        self._record_retrieval(results)
+        return results
 
     def reason(
         self,
@@ -333,7 +341,9 @@ class FactRetriever:
             scored.append(fact)
 
         scored.sort(key=lambda x: x["score"], reverse=True)
-        return scored[:limit]
+        results = scored[:limit]
+        self._record_retrieval(results)
+        return results
 
     def contradict(
         self,
@@ -476,7 +486,9 @@ class FactRetriever:
             scored.append(fact)
 
         scored.sort(key=lambda x: x["score"], reverse=True)
-        return scored[:limit]
+        results = scored[:limit]
+        self._record_retrieval(results)
+        return results
 
     def _fts_candidates(
         self,
@@ -540,6 +552,10 @@ class FactRetriever:
             results.append(fact)
 
         return results
+
+    def _record_retrieval(self, results: list[dict]) -> None:
+        """Delegate retrieval_count increment to the store layer."""
+        self.store.increment_retrieval_count(results)
 
     @staticmethod
     def _tokenize(text: str) -> set[str]:
