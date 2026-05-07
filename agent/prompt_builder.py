@@ -95,15 +95,32 @@ def _find_hermes_md(cwd: Path) -> Optional[Path]:
     Search order: *cwd* first, then each parent directory up to (and
     including) the git repository root.  Returns the first match, or
     ``None`` if nothing is found.
+
+    All filesystem operations are wrapped in OSError handlers because
+    the caller may pass a *cwd* that points into a sandbox filesystem
+    (e.g. ``TERMINAL_CWD=/root`` on a Daytona backend) which the host
+    user cannot read — see #6214.
     """
-    stop_at = _find_git_root(cwd)
-    current = cwd.resolve()
+    try:
+        current = cwd.resolve()
+    except OSError as e:
+        logger.debug("Could not resolve cwd %s for .hermes.md search: %s", cwd, e)
+        return None
+
+    try:
+        stop_at = _find_git_root(cwd)
+    except OSError:
+        stop_at = None
 
     for directory in [current, *current.parents]:
         for name in _HERMES_MD_NAMES:
             candidate = directory / name
-            if candidate.is_file():
-                return candidate
+            try:
+                if candidate.is_file():
+                    return candidate
+            except OSError as e:
+                logger.debug("Could not stat %s: %s", candidate, e)
+                continue
         # Stop walking at the git root (or filesystem root).
         if stop_at and directory == stop_at:
             break
@@ -1086,15 +1103,16 @@ def _load_agents_md(cwd_path: Path) -> str:
     """AGENTS.md — top-level only (no recursive walk)."""
     for name in ["AGENTS.md", "agents.md"]:
         candidate = cwd_path / name
-        if candidate.exists():
-            try:
-                content = candidate.read_text(encoding="utf-8").strip()
-                if content:
-                    content = _scan_context_content(content, name)
-                    result = f"## {name}\n\n{content}"
-                    return _truncate_content(result, "AGENTS.md")
-            except Exception as e:
-                logger.debug("Could not read %s: %s", candidate, e)
+        try:
+            if not candidate.exists():
+                continue
+            content = candidate.read_text(encoding="utf-8").strip()
+            if content:
+                content = _scan_context_content(content, name)
+                result = f"## {name}\n\n{content}"
+                return _truncate_content(result, "AGENTS.md")
+        except (OSError, UnicodeError) as e:
+            logger.debug("Could not load %s: %s", candidate, e)
     return ""
 
 
@@ -1102,15 +1120,16 @@ def _load_claude_md(cwd_path: Path) -> str:
     """CLAUDE.md / claude.md — cwd only."""
     for name in ["CLAUDE.md", "claude.md"]:
         candidate = cwd_path / name
-        if candidate.exists():
-            try:
-                content = candidate.read_text(encoding="utf-8").strip()
-                if content:
-                    content = _scan_context_content(content, name)
-                    result = f"## {name}\n\n{content}"
-                    return _truncate_content(result, "CLAUDE.md")
-            except Exception as e:
-                logger.debug("Could not read %s: %s", candidate, e)
+        try:
+            if not candidate.exists():
+                continue
+            content = candidate.read_text(encoding="utf-8").strip()
+            if content:
+                content = _scan_context_content(content, name)
+                result = f"## {name}\n\n{content}"
+                return _truncate_content(result, "CLAUDE.md")
+        except (OSError, UnicodeError) as e:
+            logger.debug("Could not load %s: %s", candidate, e)
     return ""
 
 
@@ -1118,26 +1137,29 @@ def _load_cursorrules(cwd_path: Path) -> str:
     """.cursorrules + .cursor/rules/*.mdc — cwd only."""
     cursorrules_content = ""
     cursorrules_file = cwd_path / ".cursorrules"
-    if cursorrules_file.exists():
-        try:
+    try:
+        if cursorrules_file.exists():
             content = cursorrules_file.read_text(encoding="utf-8").strip()
             if content:
                 content = _scan_context_content(content, ".cursorrules")
                 cursorrules_content += f"## .cursorrules\n\n{content}\n\n"
-        except Exception as e:
-            logger.debug("Could not read .cursorrules: %s", e)
+    except (OSError, UnicodeError) as e:
+        logger.debug("Could not load .cursorrules: %s", e)
 
     cursor_rules_dir = cwd_path / ".cursor" / "rules"
-    if cursor_rules_dir.exists() and cursor_rules_dir.is_dir():
-        mdc_files = sorted(cursor_rules_dir.glob("*.mdc"))
-        for mdc_file in mdc_files:
-            try:
-                content = mdc_file.read_text(encoding="utf-8").strip()
-                if content:
-                    content = _scan_context_content(content, f".cursor/rules/{mdc_file.name}")
-                    cursorrules_content += f"## .cursor/rules/{mdc_file.name}\n\n{content}\n\n"
-            except Exception as e:
-                logger.debug("Could not read %s: %s", mdc_file, e)
+    try:
+        if cursor_rules_dir.exists() and cursor_rules_dir.is_dir():
+            mdc_files = sorted(cursor_rules_dir.glob("*.mdc"))
+            for mdc_file in mdc_files:
+                try:
+                    content = mdc_file.read_text(encoding="utf-8").strip()
+                    if content:
+                        content = _scan_context_content(content, f".cursor/rules/{mdc_file.name}")
+                        cursorrules_content += f"## .cursor/rules/{mdc_file.name}\n\n{content}\n\n"
+                except (OSError, UnicodeError) as e:
+                    logger.debug("Could not read %s: %s", mdc_file, e)
+    except (OSError, UnicodeError) as e:
+        logger.debug("Could not load .cursor/rules: %s", e)
 
     if not cursorrules_content:
         return ""
@@ -1162,18 +1184,24 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
     if cwd is None:
         cwd = os.getcwd()
 
-    cwd_path = Path(cwd).resolve()
+    try:
+        cwd_path = Path(cwd).resolve()
+    except OSError as e:
+        logger.debug("Could not resolve context cwd %s: %s", cwd, e)
+        cwd_path = None
+
     sections = []
 
     # Priority-based project context: first match wins
-    project_context = (
-        _load_hermes_md(cwd_path)
-        or _load_agents_md(cwd_path)
-        or _load_claude_md(cwd_path)
-        or _load_cursorrules(cwd_path)
-    )
-    if project_context:
-        sections.append(project_context)
+    if cwd_path is not None:
+        project_context = (
+            _load_hermes_md(cwd_path)
+            or _load_agents_md(cwd_path)
+            or _load_claude_md(cwd_path)
+            or _load_cursorrules(cwd_path)
+        )
+        if project_context:
+            sections.append(project_context)
 
     # SOUL.md from HERMES_HOME only — skip when already loaded as identity
     if not skip_soul:

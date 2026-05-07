@@ -1089,4 +1089,62 @@ class TestOpenAIModelExecutionGuidance:
 # =========================================================================
 
 
+# =========================================================================
+# PermissionError / UnicodeDecodeError resilience (see #6214)
+# =========================================================================
+
+
+class TestFindHermesMdPermissionError:
+    """_find_hermes_md must not crash when cwd is unreadable (sandbox)."""
+
+    def test_returns_none_when_cwd_resolve_raises(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "agent.prompt_builder.Path.resolve",
+            lambda self: (_ for _ in ()).throw(PermissionError("sandbox")),
+        )
+        assert _find_hermes_md(tmp_path) is None
+
+    def test_skips_unreadable_candidate_and_finds_next(self, tmp_path, monkeypatch):
+        """First candidate (.hermes.md) raises PermissionError on is_file,
+        second candidate (HERMES.md) succeeds — function must skip the bad
+        one and return the good one."""
+        (tmp_path / ".hermes.md").write_text("lower")
+        (tmp_path / "HERMES.md").write_text("upper")
+        real_is_file = type(tmp_path / ".hermes.md").is_file
+        call_count = {"n": 0}
+
+        def flaky_is_file(self):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise PermissionError("sandbox")
+            return real_is_file(self)
+
+        monkeypatch.setattr("agent.prompt_builder.Path.is_file", flaky_is_file)
+        result = _find_hermes_md(tmp_path)
+        assert result is not None
+        assert result.name == "HERMES.md"
+
+
+class TestBuildContextFilesPromptPermissionError:
+    """build_context_files_prompt must not crash on unresolvable cwd."""
+
+    def test_unresolvable_cwd_returns_empty_or_soul_only(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "agent.prompt_builder.Path.resolve",
+            lambda self: (_ for _ in ()).throw(PermissionError("sandbox")),
+        )
+        result = build_context_files_prompt(cwd=str(tmp_path), skip_soul=True)
+        assert result == ""
+
+    def test_unicode_error_in_agents_md(self, tmp_path):
+        agents_file = tmp_path / "AGENTS.md"
+        agents_file.write_bytes(b"\xff\xfe invalid utf-8 \x80\x81")
+        result = build_context_files_prompt(cwd=str(tmp_path), skip_soul=True)
+        assert isinstance(result, str)
+
+    def test_unicode_error_in_cursorrules(self, tmp_path):
+        cr = tmp_path / ".cursorrules"
+        cr.write_bytes(b"\xff\xfe not utf-8 \x80\x81")
+        result = build_context_files_prompt(cwd=str(tmp_path), skip_soul=True)
+        assert isinstance(result, str)
 
