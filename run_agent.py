@@ -3813,6 +3813,33 @@ class AIAgent:
                 self._ensure_db_session()
             start_idx = len(conversation_history) if conversation_history else 0
             flush_from = max(start_idx, self._last_flushed_db_idx)
+
+            # ``conversation_history`` is an API-call context cursor, not a
+            # durable SessionDB cursor.  After context compression/session
+            # rotation it may refer to messages that have not been written to
+            # the new session row yet.  If we trust it blindly, ``flush_from``
+            # can jump past the end of the current DB transcript and SQLite
+            # gets zero rows while the raw session JSON has the full chat.
+            try:
+                if hasattr(self._session_db, "count_messages"):
+                    persisted_count = self._session_db.count_messages(self.session_id)
+                else:
+                    persisted_count = len(self._session_db.get_messages(self.session_id))
+            except Exception:
+                persisted_count = None
+            if persisted_count is not None and persisted_count < flush_from:
+                # SessionDB appends messages in the same order as ``messages``;
+                # a smaller persisted count is therefore the durable prefix
+                # already written for this session.
+                logger.warning(
+                    "Session DB flush cursor ahead of persisted messages for %s "
+                    "(flush_from=%s, persisted=%s); resuming from persisted count",
+                    self.session_id,
+                    flush_from,
+                    persisted_count,
+                )
+                flush_from = persisted_count
+
             for msg in messages[flush_from:]:
                 role = msg.get("role", "unknown")
                 content = msg.get("content")

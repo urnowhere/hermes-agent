@@ -1446,6 +1446,15 @@ class SessionDB:
             result.append(msg)
         return result
 
+    def count_messages(self, session_id: str) -> int:
+        """Return the number of persisted messages for a session."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS count FROM messages WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        return int(row["count"] if hasattr(row, "keys") else row[0])
+
     def resolve_resume_session_id(self, session_id: str) -> str:
         """Redirect a resume target to the descendant session that holds the messages.
 
