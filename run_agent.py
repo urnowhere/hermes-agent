@@ -37,6 +37,7 @@ import sys
 import tempfile
 import time
 import threading
+import unicodedata
 from types import SimpleNamespace
 import urllib.request
 import uuid
@@ -3169,6 +3170,21 @@ class AIAgent:
         return content
 
     @staticmethod
+    def _get_terminal_response_char(content: str) -> str:
+        """Return the last visible response character, ignoring emoji joiners/modifiers."""
+        stripped = content.rstrip()
+        while stripped:
+            last_char = stripped[-1]
+            if last_char in ("\u200d", "\ufe0e", "\ufe0f"):
+                stripped = stripped[:-1]
+                continue
+            if 0x1F3FB <= ord(last_char) <= 0x1F3FF:
+                stripped = stripped[:-1]
+                continue
+            return last_char
+        return ""
+
+    @staticmethod
     def _has_natural_response_ending(content: str) -> bool:
         """Heuristic: does visible assistant text look intentionally finished?"""
         if not content:
@@ -3178,7 +3194,13 @@ class AIAgent:
             return False
         if stripped.endswith("```"):
             return True
-        return stripped[-1] in '.!?:)"\']}。！？：）】」』》'
+        terminal_char = AIAgent._get_terminal_response_char(stripped)
+        if not terminal_char:
+            return False
+        return (
+            terminal_char in '.!?:…)"\']}。！？：）】」』》'
+            or unicodedata.category(terminal_char) == "So"
+        )
 
     def _is_ollama_glm_backend(self) -> bool:
         """Detect the narrow backend family affected by Ollama/GLM stop misreports."""

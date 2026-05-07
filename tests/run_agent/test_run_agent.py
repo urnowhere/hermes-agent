@@ -3092,6 +3092,39 @@ class TestRunConversation:
             == "Based on the search results, the best next step is to update the config."
         )
 
+    def test_ollama_glm_stop_with_emoji_signoff_does_not_continue(self, agent):
+        """Emoji sign-offs should count as a natural response ending."""
+        self._setup_agent(agent)
+        agent.base_url = "http://localhost:11434/v1"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.model = "glm-5.1:cloud"
+
+        tool_turn = _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[_mock_tool_call(name="web_search", arguments="{}", call_id="c1")],
+        )
+        complete_stop = _mock_response(
+            content="Based on the search results, the best next step is to update the config 💛",
+            finish_reason="stop",
+        )
+        agent.client.chat.completions.create.side_effect = [tool_turn, complete_stop]
+
+        with (
+            patch("run_agent.handle_function_call", return_value="search result"),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello")
+
+        assert result["completed"] is True
+        assert result["api_calls"] == 2
+        assert (
+            result["final_response"]
+            == "Based on the search results, the best next step is to update the config 💛"
+        )
+
     def test_non_ollama_stop_without_terminal_boundary_does_not_continue(self, agent):
         """The stop->length workaround should stay scoped to Ollama/GLM backends."""
         self._setup_agent(agent)
