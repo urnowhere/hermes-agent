@@ -681,39 +681,51 @@ class CredentialPool:
                     last_refresh=refreshed.get("last_refresh"),
                 )
             elif self.provider == "nous":
-                synced = self._sync_nous_entry_from_auth_store(entry)
-                if synced is not entry:
-                    entry = synced
-                nous_state = {
-                    "access_token": entry.access_token,
-                    "refresh_token": entry.refresh_token,
-                    "client_id": entry.client_id,
-                    "portal_base_url": entry.portal_base_url,
-                    "inference_base_url": entry.inference_base_url,
-                    "token_type": entry.token_type,
-                    "scope": entry.scope,
-                    "obtained_at": entry.obtained_at,
-                    "expires_at": entry.expires_at,
-                    "agent_key": entry.agent_key,
-                    "agent_key_expires_at": entry.agent_key_expires_at,
-                    "tls": entry.tls,
-                }
-                refreshed = auth_mod.refresh_nous_oauth_from_state(
-                    nous_state,
-                    min_key_ttl_seconds=DEFAULT_AGENT_KEY_MIN_TTL_SECONDS,
-                    force_refresh=force,
-                    force_mint=force,
-                )
-                # Apply returned fields: dataclass fields via replace, extras via dict update
-                field_updates = {}
-                extra_updates = dict(entry.extra)
-                _field_names = {f.name for f in fields(entry)}
-                for k, v in refreshed.items():
-                    if k in _field_names:
-                        field_updates[k] = v
-                    elif k in _EXTRA_KEYS:
-                        extra_updates[k] = v
-                updated = replace(entry, extra=extra_updates, **field_updates)
+                # FIX(shagghiesuperstar): Hold _auth_store_lock across the entire
+                # sync+HTTP+apply sequence so no concurrent process can read and
+                # consume the same single-use refresh token simultaneously.
+                # _auth_store_lock() is re-entrant (_auth_lock_holder.depth in auth.py)
+                # so the nested acquire inside _sync_nous_entry_from_auth_store()
+                # does not deadlock. If another process already refreshed while we
+                # waited for the lock, _sync returns a new object and we adopt those
+                # tokens directly without a second HTTP call.
+                with _auth_store_lock():
+                    synced = self._sync_nous_entry_from_auth_store(entry)
+                    if synced is not entry:
+                        entry = synced
+                        field_updates: Dict[str, Any] = {}
+                        extra_updates = dict(entry.extra)
+                        updated = replace(entry, extra=extra_updates, **field_updates)
+                    else:
+                        nous_state = {
+                            "access_token": entry.access_token,
+                            "refresh_token": entry.refresh_token,
+                            "client_id": entry.client_id,
+                            "portal_base_url": entry.portal_base_url,
+                            "inference_base_url": entry.inference_base_url,
+                            "token_type": entry.token_type,
+                            "scope": entry.scope,
+                            "obtained_at": entry.obtained_at,
+                            "expires_at": entry.expires_at,
+                            "agent_key": entry.agent_key,
+                            "agent_key_expires_at": entry.agent_key_expires_at,
+                            "tls": entry.tls,
+                        }
+                        refreshed = auth_mod.refresh_nous_oauth_from_state(
+                            nous_state,
+                            min_key_ttl_seconds=DEFAULT_AGENT_KEY_MIN_TTL_SECONDS,
+                            force_refresh=force,
+                            force_mint=force,
+                        )
+                        field_updates = {}
+                        extra_updates = dict(entry.extra)
+                        _field_names = {f.name for f in fields(entry)}
+                        for k, v in refreshed.items():
+                            if k in _field_names:
+                                field_updates[k] = v
+                            elif k in _EXTRA_KEYS:
+                                extra_updates[k] = v
+                        updated = replace(entry, extra=extra_updates, **field_updates)
             else:
                 return entry
         except Exception as exc:
