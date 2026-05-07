@@ -1288,7 +1288,7 @@ atexit.register(_stop_browser_cleanup_thread)
 BROWSER_TOOL_SCHEMAS = [
     {
         "name": "browser_navigate",
-        "description": "Navigate to a URL in the browser. Initializes the session and loads the page. Must be called before other browser tools. For simple information retrieval, prefer web_search or web_extract (faster, cheaper). For plain-text endpoints — URLs ending in .md, .txt, .json, .yaml, .yml, .csv, .xml, raw.githubusercontent.com, or any documented API endpoint — prefer curl via the terminal tool or web_extract; the browser stack is overkill and much slower for these. Use browser tools when you need to interact with a page (click, fill forms, dynamic content). Returns a compact page snapshot with interactive elements and ref IDs — no need to call browser_snapshot separately after navigating.",
+        "description": "Navigate to a URL in the browser. Initializes the session and loads the page. Must be called before other browser tools. For simple information retrieval, prefer web_search or web_extract (faster, cheaper). For plain-text endpoints — URLs ending in .md, .txt, .json, .yaml, .yml, .csv, .xml, raw.githubusercontent.com, or any documented API endpoint — prefer curl via the terminal tool or web_extract; the browser stack is overkill and much slower for these. Use browser tools when you need to interact with a page (click, fill forms, dynamic content). After navigating, prefer browser_console and compact browser_snapshot before escalating to browser_vision screenshots. Returns a compact page snapshot with interactive elements and ref IDs — no need to call browser_snapshot separately after navigating.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -1302,7 +1302,7 @@ BROWSER_TOOL_SCHEMAS = [
     },
     {
         "name": "browser_snapshot",
-        "description": "Get a text-based snapshot of the current page's accessibility tree. Returns interactive elements with ref IDs (like @e1, @e2) for browser_click and browser_type. full=false (default): compact view with interactive elements. full=true: complete page content. Snapshots over 8000 chars are truncated or LLM-summarized. Requires browser_navigate first. Note: browser_navigate already returns a compact snapshot — use this to refresh after interactions that change the page, or with full=true for complete content.",
+        "description": "Get a text-based snapshot of the current page's accessibility tree. Returns interactive elements with ref IDs (like @e1, @e2) for browser_click and browser_type. full=false (default): compact view with interactive elements. full=true: complete page content. Snapshots over 8000 chars are truncated or LLM-summarized. Requires browser_navigate first. Note: browser_navigate already returns a compact snapshot — use this to refresh after interactions that change the page, or with full=true for complete content. Prefer compact snapshots for routine state checks; use full snapshots only when the task truly needs the entire page state.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -2044,6 +2044,34 @@ def _truncate_snapshot(snapshot_text: str, max_chars: int = 8000) -> str:
 # Browser Tool Functions
 # ============================================================================
 
+
+def _browser_workflow_hints(stage: str, full_snapshot: bool = False) -> list[str]:
+    """Return lightweight workflow hints that encourage disciplined browser use.
+
+    These hints intentionally reinforce the browser-investigation-discipline
+    pattern: prefer structured state before screenshots, verify after each
+    interaction, and decompose long brittle tasks instead of retrying blindly.
+    """
+    hints: list[str] = []
+    if stage == "navigate":
+        hints.extend([
+            "Prefer browser_console and compact browser_snapshot before escalating to screenshots.",
+            "If the page already answers the question, stop here instead of interacting further.",
+            "Use browser_vision mainly for visual/layout questions or evidence capture, not as the default next step.",
+        ])
+    elif stage == "snapshot":
+        if full_snapshot:
+            hints.append(
+                "Full snapshot can be expensive to reason over; prefer compact snapshot unless the task truly needs the whole page state."
+            )
+        else:
+            hints.extend([
+                "Verify state changes after each important interaction instead of batching many clicks blindly.",
+                "If the task is getting brittle or long, decompose it into smaller browser sub-tasks before continuing.",
+            ])
+    return hints
+
+
 def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     """
     Navigate to a URL in the browser.
@@ -2159,7 +2187,8 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         response = {
             "success": True,
             "url": final_url,
-            "title": title
+            "title": title,
+            "workflow_hints": _browser_workflow_hints("navigate"),
         }
         _copy_fallback_warning(response, result)
 
@@ -2260,7 +2289,8 @@ def browser_snapshot(
         response = {
             "success": True,
             "snapshot": snapshot_text,
-            "element_count": len(refs) if refs else 0
+            "element_count": len(refs) if refs else 0,
+            "workflow_hints": _browser_workflow_hints("snapshot", full_snapshot=full),
         }
         _copy_fallback_warning(response, result)
 
