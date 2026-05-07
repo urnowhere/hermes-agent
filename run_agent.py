@@ -8731,6 +8731,32 @@ class AIAgent:
             self._lmstudio_reasoning_options_cached(),
         )
 
+    def _resolve_deepseek_summary_reasoning_effort(self) -> str | None:
+        """Resolve a top-level ``reasoning_effort`` for the DeepSeek native API.
+
+        The iteration-limit summary path calls ``chat.completions.create()``
+        directly, bypassing the transport which would normally handle the
+        mapping through ``DeepSeekProfile.build_api_kwargs_extras``.  This
+        helper replicates that mapping so the summary path sends the same
+        ``reasoning_effort`` value that the main conversation loop does.
+        """
+        if not self.reasoning_config or not isinstance(self.reasoning_config, dict):
+            return None
+        if self.reasoning_config.get("enabled") is False:
+            return None
+        effort = str(self.reasoning_config.get("effort", "medium") or "medium").strip().lower()
+        # DeepSeek API only supports "high" and "max".
+        # low/medium/minimal → high; xhigh/max → max; high → high.
+        mapped = {
+            "minimal": "high",
+            "low": "high",
+            "medium": "high",
+            "high": "high",
+            "xhigh": "max",
+            "max": "max",
+        }.get(effort, "high")
+        return mapped
+
     def _github_models_reasoning_extra_body(self) -> dict | None:
         """Format reasoning payload for GitHub Models/OpenAI-compatible routes."""
         try:
@@ -10444,11 +10470,18 @@ class AIAgent:
                 (self.provider or "").strip().lower() == "lmstudio"
                 and self._supports_reasoning_extra_body()
             )
+            _is_deepseek_summary = (
+                (self.provider or "").strip().lower() == "deepseek"
+            )
             _lm_reasoning_effort: str | None = (
                 self._resolve_lmstudio_summary_reasoning_effort()
                 if _is_lmstudio_summary else None
             )
-            if not _is_lmstudio_summary and self._supports_reasoning_extra_body():
+            _ds_reasoning_effort: str | None = (
+                self._resolve_deepseek_summary_reasoning_effort()
+                if _is_deepseek_summary else None
+            )
+            if not _is_lmstudio_summary and not _is_deepseek_summary and self._supports_reasoning_extra_body():
                 if self.reasoning_config is not None:
                     summary_extra_body["reasoning"] = self.reasoning_config
                 else:
@@ -10477,6 +10510,8 @@ class AIAgent:
                     summary_kwargs.update(self._max_tokens_param(self.max_tokens))
                 if _lm_reasoning_effort is not None:
                     summary_kwargs["reasoning_effort"] = _lm_reasoning_effort
+                if _ds_reasoning_effort is not None:
+                    summary_kwargs["reasoning_effort"] = _ds_reasoning_effort
 
                 # Include provider routing preferences
                 provider_preferences = {}
@@ -10547,6 +10582,8 @@ class AIAgent:
                         summary_kwargs.update(self._max_tokens_param(self.max_tokens))
                     if _lm_reasoning_effort is not None:
                         summary_kwargs["reasoning_effort"] = _lm_reasoning_effort
+                    if _ds_reasoning_effort is not None:
+                        summary_kwargs["reasoning_effort"] = _ds_reasoning_effort
                     if summary_extra_body:
                         summary_kwargs["extra_body"] = summary_extra_body
 

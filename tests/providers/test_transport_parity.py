@@ -256,3 +256,87 @@ class TestCustomOllamaParity:
             reasoning_config={"enabled": False, "effort": "none"},
         )
         assert kw["extra_body"]["think"] is False
+
+
+class TestDeepSeekParity:
+    """DeepSeek: top-level reasoning_effort with value mapping (high/max)."""
+
+    def test_reasoning_effort_top_level_xhigh_maps_to_max(self, transport):
+        """xhigh → max, emitted as top-level reasoning_effort."""
+        kw = transport.build_kwargs(
+            model="deepseek-chat",
+            messages=_simple_messages(),
+            tools=None,
+            provider_profile=get_provider_profile("deepseek"),
+            reasoning_config={"enabled": True, "effort": "xhigh"},
+        )
+        assert kw.get("reasoning_effort") == "max"
+        assert "reasoning" not in kw.get("extra_body", {})
+
+    def test_reasoning_effort_top_level_max_passthrough(self, transport):
+        """max → max, emitted as top-level reasoning_effort."""
+        kw = transport.build_kwargs(
+            model="deepseek-chat",
+            messages=_simple_messages(),
+            tools=None,
+            provider_profile=get_provider_profile("deepseek"),
+            reasoning_config={"enabled": True, "effort": "max"},
+        )
+        assert kw.get("reasoning_effort") == "max"
+        assert "reasoning" not in kw.get("extra_body", {})
+
+    def test_reasoning_effort_top_level_high_passthrough(self, transport):
+        """high → high, emitted as top-level reasoning_effort."""
+        kw = transport.build_kwargs(
+            model="deepseek-chat",
+            messages=_simple_messages(),
+            tools=None,
+            provider_profile=get_provider_profile("deepseek"),
+            reasoning_config={"enabled": True, "effort": "high"},
+        )
+        assert kw.get("reasoning_effort") == "high"
+        assert "reasoning" not in kw.get("extra_body", {})
+
+    def test_reasoning_effort_medium_maps_to_high(self, transport):
+        """medium (and low/minimal) → high on DeepSeek native API."""
+        kw = transport.build_kwargs(
+            model="deepseek-chat",
+            messages=_simple_messages(),
+            tools=None,
+            provider_profile=get_provider_profile("deepseek"),
+            reasoning_config={"enabled": True, "effort": "medium"},
+        )
+        assert kw.get("reasoning_effort") == "high"
+        assert "reasoning" not in kw.get("extra_body", {})
+
+    def test_reasoning_effort_low_maps_to_high(self, transport):
+        kw = transport.build_kwargs(
+            model="deepseek-chat",
+            messages=_simple_messages(),
+            tools=None,
+            provider_profile=get_provider_profile("deepseek"),
+            reasoning_config={"enabled": True, "effort": "low"},
+        )
+        assert kw.get("reasoning_effort") == "high"
+
+    def test_reasoning_disabled_no_effort_emitted(self, transport):
+        """When thinking is disabled, don't emit reasoning_effort."""
+        kw = transport.build_kwargs(
+            model="deepseek-chat",
+            messages=_simple_messages(),
+            tools=None,
+            provider_profile=get_provider_profile("deepseek"),
+            reasoning_config={"enabled": False},
+        )
+        assert "reasoning_effort" not in kw
+        assert "reasoning" not in kw.get("extra_body", {})
+
+    def test_no_reasoning_config_no_effort(self, transport):
+        """Absent reasoning_config → no reasoning_effort emitted."""
+        kw = transport.build_kwargs(
+            model="deepseek-chat",
+            messages=_simple_messages(),
+            tools=None,
+            provider_profile=get_provider_profile("deepseek"),
+        )
+        assert "reasoning_effort" not in kw
