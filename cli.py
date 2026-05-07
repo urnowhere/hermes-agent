@@ -3657,7 +3657,13 @@ class HermesCLI:
             or resolved_acp_args != self.acp_args
         )
         self.provider = resolved_provider
-        self.api_mode = resolved_api_mode
+        # Preserve model-specific api_mode set by the /model command.
+        # resolve_runtime_provider() defaults to "chat_completions" for
+        # most providers, but some models require "anthropic_messages"
+        # (e.g. kimi-for-coding). Only overwrite when the resolver
+        # returns a non-default transport or we're already at default.
+        if self.api_mode == "chat_completions" or resolved_api_mode != "chat_completions":
+            self.api_mode = resolved_api_mode
         self.acp_command = resolved_acp_command
         self.acp_args = resolved_acp_args
         self._credential_pool = resolved_credential_pool
