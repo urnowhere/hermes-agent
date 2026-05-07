@@ -5044,10 +5044,20 @@ class HermesCLI:
 
     def show_config(self):
         """Display current configuration with kawaii ASCII art."""
-        # Get terminal config from environment (which was set from cli-config.yaml)
-        terminal_env = os.getenv("TERMINAL_ENV", "local")
-        terminal_cwd = os.getenv("TERMINAL_CWD", os.getcwd())
-        terminal_timeout = os.getenv("TERMINAL_TIMEOUT", "60")
+        # Use effective config first, with env as fallback.
+        # /config previously read timeout directly from env with a hardcoded
+        # fallback of 60, which could diverge from loaded config.yaml values.
+        current_cfg = load_cli_config()
+        terminal_cfg = current_cfg.get("terminal", {}) if isinstance(current_cfg, dict) else {}
+        terminal_env = (
+            terminal_cfg.get("backend")
+            or terminal_cfg.get("env_type")
+            or os.getenv("TERMINAL_ENV", "local")
+        )
+        terminal_cwd = terminal_cfg.get("cwd") or os.getenv("TERMINAL_CWD", os.getcwd())
+        terminal_timeout = str(
+            terminal_cfg.get("timeout", os.getenv("TERMINAL_TIMEOUT", "60"))
+        )
         
         user_config_path = _hermes_home / 'config.yaml'
         project_config_path = Path(__file__).parent / 'cli-config.yaml'
