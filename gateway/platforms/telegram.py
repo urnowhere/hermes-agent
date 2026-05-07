@@ -3126,9 +3126,21 @@ class TelegramAdapter(BasePlatformAdapter):
             return
         if not self._should_process_message(update.message):
             return
-        
+
         msg = update.message
-        
+
+        # Optional: skip videos entirely when the operator opts in. Telegram
+        # Bot API caps `getFile` downloads at 20 MB, so video handling is
+        # routinely impractical in groups; this gate lets a deployment turn
+        # video processing off without code changes (closes #17302 follow-up).
+        if self.config.extra.get("ignore_videos", False):
+            doc_mime = (msg.document.mime_type or "") if msg.document else ""
+            if msg.video or (msg.document and doc_mime.startswith("video/")):
+                logger.info(
+                    "[Telegram] Ignoring video message (ignore_videos=true)"
+                )
+                return
+
         # Determine media type
         if msg.sticker:
             msg_type = MessageType.STICKER
@@ -3212,6 +3224,23 @@ class TelegramAdapter(BasePlatformAdapter):
                 logger.warning("[Telegram] Failed to cache audio: %s", e, exc_info=True)
 
         elif msg.video:
+            # Telegram Bot API caps file downloads at 20 MB; bail early with a
+            # user-visible message instead of a blank event so the agent
+            # doesn't churn the model-fallback chain (#17302).
+            MAX_VIDEO_BYTES = 20 * 1024 * 1024
+            video_size = getattr(msg.video, "file_size", None)
+            if not video_size or video_size > MAX_VIDEO_BYTES:
+                event.text = (
+                    "⚠️ This video can't be processed: Telegram's Bot API "
+                    "limits file downloads to 20 MB. Please send a shorter "
+                    "clip or upload it elsewhere and share the link."
+                )
+                logger.info(
+                    "[Telegram] Video too large or unverifiable: %s bytes",
+                    video_size,
+                )
+                await self.handle_message(event)
+                return
             try:
                 file_obj = await msg.video.get_file()
                 video_bytes = await file_obj.download_as_bytearray()
@@ -3226,7 +3255,22 @@ class TelegramAdapter(BasePlatformAdapter):
                 event.media_types = [SUPPORTED_VIDEO_TYPES.get(ext, "video/mp4")]
                 logger.info("[Telegram] Cached user video at %s", cached_path)
             except Exception as e:
-                logger.warning("[Telegram] Failed to cache video: %s", e, exc_info=True)
+                # Detect the post-API-version-bump "File is too big" error that
+                # Telegram raises even when file_size looked OK at message time
+                # (e.g. forwarded videos). Surface a friendly text instead of
+                # forwarding an empty event to the agent (#17302).
+                if "File is too big" in str(e):
+                    event.text = (
+                        "⚠️ This video exceeds Telegram's 20 MB Bot API "
+                        "download limit and can't be processed."
+                    )
+                    logger.info(
+                        "[Telegram] Telegram refused video download (too big): %s", e
+                    )
+                else:
+                    logger.warning(
+                        "[Telegram] Failed to cache video: %s", e, exc_info=True
+                    )
 
         # Download document files to cache for agent processing
         elif msg.document:
@@ -3249,6 +3293,25 @@ class TelegramAdapter(BasePlatformAdapter):
                     ext = video_mime_to_ext.get(doc.mime_type, "")
 
                 if ext in SUPPORTED_VIDEO_TYPES:
+                    # Same 20 MB Bot API cap as inline videos (#17302). Without
+                    # this check, get_file() raises BadRequest("File is too
+                    # big"), control falls through to handle_message() with a
+                    # blank event, and the agent burns through every fallback
+                    # model trying to respond to nothing.
+                    MAX_VIDEO_DOC_BYTES = 20 * 1024 * 1024
+                    if not doc.file_size or doc.file_size > MAX_VIDEO_DOC_BYTES:
+                        event.text = (
+                            "⚠️ This video document is too large for the "
+                            "Telegram Bot API (20 MB limit). Please share a "
+                            "shorter clip or a link."
+                        )
+                        event.message_type = MessageType.VIDEO
+                        logger.info(
+                            "[Telegram] Video document too large: %s bytes",
+                            doc.file_size,
+                        )
+                        await self.handle_message(event)
+                        return
                     file_obj = await doc.get_file()
                     video_bytes = await file_obj.download_as_bytearray()
                     cached_path = cache_video_from_bytes(bytes(video_bytes), ext=ext)
@@ -3310,7 +3373,22 @@ class TelegramAdapter(BasePlatformAdapter):
                         )
 
             except Exception as e:
-                logger.warning("[Telegram] Failed to cache document: %s", e, exc_info=True)
+                # Telegram's API can refuse downloads after the fact with
+                # "File is too big" even when file_size looked acceptable
+                # (forwards, edited messages, etc.). Don't fall through to
+                # handle_message() with a blank event — that's what triggers
+                # the model-fallback storm in #17302.
+                if "File is too big" in str(e):
+                    event.text = (
+                        "⚠️ This file exceeds Telegram's 20 MB Bot API "
+                        "download limit and can't be processed."
+                    )
+                    logger.info(
+                        "[Telegram] Telegram refused document download (too big): %s",
+                        e,
+                    )
+                else:
+                    logger.warning("[Telegram] Failed to cache document: %s", e, exc_info=True)
 
         media_group_id = getattr(msg, "media_group_id", None)
         if media_group_id:

@@ -118,9 +118,10 @@ def _make_update(msg):
     return update
 
 
-def _make_video(file_obj=None):
+def _make_video(file_obj=None, file_size=1024):
     video = MagicMock()
     video.get_file = AsyncMock(return_value=file_obj or _make_file_obj(b"video-bytes"))
+    video.file_size = file_size
     return video
 
 
@@ -387,6 +388,124 @@ class TestVideoDownloadBlock:
         assert len(event.media_urls) == 1
         assert os.path.exists(event.media_urls[0])
         assert event.media_types == [SUPPORTED_VIDEO_TYPES[".mp4"]]
+
+    # ----- #17302 regression: large videos must not silently fall through -----
+
+    @pytest.mark.asyncio
+    async def test_oversize_native_video_short_circuits_with_friendly_text(self, adapter):
+        """Native videos > 20 MB must reach handle_message() with a user-visible
+        text, not an empty event that triggers the model fallback storm (#17302)."""
+        msg = _make_message()
+        # 25 MB — over the 20 MB Bot API cap.
+        msg.video = _make_video(file_size=25 * 1024 * 1024)
+        update = _make_update(msg)
+
+        await adapter._handle_media_message(update, MagicMock())
+        event = adapter.handle_message.call_args[0][0]
+        assert event.text and "20 MB" in event.text
+        assert not event.media_urls  # nothing was downloaded
+        # Crucially: get_file() was never called — the early gate caught it.
+        msg.video.get_file.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unverifiable_native_video_size_short_circuits(self, adapter):
+        """file_size=None must be treated like 'too large' (security parity with documents)."""
+        msg = _make_message()
+        msg.video = _make_video(file_size=None)
+        update = _make_update(msg)
+
+        await adapter._handle_media_message(update, MagicMock())
+        event = adapter.handle_message.call_args[0][0]
+        assert event.text and "20 MB" in event.text
+        msg.video.get_file.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_oversize_video_document_short_circuits(self, adapter):
+        """Video sent as a document and > 20 MB must also short-circuit (#17302)."""
+        doc = _make_document(
+            file_name="huge.mp4",
+            mime_type="video/mp4",
+            file_size=25 * 1024 * 1024,
+        )
+        msg = _make_message(document=doc)
+        update = _make_update(msg)
+
+        await adapter._handle_media_message(update, MagicMock())
+        event = adapter.handle_message.call_args[0][0]
+        assert event.message_type == MessageType.VIDEO
+        assert event.text and "20 MB" in event.text
+        # get_file() must NOT be called — that's what threw BadRequest in #17302.
+        doc.get_file.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_native_video_get_file_too_big_does_not_send_blank_event(self, adapter):
+        """Even when file_size lies (forwarded videos), if Telegram raises
+        'File is too big' inside get_file(), the event must carry a friendly
+        text — NOT a blank one that triggers infinite model fallback (#17302)."""
+        # Pretend file_size is fine (5 MB), but get_file() blows up.
+        from telegram.error import BadRequest  # type: ignore[attr-defined]
+        boom = AsyncMock(side_effect=Exception("BadRequest: File is too big"))
+        video = MagicMock()
+        video.file_size = 5 * 1024 * 1024
+        video.get_file = boom
+        msg = _make_message()
+        msg.video = video
+        update = _make_update(msg)
+
+        await adapter._handle_media_message(update, MagicMock())
+        event = adapter.handle_message.call_args[0][0]
+        assert event.text and "20 MB" in event.text
+        assert not event.media_urls
+
+    @pytest.mark.asyncio
+    async def test_video_document_get_file_too_big_does_not_send_blank_event(self, adapter):
+        """Same as above but for videos sent as documents."""
+        # file_size lies; get_file() raises File is too big.
+        doc = MagicMock()
+        doc.file_name = "forwarded.mp4"
+        doc.mime_type = "video/mp4"
+        doc.file_size = 5 * 1024 * 1024  # Looks fine.
+        doc.get_file = AsyncMock(side_effect=Exception("BadRequest: File is too big"))
+        msg = _make_message(document=doc)
+        update = _make_update(msg)
+
+        await adapter._handle_media_message(update, MagicMock())
+        event = adapter.handle_message.call_args[0][0]
+        assert event.text and "20 MB" in event.text
+        assert not event.media_urls
+
+    @pytest.mark.asyncio
+    async def test_ignore_videos_config_skips_native_video(self, adapter):
+        """With telegram.extra.ignore_videos=true, video messages are dropped (#17302)."""
+        adapter.config.extra["ignore_videos"] = True
+        msg = _make_message()
+        msg.video = _make_video(file_size=1024)
+        update = _make_update(msg)
+
+        await adapter._handle_media_message(update, MagicMock())
+        adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ignore_videos_config_skips_video_documents(self, adapter):
+        """With telegram.extra.ignore_videos=true, video-as-document is also dropped."""
+        adapter.config.extra["ignore_videos"] = True
+        doc = _make_document(file_name="clip.mp4", mime_type="video/mp4", file_size=1024)
+        msg = _make_message(document=doc)
+        update = _make_update(msg)
+
+        await adapter._handle_media_message(update, MagicMock())
+        adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ignore_videos_does_not_block_pdfs(self, adapter):
+        """ignore_videos must NOT touch non-video media."""
+        adapter.config.extra["ignore_videos"] = True
+        doc = _make_document(file_name="report.pdf", file_size=1024)
+        msg = _make_message(document=doc)
+        update = _make_update(msg)
+
+        await adapter._handle_media_message(update, MagicMock())
+        adapter.handle_message.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
