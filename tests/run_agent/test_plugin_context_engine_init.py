@@ -26,6 +26,25 @@ class _StubEngine(ContextEngine):
         return messages
 
 
+class _ToolEngine(_StubEngine):
+    @property
+    def name(self) -> str:
+        return "tool-engine"
+
+    def get_tool_schemas(self):
+        return [
+            {
+                "name": "memory_search",
+                "description": "Search memory",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                },
+            }
+        ]
+
+
 def test_plugin_engine_gets_context_length_on_init():
     """Plugin context engine should have context_length set during AIAgent init."""
     engine = _StubEngine()
@@ -89,3 +108,32 @@ def test_plugin_engine_update_model_args():
     assert "provider" in kw
     # Should NOT pass api_mode — the ABC doesn't accept it
     assert "api_mode" not in kw
+
+
+def test_plugin_engine_tool_schemas_are_injected_into_agent_tools():
+    engine = _ToolEngine()
+    cfg = {"context": {"engine": "tool-engine"}, "agent": {}}
+
+    with (
+        patch("hermes_cli.config.load_config", return_value=cfg),
+        patch("plugins.context_engine.load_context_engine", return_value=engine),
+        patch("agent.model_metadata.get_model_context_length", return_value=131_072),
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            model="openrouter/auto",
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+
+    tool_names = [tool["function"]["name"] for tool in agent.tools]
+    assert "memory_search" in tool_names
+    assert "memory_search" in agent.valid_tool_names
+    assert "memory_search" in agent._context_engine_tool_names
