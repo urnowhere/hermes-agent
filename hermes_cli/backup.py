@@ -103,12 +103,12 @@ def _safe_copy_db(src: Path, dst: Path) -> bool:
         conn.close()
         return True
     except Exception as exc:
-        logger.warning("SQLite safe copy failed for %s: %s", src, exc)
+        logger.warning("SQLite safe copy failed for %s: %s", src, exc, exc_info=True)
         try:
             shutil.copy2(src, dst)
             return True
         except Exception as exc2:
-            logger.error("Raw copy also failed for %s: %s", src, exc2)
+            logger.error("Raw copy also failed for %s: %s", src, exc2, exc_info=True)
             return False
 
 
@@ -558,7 +558,7 @@ def create_quick_snapshot(
                 shutil.copy2(src, dst)
             manifest[rel] = dst.stat().st_size
         except (OSError, PermissionError) as exc:
-            logger.warning("Could not snapshot %s: %s", rel, exc)
+            logger.warning("Could not snapshot %s: %s", rel, exc, exc_info=True)
 
     if not manifest:
         shutil.rmtree(snap_dir, ignore_errors=True)
@@ -652,7 +652,7 @@ def restore_quick_snapshot(
                 shutil.copy2(src, dst)
             restored += 1
         except (OSError, PermissionError) as exc:
-            logger.error("Failed to restore %s: %s", rel, exc)
+            logger.error("Failed to restore %s: %s", rel, exc, exc_info=True)
 
     logger.info("Restored %d files from snapshot %s", restored, snapshot_id)
     return restored > 0
@@ -675,7 +675,7 @@ def _prune_quick_snapshots(root: Path, keep: int = _QUICK_DEFAULT_KEEP) -> int:
             shutil.rmtree(d)
             deleted += 1
         except OSError as exc:
-            logger.warning("Failed to prune snapshot %s: %s", d.name, exc)
+            logger.warning("Failed to prune snapshot %s: %s", d.name, exc, exc_info=True)
 
     return deleted
 

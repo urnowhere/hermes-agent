@@ -159,7 +159,7 @@ def maybe_persist_tool_result(
                 )
                 return _build_persisted_message(preview, has_more, len(content), remote_path)
         except Exception as exc:
-            logger.warning("Sandbox write failed for %s: %s", tool_use_id, exc)
+            logger.warning("Sandbox write failed for %s: %s", tool_use_id, exc, exc_info=True)
 
     logger.info(
         "Inline-truncating large tool result: %s (%d chars, no sandbox write)",

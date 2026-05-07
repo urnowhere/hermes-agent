@@ -378,7 +378,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
                 return False
             lock_acquired = True
         except Exception as e:
-            logger.warning("[%s] Could not acquire session lock (non-fatal): %s", self.name, e)
+            logger.warning("[%s] Could not acquire session lock (non-fatal): %s", self.name, e, exc_info=True)
 
         try:
             # Auto-install npm dependencies if node_modules doesn't exist

@@ -250,7 +250,7 @@ def _verify_cosign(checksums_path: str, sig_path: str, cert_path: str) -> bool |
                           result.returncode, result.stderr.strip())
             return False
     except (OSError, subprocess.TimeoutExpired) as exc:
-        logger.warning("cosign execution failed: %s", exc)
+        logger.warning("cosign execution failed: %s", exc, exc_info=True)
         return None
 
 
@@ -647,7 +647,7 @@ def check_command_security(command: str) -> dict:
         )
     except OSError as exc:
         # Covers FileNotFoundError, PermissionError, exec format error
-        logger.warning("tirith spawn failed: %s", exc)
+        logger.warning("tirith spawn failed: %s", exc, exc_info=True)
         if fail_open:
             return {"action": "allow", "findings": [], "summary": f"tirith unavailable: {exc}"}
         return {"action": "block", "findings": [], "summary": f"tirith spawn failed (fail-closed): {exc}"}
