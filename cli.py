@@ -3403,6 +3403,44 @@ class HermesCLI:
                 self._stream_prefilt = self._stream_prefilt[-max_tag_len:]
             return
 
+    def _current_session_title_for_display(self) -> str:
+        """Return the current session title, if one is available for display."""
+        pending_title = (getattr(self, "_pending_title", None) or "").strip()
+        if pending_title:
+            return pending_title
+
+        session_db = getattr(self, "_session_db", None)
+        session_id = getattr(self, "session_id", None)
+        if not session_db or not session_id:
+            return ""
+
+        try:
+            session = session_db.get_session(session_id) or {}
+        except Exception:
+            return ""
+        return (session.get("title") or "").strip()
+
+    def _response_panel_label(self) -> str:
+        """Return the response-box title, including the chat title when set."""
+        try:
+            from hermes_cli.skin_engine import get_active_skin
+            label = get_active_skin().get_branding("response_label", "⚕ Hermes")
+        except Exception:
+            label = "⚕ Hermes"
+
+        title = self._current_session_title_for_display()
+        if not title:
+            return label
+
+        max_title_len = 60
+        if len(title) > max_title_len:
+            title = f"{title[:max_title_len - 1]}…"
+
+        leading = label[:len(label) - len(label.lstrip())]
+        trailing = label[len(label.rstrip()):]
+        base_label = label.strip() or "⚕ Hermes"
+        return f"{leading}{base_label} · {title}{trailing}"
+
     def _emit_stream_text(self, text: str) -> None:
         """Emit filtered text to the streaming display."""
         if not text:
@@ -3428,10 +3466,10 @@ class HermesCLI:
             try:
                 from hermes_cli.skin_engine import get_active_skin
                 _skin = get_active_skin()
-                label = _skin.get_branding("response_label", "⚕ Hermes")
+                label = self._response_panel_label()
                 _text_hex = _skin.get_color("banner_text", "#FFF8DC")
             except Exception:
-                label = "⚕ Hermes"
+                label = self._response_panel_label()
                 _text_hex = "#FFF8DC"
             # Build a true-color ANSI escape for the response text color
             # so streamed content matches the Rich Panel appearance.
@@ -7095,18 +7133,18 @@ class HermesCLI:
                     try:
                         from hermes_cli.skin_engine import get_active_skin
                         _skin = get_active_skin()
-                        label = _skin.get_branding("response_label", "⚕ Hermes")
+                        label = self._response_panel_label()
                         _resp_color = _skin.get_color("response_border", "#CD7F32")
                         _resp_text = _skin.get_color("banner_text", "#FFF8DC")
                     except Exception:
-                        label = "⚕ Hermes"
+                        label = self._response_panel_label()
                         _resp_color = "#CD7F32"
                         _resp_text = "#FFF8DC"
 
                     _chat_console = ChatConsole()
                     _chat_console.print(Panel(
                         _render_final_assistant_content(response, mode=self.final_response_markdown),
-                        title=f"[{_resp_color} bold]{label} (background #{task_num})[/]",
+                        title=f"[{_resp_color} bold]{_escape(label)} (background #{task_num})[/]",
                         title_align="left",
                         border_style=_resp_color,
                         style=_resp_text,
@@ -9850,11 +9888,11 @@ class HermesCLI:
                 try:
                     from hermes_cli.skin_engine import get_active_skin
                     _skin = get_active_skin()
-                    label = _skin.get_branding("response_label", "⚕ Hermes")
+                    label = self._response_panel_label()
                     _resp_color = _skin.get_color("response_border", "#CD7F32")
                     _resp_text = _skin.get_color("banner_text", "#FFF8DC")
                 except Exception:
-                    label = "⚕ Hermes"
+                    label = self._response_panel_label()
                     _resp_color = "#CD7F32"
                     _resp_text = "#FFF8DC"
 
@@ -9872,7 +9910,7 @@ class HermesCLI:
                     _chat_console = ChatConsole()
                     _chat_console.print(Panel(
                         _render_final_assistant_content(response, mode=self.final_response_markdown),
-                        title=f"[{_resp_color} bold]{label}[/]",
+                        title=f"[{_resp_color} bold]{_escape(label)}[/]",
                         title_align="left",
                         border_style=_resp_color,
                         style=_resp_text,
