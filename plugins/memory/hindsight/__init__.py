@@ -540,6 +540,8 @@ class HindsightMemoryProvider(MemoryProvider):
         self._agent_workspace = ""
         self._turn_index = 0
         self._client = None
+        self._client_loop = None
+        self._client_lock = threading.Lock()
         self._timeout = _DEFAULT_TIMEOUT
         self._idle_timeout = _DEFAULT_IDLE_TIMEOUT
         self._prefetch_result = ""
@@ -867,48 +869,75 @@ class HindsightMemoryProvider(MemoryProvider):
 
     def _get_client(self):
         """Return the cached Hindsight client (created once, reused)."""
-        if self._client is None:
-            if self._mode == "local_embedded":
-                available, reason = _check_local_runtime()
-                if not available:
-                    raise RuntimeError(
-                        "Hindsight local runtime is unavailable"
-                        + (f": {reason}" if reason else "")
-                    )
-                from hindsight import HindsightEmbedded
-                HindsightEmbedded.__del__ = lambda self: None
-                llm_provider = self._config.get("llm_provider", "")
-                if llm_provider in ("openai_compatible", "openrouter"):
-                    llm_provider = "openai"
-                logger.debug("Creating HindsightEmbedded client (profile=%s, provider=%s)",
-                             self._config.get("profile", "hermes"), llm_provider)
-                kwargs = dict(
-                    profile=self._config.get("profile", "hermes"),
-                    llm_provider=llm_provider,
-                    llm_api_key=self._config.get("llmApiKey") or self._config.get("llm_api_key") or os.environ.get("HINDSIGHT_LLM_API_KEY", ""),
-                    llm_model=self._config.get("llm_model", ""),
+        current_loop = _get_loop()
+        with self._client_lock:
+            if self._client is not None and self._client_loop is not current_loop:
+                logger.info("Shared event loop was replaced; recreating Hindsight client")
+                stale, stale_loop = self._client, self._client_loop
+                self._client = None
+                self._client_loop = None
+                # Best-effort close on the old loop (may already be dead)
+                try:
+                    if hasattr(stale, "aclose") and stale_loop is not None and stale_loop.is_running():
+                        asyncio.run_coroutine_threadsafe(stale.aclose(), stale_loop)
+                except Exception:
+                    pass
+            if self._client is not None:
+                return self._client
+
+        # Build outside the lock — construction may block on daemon startup
+        new_client = self._build_client(current_loop)
+
+        with self._client_lock:
+            # Another thread may have raced us; prefer theirs if loop matches
+            if self._client is not None and self._client_loop is current_loop:
+                return self._client
+            self._client = new_client
+            self._client_loop = current_loop
+            return self._client
+
+    def _build_client(self, current_loop):
+        """Construct a Hindsight client (not thread-safe, called outside lock)."""
+        if self._mode == "local_embedded":
+            available, reason = _check_local_runtime()
+            if not available:
+                raise RuntimeError(
+                    "Hindsight local runtime is unavailable"
+                    + (f": {reason}" if reason else "")
                 )
-                if self._llm_base_url:
-                    kwargs["llm_base_url"] = self._llm_base_url
-                idle_timeout = _parse_int_setting(
-                    self._config.get("idle_timeout")
-                    if self._config.get("idle_timeout") is not None
-                    else os.environ.get("HINDSIGHT_IDLE_TIMEOUT", self._idle_timeout),
-                    _DEFAULT_IDLE_TIMEOUT,
-                )
-                self._idle_timeout = idle_timeout
-                kwargs["idle_timeout"] = idle_timeout
-                self._client = HindsightEmbedded(**kwargs)
-            else:
-                from hindsight_client import Hindsight
-                timeout = self._timeout or _DEFAULT_TIMEOUT
-                kwargs = {"base_url": self._api_url, "timeout": float(timeout)}
-                if self._api_key:
-                    kwargs["api_key"] = self._api_key
-                logger.debug("Creating Hindsight cloud client (url=%s, has_key=%s, timeout=%s)",
-                             self._api_url, bool(self._api_key), kwargs["timeout"])
-                self._client = Hindsight(**kwargs)
-        return self._client
+            from hindsight import HindsightEmbedded
+            HindsightEmbedded.__del__ = lambda self: None
+            llm_provider = self._config.get("llm_provider", "")
+            if llm_provider in ("openai_compatible", "openrouter"):
+                llm_provider = "openai"
+            logger.debug("Creating HindsightEmbedded client (profile=%s, provider=%s)",
+                         self._config.get("profile", "hermes"), llm_provider)
+            kwargs = dict(
+                profile=self._config.get("profile", "hermes"),
+                llm_provider=llm_provider,
+                llm_api_key=self._config.get("llmApiKey") or self._config.get("llm_api_key") or os.environ.get("HINDSIGHT_LLM_API_KEY", ""),
+                llm_model=self._config.get("llm_model", ""),
+            )
+            if self._llm_base_url:
+                kwargs["llm_base_url"] = self._llm_base_url
+            idle_timeout = _parse_int_setting(
+                self._config.get("idle_timeout")
+                if self._config.get("idle_timeout") is not None
+                else os.environ.get("HINDSIGHT_IDLE_TIMEOUT", self._idle_timeout),
+                _DEFAULT_IDLE_TIMEOUT,
+            )
+            self._idle_timeout = idle_timeout
+            kwargs["idle_timeout"] = idle_timeout
+            return HindsightEmbedded(**kwargs)
+        else:
+            from hindsight_client import Hindsight
+            timeout = self._timeout or _DEFAULT_TIMEOUT
+            kwargs = {"base_url": self._api_url, "timeout": float(timeout)}
+            if self._api_key:
+                kwargs["api_key"] = self._api_key
+            logger.debug("Creating Hindsight cloud client (url=%s, has_key=%s, timeout=%s)",
+                         self._api_url, bool(self._api_key), kwargs["timeout"])
+            return Hindsight(**kwargs)
 
     def _run_sync(self, coro):
         """Schedule *coro* on the shared loop using the configured timeout."""
@@ -1008,9 +1037,10 @@ class HindsightMemoryProvider(MemoryProvider):
                 "Hindsight embedded daemon appears unreachable; recreating client and retrying once: %s",
                 exc,
             )
-            self._client = None
+            with self._client_lock:
+                self._client = None
+                self._client_loop = None
             client = self._get_client()
-            self._client = client
             return self._run_sync(operation(client))
 
     def _probe_url(self) -> str:
