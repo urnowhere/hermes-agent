@@ -89,12 +89,38 @@ class TestReapOrphanedBrowserSessions:
                 return  # pretend process exists
             # Don't actually kill anything
 
-        with patch("os.kill", side_effect=mock_kill):
+        with patch("os.kill", side_effect=mock_kill), patch(
+            "tools.browser_tool._read_process_cmdline",
+            return_value="node /usr/local/bin/agent-browser daemon",
+        ):
             _reap_orphaned_browser_sessions()
 
         # Should have checked existence (sig 0) then killed (SIGTERM)
         assert (12345, 0) in kill_calls
         assert (12345, signal.SIGTERM) in kill_calls
+
+    def test_alive_pid_must_match_agent_browser_before_kill(self, fake_tmpdir):
+        """A planted PID file for a non-browser process must not be SIGTERMed."""
+        from tools.browser_tool import _reap_orphaned_browser_sessions
+
+        d = _make_socket_dir(fake_tmpdir, "h_fake123456", pid=12345)
+
+        kill_calls = []
+
+        def mock_kill(pid, sig):
+            kill_calls.append((pid, sig))
+            if sig == 0:
+                return  # pretend the planted PID exists
+
+        with patch("os.kill", side_effect=mock_kill), patch(
+            "tools.browser_tool._read_process_cmdline",
+            return_value="/bin/sleep 600",
+        ):
+            _reap_orphaned_browser_sessions()
+
+        assert (12345, 0) in kill_calls
+        assert (12345, signal.SIGTERM) not in kill_calls
+        assert d.exists()
 
     def test_tracked_session_is_not_reaped(self, fake_tmpdir):
         """Sessions tracked in _active_sessions are left alone (legacy path)."""
@@ -230,7 +256,10 @@ class TestOwnerPidCrossProcess:
                 return  # daemon still alive
             # SIGTERM to daemon — noop in test
 
-        with patch("os.kill", side_effect=mock_kill):
+        with patch("os.kill", side_effect=mock_kill), patch(
+            "tools.browser_tool._read_process_cmdline",
+            return_value="node /usr/local/bin/agent-browser daemon",
+        ):
             _reap_orphaned_browser_sessions()
 
         # Owner checked (returned dead), daemon checked (alive), daemon killed

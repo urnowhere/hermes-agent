@@ -1100,6 +1100,61 @@ def _write_owner_pid(socket_dir: str, session_name: str) -> None:
                      session_name, exc)
 
 
+def _read_process_cmdline(pid: int) -> Optional[str]:
+    """Best-effort command-line read for process identity checks."""
+    proc_cmdline = Path(f"/proc/{pid}/cmdline")
+    try:
+        raw = proc_cmdline.read_bytes()
+    except OSError:
+        raw = b""
+    if raw:
+        return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=1,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    cmdline = (result.stdout or "").strip()
+    return cmdline or None
+
+
+def _is_agent_browser_daemon_process(pid: int, session_name: str) -> bool:
+    """Return True only when a PID looks like an agent-browser daemon.
+
+    The orphan reaper scans predictable temp paths.  A same-user process can
+    plant a fake socket directory with a PID file, so never SIGTERM a live PID
+    unless its command line matches the daemon we expect.
+    """
+    cmdline = _read_process_cmdline(pid)
+    if not cmdline:
+        logger.warning(
+            "Refusing to reap browser daemon PID %d for session %s: "
+            "could not verify process command line",
+            pid,
+            session_name,
+        )
+        return False
+
+    if "agent-browser" not in cmdline.lower():
+        logger.warning(
+            "Refusing to reap browser daemon PID %d for session %s: "
+            "process command line does not look like agent-browser: %r",
+            pid,
+            session_name,
+            cmdline[:200],
+        )
+        return False
+
+    return True
+
+
 def _reap_orphaned_browser_sessions():
     """Scan for orphaned agent-browser daemon processes from previous runs.
 
@@ -1202,6 +1257,9 @@ def _reap_orphaned_browser_sessions():
             continue
         except PermissionError:
             # Alive but owned by someone else — leave it alone
+            continue
+
+        if not _is_agent_browser_daemon_process(daemon_pid, session_name):
             continue
 
         # Daemon is alive and its owner is dead (or legacy + untracked).  Reap.
