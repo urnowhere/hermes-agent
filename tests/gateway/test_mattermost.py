@@ -738,3 +738,49 @@ class TestMattermostMediaTypes:
         assert msg.media_types == ["application/pdf"]
         assert not msg.media_types[0].startswith("image/")
         assert not msg.media_types[0].startswith("audio/")
+
+
+class TestMattermostUploadFile:
+    """_upload_file() returns None on network errors instead of raising."""
+
+    def setup_method(self):
+        self.adapter = _make_adapter()
+
+    def test_upload_file_returns_none_on_client_error(self):
+        import asyncio
+        import aiohttp
+
+        async def _run():
+            mock_session = MagicMock()
+            mock_session.post = MagicMock(side_effect=aiohttp.ClientError("connection reset"))
+            self.adapter._session = mock_session
+            return await self.adapter._upload_file("ch1", b"data", "file.txt")
+
+        assert asyncio.run(_run()) is None
+
+    def test_upload_file_returns_none_on_timeout(self):
+        import asyncio
+
+        async def _run():
+            mock_session = MagicMock()
+            mock_session.post = MagicMock(side_effect=asyncio.TimeoutError())
+            self.adapter._session = mock_session
+            return await self.adapter._upload_file("ch1", b"data", "file.txt")
+
+        assert asyncio.run(_run()) is None
+
+    def test_upload_file_returns_file_id_on_success(self):
+        import asyncio
+
+        async def _run():
+            mock_resp = AsyncMock()
+            mock_resp.status = 200
+            mock_resp.json = AsyncMock(return_value={"file_infos": [{"id": "abc123"}]})
+            mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+            mock_resp.__aexit__ = AsyncMock(return_value=False)
+            mock_session = MagicMock()
+            mock_session.post = MagicMock(return_value=mock_resp)
+            self.adapter._session = mock_session
+            return await self.adapter._upload_file("ch1", b"data", "file.txt")
+
+        assert asyncio.run(_run()) == "abc123"
