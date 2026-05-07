@@ -58,17 +58,72 @@ def _require_boto3():
         )
 
 
-def _get_bedrock_runtime_client(region: str):
+def _resolve_custom_endpoint() -> str:
+    """Return the custom Bedrock runtime endpoint, preferring env var override over config."""
+    env_val = os.environ.get("AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "").strip()
+    if env_val:
+        return env_val
+    try:
+        from hermes_cli.config import load_config
+        return (load_config().get("bedrock", {}).get("runtime_endpoint") or "").strip()
+    except (ImportError, OSError) as exc:
+        logger.debug("bedrock: could not read runtime_endpoint from config: %s", exc)
+        return ""
+
+
+def _get_bedrock_runtime_client(
+    region: str,
+    endpoint_url: str = "",
+    bearer_token: str = "",
+):
     """Get or create a cached ``bedrock-runtime`` client for the given region.
 
     Uses the default AWS credential chain (env vars → profile → instance role).
+
+    When a bearer token is present — whether for a native AWS Bedrock API key
+    or a custom AI-gateway proxy — creates an unsigned client with bearer
+    auth injected via a ``before-sign`` event handler.
     """
-    if region not in _bedrock_runtime_client_cache:
-        boto3 = _require_boto3()
-        _bedrock_runtime_client_cache[region] = boto3.client(
+    effective_endpoint = endpoint_url or _resolve_custom_endpoint()
+    effective_bearer = bearer_token or os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "").strip()
+
+    _bearer_tag = effective_bearer[:8] if effective_bearer else ""
+    cache_key = f"{region}|{effective_endpoint}|{_bearer_tag}"
+    if cache_key in _bedrock_runtime_client_cache:
+        return _bedrock_runtime_client_cache[cache_key]
+
+    boto3 = _require_boto3()
+
+    if effective_bearer:
+        # Bearer auth — unsigned client.  Works for both native AWS Bedrock
+        # API keys and custom AI-gateway proxies.
+        from botocore import UNSIGNED
+        from botocore.config import Config
+
+        client_kwargs = {
+            "region_name": region,
+            "config": Config(signature_version=UNSIGNED),
+        }
+        if effective_endpoint:
+            client_kwargs["endpoint_url"] = effective_endpoint
+
+        client = boto3.client("bedrock-runtime", **client_kwargs)
+
+        def _inject_bearer(request, **kwargs):
+            request.headers["Authorization"] = f"Bearer {effective_bearer}"
+
+        client.meta.events.register("before-sign.bedrock-runtime.*", _inject_bearer)
+    elif effective_endpoint:
+        client = boto3.client(
+            "bedrock-runtime", region_name=region, endpoint_url=effective_endpoint,
+        )
+    else:
+        client = boto3.client(
             "bedrock-runtime", region_name=region,
         )
-    return _bedrock_runtime_client_cache[region]
+
+    _bedrock_runtime_client_cache[cache_key] = client
+    return client
 
 
 def _get_bedrock_control_client(region: str):
@@ -87,7 +142,7 @@ def reset_client_cache():
     _bedrock_control_client_cache.clear()
 
 
-def invalidate_runtime_client(region: str) -> bool:
+def invalidate_runtime_client(region: str, endpoint_url: str = "") -> bool:
     """Evict the cached ``bedrock-runtime`` client for a single region.
 
     Per-region counterpart to :func:`reset_client_cache`. Used by the converse
@@ -98,8 +153,12 @@ def invalidate_runtime_client(region: str) -> bool:
     Returns True if a cached entry was evicted, False if the region was not
     cached.
     """
-    existed = region in _bedrock_runtime_client_cache
-    _bedrock_runtime_client_cache.pop(region, None)
+    effective_endpoint = endpoint_url or _resolve_custom_endpoint()
+    effective_bearer = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "").strip()
+    _bearer_tag = effective_bearer[:8] if effective_bearer else ""
+    cache_key = f"{region}|{effective_endpoint}|{_bearer_tag}"
+    existed = cache_key in _bedrock_runtime_client_cache
+    _bedrock_runtime_client_cache.pop(cache_key, None)
     return existed
 
 
@@ -226,7 +285,9 @@ def resolve_aws_auth_env_var(env: Optional[Dict[str, str]] = None) -> Optional[s
     attempting to authenticate.
     """
     env = env if env is not None else os.environ
-    # Bearer token takes highest priority
+    # Bearer token takes highest priority.  Works for both native AWS Bedrock
+    # API keys (short/long-term, against the standard bedrock-runtime endpoint)
+    # and custom AI-gateway proxies that use bearer auth.
     if env.get("AWS_BEARER_TOKEN_BEDROCK", "").strip():
         return "AWS_BEARER_TOKEN_BEDROCK"
     # Explicit access key pair

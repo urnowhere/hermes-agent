@@ -1227,6 +1227,12 @@ def resolve_runtime_provider(
         # Region priority: config.yaml bedrock.region → env var → us-east-1
         region = (_bedrock_cfg.get("region") or "").strip() or resolve_bedrock_region()
         auth_source = resolve_aws_auth_env_var() or "aws-sdk-default-chain"
+        _custom_endpoint = (
+            os.environ.get("AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "").strip()
+            or (_bedrock_cfg.get("runtime_endpoint") or "").strip()
+        )
+        _default_base_url = f"https://bedrock-runtime.{region}.amazonaws.com"
+        _effective_base_url = _custom_endpoint or _default_base_url
         # Build guardrail config if configured
         _gr = _bedrock_cfg.get("guardrail", {})
         guardrail_config = None
@@ -1248,11 +1254,11 @@ def resolve_runtime_provider(
             runtime = {
                 "provider": "bedrock",
                 "api_mode": "anthropic_messages",
-                "base_url": f"https://bedrock-runtime.{region}.amazonaws.com",
+                "base_url": _effective_base_url,
                 "api_key": "aws-sdk",
                 "source": auth_source,
                 "region": region,
-                "bedrock_anthropic": True,  # Signal to use AnthropicBedrock client
+                "bedrock_anthropic": True,
                 "requested_provider": requested_provider,
             }
         else:
@@ -1260,7 +1266,7 @@ def resolve_runtime_provider(
             runtime = {
                 "provider": "bedrock",
                 "api_mode": "bedrock_converse",
-                "base_url": f"https://bedrock-runtime.{region}.amazonaws.com",
+                "base_url": _effective_base_url,
                 "api_key": "aws-sdk",
                 "source": auth_source,
                 "region": region,

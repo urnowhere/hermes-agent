@@ -610,7 +610,11 @@ def build_anthropic_client(
     return _anthropic_sdk.Anthropic(**kwargs)
 
 
-def build_anthropic_bedrock_client(region: str):
+def build_anthropic_bedrock_client(
+    region: str,
+    endpoint_url: str = "",
+    bearer_token: str = "",
+):
     """Create an AnthropicBedrock client for Bedrock Claude models.
 
     Uses the Anthropic SDK's native Bedrock adapter, which provides full
@@ -625,6 +629,10 @@ def build_anthropic_bedrock_client(region: str):
     serves them with 1M natively.
 
     Auth uses the boto3 default credential chain (IAM roles, SSO, env vars).
+
+    When a bearer token is provided (or ``AWS_BEARER_TOKEN_BEDROCK`` is set),
+    the SDK's native ``api_key`` parameter is used — ``AnthropicBedrock``
+    natively sets ``Authorization: Bearer <api_key>`` and skips SigV4 signing.
     """
     _anthropic_sdk = _get_anthropic_sdk()
     if _anthropic_sdk is None:
@@ -639,11 +647,27 @@ def build_anthropic_bedrock_client(region: str):
         )
     from httpx import Timeout
 
-    return _anthropic_sdk.AnthropicBedrock(
-        aws_region=region,
-        timeout=Timeout(timeout=900.0, connect=10.0),
-        default_headers={"anthropic-beta": ",".join(_COMMON_BETAS)},
-    )
+    effective_endpoint = endpoint_url or os.environ.get("AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "").strip()
+    if not effective_endpoint:
+        try:
+            from hermes_cli.config import load_config
+
+            effective_endpoint = (load_config().get("bedrock", {}).get("runtime_endpoint") or "").strip()
+        except (ImportError, OSError):
+            pass
+    effective_bearer = bearer_token or os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "").strip()
+
+    kwargs = {
+        "aws_region": region,
+        "timeout": Timeout(timeout=900.0, connect=10.0),
+        "default_headers": {"anthropic-beta": ",".join(_COMMON_BETAS)},
+    }
+    if effective_endpoint:
+        kwargs["base_url"] = effective_endpoint
+    if effective_bearer:
+        kwargs["api_key"] = effective_bearer
+
+    return _anthropic_sdk.AnthropicBedrock(**kwargs)
 
 
 def _read_claude_code_credentials_from_keychain() -> Optional[Dict[str, Any]]:
@@ -1966,5 +1990,4 @@ def build_anthropic_kwargs(
         kwargs["extra_headers"] = {"anthropic-beta": ",".join(betas)}
 
     return kwargs
-
 

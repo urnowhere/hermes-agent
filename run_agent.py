@@ -882,6 +882,22 @@ def _qwen_portal_headers() -> dict:
     }
 
 
+def _resolve_bedrock_region_for_init(base_url: str = "") -> str:
+    """Resolve Bedrock region from base_url pattern, config.yaml, or env vars."""
+    _match = re.search(r"bedrock-runtime\.([a-z0-9-]+)\.", base_url or "")
+    if _match:
+        return _match.group(1)
+    try:
+        from hermes_cli.config import load_config
+        _cfg_region = (load_config().get("bedrock", {}).get("region") or "").strip()
+        if _cfg_region:
+            return _cfg_region
+    except (ImportError, OSError):
+        pass
+    from agent.bedrock_adapter import resolve_bedrock_region
+    return resolve_bedrock_region()
+
+
 class AIAgent:
     """
     AI Agent with tool calling capabilities.
@@ -1355,8 +1371,7 @@ class AIAgent:
             _is_bedrock_anthropic = self.provider == "bedrock"
             if _is_bedrock_anthropic:
                 from agent.anthropic_adapter import build_anthropic_bedrock_client
-                _region_match = re.search(r"bedrock-runtime\.([a-z0-9-]+)\.", base_url or "")
-                _br_region = _region_match.group(1) if _region_match else "us-east-1"
+                _br_region = _resolve_bedrock_region_for_init(base_url)
                 self._bedrock_region = _br_region
                 self._anthropic_client = build_anthropic_bedrock_client(_br_region)
                 self._anthropic_api_key = "aws-sdk"
@@ -1395,9 +1410,8 @@ class AIAgent:
                         print(f"🔑 Using token: {effective_key[:8]}...{effective_key[-4:]}")
         elif self.api_mode == "bedrock_converse":
             # AWS Bedrock — uses boto3 directly, no OpenAI client needed.
-            # Region is extracted from the base_url or defaults to us-east-1.
-            _region_match = re.search(r"bedrock-runtime\.([a-z0-9-]+)\.", base_url or "")
-            self._bedrock_region = _region_match.group(1) if _region_match else "us-east-1"
+            # Region is taken from base_url or config.yaml.
+            self._bedrock_region = _resolve_bedrock_region_for_init(base_url)
             # Guardrail config — read from config.yaml at init time.
             self._bedrock_guardrail_config = None
             try:

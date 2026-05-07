@@ -696,6 +696,7 @@ DEFAULT_CONFIG = {
             "provider_filter": [],     # Only show models from these providers (e.g. ["anthropic", "amazon"])
             "refresh_interval": 3600,  # Cache discovery results for this many seconds
         },
+        "runtime_endpoint": "",  # Custom Bedrock runtime endpoint URL (empty = default AWS endpoint)
         "guardrail": {
             # Amazon Bedrock Guardrails — content filtering and safety policies.
             # Create a guardrail in the Bedrock console, then set the ID and version here.
@@ -1740,6 +1741,14 @@ OPTIONAL_ENV_VARS = {
         "prompt": "AWS Profile",
         "url": None,
         "password": False,
+        "category": "provider",
+        "advanced": True,
+    },
+    "AWS_BEARER_TOKEN_BEDROCK": {
+        "description": "AWS Bedrock API key (native short/long-term) or bearer token for custom AI-gateway endpoints",
+        "prompt": "Bedrock Bearer Token",
+        "url": None,
+        "password": True,
         "category": "provider",
         "advanced": True,
     },

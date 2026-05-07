@@ -4447,6 +4447,19 @@ def _model_flow_stepfun(config, current_model=""):
         print("No change.")
 
 
+def _clear_custom_bedrock_endpoint(cfg: dict) -> None:
+    bedrock_cfg = cfg.get("bedrock", {})
+    if isinstance(bedrock_cfg, dict) and bedrock_cfg.get("runtime_endpoint"):
+        bedrock_cfg["runtime_endpoint"] = ""
+        cfg["bedrock"] = bedrock_cfg
+        print("Cleared custom Bedrock endpoint from config.")
+        if os.environ.get("AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "").strip():
+            print(
+                "Note: AWS_ENDPOINT_URL_BEDROCK_RUNTIME env var is still set — "
+                "remove it to fully switch back to IAM."
+            )
+
+
 def _model_flow_bedrock_api_key(config, region, current_model=""):
     """Bedrock API Key mode — uses the OpenAI-compatible bedrock-mantle endpoint.
 
@@ -4471,7 +4484,7 @@ def _model_flow_bedrock_api_key(config, region, current_model=""):
     # Prompt for API key
     existing_key = get_env_value("AWS_BEARER_TOKEN_BEDROCK") or ""
     if existing_key:
-        print(f"  Bedrock API Key: {existing_key[:12]}... ✓")
+        print("  Bedrock API Key: ✓ configured")
     else:
         print(f"  Endpoint: {mantle_base_url}")
         print()
@@ -4521,6 +4534,7 @@ def _model_flow_bedrock_api_key(config, region, current_model=""):
             bedrock_cfg = {}
         bedrock_cfg["region"] = region
         cfg["bedrock"] = bedrock_cfg
+        _clear_custom_bedrock_endpoint(cfg)
 
         # Save the API key env var name so hermes knows where to find it
         save_env_value("OPENAI_API_KEY", existing_key)
@@ -4531,6 +4545,106 @@ def _model_flow_bedrock_api_key(config, region, current_model=""):
 
         print(f"  Default model set to: {selected} (via Bedrock API Key, {region})")
         print(f"  Endpoint: {mantle_base_url}")
+    else:
+        print("  No change.")
+
+
+def _model_flow_bedrock_custom_endpoint(config, region, current_model=""):
+    """Custom Bedrock endpoint with bearer token authentication.
+
+    For AI gateway proxies (e.g. corporate gateways) that expose a
+    Bedrock-compatible API with bearer token auth instead of SigV4.
+
+    Saves the endpoint URL to config.yaml (bedrock.runtime_endpoint) and
+    AWS_BEARER_TOKEN_BEDROCK (secret) to .env. Sets provider to "bedrock"
+    so the native Bedrock adapter is used with the custom endpoint and bearer auth.
+    """
+    from hermes_cli.auth import (
+        _prompt_model_selection,
+        _save_model_choice,
+        deactivate_provider,
+    )
+    from hermes_cli.config import (
+        load_config,
+        save_config,
+        get_env_value,
+        save_env_value,
+    )
+    from hermes_cli.models import _PROVIDER_MODELS
+
+    _bedrock_cfg_existing = load_config().get("bedrock", {}) or {}
+    existing_url = (_bedrock_cfg_existing.get("runtime_endpoint") or "").strip()
+    print()
+    try:
+        url_input = input(
+            f"  Bedrock endpoint URL [{existing_url or 'e.g. https://ai-gateway.example.com/bedrock'}]: "
+        ).strip()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return
+    endpoint_url = url_input or existing_url
+    if not endpoint_url:
+        print("  No URL provided. Cancelled.")
+        return
+    if not endpoint_url.startswith(("http://", "https://")):
+        print(f"  Invalid URL: {endpoint_url} (must start with http:// or https://)")
+        return
+
+    existing_token = get_env_value("AWS_BEARER_TOKEN_BEDROCK") or ""
+    if existing_token:
+        print("  Bearer token: ✓ token configured")
+    try:
+        import getpass
+        token_input = getpass.getpass(
+            "  Bearer token [leave blank to keep existing]: "
+        ).strip()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return
+    bearer_token = token_input or existing_token
+    if not bearer_token:
+        print("  No bearer token provided. Cancelled.")
+        return
+
+    save_env_value("AWS_BEARER_TOKEN_BEDROCK", bearer_token)
+    print("  ✓ Token saved.")
+    print()
+
+    model_list = _PROVIDER_MODELS.get("bedrock", [])
+    print(f"  Showing {len(model_list)} curated models")
+
+    if model_list:
+        selected = _prompt_model_selection(model_list, current_model=current_model)
+    else:
+        try:
+            selected = input("  Model ID: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            selected = None
+
+    if selected:
+        _save_model_choice(selected)
+
+        cfg = load_config()
+        model = cfg.get("model")
+        if not isinstance(model, dict):
+            model = {"default": model} if model else {}
+            cfg["model"] = model
+        model["provider"] = "bedrock"
+        model.pop("api_mode", None)
+        model.pop("base_url", None)
+
+        bedrock_cfg = cfg.get("bedrock", {})
+        if not isinstance(bedrock_cfg, dict):
+            bedrock_cfg = {}
+        bedrock_cfg["region"] = region
+        bedrock_cfg["runtime_endpoint"] = endpoint_url
+        cfg["bedrock"] = bedrock_cfg
+
+        save_config(cfg)
+        deactivate_provider()
+
+        print(f"  Default model set to: {selected} (via custom Bedrock endpoint)")
+        print(f"  Endpoint: {endpoint_url}")
     else:
         print("  No change.")
 
@@ -4593,6 +4707,9 @@ def _model_flow_bedrock(config, current_model=""):
     print("    2. Bedrock API Key")
     print("       Enter your Bedrock API Key directly — also supports")
     print("       team scenarios where an admin distributes keys")
+    print("    3. Custom Bedrock endpoint (Bearer token)")
+    print("       For AI gateway proxies that expose a Bedrock-compatible API")
+    print("       with bearer token authentication")
     print()
     try:
         auth_choice = input("  Choice [1]: ").strip()
@@ -4602,6 +4719,9 @@ def _model_flow_bedrock(config, current_model=""):
 
     if auth_choice == "2":
         _model_flow_bedrock_api_key(config, region, current_model)
+        return
+    if auth_choice == "3":
+        _model_flow_bedrock_custom_endpoint(config, region, current_model)
         return
 
     # 3. Model discovery — try live API first, fall back to static list
@@ -4709,6 +4829,7 @@ def _model_flow_bedrock(config, current_model=""):
             bedrock_cfg = {}
         bedrock_cfg["region"] = region
         cfg["bedrock"] = bedrock_cfg
+        _clear_custom_bedrock_endpoint(cfg)
 
         save_config(cfg)
         deactivate_provider()
