@@ -145,6 +145,56 @@ def test_estimate_usage_cost_marks_subscription_routes_included():
     assert float(result.amount_usd) == 0.0
 
 
+def test_normalize_usage_openai_compat_fallback_to_anthropic_names():
+    """Local OpenAI-compatible servers (mlx_vlm, etc.) emit input_tokens/output_tokens
+    instead of prompt_tokens/completion_tokens. Regression guard for #14686.
+    """
+    usage = SimpleNamespace(
+        input_tokens=11477,
+        output_tokens=235,
+        total_tokens=11712,
+    )
+
+    normalized = normalize_usage(usage, provider="custom", api_mode="chat_completions")
+
+    assert normalized.input_tokens == 11477
+    assert normalized.output_tokens == 235
+    assert normalized.prompt_tokens == 11477
+
+
+def test_normalize_usage_openai_compat_prefers_openai_names_when_both_present():
+    """When both OpenAI-style and Anthropic-style fields are present,
+    OpenAI-style takes priority (no real server emits both, but defensive).
+    """
+    usage = SimpleNamespace(
+        prompt_tokens=1000,
+        completion_tokens=200,
+        input_tokens=9999,
+        output_tokens=8888,
+    )
+
+    normalized = normalize_usage(usage, provider="openrouter", api_mode="chat_completions")
+
+    assert normalized.input_tokens == 1000
+    assert normalized.output_tokens == 200
+
+
+def test_normalize_usage_openai_compat_preserves_zero_openai_names():
+    """Zero-valued OpenAI fields are present values, not a signal to fall back."""
+    usage = SimpleNamespace(
+        prompt_tokens=0,
+        completion_tokens=0,
+        input_tokens=9999,
+        output_tokens=8888,
+    )
+
+    normalized = normalize_usage(usage, provider="openrouter", api_mode="chat_completions")
+
+    assert normalized.input_tokens == 0
+    assert normalized.output_tokens == 0
+    assert normalized.prompt_tokens == 0
+
+
 def test_estimate_usage_cost_refuses_cache_pricing_without_official_cache_rate(monkeypatch):
     monkeypatch.setattr(
         "agent.usage_pricing.fetch_model_metadata",
