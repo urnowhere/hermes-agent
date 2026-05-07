@@ -73,6 +73,23 @@ SUPPORTED_POOL_STRATEGIES = {
 EXHAUSTED_TTL_429_SECONDS = 60 * 60          # 1 hour
 EXHAUSTED_TTL_DEFAULT_SECONDS = 60 * 60      # 1 hour
 
+# Multiplier cap for the exponential backoff applied to repeated
+# exhaustions of the *same* credential.  After N consecutive failures we
+# extend the cooldown to ``base_ttl * min(2 ** (N-1), CAP)``:
+#
+#   N=1 → 1×  base_ttl  (1h on default)
+#   N=2 → 2×  base_ttl  (2h)
+#   N=3 → 4×  base_ttl  (4h)
+#   N=4 → 8×  base_ttl  (8h, the cap)
+#   N=5+ → 8× base_ttl  (clamped at the cap)
+#
+# Without the cap, a credential that's been failing for a week could
+# end up on a multi-day cooldown that survives operator intervention
+# (refreshing the upstream provider, swapping API keys, etc.); the
+# 8-hour cap ensures cooldowns stay bounded while still backing off
+# meaningfully on sustained outages (#15296).
+EXHAUSTED_TTL_BACKOFF_CAP = 8
+
 # Pool key prefix for custom OpenAI-compatible endpoints.
 # Custom endpoints all share provider='custom' but are keyed by their
 # custom_providers name: 'custom:<normalized_name>'.
@@ -103,6 +120,12 @@ class PooledCredential:
     last_error_reason: Optional[str] = None
     last_error_message: Optional[str] = None
     last_error_reset_at: Optional[float] = None
+    # Count of consecutive ``_mark_exhausted`` calls without an
+    # intervening successful clear-back-to-OK.  Drives exponential
+    # backoff on the cooldown TTL so a credential whose upstream is
+    # genuinely down for hours doesn't keep getting probed every TTL
+    # window with three retries each (#15296).
+    consecutive_failures: int = 0
     base_url: Optional[str] = None
     expires_at: Optional[str] = None
     expires_at_ms: Optional[int] = None
@@ -188,11 +211,66 @@ def _is_manual_source(source: str) -> bool:
     return normalized == SOURCE_MANUAL or normalized.startswith(f"{SOURCE_MANUAL}:")
 
 
-def _exhausted_ttl(error_code: Optional[int]) -> int:
-    """Return cooldown seconds based on the HTTP status that caused exhaustion."""
+def _coerce_failure_count(value: Any) -> int:
+    """Safely coerce a ``consecutive_failures`` value to a non-negative int.
+
+    On-disk ``auth.json`` payloads can be hand-edited or migrated from
+    older schemas, so the field may arrive as a string, a float, ``None``,
+    or even a corrupted shape.  Rather than raising ``ValueError`` from
+    inside cooldown-resolution code (which would break failover for
+    every user with a damaged pool entry), this helper tolerates the
+    bad input and falls back to ``0`` — equivalent to the pre-#15296
+    flat-TTL behaviour.
+    """
+    if value is None:
+        return 0
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, coerced)
+
+
+# log2(EXHAUSTED_TTL_BACKOFF_CAP) — pinned as a module constant so the
+# ``_exhausted_ttl`` exponent clamp doesn't depend on Python's floating-
+# point ``math.log2`` behaviour and so a refactor that bumps the cap
+# also has to update this matching ceiling.  The clamp matters because
+# without it a credential with thousands of consecutive_failures would
+# cause Python to materialise a multi-thousand-bit ``2 ** N`` integer
+# before the ``min(..., CAP)`` call discards it (Copilot caught this on
+# #15455).
+_EXHAUSTED_TTL_BACKOFF_MAX_EXPONENT = 3  # because 2 ** 3 == EXHAUSTED_TTL_BACKOFF_CAP (8)
+
+
+def _exhausted_ttl(error_code: Optional[int], consecutive_failures: int = 0) -> int:
+    """Return cooldown seconds based on the HTTP status that caused
+    exhaustion, with exponential backoff on consecutive failures.
+
+    The backoff multiplier is ``min(2 ** (consecutive_failures - 1),
+    EXHAUSTED_TTL_BACKOFF_CAP)`` and is applied to the base TTL.  A
+    fresh exhaustion (``consecutive_failures <= 1``) keeps the historic
+    1-hour cooldown so transient throttles still recover quickly; only
+    sustained outages on the *same* credential lengthen the wait.
+
+    The ``consecutive_failures`` argument defaults to 0 so older
+    callers (and on-disk pool entries that predate this field) still
+    get the un-multiplied base TTL — backward compatible with the
+    pre-#15296 behaviour.
+    """
     if error_code == 429:
-        return EXHAUSTED_TTL_429_SECONDS
-    return EXHAUSTED_TTL_DEFAULT_SECONDS
+        base = EXHAUSTED_TTL_429_SECONDS
+    else:
+        base = EXHAUSTED_TTL_DEFAULT_SECONDS
+    # ``consecutive_failures`` is the count *including* the current
+    # exhaustion, so the first failure should still apply 1× the base
+    # (i.e. multiplier exponent ``failures - 1``).  Clamp the exponent
+    # to ``log2(CAP)`` BEFORE computing ``2 ** exponent`` so a corrupted
+    # or runaway counter (millions of consecutive failures across a
+    # multi-week outage) doesn't materialise an astronomical integer
+    # only to throw it away in the ``min(..., CAP)``.
+    failures = _coerce_failure_count(consecutive_failures)
+    exponent = min(max(0, failures - 1), _EXHAUSTED_TTL_BACKOFF_MAX_EXPONENT)
+    return base * (1 << exponent)
 
 
 def _parse_absolute_timestamp(value: Any) -> Optional[float]:
@@ -270,7 +348,12 @@ def _exhausted_until(entry: PooledCredential) -> Optional[float]:
     if reset_at is not None:
         return reset_at
     if entry.last_status_at:
-        return entry.last_status_at + _exhausted_ttl(entry.last_error_code)
+        return entry.last_status_at + _exhausted_ttl(
+            entry.last_error_code,
+            consecutive_failures=_coerce_failure_count(
+                getattr(entry, "consecutive_failures", 0)
+            ),
+        )
     return None
 
 
@@ -406,6 +489,15 @@ class CredentialPool:
         error_context: Optional[Dict[str, Any]] = None,
     ) -> PooledCredential:
         normalized_error = _normalize_error_context(error_context)
+        # Count this exhaustion against the previous failure streak so
+        # ``_exhausted_ttl`` can apply an exponential backoff (#15296).
+        # ``_coerce_failure_count`` tolerates legacy on-disk entries that
+        # predate this field, missing values (``None``), and corrupted
+        # shapes (a string, a float, ...) — falling back to 0 instead of
+        # raising ``ValueError`` from inside the failover path.
+        prior_failures = _coerce_failure_count(
+            getattr(entry, "consecutive_failures", 0)
+        )
         updated = replace(
             entry,
             last_status=STATUS_EXHAUSTED,
@@ -414,6 +506,7 @@ class CredentialPool:
             last_error_reason=normalized_error.get("reason"),
             last_error_message=normalized_error.get("message"),
             last_error_reset_at=normalized_error.get("reset_at"),
+            consecutive_failures=prior_failures + 1,
         )
         self._replace_entry(entry, updated)
         self._persist()
@@ -448,6 +541,7 @@ class CredentialPool:
                     last_status=None,
                     last_status_at=None,
                     last_error_code=None,
+                    consecutive_failures=0,
                 )
                 self._replace_entry(entry, updated)
                 self._persist()
@@ -739,6 +833,7 @@ class CredentialPool:
                             last_status=STATUS_OK,
                             last_status_at=None,
                             last_error_code=None,
+                            consecutive_failures=0,
                         )
                         self._replace_entry(synced, updated)
                         self._persist()
@@ -773,6 +868,7 @@ class CredentialPool:
                         last_error_reason=None,
                         last_error_message=None,
                         last_error_reset_at=None,
+                        consecutive_failures=0,
                     )
                     self._replace_entry(synced, updated)
                     self._persist()
@@ -789,6 +885,7 @@ class CredentialPool:
             last_error_reason=None,
             last_error_message=None,
             last_error_reset_at=None,
+            consecutive_failures=0,
         )
         self._replace_entry(entry, updated)
         self._persist()
@@ -1011,7 +1108,8 @@ class CredentialPool:
         count = 0
         new_entries = []
         for entry in self._entries:
-            if entry.last_status or entry.last_status_at or entry.last_error_code:
+            if (entry.last_status or entry.last_status_at
+                    or entry.last_error_code or entry.consecutive_failures):
                 new_entries.append(
                     replace(
                         entry,
@@ -1021,6 +1119,10 @@ class CredentialPool:
                         last_error_reason=None,
                         last_error_message=None,
                         last_error_reset_at=None,
+                        # Operator-driven reset: clear the backoff streak
+                        # too so the next exhaustion starts at base TTL
+                        # rather than 8× cap (#15296).
+                        consecutive_failures=0,
                     )
                 )
                 count += 1
