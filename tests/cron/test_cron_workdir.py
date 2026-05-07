@@ -212,6 +212,10 @@ class TestTickWorkdirPartition:
         workdir_job = {"id": "a", "name": "A", "workdir": str(tmp_path)}
         parallel_job = {"id": "b", "name": "B", "workdir": None}
 
+        lock_dir = tmp_path / "cron-lock"
+        lock_dir.mkdir()
+        monkeypatch.setattr(sched, "_LOCK_DIR", lock_dir)
+        monkeypatch.setattr(sched, "_LOCK_FILE", lock_dir / ".tick.lock")
         monkeypatch.setattr(sched, "get_due_jobs", lambda: [workdir_job, parallel_job])
         monkeypatch.setattr(sched, "advance_next_run", lambda *_a, **_kw: None)
 
