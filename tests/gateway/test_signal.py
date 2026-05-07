@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import json
+import subprocess
 import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch, AsyncMock
@@ -576,7 +577,34 @@ class TestSignalRecipientResolution:
 class TestSignalSendVoice:
     @pytest.mark.asyncio
     async def test_send_voice_sends_via_rpc(self, monkeypatch, tmp_path):
-        """send_voice should send audio as attachment via signal-cli RPC."""
+        """send_voice should send staged M4A audio as a Signal voice note."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        adapter = _make_signal_adapter(monkeypatch)
+        mock_rpc, captured = _stub_rpc({"timestamp": 1234567890})
+        adapter._rpc = mock_rpc
+        adapter._stop_typing_indicator = AsyncMock()
+
+        audio_path = tmp_path / "reply.m4a"
+        audio_path.write_bytes(b"\x00\x00\x00\x18ftyp" + b"\x00" * 100)
+
+        result = await adapter.send_voice(chat_id="+155****4567", audio_path=str(audio_path))
+
+        assert result.success is True
+        assert captured[0]["method"] == "send"
+        sent_path = Path(captured[0]["params"]["attachments"][0])
+        assert sent_path.suffix == ".m4a"
+        assert sent_path.parent == tmp_path / "home" / ".cache" / "hermes" / "voice"
+        assert sent_path.exists() is False
+        assert audio_path.exists() is True
+        assert captured[0]["params"]["message"] == ""  # caption=None → ""
+        assert captured[0]["params"]["voice-note"] is True
+        adapter._stop_typing_indicator.assert_awaited_once_with("+155****4567")
+        assert 1234567890 in adapter._recent_sent_timestamps
+
+    @pytest.mark.asyncio
+    async def test_send_voice_transcodes_ogg_to_m4a(self, monkeypatch, tmp_path):
+        """Ogg voice payloads should be transcoded before sending to Signal."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
         adapter = _make_signal_adapter(monkeypatch)
         mock_rpc, captured = _stub_rpc({"timestamp": 1234567890})
         adapter._rpc = mock_rpc
@@ -585,13 +613,45 @@ class TestSignalSendVoice:
         audio_path = tmp_path / "reply.ogg"
         audio_path.write_bytes(b"OggS" + b"\x00" * 100)
 
+        def fake_run(cmd, check, capture_output, text, timeout):
+            assert cmd[cmd.index("-c:a") + 1] == "aac"
+            Path(cmd[-1]).write_bytes(b"m4a")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr("gateway.platforms.signal.shutil.which", lambda name: "/usr/bin/ffmpeg")
+        monkeypatch.setattr("gateway.platforms.signal.subprocess.run", fake_run)
+
         result = await adapter.send_voice(chat_id="+155****4567", audio_path=str(audio_path))
 
         assert result.success is True
-        assert captured[0]["method"] == "send"
+        sent_path = Path(captured[0]["params"]["attachments"][0])
+        assert sent_path.suffix == ".m4a"
+        assert sent_path.parent == tmp_path / "home" / ".cache" / "hermes" / "voice"
+        assert sent_path.exists() is False
+        assert audio_path.exists() is True
+        assert captured[0]["params"]["voice-note"] is True
+
+    @pytest.mark.asyncio
+    async def test_send_voice_falls_back_to_attachment_without_ffmpeg(
+        self, monkeypatch, tmp_path
+    ):
+        """Non-M4A voice payloads should remain sendable without ffmpeg."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        adapter = _make_signal_adapter(monkeypatch)
+        mock_rpc, captured = _stub_rpc({"timestamp": 1234567890})
+        adapter._rpc = mock_rpc
+        adapter._stop_typing_indicator = AsyncMock()
+
+        audio_path = tmp_path / "reply.ogg"
+        audio_path.write_bytes(b"OggS" + b"\x00" * 100)
+
+        monkeypatch.setattr("gateway.platforms.signal.shutil.which", lambda name: None)
+
+        result = await adapter.send_voice(chat_id="+155****4567", audio_path=str(audio_path))
+
+        assert result.success is True
         assert captured[0]["params"]["attachments"] == [str(audio_path)]
-        assert captured[0]["params"]["message"] == ""  # caption=None → ""
-        adapter._stop_typing_indicator.assert_awaited_once_with("+155****4567")
+        assert "voice-note" not in captured[0]["params"]
         assert 1234567890 in adapter._recent_sent_timestamps
 
     @pytest.mark.asyncio
@@ -608,18 +668,20 @@ class TestSignalSendVoice:
     @pytest.mark.asyncio
     async def test_send_voice_to_group(self, monkeypatch, tmp_path):
         """send_voice should route group chats correctly."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
         adapter = _make_signal_adapter(monkeypatch)
         mock_rpc, captured = _stub_rpc({"timestamp": 9999})
         adapter._rpc = mock_rpc
         adapter._stop_typing_indicator = AsyncMock()
 
-        audio_path = tmp_path / "note.mp3"
-        audio_path.write_bytes(b"\xff\xe0" + b"\x00" * 100)
+        audio_path = tmp_path / "note.m4a"
+        audio_path.write_bytes(b"\x00\x00\x00\x18ftyp" + b"\x00" * 100)
 
         result = await adapter.send_voice(chat_id="group:grp1==", audio_path=str(audio_path))
 
         assert result.success is True
         assert captured[0]["params"]["groupId"] == "grp1=="
+        assert captured[0]["params"]["voice-note"] is True
 
     @pytest.mark.asyncio
     async def test_send_voice_too_large(self, monkeypatch, tmp_path):
@@ -644,13 +706,14 @@ class TestSignalSendVoice:
     @pytest.mark.asyncio
     async def test_send_voice_rpc_failure(self, monkeypatch, tmp_path):
         """send_voice should return error when RPC returns None."""
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
         adapter = _make_signal_adapter(monkeypatch)
         mock_rpc, _ = _stub_rpc(None)
         adapter._rpc = mock_rpc
         adapter._stop_typing_indicator = AsyncMock()
 
-        audio_path = tmp_path / "reply.ogg"
-        audio_path.write_bytes(b"OggS" + b"\x00" * 100)
+        audio_path = tmp_path / "reply.m4a"
+        audio_path.write_bytes(b"\x00\x00\x00\x18ftyp" + b"\x00" * 100)
 
         result = await adapter.send_voice(chat_id="+155****4567", audio_path=str(audio_path))
 

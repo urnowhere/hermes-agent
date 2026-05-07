@@ -422,13 +422,15 @@ class TestSendVoiceReply:
 
         tts_result = json.dumps({"success": True, "file_path": "/tmp/test.ogg"})
 
-        with patch("tools.tts_tool.text_to_speech_tool", return_value=tts_result), \
+        with patch("tools.tts_tool.text_to_speech_tool", return_value=tts_result) as mock_tts, \
              patch("tools.tts_tool._strip_markdown_for_tts", side_effect=lambda t: t), \
              patch("os.path.isfile", return_value=True), \
              patch("os.unlink"), \
              patch("os.makedirs"):
             await runner._send_voice_reply(event, "Hello world")
 
+        output_path = mock_tts.call_args.kwargs["output_path"]
+        assert os.path.dirname(output_path) == os.path.expanduser("~/.cache/hermes/voice")
         mock_adapter.send_voice.assert_called_once()
         call_args = mock_adapter.send_voice.call_args
         assert call_args.kwargs.get("chat_id") == "123"

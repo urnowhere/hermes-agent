@@ -17,6 +17,8 @@ import json
 import logging
 import os
 import random
+import shutil
+import subprocess
 import time
 import uuid
 from datetime import datetime, timezone
@@ -118,6 +120,65 @@ _EXT_TO_MIME = {
 def _ext_to_mime(ext: str) -> str:
     """Map file extension to MIME type."""
     return _EXT_TO_MIME.get(ext.lower(), "application/octet-stream")
+
+
+def _signal_voice_note_cache_dir() -> Path:
+    return Path(os.path.expanduser("~")) / ".cache" / "hermes" / "voice"
+
+
+def _prepare_signal_voice_note_audio(audio_path: str) -> Tuple[str, Optional[str]]:
+    source = Path(audio_path)
+    cache_dir = _signal_voice_note_cache_dir()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    target = cache_dir / f"signal_voice_note_{uuid.uuid4().hex[:12]}.m4a"
+
+    if source.suffix.lower() == ".m4a":
+        shutil.copyfile(source, target)
+        return str(target), str(target)
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg is required to prepare Signal voice notes")
+
+    cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(source),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "44100",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "64k",
+        str(target),
+    ]
+
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired as exc:
+        target.unlink(missing_ok=True)
+        raise RuntimeError("ffmpeg timed out while preparing Signal voice note") from exc
+    except subprocess.CalledProcessError as exc:
+        target.unlink(missing_ok=True)
+        detail = (exc.stderr or exc.stdout or "").strip()
+        if detail:
+            raise RuntimeError(
+                f"ffmpeg failed while preparing Signal voice note: {detail[-500:]}"
+            ) from exc
+        raise RuntimeError("ffmpeg failed while preparing Signal voice note") from exc
+
+    if not target.exists() or target.stat().st_size == 0:
+        target.unlink(missing_ok=True)
+        raise RuntimeError("ffmpeg produced an empty Signal voice note")
+
+    return str(target), str(target)
 
 
 def _render_mentions(text: str, mentions: list) -> str:
@@ -1252,6 +1313,7 @@ class SignalAdapter(BasePlatformAdapter):
         file_path: str,
         media_label: str,
         caption: Optional[str] = None,
+        voice_note: bool = False,
     ) -> SendResult:
         """Send any file as a Signal attachment via RPC.
 
@@ -1268,22 +1330,46 @@ class SignalAdapter(BasePlatformAdapter):
         if file_size > SIGNAL_MAX_ATTACHMENT_SIZE:
             return SendResult(success=False, error=f"{media_label} too large ({file_size} bytes)")
 
-        params: Dict[str, Any] = {
-            "account": self.account,
-            "message": caption or "",
-            "attachments": [file_path],
-        }
+        send_path = file_path
+        cleanup_path: Optional[str] = None
+        try:
+            if voice_note:
+                try:
+                    send_path, cleanup_path = await asyncio.to_thread(
+                        _prepare_signal_voice_note_audio, file_path
+                    )
+                except (RuntimeError, OSError) as exc:
+                    logger.warning(
+                        "Signal: could not prepare native voice note; "
+                        "sending regular audio attachment instead: %s",
+                        exc,
+                    )
+                    voice_note = False
 
-        if chat_id.startswith("group:"):
-            params["groupId"] = chat_id[6:]
-        else:
-            params["recipient"] = [await self._resolve_recipient(chat_id)]
+            params: Dict[str, Any] = {
+                "account": self.account,
+                "message": caption or "",
+                "attachments": [send_path],
+            }
+            if voice_note:
+                params["voice-note"] = True
 
-        result = await self._rpc("send", params)
-        if result is not None:
-            self._track_sent_timestamp(result)
-            return SendResult(success=True)
-        return SendResult(success=False, error=f"RPC send {media_label.lower()} failed")
+            if chat_id.startswith("group:"):
+                params["groupId"] = chat_id[6:]
+            else:
+                params["recipient"] = [await self._resolve_recipient(chat_id)]
+
+            result = await self._rpc("send", params)
+            if result is not None:
+                self._track_sent_timestamp(result)
+                return SendResult(success=True)
+            return SendResult(success=False, error=f"RPC send {media_label.lower()} failed")
+        finally:
+            if cleanup_path:
+                try:
+                    Path(cleanup_path).unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning("Signal: failed to clean up voice note %s: %s", cleanup_path, exc)
 
     async def send_document(
         self,
@@ -1319,12 +1405,14 @@ class SignalAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         **kwargs,
     ) -> SendResult:
-        """Send an audio file as a Signal attachment.
-
-        Signal does not distinguish voice messages from file attachments at
-        the API level, so this routes through the same RPC send path.
-        """
-        return await self._send_attachment(chat_id, audio_path, "Audio", caption)
+        """Send an audio file as a native Signal voice note."""
+        return await self._send_attachment(
+            chat_id,
+            audio_path,
+            "Audio",
+            caption,
+            voice_note=True,
+        )
 
     async def send_video(
         self,

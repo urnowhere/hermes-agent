@@ -23,7 +23,6 @@ import re
 import shlex
 import sys
 import signal
-import tempfile
 import threading
 import time
 from collections import OrderedDict
@@ -8698,10 +8697,12 @@ class GatewayRunner:
             if not tts_text:
                 return
 
+            # signal-cli may run with PrivateTmp=true, so stage voice replies
+            # under the user's cache instead of /tmp.
             # Use .mp3 extension so edge-tts conversion to opus works correctly.
             # The TTS tool may convert to .ogg — use file_path from result.
             audio_path = os.path.join(
-                tempfile.gettempdir(), "hermes_voice",
+                os.path.expanduser("~"), ".cache", "hermes", "voice",
                 f"tts_reply_{_uuid.uuid4().hex[:12]}.mp3",
             )
             os.makedirs(os.path.dirname(audio_path), exist_ok=True)
