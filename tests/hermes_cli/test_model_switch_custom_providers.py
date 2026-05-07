@@ -402,6 +402,35 @@ def test_list_authenticated_providers_same_url_different_keys_disambiguated(monk
     assert models["custom:openai-2"] == ["gpt-4.6"]
 
 
+def test_list_authenticated_providers_openrouter_uses_live_model_ids(monkeypatch):
+    """OpenRouter provider row must reflect live model_ids(), not the static OPENROUTER_MODELS snapshot."""
+    live_models = [
+        ("x-ai/grok-3-mini", ""),
+        ("anthropic/claude-opus-4.6", "recommended"),
+    ]
+    monkeypatch.setattr(
+        "hermes_cli.models.fetch_openrouter_models",
+        lambda **kw: live_models,
+    )
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "agent.models_dev.fetch_models_dev",
+        lambda: {"openrouter": {"env": ["OPENROUTER_API_KEY"]}},
+    )
+    monkeypatch.setattr(providers_mod, "HERMES_OVERLAYS", {})
+
+    providers = list_authenticated_providers(
+        current_provider="openrouter",
+        user_providers={},
+        custom_providers=[],
+        max_models=50,
+    )
+
+    openrouter_rows = [p for p in providers if p["slug"] == "openrouter"]
+    assert len(openrouter_rows) == 1
+    assert openrouter_rows[0]["models"] == ["x-ai/grok-3-mini", "anthropic/claude-opus-4.6"]
+
+
 def test_list_authenticated_providers_total_models_reflects_grouped_count(monkeypatch):
     """After grouping six entries into one row, total_models must reflect
     the full count, and every grouped model appears in the list."""

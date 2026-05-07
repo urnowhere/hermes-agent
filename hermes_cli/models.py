@@ -965,7 +965,12 @@ def fetch_openrouter_models(
     *,
     force_refresh: bool = False,
 ) -> list[tuple[str, str]]:
-    """Return the curated OpenRouter picker list, refreshed from the live catalog when possible."""
+    """Return the curated OpenRouter picker list, refreshed from the live catalog when possible.
+
+    Authenticates with ``OPENROUTER_API_KEY`` when set (required by the
+    ``/api/v1/models/user`` endpoint). Falls back to the static snapshot on
+    any network or auth failure.
+    """
     global _openrouter_catalog_cache
 
     if _openrouter_catalog_cache is not None and not force_refresh:
@@ -984,9 +989,13 @@ def fetch_openrouter_models(
     preferred_ids = [mid for mid, _ in fallback]
 
     try:
+        api_key = _resolve_openrouter_api_key()
+        headers = {"Accept": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
         req = urllib.request.Request(
-            "https://openrouter.ai/api/v1/models",
-            headers={"Accept": "application/json"},
+            "https://openrouter.ai/api/v1/models/user",
+            headers=headers,
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode())

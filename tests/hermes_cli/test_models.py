@@ -87,6 +87,65 @@ class TestFetchOpenRouterModels:
 
         assert models == OPENROUTER_MODELS
 
+    def test_fetches_from_user_endpoint(self, monkeypatch):
+        """Must use /api/v1/models/user, not the public /api/v1/models catalog."""
+        class _Resp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return b'{"data":[]}'
+
+        monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache", None)
+        captured = {}
+
+        def fake_urlopen(req, timeout):
+            captured["url"] = req.full_url
+            return _Resp()
+
+        with patch("hermes_cli.models.urllib.request.urlopen", side_effect=fake_urlopen):
+            fetch_openrouter_models(force_refresh=True)
+
+        assert captured["url"] == "https://openrouter.ai/api/v1/models/user"
+
+    def test_sends_authorization_header_when_api_key_set(self, monkeypatch):
+        class _Resp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return b'{"data":[{"id":"anthropic/claude-opus-4.6","pricing":{"prompt":"0.000015","completion":"0.000075"}}]}'
+
+        monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache", None)
+        monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-123")
+
+        captured = {}
+
+        def fake_urlopen(req, timeout):
+            captured["headers"] = req.headers
+            return _Resp()
+
+        with patch("hermes_cli.models.urllib.request.urlopen", side_effect=fake_urlopen):
+            fetch_openrouter_models(force_refresh=True)
+
+        assert captured["headers"].get("Authorization") == "Bearer test-key-123"
+
+    def test_omits_authorization_header_when_no_api_key(self, monkeypatch):
+        class _Resp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return b'{"data":[{"id":"anthropic/claude-opus-4.6","pricing":{"prompt":"0.000015","completion":"0.000075"}}]}'
+
+        monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache", None)
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+        captured = {}
+
+        def fake_urlopen(req, timeout):
+            captured["headers"] = req.headers
+            return _Resp()
+
+        with patch("hermes_cli.models.urllib.request.urlopen", side_effect=fake_urlopen):
+            fetch_openrouter_models(force_refresh=True)
+
+        assert "Authorization" not in captured["headers"]
+
     def test_filters_out_models_without_tool_support(self, monkeypatch):
         """Models whose supported_parameters omits 'tools' must not appear in the picker.
 
