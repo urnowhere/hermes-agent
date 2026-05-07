@@ -341,6 +341,103 @@ class TestGoalManager:
 # ──────────────────────────────────────────────────────────────────────
 
 
+# ──────────────────────────────────────────────────────────────────────
+# migrate_goal — preserves /goal state across /compress session_id rebind (#18467)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestMigrateGoal:
+    def test_active_goal_carries_to_new_session(self, hermes_home):
+        """After /compress mints a child session_id, the active goal must follow."""
+        from hermes_cli.goals import GoalManager, load_goal, migrate_goal
+
+        old_sid = "parent-sid"
+        new_sid = "child-sid"
+
+        mgr = GoalManager(session_id=old_sid, default_max_turns=7)
+        mgr.set("port the thing")
+        mgr.state.turns_used = 3
+        mgr.state.last_verdict = "continue"
+        mgr.state.last_reason = "needs more"
+        from hermes_cli.goals import save_goal
+
+        save_goal(old_sid, mgr.state)
+
+        migrate_goal(old_sid, new_sid)
+
+        carried = load_goal(new_sid)
+        assert carried is not None
+        assert carried.goal == "port the thing"
+        assert carried.status == "active"
+        assert carried.turns_used == 3
+        assert carried.max_turns == 7
+        assert carried.last_verdict == "continue"
+        assert carried.last_reason == "needs more"
+
+    def test_old_session_goal_is_cleared_after_migration(self, hermes_home):
+        """The old session_id must not keep an 'active' goal — it's a dead session."""
+        from hermes_cli.goals import GoalManager, load_goal, migrate_goal
+
+        mgr = GoalManager(session_id="dead-parent")
+        mgr.set("ship it")
+
+        migrate_goal("dead-parent", "live-child")
+
+        residual = load_goal("dead-parent")
+        # Either fully cleared (None) or marked status=cleared — never still active.
+        assert residual is None or residual.status == "cleared"
+
+    def test_done_goal_is_not_migrated(self, hermes_home):
+        """Terminal goals (done/cleared) stay with the original session — they're audit trail."""
+        from hermes_cli.goals import GoalState, load_goal, migrate_goal, save_goal
+
+        save_goal("parent-done", GoalState(goal="finished work", status="done"))
+
+        migrate_goal("parent-done", "child")
+
+        assert load_goal("child") is None
+
+    def test_cleared_goal_is_not_migrated(self, hermes_home):
+        from hermes_cli.goals import GoalState, load_goal, migrate_goal, save_goal
+
+        save_goal("parent-cleared", GoalState(goal="abandoned", status="cleared"))
+
+        migrate_goal("parent-cleared", "child")
+
+        assert load_goal("child") is None
+
+    def test_no_goal_to_migrate_is_noop(self, hermes_home):
+        from hermes_cli.goals import load_goal, migrate_goal
+
+        migrate_goal("nothing-here", "child")
+
+        assert load_goal("child") is None
+
+    def test_paused_goal_carries_with_paused_status(self, hermes_home):
+        """A user-paused goal must survive /compress with its pause intact."""
+        from hermes_cli.goals import GoalManager, load_goal, migrate_goal
+
+        mgr = GoalManager(session_id="pause-parent")
+        mgr.set("paused work")
+        mgr.pause(reason="user-paused")
+
+        migrate_goal("pause-parent", "pause-child")
+
+        carried = load_goal("pause-child")
+        assert carried is not None
+        assert carried.status == "paused"
+        assert carried.paused_reason == "user-paused"
+
+    def test_empty_session_ids_are_noop(self, hermes_home):
+        """Defensive: empty old or new sid must not raise or corrupt state."""
+        from hermes_cli.goals import migrate_goal
+
+        # No exceptions, no side effects we can assert on directly — just must not raise.
+        migrate_goal("", "child")
+        migrate_goal("parent", "")
+        migrate_goal("", "")
+
+
 def test_goal_command_in_registry():
     from hermes_cli.commands import resolve_command
 

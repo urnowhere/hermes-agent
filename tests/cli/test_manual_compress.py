@@ -182,3 +182,61 @@ def test_manual_compress_no_sync_when_session_id_unchanged():
 
     # No split → pending title untouched.
     assert shell._pending_title == "keep me"
+
+
+def test_manual_compress_migrates_active_goal_to_child_session(tmp_path, monkeypatch):
+    """Regression for #18467: /compress used to orphan an active /goal.
+
+    The goal row is keyed by goal:<session_id> in SessionDB.state_meta. When
+    _compress_context mints a child session, the cli.session_id rebind must
+    also migrate the goal — otherwise /goal status under the child reports
+    "No active goal" and the judge loop silently dies.
+    """
+    from pathlib import Path
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    from hermes_cli import goals
+    goals._DB_CACHE.clear()
+    try:
+        from hermes_cli.goals import GoalManager, load_goal
+
+        shell = _make_cli()
+        history = _make_history()
+        old_id = shell.session_id
+        new_child_id = "20260101_000000_goalchild"
+
+        # Plant an active goal under the parent session.
+        mgr = GoalManager(session_id=old_id)
+        mgr.set("ship the change")
+
+        compressed = [{"role": "user", "content": "[summary]"}, history[-1]]
+        shell.conversation_history = history
+        shell.agent = MagicMock()
+        shell.agent.compression_enabled = True
+        shell.agent._cached_system_prompt = ""
+        shell.agent.tools = None
+
+        def _fake_compress(*args, **kwargs):
+            shell.agent.session_id = new_child_id
+            return (compressed, "")
+
+        shell.agent._compress_context.side_effect = _fake_compress
+        shell.agent.session_id = old_id
+
+        with patch("agent.model_metadata.estimate_request_tokens_rough", return_value=100):
+            shell._manual_compress()
+
+        assert shell.session_id == new_child_id
+        carried = load_goal(new_child_id)
+        assert carried is not None
+        assert carried.goal == "ship the change"
+        assert carried.status == "active"
+        # Parent must not still own the active goal — it's a dead session.
+        residual = load_goal(old_id)
+        assert residual is None or residual.status == "cleared"
+    finally:
+        goals._DB_CACHE.clear()

@@ -204,6 +204,26 @@ def clear_goal(session_id: str) -> None:
     save_goal(session_id, state)
 
 
+def migrate_goal(old_session_id: str, new_session_id: str) -> None:
+    """Carry an in-flight goal across a session_id rebind (e.g. /compress).
+
+    When ``cli._compress_context`` ends the parent session and mints a child
+    session_id, the goal row keyed by ``goal:<old>`` is orphaned and the judge
+    loop silently dies (#18467). Copy the live state to ``goal:<new>`` and
+    mark the parent cleared so /goal status under the parent reflects reality.
+
+    Terminal states (``done``/``cleared``) are not migrated — they're audit
+    trail tied to the session that completed them.
+    """
+    if not old_session_id or not new_session_id or old_session_id == new_session_id:
+        return
+    state = load_goal(old_session_id)
+    if state is None or state.status in ("done", "cleared"):
+        return
+    save_goal(new_session_id, state)
+    clear_goal(old_session_id)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Judge
 # ──────────────────────────────────────────────────────────────────────

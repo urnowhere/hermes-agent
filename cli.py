@@ -7898,6 +7898,12 @@ class HermesCLI:
                     getattr(self.agent, "session_id", None)
                     and self.agent.session_id != self.session_id
                 ):
+                    # Carry any in-flight /goal across the rebind. SessionDB
+                    # stores goals under goal:<sid>; without this the judge
+                    # loop silently dies under the orphaned parent (#18467).
+                    from hermes_cli.goals import migrate_goal
+
+                    migrate_goal(self.session_id, self.agent.session_id)
                     self.session_id = self.agent.session_id
                     self._pending_title = None
                     # Manual /compress replaces conversation_history with a new
@@ -9764,6 +9770,12 @@ class HermesCLI:
                 and getattr(self.agent, "session_id", None)
                 and self.agent.session_id != self.session_id
             ):
+                # Auto-compression rebinds the same way manual /compress
+                # does — carry any in-flight goal across so the judge loop
+                # doesn't silently die under the orphaned parent (#18467).
+                from hermes_cli.goals import migrate_goal
+
+                migrate_goal(self.session_id, self.agent.session_id)
                 self.session_id = self.agent.session_id
                 self._pending_title = None
 
@@ -12479,6 +12491,12 @@ def main(
                         getattr(cli.agent, "session_id", None)
                         and cli.agent.session_id != cli.session_id
                     ):
+                        # Carry any in-flight goal — same rebind shape as
+                        # the interactive /compress and auto-compress paths
+                        # (#18467).
+                        from hermes_cli.goals import migrate_goal
+
+                        migrate_goal(cli.session_id, cli.agent.session_id)
                         cli.session_id = cli.agent.session_id
                     response = result.get("final_response", "") if isinstance(result, dict) else str(result)
                     if response:
