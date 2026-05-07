@@ -87,6 +87,66 @@ class TestMetadata:
         assert schema["badge"] == "free"
 
 
+class TestSizeResolution:
+    def test_supported_sizes_cover_gpt_image_2_catalog(self):
+        assert codex_plugin.SUPPORTED_SIZES == (
+            "auto",
+            "1024x1024",
+            "1536x1024",
+            "1024x1536",
+            "2048x2048",
+            "2048x1152",
+            "3840x2160",
+            "2160x3840",
+        )
+
+    @pytest.mark.parametrize("aspect,expected_size", [
+        ("landscape", "1536x1024"),
+        ("square", "1024x1024"),
+        ("portrait", "1024x1536"),
+    ])
+    def test_legacy_aspect_ratio_fallback_stays_stable(self, aspect, expected_size):
+        assert codex_plugin._resolve_size(aspect, {}) == expected_size
+
+    @pytest.mark.parametrize("raw,expected_size", [
+        ("auto", "auto"),
+        ("2048x2048", "2048x2048"),
+        ("2048 x 1152", "2048x1152"),
+        ("3840×2160", "3840x2160"),
+        ("4k_portrait", "2160x3840"),
+        ("2k landscape", "2048x1152"),
+    ])
+    def test_explicit_size_overrides_aspect_ratio(self, raw, expected_size):
+        assert codex_plugin._resolve_size("square", {"size": raw}) == expected_size
+
+    def test_resolution_kwarg_is_accepted(self):
+        assert (
+            codex_plugin._resolve_size("square", {"resolution": "2160x3840"})
+            == "2160x3840"
+        )
+
+    def test_invalid_explicit_size_falls_back_to_aspect_ratio(self):
+        assert codex_plugin._resolve_size("portrait", {"size": "bogus"}) == "1024x1536"
+
+    def test_env_size_override(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_CODEX_IMAGE_SIZE", "3840x2160")
+        assert codex_plugin._resolve_size("square", {}) == "3840x2160"
+
+    def test_config_openai_codex_size(self, tmp_path):
+        import yaml
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump({"image_gen": {"openai-codex": {"size": "2048x2048"}}})
+        )
+        assert codex_plugin._resolve_size("landscape", {}) == "2048x2048"
+
+    def test_config_top_level_resolution(self, tmp_path):
+        import yaml
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump({"image_gen": {"resolution": "auto"}})
+        )
+        assert codex_plugin._resolve_size("landscape", {}) == "auto"
+
+
 # ── Availability ────────────────────────────────────────────────────────────
 
 
@@ -198,6 +258,34 @@ class TestGenerate:
         assert tool["output_format"] == "png"
         assert tool["background"] == "opaque"
         assert tool["partial_images"] == 1
+
+    def test_generate_accepts_full_gpt_image_2_size(self, provider, monkeypatch):
+        monkeypatch.setattr(
+            codex_plugin, "_read_codex_access_token", lambda: "codex-token"
+        )
+
+        captured = {}
+
+        def _stream(**kwargs):
+            captured.update(kwargs)
+            output_item = SimpleNamespace(
+                type="image_generation_call",
+                status="generating",
+                id="ig_test",
+                result=_b64_png(),
+            )
+            done_event = SimpleNamespace(type="response.output_item.done", item=output_item)
+            final_response = SimpleNamespace(output=[], status="completed", output_text="")
+            return _FakeStream([done_event], final_response)
+
+        fake_client = SimpleNamespace(responses=SimpleNamespace(stream=_stream))
+        monkeypatch.setattr(codex_plugin, "_build_codex_client", lambda: fake_client)
+
+        result = provider.generate("a cat", aspect_ratio="square", size="3840x2160")
+
+        assert result["success"] is True
+        assert result["size"] == "3840x2160"
+        assert captured["tools"][0]["size"] == "3840x2160"
 
     def test_partial_image_event_used_when_done_missing(self, provider, monkeypatch):
         """If the stream never emits output_item.done, fall back to the
