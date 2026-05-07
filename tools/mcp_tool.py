@@ -2059,6 +2059,14 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             for block in (result.content or []):
                 if hasattr(block, "text"):
                     parts.append(block.text)
+                elif hasattr(block, "resource"):
+                    # EmbeddedResource blocks nest text inside block.resource.text
+                    # (MCP spec §5.6.2 — tools may return file content this way)
+                    res = block.resource
+                    if hasattr(res, "text") and res.text:
+                        parts.append(res.text)
+                    elif hasattr(res, "blob") and res.blob:
+                        parts.append(f"[binary resource: {getattr(res, 'uri', 'unknown')}]")
             text_result = "\n".join(parts) if parts else ""
 
             # Combine content + structuredContent when both are present.

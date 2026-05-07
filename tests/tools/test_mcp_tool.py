@@ -459,6 +459,89 @@ class TestToolHandler:
         assert "error" in result
         assert "not connected" in result["error"]
 
+    def test_embedded_resource_text(self):
+        """Tools returning EmbeddedResource blocks (type: 'resource') should
+        have their nested text extracted from block.resource.text."""
+        from tools.mcp_tool import _make_tool_handler, _servers
+
+        # Simulate an EmbeddedResource content block (no top-level .text)
+        resource_obj = SimpleNamespace(
+            uri="qmd://wiki/test.md",
+            mimeType="text/markdown",
+            text="# Hello\nThis is embedded resource content.",
+        )
+        block = SimpleNamespace(type="resource", resource=resource_obj)
+        mock_result = SimpleNamespace(content=[block], isError=False)
+
+        mock_session = MagicMock()
+        mock_session.call_tool = AsyncMock(return_value=mock_result)
+        server = _make_mock_server("test_srv", session=mock_session)
+        _servers["test_srv"] = server
+
+        try:
+            handler = _make_tool_handler("test_srv", "get", 120)
+            with self._patch_mcp_loop():
+                result = json.loads(handler({"file": "wiki/test.md"}))
+            assert result["result"] == "# Hello\nThis is embedded resource content."
+        finally:
+            _servers.pop("test_srv", None)
+
+    def test_embedded_resource_blob(self):
+        """Binary EmbeddedResource blocks should produce a placeholder."""
+        from tools.mcp_tool import _make_tool_handler, _servers
+
+        resource_obj = SimpleNamespace(
+            uri="qmd://wiki/image.png",
+            mimeType="image/png",
+            blob="iVBORw0KGgo=",
+        )
+        # No .text on the resource — only .blob
+        block = SimpleNamespace(type="resource", resource=resource_obj)
+        mock_result = SimpleNamespace(content=[block], isError=False)
+
+        mock_session = MagicMock()
+        mock_session.call_tool = AsyncMock(return_value=mock_result)
+        server = _make_mock_server("test_srv", session=mock_session)
+        _servers["test_srv"] = server
+
+        try:
+            handler = _make_tool_handler("test_srv", "get_image", 120)
+            with self._patch_mcp_loop():
+                result = json.loads(handler({"file": "image.png"}))
+            assert "binary resource" in result["result"]
+            assert "qmd://wiki/image.png" in result["result"]
+        finally:
+            _servers.pop("test_srv", None)
+
+    def test_mixed_text_and_embedded_resource(self):
+        """Tool results with both TextContent and EmbeddedResource blocks."""
+        from tools.mcp_tool import _make_tool_handler, _servers
+
+        text_block = SimpleNamespace(text="Preamble text")
+        resource_obj = SimpleNamespace(
+            uri="qmd://wiki/doc.md",
+            mimeType="text/markdown",
+            text="# Doc content",
+        )
+        resource_block = SimpleNamespace(type="resource", resource=resource_obj)
+        mock_result = SimpleNamespace(
+            content=[text_block, resource_block], isError=False
+        )
+
+        mock_session = MagicMock()
+        mock_session.call_tool = AsyncMock(return_value=mock_result)
+        server = _make_mock_server("test_srv", session=mock_session)
+        _servers["test_srv"] = server
+
+        try:
+            handler = _make_tool_handler("test_srv", "multi_get", 120)
+            with self._patch_mcp_loop():
+                result = json.loads(handler({"pattern": "*.md"}))
+            assert "Preamble text" in result["result"]
+            assert "# Doc content" in result["result"]
+        finally:
+            _servers.pop("test_srv", None)
+
     def test_exception_during_call(self):
         from tools.mcp_tool import _make_tool_handler, _servers
 
