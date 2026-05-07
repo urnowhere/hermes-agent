@@ -153,10 +153,19 @@ def _find_whisper_binary() -> Optional[str]:
     return _find_binary("whisper")
 
 
-def _get_local_command_template() -> Optional[str]:
+def _get_local_command_template(stt_config: Optional[dict] = None) -> Optional[str]:
+    # HERMES_LOCAL_STT_COMMAND env var wins so deploy-time overrides work.
     configured = os.getenv(LOCAL_STT_COMMAND_ENV, "").strip()
     if configured:
         return configured
+
+    # Fall back to stt.local_command.command in config.yaml so users can set
+    # the wrapper path without needing a separate shell environment.
+    cfg = stt_config if stt_config is not None else _load_stt_config()
+    raw_command = cfg.get("local_command", {}).get("command")
+    config_command = raw_command.strip() if isinstance(raw_command, str) else ""
+    if config_command:
+        return config_command
 
     whisper_binary = _find_whisper_binary()
     if whisper_binary:
@@ -471,7 +480,10 @@ def _prepare_local_audio(file_path: str, work_dir: str) -> tuple[Optional[str], 
 
 def _transcribe_local_command(file_path: str, model_name: str) -> Dict[str, Any]:
     """Run the configured local STT command template and read back a .txt transcript."""
-    command_template = _get_local_command_template()
+    # Load config once and share with _get_local_command_template to avoid
+    # two load_config() calls per transcription request.
+    _stt_cfg = _load_stt_config()
+    command_template = _get_local_command_template(_stt_cfg)
     if not command_template:
         return {
             "success": False,
@@ -481,9 +493,10 @@ def _transcribe_local_command(file_path: str, model_name: str) -> Dict[str, Any]
             ),
         }
 
-    # Language: config.yaml (stt.local.language) > env var > "en" default.
+    # Language: stt.local_command.language > stt.local.language > env var > default.
     language = (
-        _load_stt_config().get("local", {}).get("language")
+        _stt_cfg.get("local_command", {}).get("language")
+        or _stt_cfg.get("local", {}).get("language")
         or os.getenv(LOCAL_STT_LANGUAGE_ENV)
         or DEFAULT_LOCAL_STT_LANGUAGE
     )
@@ -495,7 +508,11 @@ def _transcribe_local_command(file_path: str, model_name: str) -> Dict[str, Any]
             if prep_error:
                 return {"success": False, "transcript": "", "error": prep_error}
 
-            command = command_template.format(
+            # {file} is accepted as a friendlier alias for {input_path} so that
+            # simple wrapper scripts like `whisper "{file}"` work without the
+            # full placeholder set.
+            normalized_template = command_template.replace("{file}", "{input_path}")
+            command = normalized_template.format(
                 input_path=shlex.quote(prepared_input),
                 output_dir=shlex.quote(output_dir),
                 language=shlex.quote(language),
@@ -829,9 +846,11 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
         return _transcribe_local(file_path, model_name)
 
     if provider == "local_command":
-        local_cfg = stt_config.get("local", {})
+        local_command_cfg = stt_config.get("local_command", {})
         model_name = _normalize_local_command_model(
-            model or local_cfg.get("model", DEFAULT_LOCAL_MODEL)
+            model
+            or local_command_cfg.get("model")
+            or stt_config.get("local", {}).get("model", DEFAULT_LOCAL_MODEL)
         )
         return _transcribe_local_command(file_path, model_name)
 
