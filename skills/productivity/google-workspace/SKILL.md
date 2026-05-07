@@ -275,6 +275,7 @@ All commands return JSON. Parse with `jq` or read directly. Key fields:
 | `HttpError 403: Insufficient Permission` | Missing API scope — `$GSETUP --revoke` then redo Steps 3-5 |
 | `HttpError 403: Access Not Configured` | API not enabled — user needs to enable it in Google Cloud Console |
 | `ModuleNotFoundError` | Run `$GSETUP --install-deps` |
+| `No module named pip` (venv pip missing) | Bootstrap with `venv/bin/python -m ensurepip --upgrade --default-pip`, then retry `--install-deps` |
 | Advanced Protection blocks auth | Workspace admin must allowlist the OAuth client ID |
 
 ## Revoking Access
