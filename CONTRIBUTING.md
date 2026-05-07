@@ -420,6 +420,141 @@ metadata:
 
 The filtering happens at prompt build time in `agent/prompt_builder.py`. The `build_skills_system_prompt()` function receives the set of available tools and toolsets from the agent and uses `_skill_should_show()` to evaluate each skill's conditions.
 
+### Skill triggers — unified event routing
+
+Skills can declare explicit triggers under `metadata.hermes.triggers` to receive
+inbound events from gateway adapters: button clicks, reactions, mentions, slash
+commands, and cron firings. The schema is **type-keyed** — each trigger type has
+its own field shape:
+
+```yaml
+metadata:
+  hermes:
+    triggers:
+      mention:
+        regex: "approve\\s+\\d+"
+        channel_filter: ["bot-commands"]   # optional
+      slash:
+        name: "approve"
+      button:
+        custom_id_pattern: "skill_approve_*"
+      reaction:
+        emoji: "✅"
+        channel_filter: ["bot-commands"]   # optional
+        age_limit: "30d"                    # optional, format: <int><s|m|h|d|w>
+      cron:
+        schedule: "0 9 * * *"
+```
+
+**Three worked examples:**
+
+```yaml
+# 1. Mention-driven approver — handles "approve 42"-style commands
+metadata:
+  hermes:
+    triggers:
+      mention:
+        regex: "approve\\s+\\d+"
+
+# 2. Button-driven approver — receives clicks on buttons emitted via SkillButtonView
+#    (custom_id shape: "skill_<skill_name>_<action>")
+metadata:
+  hermes:
+    triggers:
+      button:
+        custom_id_pattern: "skill_approver_*"
+
+# 3. Reaction-driven completer — fires on ✅ within 14 days of message creation
+metadata:
+  hermes:
+    triggers:
+      reaction:
+        emoji: "✅"
+        age_limit: "14d"
+```
+
+**Backward compatibility (no migration required):**
+
+Skills without a `triggers:` field continue to work exactly as before. The
+existing prompt-builder injection path is untouched. Skills with a legacy
+`metadata.hermes.slash_command` field automatically get an implicit slash
+trigger derived from that field — no rewrite needed.
+
+**Adapter support:** Discord (buttons + reactions, opt-in via
+`config.extra.reactions.inbound_routing`) and Feishu (reactions). Resolver
+implementation: `gateway/skill_resolver.py`. Discord wiring:
+`gateway/platforms/discord_interactions.py`. See
+`docs/migration/triggers-v1.md` for the full migration guide and Feishu BC
+fallback semantics.
+
+#### How to send button messages from a skill
+
+Skills can emit Discord button messages at runtime by calling the
+`discord_send_button_message` tool. The tool wraps `SkillButtonView`
+so you do not need to import discord.py directly:
+
+```json
+// LLM tool call
+{
+  "name": "discord_send_button_message",
+  "arguments": {
+    "channel_id": "1496609306995458048",
+    "content": "Approve this deployment?",
+    "skill_name": "deployer",
+    "buttons": [
+      {"label": "Approve", "action": "approve", "style": "success"},
+      {"label": "Reject",  "action": "reject",  "style": "danger"}
+    ],
+    "timeout_seconds": 300
+  }
+}
+```
+
+The tool builds `custom_id` values of the shape `skill_<skill_name>_<action>`
+(`skill_deployer_approve`, `skill_deployer_reject` in the example above) and
+returns:
+
+```json
+{
+  "message_id": "...",
+  "channel_id": "...",
+  "view_id": "...",
+  "custom_ids": ["skill_deployer_approve", "skill_deployer_reject"]
+}
+```
+
+#### Receiving button clicks
+
+Declare a `button` trigger in the skill's frontmatter so the resolver routes
+clicks back to the skill:
+
+```yaml
+metadata:
+  hermes:
+    triggers:
+      button:
+        custom_id_pattern: "skill_deployer_*"
+```
+
+When a user clicks a button, discord.py fires the `SkillButtonView` callback,
+which calls `DiscordInteractionsHandler.handle_skill_button_interaction`. The
+resolver matches the `custom_id` against `custom_id_pattern` (fnmatch) and
+dispatches a synthetic `MessageEvent` with `auto_skill=["deployer"]`. The
+skill is invoked automatically — no further polling required.
+
+Full flow:
+
+```
+skill calls discord_send_button_message
+  → tool builds SkillButtonView (custom_ids: skill_<name>_<action>)
+  → message sent to Discord channel with view attached
+  → user clicks button
+  → discord.py routes to View callback
+  → callback → DiscordInteractionsHandler.handle_skill_button_interaction
+  → resolver matches skill via triggers.button.custom_id_pattern
+  → skill invoked with auto_skill set
+```
+
 ### Skill setup metadata
 
 Skills can declare secure setup-on-load metadata via the `required_environment_variables` frontmatter field. Missing values do not hide the skill from discovery; they trigger a CLI-only secure prompt when the skill is actually loaded.

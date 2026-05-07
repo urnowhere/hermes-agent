@@ -477,6 +477,17 @@ class VoiceReceiver:
                 pass
 
 
+def _build_skill_provider():
+    """Return the shared lazy skill snapshotter for the resolver.
+
+    Delegates to :func:`gateway.skill_resolver.snapshot_skills`; the indirection
+    here exists so adapters can swap providers in tests without monkey-patching
+    the resolver module.
+    """
+    from gateway.skill_resolver import snapshot_skills
+    return snapshot_skills
+
+
 class DiscordAdapter(BasePlatformAdapter):
     """
     Discord bot adapter.
@@ -537,6 +548,15 @@ class DiscordAdapter(BasePlatformAdapter):
         # chunk only, default), "all" (reply-reference on every chunk).
         self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'
         self._slash_commands: bool = self.config.extra.get("slash_commands", True)
+        # Unified trigger framework — composition handler for inbound buttons
+        # and (when opt-in flag is set) raw reaction events. Skill list is
+        # supplied via callable injection so the resolver does not depend on
+        # a fabricated `_available_skills` attribute on the adapter.
+        from gateway.platforms.discord_interactions import DiscordInteractionsHandler
+        self._interactions = DiscordInteractionsHandler(
+            self,
+            skill_provider=_build_skill_provider(),
+        )
 
     async def connect(self) -> bool:
         """Connect to Discord and start receiving events."""
@@ -609,6 +629,15 @@ class DiscordAdapter(BasePlatformAdapter):
                 or bool(self._allowed_role_ids)  # Need members intent for role lookup
             )
             intents.voice_states = True
+            # Unified trigger framework — opt-in inbound reaction routing.
+            # Default false to avoid forcing existing deployments to re-handshake
+            # with Discord. When True, raw reaction add/remove events are
+            # delivered to the bot and routed via DiscordInteractionsHandler.
+            _reactions_inbound = self.config.extra.get("reactions", {}).get(
+                "inbound_routing", False
+            ) if isinstance(self.config.extra.get("reactions"), dict) else False
+            if _reactions_inbound:
+                intents.reactions = True
 
             # Resolve proxy (DISCORD_PROXY > generic env vars > macOS system proxy)
             from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_bot
@@ -745,6 +774,37 @@ class DiscordAdapter(BasePlatformAdapter):
                             return
 
                 await self._handle_message(message)
+
+            # Unified trigger framework — global on_interaction handler for
+            # buttons that route to skills via custom_id. View-bound buttons
+            # (discord.ui.View subclasses) intercept BEFORE this handler fires
+            # (discord.py 2.7+ dispatch order), so they bypass the resolver
+            # intentionally. Skills emit buttons via SkillButtonView helper.
+            @self._client.event
+            async def on_interaction(interaction: discord.Interaction):
+                from gateway.platforms.discord_interactions import is_skill_custom_id
+                # Only route component interactions whose custom_id is in the
+                # skill prefix namespace; let other interaction types
+                # (slash commands, modals, internal Views) follow their
+                # existing dispatch path.
+                if interaction.type != discord.InteractionType.component:
+                    return
+                custom_id = (interaction.data or {}).get("custom_id") if interaction.data else None
+                if not is_skill_custom_id(custom_id):
+                    return
+                await adapter_self._interactions.handle_skill_button_interaction(interaction)
+
+            # Inbound reaction routing — only registered when opt-in flag is set
+            # at adapter init. Toggling the flag at runtime requires a bot
+            # restart for these handlers to bind.
+            if _reactions_inbound:
+                @self._client.event
+                async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+                    await adapter_self._interactions.handle_inbound_reaction(payload, action="add")
+
+                @self._client.event
+                async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+                    await adapter_self._interactions.handle_inbound_reaction(payload, action="remove")
 
             @self._client.event
             async def on_voice_state_update(member, before, after):
