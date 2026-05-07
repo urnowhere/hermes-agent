@@ -29,6 +29,7 @@ dependencies = [
   "exa-py>=2.9.0,<3",
   "firecrawl-py>=4.16.0,<5",
   "parallel-web>=0.4.2,<1",
+  "scrapling[fetchers]>=0.4.7,<0.5",
   "fal-client>=0.13.1,<1",
   # Cron scheduler (built-in feature — scheduled cron/interval jobs use croniter).
   "croniter>=6.0.0,<7",

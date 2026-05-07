@@ -625,3 +625,125 @@ def test_web_requires_env_includes_exa_key():
     from tools.web_tools import _web_requires_env
 
     assert "EXA_API_KEY" in _web_requires_env()
+
+
+class TestWebExtractScraplingFallback:
+    @pytest.mark.asyncio
+    async def test_firecrawl_error_falls_back_to_scrapling(self):
+        import tools.web_tools
+
+        firecrawl_client = MagicMock()
+        firecrawl_client.scrape.side_effect = RuntimeError("firecrawl boom")
+        scrapling_result = {
+            "url": "https://example.com",
+            "title": "Example title",
+            "content": "Scrapling content",
+            "raw_content": "Scrapling content",
+            "metadata": {"extractor": "scrapling"},
+        }
+
+        with patch("tools.web_tools._get_backend", return_value="firecrawl"), \
+             patch("tools.web_tools._get_firecrawl_client", return_value=firecrawl_client), \
+             patch("tools.web_tools._scrapling_extract_url", new=AsyncMock(return_value=scrapling_result)) as mock_scrapling, \
+             patch("tools.web_tools.check_website_access", return_value=None), \
+             patch("tools.web_tools.check_auxiliary_model", return_value=False), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch.object(tools.web_tools._debug, "log_call"), \
+             patch.object(tools.web_tools._debug, "save"):
+            result = json.loads(await tools.web_tools.web_extract_tool(["https://example.com"], use_llm_processing=False))
+
+        assert result["results"] == [{
+            "url": "https://example.com",
+            "title": "Example title",
+            "content": "Scrapling content",
+            "error": None,
+        }]
+        mock_scrapling.assert_awaited_once_with("https://example.com", None)
+
+    @pytest.mark.asyncio
+    async def test_firecrawl_content_skips_scrapling_fallback(self):
+        import tools.web_tools
+
+        firecrawl_client = MagicMock()
+        firecrawl_client.scrape.return_value = {
+            "markdown": "Firecrawl content",
+            "metadata": {"title": "Firecrawl title", "sourceURL": "https://example.com"},
+        }
+
+        with patch("tools.web_tools._get_backend", return_value="firecrawl"), \
+             patch("tools.web_tools._get_firecrawl_client", return_value=firecrawl_client), \
+             patch("tools.web_tools._scrapling_extract_url", new=AsyncMock()) as mock_scrapling, \
+             patch("tools.web_tools.check_website_access", return_value=None), \
+             patch("tools.web_tools.check_auxiliary_model", return_value=False), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch.object(tools.web_tools._debug, "log_call"), \
+             patch.object(tools.web_tools._debug, "save"):
+            result = json.loads(await tools.web_tools.web_extract_tool(["https://example.com"], use_llm_processing=False))
+
+        assert result["results"] == [{
+            "url": "https://example.com",
+            "title": "Firecrawl title",
+            "content": "Firecrawl content",
+            "error": None,
+        }]
+        mock_scrapling.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_firecrawl_empty_content_falls_back_to_scrapling(self):
+        import tools.web_tools
+
+        firecrawl_client = MagicMock()
+        firecrawl_client.scrape.return_value = {
+            "markdown": "",
+            "html": "",
+            "metadata": {"title": "Firecrawl title", "sourceURL": "https://example.com/final"},
+        }
+        scrapling_result = {
+            "url": "https://example.com/final",
+            "title": "Fallback title",
+            "content": "Fallback content",
+            "raw_content": "Fallback content",
+            "metadata": {"extractor": "scrapling"},
+        }
+
+        with patch("tools.web_tools._get_backend", return_value="firecrawl"), \
+             patch("tools.web_tools._get_firecrawl_client", return_value=firecrawl_client), \
+             patch("tools.web_tools._scrapling_extract_url", new=AsyncMock(return_value=scrapling_result)) as mock_scrapling, \
+             patch("tools.web_tools.check_website_access", return_value=None), \
+             patch("tools.web_tools.check_auxiliary_model", return_value=False), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch.object(tools.web_tools._debug, "log_call"), \
+             patch.object(tools.web_tools._debug, "save"):
+            result = json.loads(await tools.web_tools.web_extract_tool(["https://example.com"], use_llm_processing=False))
+
+        assert result["results"] == [{
+            "url": "https://example.com/final",
+            "title": "Fallback title",
+            "content": "Fallback content",
+            "error": None,
+        }]
+        mock_scrapling.assert_awaited_once_with("https://example.com/final", None)
+
+    @pytest.mark.asyncio
+    async def test_firecrawl_error_surfaces_when_scrapling_fallback_also_fails(self):
+        import tools.web_tools
+
+        firecrawl_client = MagicMock()
+        firecrawl_client.scrape.side_effect = RuntimeError("firecrawl boom")
+
+        with patch("tools.web_tools._get_backend", return_value="firecrawl"), \
+             patch("tools.web_tools._get_firecrawl_client", return_value=firecrawl_client), \
+             patch("tools.web_tools._scrapling_extract_url", new=AsyncMock(side_effect=RuntimeError("scrapling boom"))), \
+             patch("tools.web_tools.check_website_access", return_value=None), \
+             patch("tools.web_tools.check_auxiliary_model", return_value=False), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch.object(tools.web_tools._debug, "log_call"), \
+             patch.object(tools.web_tools._debug, "save"):
+            result = json.loads(await tools.web_tools.web_extract_tool(["https://example.com"], use_llm_processing=False))
+
+        assert result["results"] == [{
+            "url": "https://example.com",
+            "title": "",
+            "content": "",
+            "error": "firecrawl boom",
+        }]

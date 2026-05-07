@@ -281,6 +281,63 @@ def _web_requires_env() -> list[str]:
     return requires
 
 
+def _scrapling_extract_sync(url: str, format: Optional[str] = None) -> Dict[str, Any]:
+    """Fetch and normalize page content with Scrapling.
+
+    Uses the lightweight HTTP fetcher first for stability; the goal is to provide
+    a best-effort fallback when the primary extraction backend fails.
+    """
+    from scrapling.fetchers import Fetcher
+
+    page = Fetcher.fetch(url, follow_redirects=True, timeout=45)
+    final_url = getattr(page, "url", url) or url
+    title = ""
+    try:
+        title = str(page.xpath("//title/text()").get() or "")
+    except Exception:
+        title = ""
+
+    raw_html = ""
+    try:
+        raw_html = page.body.decode(getattr(page, "encoding", "utf-8"), errors="ignore")
+    except Exception:
+        raw_html = ""
+
+    if format == "html":
+        content = raw_html
+    else:
+        try:
+            content = str(page.get_all_text(separator="\n", strip=True))
+        except Exception:
+            content = ""
+        if not content:
+            content = raw_html
+
+    if not content.strip():
+        raise ValueError("Scrapling returned no extractable content")
+
+    return {
+        "url": final_url,
+        "title": title,
+        "content": content,
+        "raw_content": raw_html or content,
+        "metadata": {"extractor": "scrapling", "sourceURL": final_url},
+    }
+
+
+async def _scrapling_extract_url(url: str, format: Optional[str] = None) -> Dict[str, Any]:
+    """Async wrapper around Scrapling extraction with timeout and policy re-check."""
+    result = await asyncio.wait_for(
+        asyncio.to_thread(_scrapling_extract_sync, url, format),
+        timeout=90,
+    )
+    final_url = result.get("url", url)
+    final_blocked = check_website_access(final_url)
+    if final_blocked:
+        raise ValueError(final_blocked["message"])
+    return result
+
+
 def _get_firecrawl_client():
     """Get or create Firecrawl client.
 
@@ -1392,6 +1449,8 @@ async def web_extract_tool(
 
                     try:
                         logger.info("Scraping: %s", url)
+                        scrape_error: Optional[str] = None
+
                         # Run synchronous Firecrawl scrape in a thread with a
                         # 60s timeout so a hung fetch doesn't block the session.
                         try:
@@ -1404,11 +1463,31 @@ async def web_extract_tool(
                                 timeout=60,
                             )
                         except asyncio.TimeoutError:
-                            logger.warning("Firecrawl scrape timed out for %s", url)
-                            results.append({
-                                "url": url, "title": "", "content": "",
-                                "error": "Scrape timed out after 60s — page may be too large or unresponsive. Try browser_navigate instead.",
-                            })
+                            scrape_error = "Scrape timed out after 60s — page may be too large or unresponsive. Try browser_navigate instead."
+                            scrape_result = None
+                        except Exception as firecrawl_err:
+                            scrape_error = str(firecrawl_err)
+                            scrape_result = None
+
+                        scrapling_result: Optional[Dict[str, Any]] = None
+                        if scrape_result is None:
+                            logger.info("Firecrawl unavailable for %s, trying Scrapling fallback", url)
+                            try:
+                                scrapling_result = await _scrapling_extract_url(url, format)
+                            except Exception as scrapling_err:
+                                logger.debug("Scrapling fallback failed for %s: %s", url, scrapling_err)
+                                results.append({
+                                    "url": url,
+                                    "title": "",
+                                    "content": "",
+                                    "raw_content": "",
+                                    "error": scrape_error or str(scrapling_err),
+                                })
+                                continue
+
+                        if scrapling_result is not None:
+                            results.append(scrapling_result)
+                            debug_call_data["processing_applied"].append("scrapling_fallback")
                             continue
 
                         scrape_payload = _extract_scrape_payload(scrape_result)
@@ -1443,6 +1522,17 @@ async def web_extract_tool(
 
                         # Choose content based on requested format
                         chosen_content = content_markdown if (format == "markdown" or (format is None and content_markdown)) else content_html or content_markdown or ""
+
+                        if not (chosen_content or "").strip():
+                            logger.info("Firecrawl returned no content for %s, trying Scrapling fallback", url)
+                            try:
+                                scrapling_result = await _scrapling_extract_url(final_url, format)
+                            except Exception as scrapling_err:
+                                logger.debug("Scrapling empty-content fallback failed for %s: %s", final_url, scrapling_err)
+                            else:
+                                results.append(scrapling_result)
+                                debug_call_data["processing_applied"].append("scrapling_fallback")
+                                continue
 
                         results.append({
                             "url": final_url,
