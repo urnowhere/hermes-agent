@@ -9746,9 +9746,30 @@ Examples:
     plugins_parser.set_defaults(func=cmd_plugins)
 
     # =========================================================================
-    # Plugin CLI commands — dynamically registered by memory/general plugins.
-    # Plugins provide a register_cli(subparser) function that builds their
-    # own argparse tree.  No hardcoded plugin commands in main.py.
+    # Plugin CLI commands — dynamically registered by general plugins.
+    # Plugins provide register_cli_command(name=..., setup_fn=..., handler_fn=...)
+    # and are loaded via the standard plugin manager.
+    # =========================================================================
+    try:
+        from hermes_cli.plugins import get_plugin_cli_commands
+
+        for cmd_info in get_plugin_cli_commands().values():
+            plugin_parser = subparsers.add_parser(
+                cmd_info["name"],
+                help=cmd_info["help"],
+                description=cmd_info.get("description", ""),
+                formatter_class=__import__("argparse").RawDescriptionHelpFormatter,
+            )
+            cmd_info["setup_fn"](plugin_parser)
+            if cmd_info.get("handler_fn") is not None:
+                plugin_parser.set_defaults(func=cmd_info["handler_fn"])
+    except Exception as _exc:
+        logging.getLogger(__name__).debug("General plugin CLI discovery failed: %s", _exc)
+
+    # =========================================================================
+    # Memory-provider CLI commands — dynamically discovered by the memory
+    # plugin subsystem. These use the active provider's register_cli(subparser)
+    # convention rather than the general plugin manager registry above.
     # =========================================================================
     try:
         from plugins.memory import discover_plugin_cli_commands

@@ -1317,6 +1317,15 @@ def get_plugin_commands() -> Dict[str, dict]:
     return _ensure_plugins_discovered()._plugin_commands
 
 
+def get_plugin_cli_commands() -> Dict[str, dict]:
+    """Return plugin CLI subcommands registered via ``register_cli_command()``.
+
+    Triggers idempotent plugin discovery so terminal entry points can build
+    argparse subcommands for enabled plugins before parsing argv.
+    """
+    return _ensure_plugins_discovered()._cli_commands
+
+
 def get_plugin_toolsets() -> List[tuple]:
     """Return plugin toolsets as ``(key, label, description)`` tuples.
 

@@ -1,0 +1,17 @@
+name: zoom_meeting
+version: 0.1.0
+description: "Zoom meeting intelligence plugin built around official-style OAuth, REST, and webhook/RTMS ingestion. Tracks meeting state, captures transcript-like events, and exports durable artifacts for follow-up work."
+author: NousResearch
+kind: standalone
+platforms:
+  - linux
+  - macos
+  - windows
+provides_tools:
+  - zoom_meeting_watch
+  - zoom_meeting_status
+  - zoom_meeting_transcript
+  - zoom_meeting_events
+  - zoom_meeting_summary
+  - zoom_meeting_action_items
+  - zoom_meeting_artifacts

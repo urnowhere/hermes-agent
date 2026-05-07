@@ -20,6 +20,7 @@ from hermes_cli.plugins import (
     PluginContext,
     PluginManager,
     PluginManifest,
+    get_plugin_cli_commands,
 )
 
 
@@ -61,6 +62,25 @@ class TestRegisterCliCommand:
         ctx, mgr = self._make_ctx()
         ctx.register_cli_command("nocb", "test", MagicMock())
         assert mgr._cli_commands["nocb"]["handler_fn"] is None
+
+    def test_get_plugin_cli_commands_discovers_enabled_bundled_plugin(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "hermes_home"
+        hermes_home.mkdir(parents=True)
+        (hermes_home / "config.yaml").write_text(
+            "plugins:\n  enabled:\n    - zoom_meeting\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        import hermes_cli.plugins as plugins_mod
+
+        plugins_mod._plugin_manager = PluginManager()
+        cmds = get_plugin_cli_commands()
+
+        assert "zoom" in cmds
+        assert cmds["zoom"]["plugin"] == "zoom_meeting"
+        assert callable(cmds["zoom"]["setup_fn"])
+        assert callable(cmds["zoom"]["handler_fn"])
 
 
 # ── Memory plugin CLI discovery ───────────────────────────────────────────
