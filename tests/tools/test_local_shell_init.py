@@ -13,10 +13,51 @@ import pytest
 
 from tools.environments.local import (
     LocalEnvironment,
+    _find_bash,
     _prepend_shell_init,
+    _read_terminal_shell_config,
     _read_terminal_shell_init_config,
     _resolve_shell_init_files,
 )
+
+
+class TestTerminalShellConfig:
+    def test_reads_configured_shell(self):
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"terminal": {"shell": " zsh "}},
+        ):
+            assert _read_terminal_shell_config() == "zsh"
+
+    def test_find_bash_uses_absolute_configured_shell(self, tmp_path):
+        shell = tmp_path / "custom-shell"
+        shell.write_text("#!/bin/sh\n")
+
+        with patch(
+            "tools.environments.local._read_terminal_shell_config",
+            return_value=str(shell),
+        ):
+            assert _find_bash() == str(shell)
+
+    def test_find_bash_resolves_named_configured_shell(self):
+        def fake_which(name):
+            return {"zsh": "/usr/bin/zsh", "bash": "/usr/bin/bash"}.get(name)
+
+        with patch(
+            "tools.environments.local._read_terminal_shell_config",
+            return_value="zsh",
+        ), patch("tools.environments.local.shutil.which", side_effect=fake_which):
+            assert _find_bash() == "/usr/bin/zsh"
+
+    def test_find_bash_falls_back_when_configured_shell_missing(self):
+        def fake_which(name):
+            return "/usr/bin/bash" if name == "bash" else None
+
+        with patch(
+            "tools.environments.local._read_terminal_shell_config",
+            return_value="does-not-exist",
+        ), patch("tools.environments.local.shutil.which", side_effect=fake_which):
+            assert _find_bash() == "/usr/bin/bash"
 
 
 class TestResolveShellInitFiles:
@@ -96,6 +137,28 @@ class TestResolveShellInitFiles:
             resolved = _resolve_shell_init_files()
 
         assert resolved == []
+
+    def test_auto_bashrc_applies_only_to_bash_shells(self, tmp_path, monkeypatch):
+        bashrc = tmp_path / ".bashrc"
+        bashrc.write_text('export MARKER=seen\n')
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        with patch(
+            "tools.environments.local._read_terminal_shell_init_config",
+            return_value=([], True),
+        ):
+            assert _resolve_shell_init_files("/usr/bin/zsh") == []
+            assert _resolve_shell_init_files("/usr/bin/bash") == [str(bashrc)]
+
+    def test_explicit_list_still_applies_to_non_bash_shells(self, tmp_path):
+        custom = tmp_path / "custom.zsh"
+        custom.write_text('export MARKER=seen\n')
+
+        with patch(
+            "tools.environments.local._read_terminal_shell_init_config",
+            return_value=([str(custom)], True),
+        ):
+            assert _resolve_shell_init_files("/usr/bin/zsh") == [str(custom)]
 
     def test_auto_source_bashrc_off_suppresses_default(self, tmp_path, monkeypatch):
         bashrc = tmp_path / ".bashrc"

@@ -470,6 +470,10 @@ DEFAULT_CONFIG = {
         "modal_mode": "auto",
         "cwd": ".",  # Use current directory
         "timeout": 180,
+        # Local backend shell override. Empty means Hermes keeps its historic
+        # bash-first fallback; set to "zsh" or an absolute path to run local
+        # terminal commands through that shell instead.
+        "shell": "",
         # Environment variables to pass through to sandboxed execution
         # (terminal and execute_code).  Skill-declared required_environment_variables
         # are passed through automatically; this list is for non-skill use cases.

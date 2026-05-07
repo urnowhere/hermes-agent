@@ -173,9 +173,38 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
     return sanitized
 
 
+def _read_terminal_shell_config() -> str:
+    """Return terminal.shell from config.yaml, if configured.
+
+    Best-effort — returns an empty string on any failure so terminal
+    execution keeps the historical bash-first fallback.
+    """
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+        terminal_cfg = cfg.get("terminal") or {}
+        shell = terminal_cfg.get("shell") or ""
+        return str(shell).strip()
+    except Exception:
+        return ""
+
+
 def _find_bash() -> str:
-    """Find bash for command execution."""
+    """Find the local shell for command execution.
+
+    Historically the local backend always used bash. Keep bash as the
+    fallback, but allow users to opt into their normal shell with
+    ``terminal.shell`` (for example ``zsh`` or ``/usr/bin/zsh``).
+    """
     if not _IS_WINDOWS:
+        configured = _read_terminal_shell_config()
+        if configured:
+            if os.path.isabs(configured) and os.path.isfile(configured):
+                return configured
+            found = shutil.which(configured)
+            if found:
+                return found
         return (
             shutil.which("bash")
             or ("/usr/bin/bash" if os.path.isfile("/usr/bin/bash") else None)
@@ -268,7 +297,12 @@ def _read_terminal_shell_init_config() -> tuple[list[str], bool]:
         return [], True
 
 
-def _resolve_shell_init_files() -> list[str]:
+def _is_bash_shell(shell: str) -> bool:
+    """Return whether a shell path/name looks like bash."""
+    return os.path.basename(shell or "") in {"bash", "bash.exe"}
+
+
+def _resolve_shell_init_files(shell: str = "bash") -> list[str]:
     """Resolve the list of files to source before the login-shell snapshot.
 
     Expands ``~`` and ``${VAR}`` references and drops anything that doesn't
@@ -281,7 +315,7 @@ def _resolve_shell_init_files() -> list[str]:
     candidates: list[str] = []
     if explicit:
         candidates.extend(explicit)
-    elif auto_bashrc and not _IS_WINDOWS:
+    elif auto_bashrc and not _IS_WINDOWS and _is_bash_shell(shell):
         # Build a login-shell-ish source list so tools like n / nvm / asdf /
         # pyenv that self-install into the user's shell rc land on PATH in
         # the captured snapshot.
@@ -334,7 +368,7 @@ def _prepend_shell_init(cmd_string: str, files: list[str]) -> str:
 class LocalEnvironment(BaseEnvironment):
     """Run commands directly on the host machine.
 
-    Spawn-per-call: every execute() spawns a fresh bash process.
+    Spawn-per-call: every execute() spawns a fresh shell process.
     Session snapshot preserves env vars across calls.
     CWD persists via file-based read after each command.
     """
@@ -377,12 +411,12 @@ class LocalEnvironment(BaseEnvironment):
         bash = _find_bash()
         # For login-shell invocations (used by init_session to build the
         # environment snapshot), prepend sources for the user's bashrc /
-        # custom init files so tools registered outside bash_profile
+        # custom init files when appropriate so tools registered outside bash_profile
         # (nvm, asdf, pyenv, …) end up on PATH in the captured snapshot.
         # Non-login invocations are already sourcing the snapshot and
         # don't need this.
         if login:
-            init_files = _resolve_shell_init_files()
+            init_files = _resolve_shell_init_files(bash)
             if init_files:
                 cmd_string = _prepend_shell_init(cmd_string, init_files)
         args = [bash, "-l", "-c", cmd_string] if login else [bash, "-c", cmd_string]
