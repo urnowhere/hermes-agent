@@ -8,7 +8,7 @@ import os
 import threading
 from pathlib import Path
 
-from agent.file_safety import get_read_block_error
+from agent.file_safety import get_read_block_error, is_read_denied
 from tools.binary_extensions import has_binary_extension
 from tools.file_operations import (
     ShellFileOperations,
@@ -478,6 +478,29 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
         block_error = get_read_block_error(path)
         if block_error:
             return json.dumps({"error": block_error})
+
+        # ── Sensitive-path read guard ─────────────────────────────────
+        # Block reads of credential files (SSH keys, .env, ~/.aws, etc.).
+        # Pattern-based output redaction is best-effort and off by default
+        # (see agent/redact.py); this is the access-control floor.  The
+        # `terminal` tool with explicit user approval remains the escape
+        # hatch for cases where reading a credential file is intentional.
+        #
+        # Pass the already-resolved path (resolved against the *terminal's*
+        # cwd via ``_resolve_path_for_task``) rather than the raw ``path``.
+        # ``is_read_denied`` only knows about the Python process cwd, so a
+        # task-relative path like ``.ssh/id_ed25519`` issued while the
+        # terminal cwd is ``$HOME`` would otherwise resolve against the
+        # wrong base and slip past the deny list.
+        if is_read_denied(str(_resolved)):
+            return json.dumps({
+                "error": (
+                    f"Refusing to read sensitive credential path: {path}\n"
+                    "If you need this file's contents, ask the user to "
+                    "provide them directly, or use the terminal tool "
+                    "(which gates on user approval)."
+                ),
+            })
 
         # ── Dedup check ───────────────────────────────────────────────
         # If we already read this exact (path, offset, limit) and the
