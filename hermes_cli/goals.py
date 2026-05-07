@@ -7,8 +7,9 @@ continuation prompt back into the same session and keeps working until the
 goal is done, turn budget is exhausted, the user pauses/clears it, or the
 user sends a new message (which takes priority and pauses the goal loop).
 
-State is persisted in SessionDB's ``state_meta`` table keyed by
-``goal:<session_id>`` so ``/resume`` picks it up.
+State is persisted in SessionDB's ``state_meta`` table under a
+session-independent key (``goal:global``) so the goal survives
+session boundaries and ``/resume`` picks it up across sessions.
 
 Design notes / invariants:
 
@@ -124,8 +125,14 @@ class GoalState:
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _meta_key(session_id: str) -> str:
-    return f"goal:{session_id}"
+# Use a session-independent key so goals survive session boundaries.
+# The legacy ``goal:<session_id>`` key is still tried as a fallback in
+# load_goal() for backwards compatibility with existing goals.
+_GLOBAL_GOAL_KEY = "goal:global"
+
+
+def _meta_key(_session_id: str) -> str:
+    return _GLOBAL_GOAL_KEY
 
 
 _DB_CACHE: Dict[str, Any] = {}
@@ -162,14 +169,23 @@ def _get_session_db() -> Optional[Any]:
 
 
 def load_goal(session_id: str) -> Optional[GoalState]:
-    """Load the goal for a session, or None if none exists."""
+    """Load the goal for a session, or None if none exists.
+
+    Tries the session-independent global key first, then falls back to the
+    legacy ``goal:<session_id>`` key so pre-existing goals are not lost.
+    """
     if not session_id:
         return None
     db = _get_session_db()
     if db is None:
         return None
+
+    raw: Optional[str] = None
     try:
         raw = db.get_meta(_meta_key(session_id))
+        if raw is None:
+            # Legacy key for goals created before the global-key change
+            raw = db.get_meta(f"goal:{session_id}")
     except Exception as exc:
         logger.debug("GoalManager: get_meta failed: %s", exc)
         return None
