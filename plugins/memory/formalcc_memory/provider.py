@@ -205,13 +205,22 @@ class FormalCCMemoryProvider(MemoryProvider):
                             "type": "string",
                             "description": "Search query"
                         },
-                        "top_k": {
+                        "repo_id": {
+                            "type": "string",
+                            "description": "Repository identifier"
+                        },
+                        "revision": {
+                            "type": "string",
+                            "description": "Revision to search",
+                            "default": "latest"
+                        },
+                        "budget": {
                             "type": "integer",
-                            "description": "Maximum results",
-                            "default": 5
+                            "description": "Token budget for search results",
+                            "default": 4000
                         }
                     },
-                    "required": ["query"]
+                    "required": ["query", "repo_id"]
                 }
             },
             {
@@ -232,13 +241,16 @@ class FormalCCMemoryProvider(MemoryProvider):
         try:
             if tool_name == "cc_memory_search":
                 query = arguments.get("query", "")
-                top_k = arguments.get("top_k", arguments.get("limit", 5))
-                
+                repo_id = arguments.get("repo_id", "")
+                revision = arguments.get("revision", "latest")
+                budget = arguments.get("budget", arguments.get("top_k", 4000))
+
                 result = await self._runtime_client.memory_search(
-                    workspace_id=self._config.workspace_id,
+                    repo_id=repo_id,
                     session_id=self._session_id or "unknown",
                     query=query,
-                    top_k=top_k,
+                    revision=revision,
+                    budget=budget,
                 )
                 
                 return {"result": result}

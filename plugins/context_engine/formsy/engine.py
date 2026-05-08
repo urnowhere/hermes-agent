@@ -136,10 +136,10 @@ class FormsyContextEngine(ContextEngine):
         """Expose Formsy memory/context search to the agent."""
         return [
             {
-                "name": "memory_search",
+                "name": "context_search",
                 "description": (
                     "Search Formsy's compiled code memory/context for information "
-                    "relevant to a natural-language query. Use memory_search proactively "
+                    "relevant to a natural-language query. Use context_search proactively "
                     "and repeatedly to understand the codebase faster. Prefer several "
                     "targeted queries, such as symbols, file paths, PR behavior, call flow, "
                     "and edge cases, over one broad query. The memory compile step has "
@@ -182,10 +182,10 @@ class FormsyContextEngine(ContextEngine):
                 },
             },
             {
-                "name": "memory_read",
+                "name": "context_read",
                 "description": (
                     "Read exact source context from Formsy's compiled repository memory. "
-                    "Use memory_read after memory_search returns a relevant file path or "
+                    "Use context_read after context_search returns a relevant file path or "
                     "line range. This is the preferred way to inspect source code for "
                     "SWE-bench tasks when direct file-content reads are discouraged."
                 ),
@@ -223,14 +223,14 @@ class FormsyContextEngine(ContextEngine):
 
     def handle_tool_call(self, name: str, args: dict[str, Any], **kwargs) -> str:
         """Handle Formsy context-engine tool calls."""
-        if name == "memory_read":
+        if name == "context_read":
             return self._handle_memory_read(args)
-        if name != "memory_search":
+        if name != "context_search":
             return super().handle_tool_call(name, args, **kwargs)
 
         query = str(args.get("query") or "").strip()
         if not query:
-            return json.dumps({"ok": False, "error": "memory_search requires a non-empty query"})
+            return json.dumps({"ok": False, "error": "context_search requires a non-empty query"})
 
         if not self._engine_client:
             return json.dumps({"ok": False, "query": query, "error": "Formsy engine client is not initialized"})
@@ -241,7 +241,7 @@ class FormsyContextEngine(ContextEngine):
             return json.dumps({
                 "ok": False,
                 "query": query,
-                "error": "memory_search requires repo_id. Set formsy.repo_id or pass repo_id in the tool call.",
+                "error": "context_search requires repo_id. Set formsy.repo_id or pass repo_id in the tool call.",
             })
         revision = str(args.get("revision") or (self._config.revision if self._config else "latest") or "latest")
         budget = self._coerce_positive_int(args.get("budget"), self._config.query_budget if self._config else 4000)
@@ -255,7 +255,7 @@ class FormsyContextEngine(ContextEngine):
             )
         )
         if result is None:
-            return json.dumps({"ok": False, "query": query, "error": "Formsy memory search failed"})
+            return json.dumps({"ok": False, "query": query, "error": "Formsy context search failed"})
 
         payload = {
             "ok": True,
@@ -270,7 +270,7 @@ class FormsyContextEngine(ContextEngine):
     def _handle_memory_read(self, args: dict[str, Any]) -> str:
         path = str(args.get("path") or "").strip()
         if not path:
-            return json.dumps({"ok": False, "error": "memory_read requires a non-empty path"})
+            return json.dumps({"ok": False, "error": "context_read requires a non-empty path"})
 
         if not self._engine_client:
             return json.dumps({"ok": False, "path": path, "error": "Formsy engine client is not initialized"})
@@ -281,7 +281,7 @@ class FormsyContextEngine(ContextEngine):
             return json.dumps({
                 "ok": False,
                 "path": path,
-                "error": "memory_read requires repo_id. Set formsy.repo_id or pass repo_id in the tool call.",
+                "error": "context_read requires repo_id. Set formsy.repo_id or pass repo_id in the tool call.",
             })
         revision = str(args.get("revision") or (self._config.revision if self._config else "latest") or "latest")
         start_line = self._optional_positive_int(args.get("start_line"))
@@ -297,7 +297,7 @@ class FormsyContextEngine(ContextEngine):
             )
         )
         if result is None:
-            return json.dumps({"ok": False, "path": path, "error": "Formsy memory read failed"})
+            return json.dumps({"ok": False, "path": path, "error": "Formsy context read failed"})
 
         return self._format_memory_read_result(path, result)
 

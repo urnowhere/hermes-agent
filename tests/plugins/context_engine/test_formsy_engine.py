@@ -2,10 +2,12 @@
 
 import json
 from inspect import iscoroutinefunction, signature
+from typing import cast
 
 from plugins.context_engine.formsy.config import EngineConfigManager
 from plugins.context_engine.formsy.client import EngineClient
 from plugins.context_engine.formsy.engine import FormsyContextEngine
+from plugins.formsy import RuntimeClient
 from plugins.formsy.models import (
     CompileBundle,
     CompiledMessage,
@@ -90,7 +92,7 @@ def test_formsy_engine_exposes_memory_search_tool():
 
     schemas = engine.get_tool_schemas()
 
-    assert [schema["name"] for schema in schemas] == ["memory_search", "memory_read"]
+    assert [schema["name"] for schema in schemas] == ["context_search", "context_read"]
     params = schemas[0]["parameters"]
     assert params["required"] == ["query"]
     assert "query" in params["properties"]
@@ -131,7 +133,7 @@ def test_formsy_engine_memory_search_tool_queries_runtime():
     engine._session_id = "session-123"
 
     result = engine.handle_tool_call(
-        "memory_search",
+        "context_search",
         {"query": "parser state handling", "repo_id": "django__django-14053", "budget": 3000},
     )
 
@@ -176,7 +178,7 @@ def test_formsy_engine_memory_read_tool_queries_runtime():
     engine._session_id = "session-123"
 
     result = engine.handle_tool_call(
-        "memory_read",
+        "context_read",
         {
             "path": "parser.py",
             "repo_id": "django__django-14053",
@@ -207,7 +209,7 @@ def test_formsy_engine_client_forwards_memory_read():
             calls.append(kwargs)
             return {"content": "source"}
 
-    client = EngineClient(FakeRuntimeClient())
+    client = EngineClient(cast(RuntimeClient, FakeRuntimeClient()))
 
     result = FormsyContextEngine()._run_async(
         client.memory_read(
