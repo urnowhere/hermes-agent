@@ -50,6 +50,7 @@ class FormsyContextEngine(ContextEngine):
 
         self._runtime_client = RuntimeClient(
             base_url=self._config.base_url,
+            memory_search_endpoint=self._config.memory_search_endpoint,
             api_key_env=self._config.api_key_env,
             timeout_s=self._config.timeout_s,
             max_retries=self._config.max_retries,
@@ -135,11 +136,17 @@ class FormsyContextEngine(ContextEngine):
         """Expose Formsy memory/context search to the agent."""
         return [
             {
-                "name": "memory_search",
+                "name": "context_search",
                 "description": (
-                    "Search Formsy's compiled memory/context for information "
-                    "relevant to a natural-language query. Use this before "
-                    "broad source-code content searches when Formsy is enabled."
+                    "Search Formsy's compiled code memory/context for information "
+                    "relevant to a natural-language query. Use context_search proactively "
+                    "and repeatedly to understand the codebase faster. Prefer several "
+                    "targeted queries, such as symbols, file paths, PR behavior, call flow, "
+                    "and edge cases, over one broad query. The memory compile step has "
+                    "already completed before the task starts, so this tool is ready to "
+                    "use immediately. For SWE-bench tasks, pass repo_id and revision from "
+                    "the task metadata directly, for example repo_id='django__django-14053' "
+                    "and revision='latest'."
                 ),
                 "parameters": {
                     "type": "object",
@@ -148,9 +155,24 @@ class FormsyContextEngine(ContextEngine):
                             "type": "string",
                             "description": "Natural-language query describing the code, behavior, or fact to find.",
                         },
+                        "repo_id": {
+                            "type": "string",
+                            "description": "External repository identifier required by Formsy query API. Use the task metadata repo_id directly, e.g. django__django-14053.",
+                        },
+                        "revision": {
+                            "type": "string",
+                            "description": "Logical revision label to query. Use the task metadata revision directly when provided; otherwise use latest.",
+                            "default": "latest",
+                        },
+                        "budget": {
+                            "type": "integer",
+                            "description": "Context token budget for the Formsy query.",
+                            "default": 4000,
+                            "minimum": 1,
+                        },
                         "limit": {
                             "type": "integer",
-                            "description": "Maximum number of memory hits to return.",
+                            "description": "Deprecated. Kept for compatibility; Formsy query uses budget instead.",
                             "default": 5,
                             "minimum": 1,
                             "maximum": 20,
@@ -158,41 +180,159 @@ class FormsyContextEngine(ContextEngine):
                     },
                     "required": ["query"],
                 },
-            }
+            },
+            {
+                "name": "context_read",
+                "description": (
+                    "Read exact source context from Formsy's compiled repository memory. "
+                    "Use context_read after context_search returns a relevant file path or "
+                    "line range. This is the preferred way to inspect source code for "
+                    "SWE-bench tasks when direct file-content reads are discouraged."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Repository-relative file path to read.",
+                        },
+                        "repo_id": {
+                            "type": "string",
+                            "description": "External repository identifier required by Formsy query API. Use the task metadata repo_id directly, e.g. django__django-14053.",
+                        },
+                        "revision": {
+                            "type": "string",
+                            "description": "Logical revision label to query. Use the task metadata revision directly when provided; otherwise use latest.",
+                            "default": "latest",
+                        },
+                        "start_line": {
+                            "type": "integer",
+                            "description": "Optional 1-indexed first source line to read.",
+                            "minimum": 1,
+                        },
+                        "end_line": {
+                            "type": "integer",
+                            "description": "Optional inclusive 1-indexed last source line to read.",
+                            "minimum": 1,
+                        },
+                    },
+                    "required": ["path"],
+                },
+            },
         ]
 
     def handle_tool_call(self, name: str, args: dict[str, Any], **kwargs) -> str:
         """Handle Formsy context-engine tool calls."""
-        if name != "memory_search":
+        if name == "context_read":
+            return self._handle_memory_read(args)
+        if name != "context_search":
             return super().handle_tool_call(name, args, **kwargs)
 
         query = str(args.get("query") or "").strip()
         if not query:
-            return json.dumps({"ok": False, "error": "memory_search requires a non-empty query"})
+            return json.dumps({"ok": False, "error": "context_search requires a non-empty query"})
 
-        limit = self._coerce_limit(args.get("limit", args.get("top_k", 5)))
         if not self._engine_client:
             return json.dumps({"ok": False, "query": query, "error": "Formsy engine client is not initialized"})
 
         session_id = self._session_id or self._context.get("session_id") or "unknown"
-        workspace_id = self._config.workspace_id if self._config else "ws_default"
+        repo_id = str(args.get("repo_id") or (self._config.repo_id if self._config else "") or "").strip()
+        if not repo_id:
+            return json.dumps({
+                "ok": False,
+                "query": query,
+                "error": "context_search requires repo_id. Set formsy.repo_id or pass repo_id in the tool call.",
+            })
+        revision = str(args.get("revision") or (self._config.revision if self._config else "latest") or "latest")
+        budget = self._coerce_positive_int(args.get("budget"), self._config.query_budget if self._config else 4000)
         result = self._run_async(
             self._engine_client.memory_search(
-                workspace_id=workspace_id,
+                repo_id=repo_id,
                 session_id=session_id,
                 query=query,
-                limit=limit,
+                revision=revision,
+                budget=budget,
             )
         )
         if result is None:
-            return json.dumps({"ok": False, "query": query, "error": "Formsy memory search failed"})
+            return json.dumps({"ok": False, "query": query, "error": "Formsy context search failed"})
 
-        return json.dumps({
+        payload = {
             "ok": True,
             "query": query,
             "extra_context": self._extract_extra_context(result),
-            "results": result,
-        })
+        }
+        for key in ("matches", "suggested_queries", "coverage", "missing_context"):
+            if key in result:
+                payload[key] = result[key]
+        return json.dumps(payload)
+
+    def _handle_memory_read(self, args: dict[str, Any]) -> str:
+        path = str(args.get("path") or "").strip()
+        if not path:
+            return json.dumps({"ok": False, "error": "context_read requires a non-empty path"})
+
+        if not self._engine_client:
+            return json.dumps({"ok": False, "path": path, "error": "Formsy engine client is not initialized"})
+
+        session_id = self._session_id or self._context.get("session_id") or "unknown"
+        repo_id = str(args.get("repo_id") or (self._config.repo_id if self._config else "") or "").strip()
+        if not repo_id:
+            return json.dumps({
+                "ok": False,
+                "path": path,
+                "error": "context_read requires repo_id. Set formsy.repo_id or pass repo_id in the tool call.",
+            })
+        revision = str(args.get("revision") or (self._config.revision if self._config else "latest") or "latest")
+        start_line = self._optional_positive_int(args.get("start_line"))
+        end_line = self._optional_positive_int(args.get("end_line"))
+        result = self._run_async(
+            self._engine_client.memory_read(
+                repo_id=repo_id,
+                session_id=session_id,
+                path=path,
+                revision=revision,
+                start_line=start_line,
+                end_line=end_line,
+            )
+        )
+        if result is None:
+            return json.dumps({"ok": False, "path": path, "error": "Formsy context read failed"})
+
+        return self._format_memory_read_result(path, result)
+
+    @staticmethod
+    def _format_memory_read_result(requested_path: str, result: Any) -> str:
+        if not isinstance(result, dict):
+            return json.dumps({"ok": True, "path": requested_path, "result": result})
+
+        path = str(result.get("path") or requested_path)
+        content = str(result.get("content") or "")
+        start_line = result.get("start_line")
+        end_line = result.get("end_line")
+        total_lines = result.get("total_lines")
+        truncated = bool(result.get("truncated", False))
+
+        line_label = "unknown"
+        if start_line is not None and end_line is not None:
+            line_label = f"{start_line}-{end_line}"
+        elif start_line is not None:
+            line_label = f"{start_line}+"
+
+        metadata = [
+            "ok: true",
+            f"path: {path}",
+            f"lines: {line_label}",
+        ]
+        if total_lines is not None:
+            metadata.append(f"total_lines: {total_lines}")
+        if truncated:
+            metadata.append("truncated: true")
+        metadata.append("")
+        metadata.append("```python")
+        metadata.append(content)
+        metadata.append("```")
+        return "\n".join(metadata)
 
     def _run_async(self, coro):
         """Run Formsy async API calls from the synchronous ContextEngine API."""
@@ -204,12 +344,22 @@ class FormsyContextEngine(ContextEngine):
             return None
 
     @staticmethod
-    def _coerce_limit(value: Any) -> int:
+    def _coerce_positive_int(value: Any, default: int) -> int:
         try:
-            limit = int(value)
+            number = int(value)
         except (TypeError, ValueError):
-            limit = 5
-        return max(1, min(limit, 20))
+            number = default
+        return max(1, number)
+
+    @staticmethod
+    def _optional_positive_int(value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return None
+        return max(1, number)
 
     @staticmethod
     def _extract_extra_context(result: Any) -> str:

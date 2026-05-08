@@ -1,5 +1,6 @@
 """HTTP client for FormalCC Runtime API."""
 
+import json
 import logging
 from typing import Optional, Any
 import httpx
@@ -17,6 +18,7 @@ from .models import (
 from .utils import generate_request_id
 
 logger = logging.getLogger("formalcc.runtime_client")
+_LOG_BODY_LIMIT = 4000
 
 
 class RuntimeClient:
@@ -25,15 +27,24 @@ class RuntimeClient:
     def __init__(
         self,
         base_url: str,
+        memory_search_endpoint: str = "/api/v1/query",
         api_key_env: str = "FORMALCC_API_KEY",
         timeout_s: int = 30,
         max_retries: int = 3,
     ):
         self.base_url = base_url.rstrip("/")
+        self.memory_search_endpoint = self._normalize_endpoint(memory_search_endpoint)
         self.timeout_s = timeout_s
         self.max_retries = max_retries
         self.auth_manager = AuthManager(api_key_env)
         self._client: Optional[httpx.AsyncClient] = None
+
+    @staticmethod
+    def _normalize_endpoint(endpoint: str) -> str:
+        endpoint = str(endpoint or "").strip()
+        if not endpoint:
+            return "/api/v1/query"
+        return endpoint if endpoint.startswith("/") else f"/{endpoint}"
 
     async def __aenter__(self):
         """Async context manager entry."""
@@ -80,32 +91,108 @@ class RuntimeClient:
             
             # Handle different status codes
             if response.status_code == 401:
+                self._log_http_error(method, url, headers, data, response=response)
                 raise RuntimeAPIError("Authentication failed", status_code=401)
             elif response.status_code == 404:
+                self._log_http_error(method, url, headers, data, response=response)
                 raise RuntimeAPIError("Endpoint not found", status_code=404)
             elif response.status_code == 503:
+                self._log_http_error(method, url, headers, data, response=response)
                 raise RuntimeAPIError("Service unavailable", status_code=503)
             elif response.status_code >= 500:
+                self._log_http_error(method, url, headers, data, response=response)
                 raise RuntimeAPIError(
                     f"Server error: {response.status_code}",
                     status_code=response.status_code,
+                    response_data=self._response_body_for_error(response),
                 )
             elif response.status_code >= 400:
+                response_data = self._response_body_for_error(response)
+                self._log_http_error(method, url, headers, data, response=response)
                 raise RuntimeAPIError(
                     f"Client error: {response.status_code}",
                     status_code=response.status_code,
-                    response_data=response.json() if response.content else None,
+                    response_data=response_data,
                 )
             
             response.raise_for_status()
             return response.json() if response.content else {}
         
         except httpx.TimeoutException as e:
-            logger.warning(f"Request timeout: {url}")
+            self._log_http_error(method, url, headers, data, error=e)
             raise FormalCCTimeoutError(f"Request timed out after {self.timeout_s}s") from e
         except httpx.HTTPError as e:
-            logger.error(f"HTTP error: {e}")
+            self._log_http_error(method, url, headers, data, error=e)
             raise RuntimeAPIError(f"HTTP error: {e}") from e
+
+    @staticmethod
+    def _redact_headers(headers: dict[str, str]) -> dict[str, str]:
+        redacted = {}
+        for key, value in (headers or {}).items():
+            lowered = key.lower()
+            if lowered in {"authorization", "x-api-key", "api-key"} or "token" in lowered or "secret" in lowered:
+                if lowered == "authorization" and str(value).lower().startswith("bearer "):
+                    redacted[key] = "Bearer ***"
+                else:
+                    redacted[key] = "***"
+            else:
+                redacted[key] = str(value)
+        return redacted
+
+    @staticmethod
+    def _truncate(value: str, limit: int = _LOG_BODY_LIMIT) -> str:
+        if len(value) <= limit:
+            return value
+        return f"{value[:limit]}...<truncated {len(value) - limit} chars>"
+
+    @classmethod
+    def _json_for_log(cls, value: Any) -> str:
+        if value is None:
+            return "null"
+        try:
+            return cls._truncate(json.dumps(value, ensure_ascii=False, sort_keys=True))
+        except (TypeError, ValueError):
+            return cls._truncate(str(value))
+
+    @classmethod
+    def _response_body_for_error(cls, response: httpx.Response) -> Any:
+        if not response.content:
+            return None
+        try:
+            return response.json()
+        except ValueError:
+            return cls._truncate(response.text)
+
+    @classmethod
+    def _response_text_for_log(cls, response: httpx.Response) -> str:
+        if not response.content:
+            return ""
+        try:
+            return cls._json_for_log(response.json())
+        except ValueError:
+            return cls._truncate(response.text)
+
+    def _log_http_error(
+        self,
+        method: str,
+        url: str,
+        headers: dict[str, str],
+        request_body: Optional[dict[str, Any]],
+        *,
+        response: Optional[httpx.Response] = None,
+        error: Optional[BaseException] = None,
+    ) -> None:
+        logger.error(
+            "Runtime API request failed: %s %s status_code=%s error=%s "
+            "request_headers=%s request_body=%s response_body=%s",
+            method,
+            url,
+            response.status_code if response is not None else None,
+            repr(error) if error is not None else None,
+            self._json_for_log(self._redact_headers(headers)),
+            self._json_for_log(request_body),
+            self._response_text_for_log(response) if response is not None else "",
+        )
     
     async def memory_prefetch(
         self, request: MemoryPrefetchRequest
@@ -159,20 +246,59 @@ class RuntimeClient:
         return CompileResponse(bundle=response_data)
     
     async def memory_search(
-        self, workspace_id: str, session_id: str, query: str, top_k: int = 5, limit: Optional[int] = None
+        self,
+        repo_id: str,
+        session_id: str,
+        query: str,
+        revision: str = "latest",
+        budget: int = 4000,
+        enable_profiling: bool = False,
+        profiling_top_n: int = 20,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Call memory search endpoint (for tool calls)."""
         logger.debug(f"Memory search: query={query[:50]}...")
-        effective_top_k = limit if limit is not None else top_k
+        request_body = {
+            "repo_id": repo_id,
+            "query": query,
+            "revision": revision,
+            "budget": budget,
+            "enable_profiling": enable_profiling,
+            "profiling_top_n": profiling_top_n,
+            "metadata": metadata or {"instance_id": repo_id},
+        }
         
         return await self._request(
             "POST",
-            "/v1/runtime/memory/search",
-            data={
-                "workspace_id": workspace_id,
-                "session_id": session_id,
-                "query": query,
-                "top_k": effective_top_k,
-            },
+            self.memory_search_endpoint,
+            data=request_body,
+            session_id=session_id,
+        )
+
+    async def memory_read(
+        self,
+        repo_id: str,
+        session_id: str,
+        path: str,
+        revision: str = "latest",
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> dict[str, Any]:
+        """Call repository source read endpoint (for tool calls)."""
+        logger.debug(f"Memory read: path={path}...")
+        request_body: dict[str, Any] = {
+            "repo_id": repo_id,
+            "revision": revision,
+            "path": path,
+        }
+        if start_line is not None:
+            request_body["start_line"] = start_line
+        if end_line is not None:
+            request_body["end_line"] = end_line
+
+        return await self._request(
+            "POST",
+            "/api/v1/read",
+            data=request_body,
             session_id=session_id,
         )

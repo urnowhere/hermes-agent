@@ -54,22 +54,50 @@ class EngineClient:
 
     async def memory_search(
         self,
-        workspace_id: str,
+        repo_id: str,
         session_id: str,
         query: str,
-        limit: int = 5,
+        revision: str = "latest",
+        budget: int = 4000,
     ) -> Optional[dict[str, Any]]:
         """Search Formsy memory/context for relevant snippets."""
         try:
             return await self.runtime_client.memory_search(
-                workspace_id=workspace_id,
+                repo_id=repo_id,
                 session_id=session_id,
                 query=query,
-                limit=limit,
+                revision=revision,
+                budget=budget,
             )
         except (RuntimeAPIError, FormalCCTimeoutError) as e:
             logger.warning(f"Memory search failed: {e}")
             return None
         except Exception as e:
             logger.error(f"Unexpected error in memory search: {e}")
+            return None
+
+    async def memory_read(
+        self,
+        repo_id: str,
+        session_id: str,
+        path: str,
+        revision: str = "latest",
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> Optional[dict[str, Any]]:
+        """Read exact source context from Formsy compiled repository memory."""
+        try:
+            return await self.runtime_client.memory_read(
+                repo_id=repo_id,
+                session_id=session_id,
+                path=path,
+                revision=revision,
+                start_line=start_line,
+                end_line=end_line,
+            )
+        except (RuntimeAPIError, FormalCCTimeoutError) as e:
+            logger.warning(f"Memory read failed: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error in memory read: {e}")
             return None
