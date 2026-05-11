@@ -93,7 +93,9 @@ TERMINAL_TOOL_DEFINITION = {
 - Install tools with apt-get or pip as needed
 
 **Completion:**
-- When task is complete, output: echo "MINI_SWE_AGENT_FINAL_OUTPUT" followed by your result
+- When task is complete, output a completion marker followed by your result:
+  - echo "MINI_SWE_AGENT_FINAL_OUTPUT"
+  - echo "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 """,
         "parameters": {
             "type": "object",
@@ -290,6 +292,17 @@ class MiniSWERunner:
                 "exit_code": -1,
                 "error": str(e)
             }
+
+    @staticmethod
+    def _has_completion_signal(output: str) -> bool:
+        """Return True when terminal output indicates the task is done."""
+        return any(
+            marker in output
+            for marker in (
+                "MINI_SWE_AGENT_FINAL_OUTPUT",
+                "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+            )
+        )
     
     def _format_tools_for_system_message(self) -> str:
         """Format tool definitions for the system message."""
@@ -440,7 +453,9 @@ class MiniSWERunner:
 When you need to run commands, use the 'terminal' tool with your bash command.
 
 **Important:**
-- When you have completed the task successfully, run: echo "MINI_SWE_AGENT_FINAL_OUTPUT" followed by a summary
+- When you have completed the task successfully, run a completion marker command followed by a summary:
+  - echo "MINI_SWE_AGENT_FINAL_OUTPUT"
+  - echo "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 - Be concise and efficient in your approach
 - Install any needed tools with apt-get or pip
 - Avoid interactive commands (no vim, nano, less, etc.)
@@ -531,7 +546,7 @@ Complete the user's task step by step."""
                         }, ensure_ascii=False)
                         
                         # Check for task completion signal
-                        if "MINI_SWE_AGENT_FINAL_OUTPUT" in result["output"]:
+                        if self._has_completion_signal(result["output"]):
                             print("   ✅ Task completion signal detected!")
                             completed = True
                         
