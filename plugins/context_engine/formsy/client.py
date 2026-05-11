@@ -59,6 +59,7 @@ class EngineClient:
         query: str,
         revision: str = "latest",
         budget: int = 4000,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> Optional[dict[str, Any]]:
         """Search Formsy memory/context for relevant snippets."""
         try:
@@ -68,6 +69,7 @@ class EngineClient:
                 query=query,
                 revision=revision,
                 budget=budget,
+                metadata=metadata,
             )
         except (RuntimeAPIError, FormalCCTimeoutError) as e:
             logger.warning(f"Memory search failed: {e}")

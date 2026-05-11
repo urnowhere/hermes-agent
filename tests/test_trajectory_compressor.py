@@ -207,6 +207,7 @@ class TestTrajectoryMetrics:
         assert d["compression_ratio"] == 0.5
         assert d["was_compressed"] is True
         assert d["compression_region"]["start_idx"] == -1
+        assert d["llm_usage"]["summarization"]["prompt_tokens"] == 0
 
     def test_default_values(self):
         m = TrajectoryMetrics()
@@ -235,6 +236,9 @@ class TestAggregateMetrics:
         m.original_tokens = 20000
         m.compressed_tokens = 10000
         m.tokens_saved = 10000
+        m.summarization_prompt_tokens = 1200
+        m.summarization_completion_tokens = 300
+        m.summarization_total_tokens = 1500
         m.compression_ratio = 0.5
         m.original_turns = 30
         m.compressed_turns = 15
@@ -245,6 +249,7 @@ class TestAggregateMetrics:
         assert agg.trajectories_compressed == 1
         assert agg.total_tokens_saved == 10000
         assert len(agg.compression_ratios) == 1
+        assert agg.total_summarization_total_tokens == 1500
 
     def test_add_skipped_trajectory(self):
         agg = AggregateMetrics()
@@ -290,6 +295,7 @@ class TestAggregateMetrics:
         d = agg.to_dict()
         assert d["summarization"]["success_rate"] == 1.0
         assert d["tokens"]["overall_compression_ratio"] == 0.0
+        assert d["llm_usage"]["summarization"]["total_tokens"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -492,6 +498,24 @@ class TestGenerateSummary:
         summary = tc._generate_summary("Turn content", metrics)
 
         assert summary == "[CONTEXT SUMMARY]:"
+
+    def test_generate_summary_records_llm_usage(self):
+        tc = _make_compressor()
+        tc.client = MagicMock()
+        tc.client.chat.completions.create.return_value = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="summary"))],
+            usage=SimpleNamespace(prompt_tokens=123, completion_tokens=45, total_tokens=168),
+        )
+        metrics = TrajectoryMetrics()
+        metrics.tokens_saved = 1000
+
+        summary = tc._generate_summary("Turn content", metrics)
+
+        assert summary == "[CONTEXT SUMMARY]: summary"
+        assert metrics.summarization_prompt_tokens == 123
+        assert metrics.summarization_completion_tokens == 45
+        assert metrics.summarization_total_tokens == 168
+        assert metrics.to_dict()["net_tokens_saved_after_summarization"] == 832
 
     @pytest.mark.asyncio
     async def test_generate_summary_async_handles_none_content(self):

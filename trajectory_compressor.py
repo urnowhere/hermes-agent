@@ -201,12 +201,23 @@ class TrajectoryMetrics:
     
     summarization_api_calls: int = 0
     summarization_errors: int = 0
+    summarization_prompt_tokens: int = 0
+    summarization_completion_tokens: int = 0
+    summarization_total_tokens: int = 0
+    summarization_input_tokens: int = 0
+    summarization_output_tokens: int = 0
+    summarization_cache_read_tokens: int = 0
+    summarization_cache_write_tokens: int = 0
+    summarization_reasoning_tokens: int = 0
     
     def to_dict(self) -> Dict[str, Any]:
         return {
             "original_tokens": self.original_tokens,
             "compressed_tokens": self.compressed_tokens,
             "tokens_saved": self.tokens_saved,
+            "net_tokens_saved_after_summarization": (
+                self.tokens_saved - self.summarization_total_tokens
+            ),
             "compression_ratio": round(self.compression_ratio, 4),
             "original_turns": self.original_turns,
             "compressed_turns": self.compressed_turns,
@@ -221,6 +232,18 @@ class TrajectoryMetrics:
             "skipped_under_target": self.skipped_under_target,
             "summarization_api_calls": self.summarization_api_calls,
             "summarization_errors": self.summarization_errors,
+            "llm_usage": {
+                "summarization": {
+                    "prompt_tokens": self.summarization_prompt_tokens,
+                    "completion_tokens": self.summarization_completion_tokens,
+                    "total_tokens": self.summarization_total_tokens,
+                    "input_tokens": self.summarization_input_tokens,
+                    "output_tokens": self.summarization_output_tokens,
+                    "cache_read_tokens": self.summarization_cache_read_tokens,
+                    "cache_write_tokens": self.summarization_cache_write_tokens,
+                    "reasoning_tokens": self.summarization_reasoning_tokens,
+                }
+            },
         }
 
 
@@ -243,6 +266,14 @@ class AggregateMetrics:
     
     total_summarization_calls: int = 0
     total_summarization_errors: int = 0
+    total_summarization_prompt_tokens: int = 0
+    total_summarization_completion_tokens: int = 0
+    total_summarization_total_tokens: int = 0
+    total_summarization_input_tokens: int = 0
+    total_summarization_output_tokens: int = 0
+    total_summarization_cache_read_tokens: int = 0
+    total_summarization_cache_write_tokens: int = 0
+    total_summarization_reasoning_tokens: int = 0
     
     # Distribution stats
     compression_ratios: List[float] = field(default_factory=list)
@@ -264,6 +295,14 @@ class AggregateMetrics:
         self.total_turns_removed += metrics.turns_removed
         self.total_summarization_calls += metrics.summarization_api_calls
         self.total_summarization_errors += metrics.summarization_errors
+        self.total_summarization_prompt_tokens += metrics.summarization_prompt_tokens
+        self.total_summarization_completion_tokens += metrics.summarization_completion_tokens
+        self.total_summarization_total_tokens += metrics.summarization_total_tokens
+        self.total_summarization_input_tokens += metrics.summarization_input_tokens
+        self.total_summarization_output_tokens += metrics.summarization_output_tokens
+        self.total_summarization_cache_read_tokens += metrics.summarization_cache_read_tokens
+        self.total_summarization_cache_write_tokens += metrics.summarization_cache_write_tokens
+        self.total_summarization_reasoning_tokens += metrics.summarization_reasoning_tokens
         
         if metrics.was_compressed:
             self.trajectories_compressed += 1
@@ -304,12 +343,27 @@ class AggregateMetrics:
                 "total_before": self.total_tokens_before,
                 "total_after": self.total_tokens_after,
                 "total_saved": self.total_tokens_saved,
+                "net_saved_after_summarization": (
+                    self.total_tokens_saved - self.total_summarization_total_tokens
+                ),
                 "overall_compression_ratio": round(self.total_tokens_after / max(self.total_tokens_before, 1), 4),
             },
             "turns": {
                 "total_before": self.total_turns_before,
                 "total_after": self.total_turns_after,
                 "total_removed": self.total_turns_removed,
+            },
+            "llm_usage": {
+                "summarization": {
+                    "prompt_tokens": self.total_summarization_prompt_tokens,
+                    "completion_tokens": self.total_summarization_completion_tokens,
+                    "total_tokens": self.total_summarization_total_tokens,
+                    "input_tokens": self.total_summarization_input_tokens,
+                    "output_tokens": self.total_summarization_output_tokens,
+                    "cache_read_tokens": self.total_summarization_cache_read_tokens,
+                    "cache_write_tokens": self.total_summarization_cache_write_tokens,
+                    "reasoning_tokens": self.total_summarization_reasoning_tokens,
+                }
             },
             "averages": {
                 "avg_compression_ratio": round(avg_compression_ratio, 4),
@@ -567,6 +621,69 @@ class TrajectoryCompressor:
         if text.startswith("[CONTEXT SUMMARY]:"):
             return text
         return "[CONTEXT SUMMARY]:" if not text else f"[CONTEXT SUMMARY]: {text}"
+
+    @staticmethod
+    def _extract_summarization_usage(response: Any) -> Dict[str, int]:
+        """Extract prompt/completion usage from a summary-model response."""
+        usage = getattr(response, "usage", None)
+        if not usage:
+            return {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "reasoning_tokens": 0,
+            }
+
+        def _as_int(value: Any) -> int:
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        prompt_tokens = _as_int(getattr(usage, "prompt_tokens", 0))
+        completion_tokens = _as_int(getattr(usage, "completion_tokens", 0))
+        input_tokens = _as_int(getattr(usage, "input_tokens", 0))
+        output_tokens = _as_int(getattr(usage, "output_tokens", 0))
+
+        details = getattr(usage, "prompt_tokens_details", None) or getattr(usage, "input_tokens_details", None)
+        cache_read_tokens = _as_int(getattr(details, "cached_tokens", 0) if details else 0)
+        if not cache_read_tokens:
+            cache_read_tokens = _as_int(getattr(usage, "cache_read_input_tokens", 0))
+
+        cache_write_tokens = _as_int(getattr(details, "cache_write_tokens", 0) if details else 0)
+        if not cache_write_tokens:
+            cache_write_tokens = _as_int(getattr(usage, "cache_creation_input_tokens", 0))
+
+        output_details = getattr(usage, "output_tokens_details", None)
+        reasoning_tokens = _as_int(getattr(output_details, "reasoning_tokens", 0) if output_details else 0)
+
+        if not prompt_tokens:
+            prompt_tokens = input_tokens + cache_read_tokens + cache_write_tokens
+        if not completion_tokens:
+            completion_tokens = output_tokens
+        if not input_tokens:
+            input_tokens = max(0, prompt_tokens - cache_read_tokens - cache_write_tokens)
+        if not output_tokens:
+            output_tokens = completion_tokens
+
+        total_tokens = _as_int(getattr(usage, "total_tokens", 0))
+        if not total_tokens:
+            total_tokens = prompt_tokens + completion_tokens
+
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
+            "reasoning_tokens": reasoning_tokens,
+        }
     
     def _generate_summary(self, content: str, metrics: TrajectoryMetrics) -> str:
         """
@@ -624,6 +741,16 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                         _create_kwargs["temperature"] = summary_temperature
                     response = self.client.chat.completions.create(**_create_kwargs)
                 
+                usage = self._extract_summarization_usage(response)
+                metrics.summarization_prompt_tokens += usage["prompt_tokens"]
+                metrics.summarization_completion_tokens += usage["completion_tokens"]
+                metrics.summarization_total_tokens += usage["total_tokens"]
+                metrics.summarization_input_tokens += usage["input_tokens"]
+                metrics.summarization_output_tokens += usage["output_tokens"]
+                metrics.summarization_cache_read_tokens += usage["cache_read_tokens"]
+                metrics.summarization_cache_write_tokens += usage["cache_write_tokens"]
+                metrics.summarization_reasoning_tokens += usage["reasoning_tokens"]
+
                 summary = self._coerce_summary_content(response.choices[0].message.content)
                 return self._ensure_summary_prefix(summary)
                 
@@ -693,6 +820,16 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                         _create_kwargs["temperature"] = summary_temperature
                     response = await self._get_async_client().chat.completions.create(**_create_kwargs)
                 
+                usage = self._extract_summarization_usage(response)
+                metrics.summarization_prompt_tokens += usage["prompt_tokens"]
+                metrics.summarization_completion_tokens += usage["completion_tokens"]
+                metrics.summarization_total_tokens += usage["total_tokens"]
+                metrics.summarization_input_tokens += usage["input_tokens"]
+                metrics.summarization_output_tokens += usage["output_tokens"]
+                metrics.summarization_cache_read_tokens += usage["cache_read_tokens"]
+                metrics.summarization_cache_write_tokens += usage["cache_write_tokens"]
+                metrics.summarization_reasoning_tokens += usage["reasoning_tokens"]
+
                 summary = self._coerce_summary_content(response.choices[0].message.content)
                 return self._ensure_summary_prefix(summary)
                 
@@ -1221,6 +1358,7 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
         print(f"║{'':4}Before Compression:     {tokens_before:>15,} tokens{' '*21}║")
         print(f"║{'':4}After Compression:      {tokens_after:>15,} tokens{' '*21}║")
         print(f"║{'':4}Total Saved:            {tokens_saved:>15,} tokens{' '*21}║")
+        print(f"║{'':4}Net Saved After Summary:{m['tokens']['net_saved_after_summarization']:>13,} tokens{' '*18}║")
         print(f"║{'':4}Overall Compression:    {m['tokens']['overall_compression_ratio']:>14.1%}{' '*28}║")
         
         if tokens_before > 0:
@@ -1255,6 +1393,9 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
         print(f"║{'─'*70}║")
         print(f"║{'':4}API Calls Made:         {m['summarization']['total_api_calls']:>15,}{' '*27}║")
         print(f"║{'':4}Errors:                 {m['summarization']['total_errors']:>15,}{' '*27}║")
+        print(f"║{'':4}Prompt Tokens:          {m['llm_usage']['summarization']['prompt_tokens']:>15,}{' '*27}║")
+        print(f"║{'':4}Completion Tokens:      {m['llm_usage']['summarization']['completion_tokens']:>15,}{' '*27}║")
+        print(f"║{'':4}Total Tokens:           {m['llm_usage']['summarization']['total_tokens']:>15,}{' '*27}║")
         print(f"║{'':4}Success Rate:           {m['summarization']['success_rate']:>14.1%}{' '*28}║")
         
         print(f"╠{'═'*70}╣")

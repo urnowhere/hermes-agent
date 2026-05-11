@@ -9428,6 +9428,17 @@ class AIAgent:
         self._set_tool_guardrail_halt(decision)
         return toolguard_synthetic_result(decision)
 
+    def _context_engine_block_message(self, function_name: str, function_args: dict) -> Optional[str]:
+        """Ask the active context engine whether a tool call should be blocked."""
+        engine = getattr(self, "context_compressor", None)
+        if not engine or not hasattr(engine, "get_tool_block_message"):
+            return None
+        try:
+            return engine.get_tool_block_message(function_name, function_args)
+        except Exception:
+            logger.debug("context engine block check failed", exc_info=True)
+            return None
+
     def _execute_tool_calls(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
         """Execute tool calls from the assistant message and append results to messages.
 
@@ -9491,6 +9502,10 @@ class AIAgent:
                 pass
         if block_message is not None:
             return json.dumps({"error": block_message}, ensure_ascii=False)
+
+        ce_block_message = self._context_engine_block_message(function_name, function_args)
+        if ce_block_message is not None:
+            return json.dumps({"error": ce_block_message}, ensure_ascii=False)
 
         if function_name == "todo":
             from tools.todo_tool import todo_tool as _todo_tool
@@ -9658,6 +9673,10 @@ class AIAgent:
                 if not guardrail_decision.allows_execution:
                     block_result = self._guardrail_block_result(guardrail_decision)
                     blocked_by_guardrail = True
+                else:
+                    ce_block_message = self._context_engine_block_message(function_name, function_args)
+                    if ce_block_message is not None:
+                        block_result = json.dumps({"error": ce_block_message}, ensure_ascii=False)
 
             parsed_calls.append((tool_call, function_name, function_args, block_result, blocked_by_guardrail))
 
@@ -10007,6 +10026,11 @@ class AIAgent:
                 guardrail_decision = self._tool_guardrails.before_call(function_name, function_args)
                 if not guardrail_decision.allows_execution:
                     _guardrail_block_decision = guardrail_decision
+
+            if _block_msg is None and _guardrail_block_decision is None:
+                ce_block_message = self._context_engine_block_message(function_name, function_args)
+                if ce_block_message is not None:
+                    _block_msg = ce_block_message
 
             _execution_blocked = _block_msg is not None or _guardrail_block_decision is not None
 
@@ -14098,6 +14122,20 @@ class AIAgent:
             "cost_status": self.session_cost_status,
             "cost_source": self.session_cost_source,
         }
+        retrieval_status = None
+        try:
+            if self.context_compressor and hasattr(self.context_compressor, "get_retrieval_status"):
+                retrieval_status = self.context_compressor.get_retrieval_status()
+        except Exception:
+            retrieval_status = None
+        if isinstance(retrieval_status, dict):
+            result["retrieval_status"] = retrieval_status.get("retrieval_status")
+            result["retrieval_details"] = retrieval_status
+            result["coding_status"] = retrieval_status.get("coding_status", "unverified")
+        else:
+            result["retrieval_status"] = None
+            result["retrieval_details"] = None
+            result["coding_status"] = "unverified"
         if self._tool_guardrail_halt_decision is not None:
             result["guardrail"] = self._tool_guardrail_halt_decision.to_metadata()
         # If a /steer landed after the final assistant turn (no more tool

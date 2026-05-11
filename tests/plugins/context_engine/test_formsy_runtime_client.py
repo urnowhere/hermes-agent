@@ -92,6 +92,56 @@ async def test_runtime_client_memory_search_uses_configured_endpoint(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_runtime_client_memory_search_forwards_metadata(monkeypatch):
+    monkeypatch.setenv("FORMALCC_API_KEY", "fsy_test_secret_token")
+    client = RuntimeClient(
+        base_url="https://runtime.example",
+        api_key_env="FORMALCC_API_KEY",
+    )
+    calls = []
+
+    class FakeAsyncClient:
+        async def request(self, method, url, json=None, headers=None):
+            calls.append({
+                "method": method,
+                "url": url,
+                "json": json,
+                "headers": headers,
+            })
+            return httpx.Response(
+                200,
+                json={"matches": []},
+                request=httpx.Request(method, url, json=json, headers=headers),
+            )
+
+    client._client = FakeAsyncClient()
+
+    result = await client.memory_search(
+        repo_id="django__django-14053",
+        session_id="session-1",
+        query="parser",
+        revision="latest",
+        budget=4000,
+        metadata={
+            "retrieval_mode": "symbolic",
+            "grounding_phase": "seed",
+            "response_format": "bundle",
+            "trace_id": "trace-1",
+            "case_id": "case-1",
+        },
+    )
+
+    assert result == {"matches": []}
+    assert calls[0]["json"]["metadata"] == {
+        "retrieval_mode": "symbolic",
+        "grounding_phase": "seed",
+        "response_format": "bundle",
+        "trace_id": "trace-1",
+        "case_id": "case-1",
+    }
+
+
+@pytest.mark.asyncio
 async def test_runtime_client_memory_read_uses_read_endpoint(monkeypatch):
     monkeypatch.setenv("FORMALCC_API_KEY", "fsy_test_secret_token")
     client = RuntimeClient(

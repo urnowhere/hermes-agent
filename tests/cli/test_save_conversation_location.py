@@ -40,6 +40,7 @@ def _make_stub_cli(history):
         model="test-model",
         session_id="20260101_120000_abc123",
         session_start=datetime(2026, 1, 1, 12, 0, 0),
+        agent=None,
     )
 
 
@@ -86,6 +87,46 @@ def test_save_conversation_writes_under_hermes_home(hermes_home, tmp_path, monke
     out = capsys.readouterr().out
     assert str(files[0]) in out, out
     assert "hermes --resume 20260101_120000_abc123" in out, out
+
+
+def test_save_conversation_includes_retrieval_details(hermes_home, monkeypatch):
+    for mod in [m for m in sys.modules if m.startswith("cli") or m == "hermes_constants"]:
+        sys.modules.pop(mod, None)
+    import cli
+
+    stub = _make_stub_cli([
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+    ])
+    stub.agent = SimpleNamespace(
+        context_compressor=SimpleNamespace(
+            get_retrieval_status=lambda: {
+                "retrieval_status": "good",
+                "seed_calls": 1,
+                "retry_calls": 0,
+                "grounded_calls": 1,
+                "legacy_calls": 0,
+                "retrieval_trace": {
+                    "accepted_targets": ["django/contrib/auth/validators.py"],
+                    "exploration_closed": True,
+                },
+            }
+        )
+    )
+
+    cli.HermesCLI.save_conversation(stub)
+
+    saved_dir = hermes_home / "sessions" / "saved"
+    files = list(saved_dir.glob("hermes_conversation_*.json"))
+    assert len(files) == 1, files
+
+    payload = json.loads(files[0].read_text())
+    assert payload["retrieval_status"] == "good"
+    assert payload["retrieval_details"]["seed_calls"] == 1
+    assert payload["retrieval_details"]["grounded_calls"] == 1
+    assert payload["retrieval_details"]["retrieval_trace"]["accepted_targets"] == [
+        "django/contrib/auth/validators.py"
+    ]
 
 
 def test_save_conversation_empty_history_does_nothing(hermes_home, capsys):

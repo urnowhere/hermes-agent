@@ -5585,14 +5585,35 @@ class HermesCLI:
             return
         path = saved_dir / f"hermes_conversation_{timestamp}.json"
 
+        retrieval_details = None
+        retrieval_status = None
+        try:
+            if self.agent is not None:
+                if hasattr(self.agent, "get_retrieval_status"):
+                    retrieval_details = self.agent.get_retrieval_status()
+                else:
+                    compressor = getattr(self.agent, "context_compressor", None)
+                    if compressor and hasattr(compressor, "get_retrieval_status"):
+                        retrieval_details = compressor.get_retrieval_status()
+            if isinstance(retrieval_details, dict):
+                retrieval_status = retrieval_details.get("retrieval_status")
+        except Exception:
+            retrieval_details = None
+            retrieval_status = None
+
         try:
             with open(path, "w", encoding="utf-8") as f:
-                json.dump({
+                snapshot = {
                     "model": self.model,
                     "session_id": self.session_id,
                     "session_start": self.session_start.isoformat(),
                     "messages": self.conversation_history,
-                }, f, indent=2, ensure_ascii=False)
+                }
+                if retrieval_status is not None:
+                    snapshot["retrieval_status"] = retrieval_status
+                if retrieval_details is not None:
+                    snapshot["retrieval_details"] = retrieval_details
+                json.dump(snapshot, f, indent=2, ensure_ascii=False)
             print(f"(^_^)v Conversation snapshot saved to: {path}")
             if self.session_id:
                 print(f"       Resume the live session with: hermes --resume {self.session_id}")

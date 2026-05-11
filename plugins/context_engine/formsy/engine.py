@@ -2,6 +2,7 @@
 
 import json
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -19,6 +20,40 @@ from .message_converter import (
 logger = logging.getLogger("formsy.context_engine")
 
 
+@dataclass
+class RetrievalTrace:
+    """Per-run retrieval state used for gating and trace output."""
+
+    state: str = "not_started"
+    seed_calls: int = 0
+    retry_calls: int = 0
+    grounded_calls: int = 0
+    legacy_calls: int = 0
+    exploration_closed: bool = False
+    accepted_targets: list[str] = field(default_factory=list)
+    test_plan_files: list[str] = field(default_factory=list)
+    retrieval_budget: int = 0
+    blocked_tool_reason: str = ""
+    contradiction_retry_used: bool = False
+    contradiction_legacy_used: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "state": self.state,
+            "seed_calls": self.seed_calls,
+            "retry_calls": self.retry_calls,
+            "grounded_calls": self.grounded_calls,
+            "legacy_calls": self.legacy_calls,
+            "exploration_closed": self.exploration_closed,
+            "accepted_targets": list(self.accepted_targets),
+            "test_plan_files": list(self.test_plan_files),
+            "retrieval_budget": self.retrieval_budget,
+            "blocked_tool_reason": self.blocked_tool_reason,
+            "contradiction_retry_used": self.contradiction_retry_used,
+            "contradiction_legacy_used": self.contradiction_legacy_used,
+        }
+
+
 class FormsyContextEngine(ContextEngine):
     """Formsy context engine for Hermes."""
 
@@ -29,6 +64,33 @@ class FormsyContextEngine(ContextEngine):
         self._session_id: Optional[str] = None
         self._turn_counter: int = 0
         self._context: dict[str, Any] = {}
+        self._retrieval_trace = RetrievalTrace()
+        self._retrieval_state: str = "not_started"
+        self._symbolic_failures: int = 0
+        self._legacy_attempted: bool = False
+        self._grounded_symbols: list[str] = []
+        self._grounded_files: list[str] = []
+        self._last_suggested_queries: list[str] = []
+        self._symbolic_retry_count: int = 0
+        self._grounded_search_count: int = 0
+        self._legacy_search_count: int = 0
+        self._requirement_analysis: Any = None
+        self._template_family: Any = None
+        self._retrieval_targets: Any = None
+        self._test_plan: Any = None
+        self._symbolic_prompt_present: bool = False
+        self._symbolic_prompt_sections: list[str] = []
+        self._symbolic_prompt_missing: bool = False
+        self._constraints_present: bool = False
+        self._constraints_quality: str = "missing"
+        self._bundle_must_edit: list[str] = []
+        self._bundle_primary_files: list[str] = []
+        self._direct_match_files: list[str] = []
+        self._preferred_edit_targets: list[str] = []
+        self._target_changed_after_grounding: bool = False
+        self._target_conflict: bool = False
+        self._last_retrieval_decision: dict[str, Any] = {}
+        self._last_gate_failure: dict[str, Any] = {}
 
         self.last_prompt_tokens = 0
         self.last_completion_tokens = 0
@@ -131,6 +193,7 @@ class FormsyContextEngine(ContextEngine):
         self._turn_counter = 0
         self._session_id = None
         self._context = {}
+        self._reset_retrieval_state()
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
         """Expose Formsy memory/context search to the agent."""
@@ -142,8 +205,12 @@ class FormsyContextEngine(ContextEngine):
                     "relevant to a natural-language query. Use context_search proactively "
                     "and repeatedly to understand the codebase faster. Prefer several "
                     "targeted queries, such as symbols, file paths, PR behavior, call flow, "
-                    "and edge cases, over one broad query. The memory compile step has "
-                    "already completed before the task starts, so this tool is ready to "
+                    "and edge cases, over one broad query. Treat this tool as mandatory for "
+                    "retrieval: after a seed search, continue only if matches is non-empty "
+                    "and coverage is not poor, or rerun with grounded/legacy metadata. When "
+                    "context_search returns a candidate file or span, use context_read next "
+                    "instead of shell grep/find or direct file reads. The memory compile step "
+                    "has already completed before the task starts, so this tool is ready to "
                     "use immediately. For SWE-bench tasks, pass repo_id and revision from "
                     "the task metadata directly, for example repo_id='django__django-14053' "
                     "and revision='latest'."
@@ -176,6 +243,49 @@ class FormsyContextEngine(ContextEngine):
                             "default": 5,
                             "minimum": 1,
                             "maximum": 20,
+                        },
+                        "metadata": {
+                            "type": "object",
+                            "description": "Optional server-side query metadata used to control retrieval mode and grounding phase.",
+                            "properties": {
+                                "retrieval_mode": {
+                                    "type": "string",
+                                    "enum": ["symbolic", "legacy"],
+                                    "description": "Select the retrieval strategy used by the server-side query API.",
+                                },
+                                "grounding_phase": {
+                                    "type": "string",
+                                    "enum": ["seed", "grounded", "fallback"],
+                                    "description": "Indicate whether this query is part of seed grounding or grounded verification.",
+                                },
+                                "response_format": {
+                                    "type": "string",
+                                    "enum": ["bundle", "legacy"],
+                                    "description": "Choose the response envelope expected from the query API.",
+                                },
+                                "trace_id": {
+                                    "type": "string",
+                                    "description": "Optional trace identifier for correlating related query calls.",
+                                },
+                                "case_id": {
+                                    "type": "string",
+                                    "description": "Optional case identifier for E2E runs.",
+                                },
+                                "grounded_symbols": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Optional grounded evidence symbols returned or confirmed by prior inspection.",
+                                },
+                                "grounded_files": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Optional grounded evidence file paths returned or confirmed by prior inspection.",
+                                },
+                                "retrieval_feedback": {
+                                    "type": "string",
+                                    "description": "Optional feedback about retrieval quality or contradictions to carry into the next query.",
+                                },
+                            },
                         },
                     },
                     "required": ["query"],
@@ -245,6 +355,22 @@ class FormsyContextEngine(ContextEngine):
             })
         revision = str(args.get("revision") or (self._config.revision if self._config else "latest") or "latest")
         budget = self._coerce_positive_int(args.get("budget"), self._config.query_budget if self._config else 4000)
+        self._retrieval_trace.retrieval_budget = budget
+        metadata = self._build_query_metadata(args, repo_id=repo_id, session_id=session_id)
+        phase = str(metadata.get("grounding_phase") or "").strip().lower()
+        if phase == "grounded":
+            if self._grounded_files and not metadata.get("grounded_files"):
+                metadata["grounded_files"] = list(self._grounded_files)
+            if self._grounded_symbols and not metadata.get("grounded_symbols"):
+                metadata["grounded_symbols"] = list(self._grounded_symbols)
+            for key, value in (
+                ("requirement_analysis", self._requirement_analysis),
+                ("template_family", self._template_family),
+                ("retrieval_targets", self._retrieval_targets),
+                ("test_plan", self._test_plan),
+            ):
+                if value is not None and not metadata.get(key):
+                    metadata[key] = value
         result = self._run_async(
             self._engine_client.memory_search(
                 repo_id=repo_id,
@@ -252,25 +378,64 @@ class FormsyContextEngine(ContextEngine):
                 query=query,
                 revision=revision,
                 budget=budget,
+                metadata=metadata,
             )
         )
         if result is None:
             return json.dumps({"ok": False, "query": query, "error": "Formsy context search failed"})
 
-        payload = {
+        payload: dict[str, Any] = {
             "ok": True,
             "query": query,
             "extra_context": self._extract_extra_context(result),
+            "retrieval_budget": budget,
         }
-        for key in ("matches", "suggested_queries", "coverage", "missing_context"):
+        for key in (
+            "symbolic_prompt",
+            "matches",
+            "suggested_queries",
+            "coverage",
+            "missing_context",
+            "diagnostics",
+            "test_plan",
+            "requirement_analysis",
+            "template_family",
+            "retrieval_targets",
+            "bundle",
+            "context_package",
+            "grounded_symbols",
+            "grounded_files",
+            "retrieval_feedback",
+        ):
             if key in result:
                 payload[key] = result[key]
+        coverage = str(payload.get("coverage") or "").strip().lower()
+        matches = payload.get("matches")
+        payload["direct_match_files"] = self._extract_match_files(matches)
+        payload["bundle_primary_files"] = self._extract_bundle_primary_files(result.get("bundle"))
+        payload["bundle_must_edit"] = self._extract_bundle_must_edit(result.get("bundle"))
+        self._record_context_search_result(
+            query=query,
+            metadata=metadata,
+            coverage=coverage,
+            matches=matches,
+            payload=payload,
+        )
         return json.dumps(payload)
 
     def _handle_memory_read(self, args: dict[str, Any]) -> str:
         path = str(args.get("path") or "").strip()
         if not path:
             return json.dumps({"ok": False, "error": "context_read requires a non-empty path"})
+        if not self._is_context_read_allowed(path):
+            return json.dumps({
+                "ok": False,
+                "path": path,
+                "error": (
+                    "context_read is limited to accepted targets or test-plan files "
+                    "after a grounded target has been accepted."
+                ),
+            })
 
         if not self._engine_client:
             return json.dumps({"ok": False, "path": path, "error": "Formsy engine client is not initialized"})
@@ -299,6 +464,7 @@ class FormsyContextEngine(ContextEngine):
         if result is None:
             return json.dumps({"ok": False, "path": path, "error": "Formsy context read failed"})
 
+        self._record_context_read(path, result)
         return self._format_memory_read_result(path, result)
 
     @staticmethod
@@ -372,6 +538,737 @@ class FormsyContextEngine(ContextEngine):
         if isinstance(memory_block, str):
             return memory_block
         return ""
+
+    @staticmethod
+    def _build_query_metadata(
+        args: dict[str, Any],
+        *,
+        repo_id: str = "",
+        session_id: str = "",
+    ) -> dict[str, Any]:
+        metadata: dict[str, Any] = {}
+        for key in (
+            "retrieval_mode",
+            "grounding_phase",
+            "response_format",
+            "trace_id",
+            "case_id",
+            "grounded_symbols",
+            "grounded_files",
+            "retrieval_feedback",
+        ):
+            value = args.get(key)
+            if value is not None and value != "":
+                metadata[key] = value
+        supplied = args.get("metadata")
+        if isinstance(supplied, dict):
+            metadata.update(supplied)
+        metadata.setdefault("retrieval_mode", "symbolic")
+        metadata.setdefault("grounding_phase", "seed")
+        metadata.setdefault("response_format", "bundle")
+        if repo_id:
+            metadata.setdefault("case_id", repo_id)
+        if session_id and session_id != "unknown":
+            metadata.setdefault("trace_id", session_id)
+        return metadata
+
+    def _reset_retrieval_state(self) -> None:
+        self._retrieval_trace = RetrievalTrace()
+        self._retrieval_state = "not_started"
+        self._symbolic_failures = 0
+        self._symbolic_retry_count = 0
+        self._grounded_search_count = 0
+        self._legacy_search_count = 0
+        self._legacy_attempted = False
+        self._grounded_symbols = []
+        self._grounded_files = []
+        self._last_suggested_queries = []
+        self._requirement_analysis = None
+        self._template_family = None
+        self._retrieval_targets = None
+        self._test_plan = None
+        self._symbolic_prompt_present = False
+        self._symbolic_prompt_sections = []
+        self._symbolic_prompt_missing = False
+        self._constraints_present = False
+        self._constraints_quality = "missing"
+        self._bundle_must_edit = []
+        self._bundle_primary_files = []
+        self._direct_match_files = []
+        self._preferred_edit_targets = []
+        self._target_changed_after_grounding = False
+        self._target_conflict = False
+        self._last_retrieval_decision = {}
+        self._last_gate_failure = {}
+
+    @staticmethod
+    def _has_useful_matches(matches: Any) -> bool:
+        return isinstance(matches, list) and len(matches) > 0
+
+    def _record_context_search_result(
+        self,
+        *,
+        query: str,
+        metadata: dict[str, Any],
+        coverage: str,
+        matches: Any,
+        payload: dict[str, Any],
+    ) -> None:
+        mode = str(metadata.get("retrieval_mode") or "symbolic").strip().lower()
+        phase = str(metadata.get("grounding_phase") or "seed").strip().lower()
+        suggested_queries = payload.get("suggested_queries")
+        if isinstance(suggested_queries, list):
+            self._last_suggested_queries = [str(query) for query in suggested_queries if str(query).strip()]
+        else:
+            suggested_queries = []
+        self._symbolic_prompt_present = bool(str(payload.get("symbolic_prompt") or "").strip())
+        if self._symbolic_prompt_present:
+            self._symbolic_prompt_sections = self._extract_symbolic_prompt_sections(
+                str(payload.get("symbolic_prompt") or "")
+            )
+            self._symbolic_prompt_missing = False
+        else:
+            self._symbolic_prompt_sections = []
+            self._symbolic_prompt_missing = mode == "symbolic"
+        self._constraints_present = "Constraints" in self._symbolic_prompt_sections
+        self._constraints_quality = self._classify_constraints_quality(str(payload.get("symbolic_prompt") or ""))
+        useful = coverage != "poor" and self._has_useful_matches(matches)
+        legacy_useful = coverage != "poor" and (self._has_useful_matches(matches) or bool(payload.get("extra_context")))
+        grounded_symbols = list(metadata.get("grounded_symbols") or [])
+        grounded_files = list(metadata.get("grounded_files") or [])
+        has_grounded_evidence = bool(grounded_symbols or grounded_files or self._grounded_symbols or self._grounded_files)
+        previous_targets = list(self._preferred_edit_targets or self._grounded_files or [])
+        test_plan_files = self._extract_test_plan_files(payload.get("test_plan") or self._test_plan)
+        if test_plan_files:
+            self._retrieval_trace.test_plan_files = list(test_plan_files)
+        self._direct_match_files = self._extract_match_files(matches)
+        self._bundle_must_edit = self._extract_bundle_must_edit(payload.get("bundle"))
+        self._bundle_primary_files = self._extract_bundle_primary_files(payload.get("bundle"))
+        candidate_targets = (
+            grounded_files
+            or list(self._grounded_files)
+            or list(self._direct_match_files)
+            or list(self._bundle_primary_files)
+            or (
+                [str(target) for target in payload.get("retrieval_targets") if str(target).strip()]
+                if isinstance(payload.get("retrieval_targets"), list) else (
+                    [str(target) for target in self._retrieval_targets if str(target).strip()]
+                    if isinstance(self._retrieval_targets, list) else []
+                )
+            )
+            or list(self._bundle_must_edit)
+        )
+        candidate_target_conflict = bool(
+            self._bundle_must_edit
+            and candidate_targets
+            and set(self._bundle_must_edit) != set(candidate_targets)
+        )
+        candidate_target_changed = (
+            phase == "grounded"
+            and bool(previous_targets)
+            and set(previous_targets) != set(candidate_targets)
+        )
+        contradiction_found = (
+            candidate_target_conflict
+            or candidate_target_changed
+            or self._has_contradiction(payload, metadata)
+        )
+        is_first_symbolic_seed = mode != "legacy" and phase != "grounded" and self._retrieval_trace.seed_calls == 0
+
+        if mode == "legacy":
+            self._legacy_search_count += 1
+            self._legacy_attempted = True
+            self._retrieval_trace.legacy_calls += 1
+            if legacy_useful:
+                self._retrieval_state = "legacy_fallback"
+                preferred_next = "direct_inspection"
+                if not self._retrieval_trace.accepted_targets:
+                    self._set_accepted_targets(
+                        candidate_targets,
+                        test_plan_files=test_plan_files,
+                    )
+            else:
+                self._retrieval_state = "degraded_recovery"
+                preferred_next = "bounded_shell_inspection"
+        elif phase == "grounded":
+            self._grounded_search_count += 1
+            self._retrieval_trace.grounded_calls += 1
+            if has_grounded_evidence and useful and not contradiction_found:
+                self._grounded_symbols = grounded_symbols or list(self._grounded_symbols)
+                self._grounded_files = grounded_files or list(self._grounded_files)
+                self._retrieval_state = "grounded"
+                preferred_next = "edit"
+                self._set_accepted_targets(
+                    candidate_targets,
+                    test_plan_files=test_plan_files,
+                )
+                self._retrieval_trace.contradiction_retry_used = False
+                self._retrieval_trace.contradiction_legacy_used = False
+            elif contradiction_found and not self._retrieval_trace.contradiction_retry_used:
+                self._retrieval_state = "grounded_retry"
+                self._retrieval_trace.contradiction_retry_used = True
+                preferred_next = "context_search"
+            elif contradiction_found and not self._retrieval_trace.contradiction_legacy_used:
+                self._retrieval_state = "legacy_fallback"
+                self._retrieval_trace.contradiction_legacy_used = True
+                preferred_next = "direct_inspection"
+            elif self._grounded_files or self._grounded_symbols:
+                self._retrieval_state = "degraded_recovery"
+                preferred_next = "bounded_shell_inspection"
+            else:
+                self._retrieval_state = "grounded_retry"
+                preferred_next = "context_search"
+        elif useful:
+            if is_first_symbolic_seed:
+                self._retrieval_trace.seed_calls += 1
+            else:
+                self._retrieval_trace.retry_calls += 1
+            self._symbolic_retry_count += 1
+            self._retrieval_state = "inspect_candidates"
+            preferred_next = "context_read"
+        else:
+            self._symbolic_failures += 1
+            self._symbolic_retry_count += 1
+            if is_first_symbolic_seed:
+                self._retrieval_trace.seed_calls += 1
+            else:
+                self._retrieval_trace.retry_calls += 1
+            self._retrieval_state = "retry"
+            preferred_next = "context_search"
+
+        for key in ("requirement_analysis", "template_family", "retrieval_targets", "test_plan"):
+            value = payload.get(key)
+            if value is not None:
+                setattr(self, f"_{key}", value)
+        self._preferred_edit_targets = self._select_preferred_edit_targets()
+        self._target_conflict = candidate_target_conflict
+        self._target_changed_after_grounding = candidate_target_changed
+        self._sync_trace_state(state=self._retrieval_state)
+
+        next_retrieval = self._next_retrieval_hint(metadata=metadata, payload=payload)
+        payload["retrieval_state"] = self._retrieval_state
+        payload["preferred_next_step"] = preferred_next
+        payload["retrieval_budget"] = self._retrieval_trace.retrieval_budget
+        payload["accepted_targets"] = list(self._retrieval_trace.accepted_targets)
+        payload["exploration_closed"] = self._retrieval_trace.exploration_closed
+        if next_retrieval:
+            payload["next_retrieval"] = next_retrieval
+        payload["retrieval_decision"] = {
+            "query": query,
+            "retrieval_mode": mode,
+            "grounding_phase": phase,
+            "retrieval_budget": self._retrieval_trace.retrieval_budget,
+            "coverage": coverage or None,
+            "matches_count": len(matches) if isinstance(matches, list) else 0,
+            "symbolic_failures": self._symbolic_failures,
+            "symbolic_retry_count": self._symbolic_retry_count,
+            "grounded_search_count": self._grounded_search_count,
+            "legacy_search_count": self._legacy_search_count,
+            "seed_calls": self._retrieval_trace.seed_calls,
+            "retry_calls": self._retrieval_trace.retry_calls,
+            "grounded_calls": self._retrieval_trace.grounded_calls,
+            "legacy_calls": self._retrieval_trace.legacy_calls,
+            "legacy_attempted": self._legacy_attempted,
+            "symbolic_prompt_present": self._symbolic_prompt_present,
+            "symbolic_prompt_sections": list(self._symbolic_prompt_sections),
+            "constraints_present": self._constraints_present,
+            "constraints_quality": self._constraints_quality,
+            "direct_match_files": list(self._direct_match_files),
+            "bundle_primary_files": list(self._bundle_primary_files),
+            "bundle_must_edit": list(self._bundle_must_edit),
+            "preferred_edit_targets": list(self._preferred_edit_targets),
+            "accepted_targets": list(self._retrieval_trace.accepted_targets),
+            "exploration_closed": self._retrieval_trace.exploration_closed,
+            "blocked_tool_reason": self._retrieval_trace.blocked_tool_reason,
+            "target_conflict": self._target_conflict,
+            "target_changed_after_grounding": self._target_changed_after_grounding,
+            "contradiction_found": contradiction_found,
+            "decision": self._retrieval_state,
+            "reason": self._retrieval_reason(payload),
+        }
+        if next_retrieval:
+            payload["retrieval_decision"]["next_retrieval"] = next_retrieval
+        self._last_retrieval_decision = dict(payload["retrieval_decision"])
+
+    def _next_retrieval_hint(self, *, metadata: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any] | None:
+        if self._retrieval_state == "retry":
+            if self._retrieval_trace.exploration_closed:
+                if self._retrieval_trace.contradiction_retry_used and not self._retrieval_trace.contradiction_legacy_used:
+                    return {
+                        "retrieval_mode": "legacy",
+                        "grounding_phase": "fallback",
+                        "response_format": "bundle",
+                        "retrieval_feedback": "Contradiction found after grounded acceptance; fall back to legacy retrieval once.",
+                    }
+                if self._retrieval_trace.contradiction_retry_used and self._retrieval_trace.contradiction_legacy_used:
+                    return {
+                        "recovery_mode": "degraded_recovery",
+                        "preferred_next_step": "bounded_shell_inspection",
+                        "allowed_tools": ["terminal", "read_file"],
+                    }
+                return None
+            if self._symbolic_failures >= 2:
+                return {
+                    "retrieval_mode": "legacy",
+                    "grounding_phase": "fallback",
+                    "response_format": "bundle",
+                    "retrieval_feedback": "Symbolic seed searches returned no matches or poor coverage.",
+                }
+            suggested_queries = payload.get("suggested_queries")
+            if isinstance(suggested_queries, list) and suggested_queries:
+                query = next((str(item) for item in suggested_queries if str(item).strip()), None)
+                if query:
+                    return {
+                        "query": query,
+                        "retrieval_mode": "symbolic",
+                        "grounding_phase": "seed",
+                        "response_format": "bundle",
+                    }
+            return {
+                "retrieval_mode": "symbolic",
+                "grounding_phase": "seed",
+                "response_format": "bundle",
+            }
+        if self._retrieval_state == "context_read":
+            return {
+                "query": "confirm grounded source details",
+                "retrieval_mode": "symbolic",
+                "grounding_phase": "grounded",
+                "response_format": "bundle",
+                "grounded_symbols": list(self._grounded_symbols),
+                "grounded_files": list(self._grounded_files),
+                "requirement_analysis": self._requirement_analysis,
+                "template_family": self._template_family,
+                "retrieval_targets": self._retrieval_targets,
+                "test_plan": self._test_plan,
+            }
+        if self._retrieval_state == "grounded_retry":
+            return {
+                "retrieval_mode": str(metadata.get("retrieval_mode") or "symbolic"),
+                "grounding_phase": str(metadata.get("grounding_phase") or "seed"),
+                "response_format": "bundle",
+                "requirement_analysis": self._requirement_analysis,
+                "template_family": self._template_family,
+                "retrieval_targets": self._retrieval_targets,
+                "test_plan": self._test_plan,
+                "retrieval_feedback": self._retrieval_reason(payload),
+            }
+        if self._retrieval_state == "degraded_recovery":
+            return {
+                "recovery_mode": "degraded_recovery",
+                "preferred_next_step": "bounded_shell_inspection",
+                "allowed_tools": ["terminal", "read_file", "search_files"],
+                "retrieval_feedback": (
+                    "Symbolic and legacy retrieval returned weak context. "
+                    "Bounded shell inspection is allowed, but editing remains low-confidence "
+                    "until a file or symbol is grounded."
+                ),
+            }
+        return None
+
+    @staticmethod
+    def _retrieval_reason(payload: dict[str, Any]) -> str:
+        missing = payload.get("missing_context")
+        if isinstance(missing, list) and missing:
+            return str(missing[0])
+        if payload.get("coverage") == "poor":
+            return "coverage is poor"
+        matches = payload.get("matches")
+        if not matches:
+            return "no matches returned"
+        return "retrieval result accepted"
+
+    def _record_context_read(self, requested_path: str, result: Any) -> None:
+        if isinstance(result, dict):
+            path = str(result.get("path") or requested_path)
+        else:
+            path = requested_path
+        if path and path not in self._grounded_files:
+            self._grounded_files.append(path)
+        self._retrieval_state = "context_read"
+        self._sync_trace_state(state="context_read")
+        self._last_retrieval_decision = {
+            "decision": "context_read",
+            "grounded_files": list(self._grounded_files),
+            "accepted_targets": list(self._retrieval_trace.accepted_targets),
+            "exploration_closed": self._retrieval_trace.exploration_closed,
+            "retrieval_budget": self._retrieval_trace.retrieval_budget,
+            "next_state": "grounded_search",
+            "next_retrieval": {
+                "query": "confirm grounded source details",
+                "retrieval_mode": "symbolic",
+                "grounding_phase": "grounded",
+                "response_format": "bundle",
+                "grounded_symbols": list(self._grounded_symbols),
+                "grounded_files": list(self._grounded_files),
+                "requirement_analysis": self._requirement_analysis,
+                "template_family": self._template_family,
+                "retrieval_targets": self._retrieval_targets,
+                "test_plan": self._test_plan,
+            },
+        }
+
+    @staticmethod
+    def _extract_symbolic_prompt_sections(symbolic_prompt: str) -> list[str]:
+        sections = []
+        for label in ("Formal Semantics:", "Constraints:", "Retrieval Strategy:", "Retrieved Facts:"):
+            if label in symbolic_prompt:
+                sections.append(label[:-1])
+        return sections
+
+    @staticmethod
+    def _classify_constraints_quality(symbolic_prompt: str) -> str:
+        if "Constraints:" not in symbolic_prompt:
+            return "missing"
+        after = symbolic_prompt.split("Constraints:", 1)[1]
+        for next_label in ("Retrieval Strategy:", "Retrieved Facts:"):
+            if next_label in after:
+                after = after.split(next_label, 1)[0]
+                break
+        text = after.strip()
+        return "thin" if len(text) < 20 else "present"
+
+    @staticmethod
+    def _extract_bundle_must_edit(bundle: Any) -> list[str]:
+        if not isinstance(bundle, dict):
+            return []
+        candidates = bundle.get("must_edit")
+        if candidates is None:
+            candidates = bundle.get("must_edit_files")
+        if candidates is None and isinstance(bundle.get("edit_targets"), dict):
+            candidates = bundle["edit_targets"].get("must_edit")
+        if isinstance(candidates, str):
+            return [candidates]
+        if isinstance(candidates, list):
+            paths = []
+            for item in candidates:
+                if isinstance(item, str):
+                    paths.append(item)
+                elif isinstance(item, dict):
+                    path = item.get("path") or item.get("file")
+                    if path:
+                        paths.append(str(path))
+            return paths
+        return []
+
+    @staticmethod
+    def _extract_match_files(matches: Any) -> list[str]:
+        if not isinstance(matches, list):
+            return []
+        paths = []
+        for match in matches:
+            if isinstance(match, str):
+                path = match
+            elif isinstance(match, dict):
+                path = match.get("path") or match.get("file") or match.get("filepath")
+            else:
+                path = None
+            if path:
+                path = str(path)
+                if path not in paths:
+                    paths.append(path)
+        return paths
+
+    @staticmethod
+    def _extract_bundle_primary_files(bundle: Any) -> list[str]:
+        if not isinstance(bundle, dict):
+            return []
+        candidates = bundle.get("primary_files")
+        if candidates is None:
+            candidates = bundle.get("primary")
+        if candidates is None and isinstance(bundle.get("files"), dict):
+            candidates = bundle["files"].get("primary")
+        if isinstance(candidates, str):
+            return [candidates]
+        if isinstance(candidates, list):
+            paths = []
+            for item in candidates:
+                if isinstance(item, str):
+                    path = item
+                elif isinstance(item, dict):
+                    path = item.get("path") or item.get("file")
+                else:
+                    path = None
+                if path:
+                    path = str(path)
+                    if path not in paths:
+                        paths.append(path)
+            return paths
+        return []
+
+    @staticmethod
+    def _extract_test_plan_files(test_plan: Any) -> list[str]:
+        if not isinstance(test_plan, dict):
+            return []
+        candidates: list[Any] = []
+        for key in ("files", "file_paths", "paths", "read_files", "targets", "target_files"):
+            value = test_plan.get(key)
+            if value is not None:
+                candidates.append(value)
+        paths: list[str] = []
+        for candidate in candidates:
+            if isinstance(candidate, str):
+                if candidate not in paths:
+                    paths.append(candidate)
+            elif isinstance(candidate, list):
+                for item in candidate:
+                    if isinstance(item, str) and item not in paths:
+                        paths.append(item)
+                    elif isinstance(item, dict):
+                        path = item.get("path") or item.get("file") or item.get("filepath")
+                        if path:
+                            path = str(path)
+                            if path not in paths:
+                                paths.append(path)
+            elif isinstance(candidate, dict):
+                path = candidate.get("path") or candidate.get("file") or candidate.get("filepath")
+                if path:
+                    path = str(path)
+                    if path not in paths:
+                        paths.append(path)
+        return paths
+
+    def _sync_trace_state(self, *, state: Optional[str] = None) -> None:
+        if state is not None:
+            self._retrieval_state = state
+            self._retrieval_trace.state = state
+        self._retrieval_trace.exploration_closed = bool(self._retrieval_trace.accepted_targets)
+
+    def _set_accepted_targets(self, targets: list[str], *, test_plan_files: list[str] | None = None) -> None:
+        seen: list[str] = []
+        for target in targets:
+            target = str(target).strip()
+            if target and target not in seen:
+                seen.append(target)
+        self._retrieval_trace.accepted_targets = seen
+        if test_plan_files is not None:
+            seen_test: list[str] = []
+            for path in test_plan_files:
+                path = str(path).strip()
+                if path and path not in seen_test:
+                    seen_test.append(path)
+            self._retrieval_trace.test_plan_files = seen_test
+        self._retrieval_trace.exploration_closed = bool(self._retrieval_trace.accepted_targets)
+
+    def _is_context_read_allowed(self, path: str) -> bool:
+        if not self._retrieval_trace.exploration_closed and not self._retrieval_trace.accepted_targets:
+            return True
+        accepted = set(self._retrieval_trace.accepted_targets)
+        test_plan_files = set(self._retrieval_trace.test_plan_files)
+        return path in accepted or path in test_plan_files
+
+    def _has_contradiction(self, payload: dict[str, Any], metadata: dict[str, Any]) -> bool:
+        if self._target_conflict or self._target_changed_after_grounding:
+            return True
+        feedback = " ".join(
+            str(value)
+            for value in (
+                payload.get("retrieval_feedback"),
+                metadata.get("retrieval_feedback"),
+                payload.get("missing_context"),
+                payload.get("coverage"),
+            )
+            if value is not None
+        ).lower()
+        if "contradict" in feedback or "conflict" in feedback or "inconsisten" in feedback:
+            return True
+        diagnostics = payload.get("diagnostics")
+        if isinstance(diagnostics, dict):
+            diag_blob = json.dumps(diagnostics, ensure_ascii=False).lower()
+            if "contradict" in diag_blob or "conflict" in diag_blob or "inconsisten" in diag_blob:
+                return True
+        return False
+
+    @staticmethod
+    def _is_broad_discovery_command(command: str) -> bool:
+        text = " ".join(str(command or "").split()).lower()
+        if not text:
+            return False
+        patterns = (
+            "grep ",
+            " find ",
+            " fd ",
+            " rg ",
+            "git grep",
+            "ack ",
+            "ag ",
+        )
+        if any(pattern in f" {text} " for pattern in patterns):
+            return True
+        return text.startswith("find ") or text.startswith("grep ") or text.startswith("rg ")
+
+    def _select_preferred_edit_targets(self) -> list[str]:
+        if self._grounded_files:
+            return list(self._grounded_files)
+        if self._direct_match_files:
+            return list(self._direct_match_files)
+        if self._bundle_primary_files:
+            return list(self._bundle_primary_files)
+        if isinstance(self._retrieval_targets, list):
+            return [str(target) for target in self._retrieval_targets if str(target).strip()]
+        return list(self._bundle_must_edit)
+
+    def get_retrieval_status(self) -> dict[str, Any]:
+        return {
+            "retrieval_state": self._retrieval_state,
+            "retrieval_status": self._retrieval_status(),
+            "coding_status": "unverified",
+            "retrieval_trace": self._retrieval_trace.to_dict(),
+            "retrieval_budget": self._retrieval_trace.retrieval_budget,
+            "symbolic_failures": self._symbolic_failures,
+            "seed_calls": self._retrieval_trace.seed_calls,
+            "retry_calls": self._retrieval_trace.retry_calls,
+            "grounded_calls": self._retrieval_trace.grounded_calls,
+            "legacy_calls": self._retrieval_trace.legacy_calls,
+            "legacy_attempted": self._legacy_attempted,
+            "grounded_symbols": list(self._grounded_symbols),
+            "grounded_files": list(self._grounded_files),
+            "accepted_targets": list(self._retrieval_trace.accepted_targets),
+            "exploration_closed": self._retrieval_trace.exploration_closed,
+            "blocked_tool_reason": self._retrieval_trace.blocked_tool_reason,
+            "test_plan_files": list(self._retrieval_trace.test_plan_files),
+            "suggested_queries": list(self._last_suggested_queries),
+            "requirement_analysis": self._requirement_analysis,
+            "template_family": self._template_family,
+            "retrieval_targets": self._retrieval_targets,
+            "test_plan": self._test_plan,
+            "symbolic_prompt_present": self._symbolic_prompt_present,
+            "symbolic_prompt_sections": list(self._symbolic_prompt_sections),
+            "symbolic_prompt_missing": self._symbolic_prompt_missing,
+            "constraints_present": self._constraints_present,
+            "constraints_quality": self._constraints_quality,
+            "direct_match_files": list(self._direct_match_files),
+            "bundle_primary_files": list(self._bundle_primary_files),
+            "bundle_must_edit": list(self._bundle_must_edit),
+            "preferred_edit_targets": list(self._preferred_edit_targets),
+            "target_conflict": self._target_conflict,
+            "target_changed_after_grounding": self._target_changed_after_grounding,
+            "last_decision": dict(self._last_retrieval_decision),
+            "last_gate_failure": dict(self._last_gate_failure),
+        }
+
+    def _retrieval_status(self) -> str:
+        if self._retrieval_state in {"grounded", "context_read", "inspect_candidates"}:
+            return "good"
+        if self._retrieval_state == "legacy_fallback":
+            return "legacy_fallback"
+        if self._retrieval_state == "degraded_recovery":
+            return "failed"
+        return "weak"
+
+    def _gate_block(self, tool_name: str, message: str) -> str:
+        self._last_gate_failure = {
+            "tool_name": tool_name,
+            "retrieval_state": self._retrieval_state,
+            "retrieval_status": self._retrieval_status(),
+            "message": message,
+        }
+        self._retrieval_trace.blocked_tool_reason = message
+        logger.info(
+            "Retrieval gate blocked tool=%s state=%s status=%s",
+            tool_name,
+            self._retrieval_state,
+            self._retrieval_status(),
+        )
+        return message
+
+    def get_tool_block_message(self, tool_name: str, args: dict[str, Any] | None = None) -> str | None:
+        """Return a block message when a non-retrieval tool would bypass grounding."""
+        if tool_name == "context_search":
+            return None
+
+        args = args or {}
+        if tool_name == "context_read":
+            requested_path = str(args.get("path") or "").strip()
+            if self._is_context_read_allowed(requested_path):
+                return None
+            return self._gate_block(tool_name, (
+                "Retrieval gate active: context_read is limited to accepted targets or test-plan files "
+                "after a grounded target has been accepted."
+            ))
+
+        read_or_discovery_tools = {
+            "terminal",
+            "read_file",
+            "search_files",
+        }
+        edit_or_execution_tools = {
+            "write_file",
+            "patch",
+            "execute_code",
+        }
+        gated_tools = read_or_discovery_tools | edit_or_execution_tools
+        if tool_name not in gated_tools:
+            return None
+
+        if tool_name == "read_file":
+            requested_path = str(args.get("path") or "").strip()
+            if self._is_context_read_allowed(requested_path):
+                return None
+            return self._gate_block(tool_name, (
+                "Retrieval gate active: read_file is limited to accepted targets or test-plan files "
+                "after a grounded target has been accepted."
+            ))
+        if tool_name == "search_files" and self._retrieval_trace.exploration_closed:
+            return self._gate_block(tool_name, (
+                "Retrieval gate active: accepted targets close exploration; search_files is blocked "
+                "to prevent alternative-file searches."
+            ))
+        if tool_name == "terminal" and self._retrieval_trace.exploration_closed:
+            command = str(args.get("command") or args.get("cmd") or "")
+            if self._is_broad_discovery_command(command):
+                return self._gate_block(tool_name, (
+                    "Retrieval gate active: accepted targets close exploration; broad grep/find/search "
+                    "commands are blocked."
+                ))
+
+        if self._retrieval_state == "not_started":
+            return self._gate_block(tool_name, (
+                "Retrieval gate active: call context_search first with "
+                "metadata.retrieval_mode='symbolic' and metadata.grounding_phase='seed'."
+            ))
+        if self._retrieval_state in {"retry", "grounded_retry"}:
+            if self._retrieval_state == "retry" and self._symbolic_failures >= 2:
+                retry_message = (
+                    "Fallback context_search is required with metadata.retrieval_mode='legacy' "
+                    "and metadata.grounding_phase='fallback'."
+                )
+            elif self._last_suggested_queries:
+                retry_message = (
+                    "Retry context_search using one of suggested_queries before shell/file exploration."
+                )
+            else:
+                retry_message = (
+                    "Retry context_search with a narrower query before shell/file exploration."
+                )
+            return self._gate_block(tool_name, (
+                "Retrieval gate active: the last context_search result was weak. "
+                f"{retry_message}"
+            ))
+        if self._retrieval_state == "inspect_candidates":
+            return self._gate_block(tool_name, (
+                "Retrieval gate active: use context_read on a candidate file/span before "
+                "shell/file exploration or editing."
+            ))
+        if self._retrieval_state == "context_read":
+            if tool_name in read_or_discovery_tools:
+                return None
+            return self._gate_block(tool_name, (
+                "Retrieval gate active: context_read unlocked direct inspection, but editing "
+                "requires a grounded_search context_search with metadata.grounding_phase='grounded' "
+                "and grounded_files/grounded_symbols."
+            ))
+        if self._retrieval_state == "degraded_recovery":
+            if tool_name in read_or_discovery_tools:
+                return None
+            return self._gate_block(tool_name, (
+                "Retrieval gate active: symbolic and legacy retrieval both failed. "
+                "Bounded shell inspection is allowed in degraded_recovery, but editing "
+                "requires grounded evidence from a relevant file or symbol."
+            ))
+        if self._retrieval_state in {"grounded", "legacy_fallback"}:
+            return None
+        return None
 
     async def _compress_async(
         self,

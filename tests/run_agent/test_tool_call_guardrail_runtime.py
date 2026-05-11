@@ -42,6 +42,8 @@ def _make_agent(*tool_names: str, max_iterations: int = 10, config: dict | None 
         patch("run_agent.check_toolset_requirements", return_value={}),
         patch("hermes_cli.config.load_config", return_value=config or {}),
         patch("run_agent.OpenAI"),
+        patch("hermes_logging.setup_logging"),
+        patch("run_agent.fetch_model_metadata"),
     ):
         agent = AIAgent(
             api_key="test-key-1234567890",
@@ -207,6 +209,52 @@ def test_plugin_pre_tool_block_wins_without_counting_as_toolguard_block():
     assert agent._tool_guardrails.before_call("web_search", args).action == "allow"
 
 
+def test_context_engine_gate_blocks_terminal_before_retrieval_is_valid():
+    agent = _make_agent("terminal", "read_file")
+    agent.context_compressor = SimpleNamespace(
+        get_tool_block_message=lambda name, args=None: (
+            "Retrieval gate active: call context_search first"
+            if name == "terminal"
+            else None
+        )
+    )
+
+    with patch("run_agent.handle_function_call", return_value="SHOULD_NOT_RUN") as mock_hfc:
+        result = agent._invoke_tool(
+            "terminal",
+            {"command": "ls"},
+            "task-1",
+            tool_call_id="tc-1",
+            pre_tool_block_checked=True,
+        )
+
+    assert json.loads(result)["error"].startswith("Retrieval gate active")
+    mock_hfc.assert_not_called()
+
+
+def test_context_engine_gate_blocks_read_file_until_grounded_search_completes():
+    agent = _make_agent("terminal", "read_file")
+    agent.context_compressor = SimpleNamespace(
+        get_tool_block_message=lambda name, args=None: (
+            "Retrieval gate active: run a grounded context_search first"
+            if name == "read_file"
+            else None
+        )
+    )
+
+    with patch("run_agent.handle_function_call", return_value="SHOULD_NOT_RUN") as mock_hfc:
+        result = agent._invoke_tool(
+            "read_file",
+            {"path": "README.md"},
+            "task-1",
+            tool_call_id="tc-2",
+            pre_tool_block_checked=True,
+        )
+
+    assert "Retrieval gate active" in json.loads(result)["error"]
+    mock_hfc.assert_not_called()
+
+
 def test_default_run_conversation_warns_without_guardrail_halt():
     agent = _make_agent("web_search", max_iterations=10)
     same_args = {"query": "same"}
@@ -235,6 +283,33 @@ def test_default_run_conversation_warns_without_guardrail_halt():
     assert result["final_response"] == "done"
     tool_contents = [m["content"] for m in result["messages"] if m.get("role") == "tool"]
     assert any("repeated_exact_failure_warning" in content for content in tool_contents)
+
+
+def test_run_conversation_exposes_retrieval_and_coding_status():
+    agent = _make_agent("web_search", max_iterations=3)
+    agent.context_compressor = SimpleNamespace(
+        get_retrieval_status=lambda: {
+            "retrieval_status": "failed",
+            "coding_status": "unverified",
+            "retrieval_state": "degraded_recovery",
+        }
+    )
+    agent.client.chat.completions.create.return_value = _mock_response(
+        content="done",
+        finish_reason="stop",
+        tool_calls=None,
+    )
+
+    with (
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("summarize status")
+
+    assert result["retrieval_status"] == "failed"
+    assert result["coding_status"] == "unverified"
+    assert result["retrieval_details"]["retrieval_state"] == "degraded_recovery"
 
 
 def test_config_enabled_hard_stop_run_conversation_returns_controlled_guardrail_halt_without_top_level_error():
