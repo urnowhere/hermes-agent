@@ -91,6 +91,8 @@ class FormsyContextEngine(ContextEngine):
         self._target_conflict: bool = False
         self._last_retrieval_decision: dict[str, Any] = {}
         self._last_gate_failure: dict[str, Any] = {}
+        self._grounded_search_required: bool = False
+        self._test_plan_commands: list[str] = []
 
         self.last_prompt_tokens = 0
         self.last_completion_tokens = 0
@@ -406,6 +408,11 @@ class FormsyContextEngine(ContextEngine):
             "grounded_symbols",
             "grounded_files",
             "retrieval_feedback",
+            "retrieval_state",
+            "preferred_next_step",
+            "accepted_targets",
+            "exploration_closed",
+            "blocked_tool_reason",
         ):
             if key in result:
                 payload[key] = result[key]
@@ -600,10 +607,26 @@ class FormsyContextEngine(ContextEngine):
         self._target_conflict = False
         self._last_retrieval_decision = {}
         self._last_gate_failure = {}
+        self._grounded_search_required = False
+        self._test_plan_commands = []
 
     @staticmethod
     def _has_useful_matches(matches: Any) -> bool:
         return isinstance(matches, list) and len(matches) > 0
+
+    @staticmethod
+    def _coerce_string_list(value: Any) -> list[str]:
+        if isinstance(value, str):
+            text = value.strip()
+            return [text] if text else []
+        if not isinstance(value, list):
+            return []
+        items: list[str] = []
+        for item in value:
+            text = str(item).strip()
+            if text and text not in items:
+                items.append(text)
+        return items
 
     def _record_context_search_result(
         self,
@@ -616,6 +639,11 @@ class FormsyContextEngine(ContextEngine):
     ) -> None:
         mode = str(metadata.get("retrieval_mode") or "symbolic").strip().lower()
         phase = str(metadata.get("grounding_phase") or "seed").strip().lower()
+        server_state = str(payload.get("retrieval_state") or "").strip().lower()
+        server_preferred_next = str(payload.get("preferred_next_step") or "").strip()
+        server_accepted_targets = self._coerce_string_list(payload.get("accepted_targets"))
+        server_exploration_closed = bool(payload.get("exploration_closed"))
+        server_blocked_reason = str(payload.get("blocked_tool_reason") or "").strip()
         suggested_queries = payload.get("suggested_queries")
         if isinstance(suggested_queries, list):
             self._last_suggested_queries = [str(query) for query in suggested_queries if str(query).strip()]
@@ -634,9 +662,24 @@ class FormsyContextEngine(ContextEngine):
         self._constraints_quality = self._classify_constraints_quality(str(payload.get("symbolic_prompt") or ""))
         useful = coverage != "poor" and self._has_useful_matches(matches)
         legacy_useful = coverage != "poor" and (self._has_useful_matches(matches) or bool(payload.get("extra_context")))
-        grounded_symbols = list(metadata.get("grounded_symbols") or [])
-        grounded_files = list(metadata.get("grounded_files") or [])
-        has_grounded_evidence = bool(grounded_symbols or grounded_files or self._grounded_symbols or self._grounded_files)
+        grounded_symbols = (
+            self._coerce_string_list(payload.get("grounded_symbols"))
+            or self._coerce_string_list(metadata.get("grounded_symbols"))
+        )
+        grounded_files = (
+            self._coerce_string_list(payload.get("grounded_files"))
+            or self._coerce_string_list(metadata.get("grounded_files"))
+        )
+        has_grounded_evidence = bool(
+            grounded_symbols
+            or grounded_files
+            or server_accepted_targets
+            or self._grounded_symbols
+            or self._grounded_files
+            or self._direct_match_files
+            or self._bundle_primary_files
+            or self._bundle_must_edit
+        )
         previous_targets = list(self._preferred_edit_targets or self._grounded_files or [])
         test_plan_files = self._extract_test_plan_files(payload.get("test_plan") or self._test_plan)
         if test_plan_files:
@@ -645,7 +688,9 @@ class FormsyContextEngine(ContextEngine):
         self._bundle_must_edit = self._extract_bundle_must_edit(payload.get("bundle"))
         self._bundle_primary_files = self._extract_bundle_primary_files(payload.get("bundle"))
         candidate_targets = (
-            grounded_files
+            server_accepted_targets
+            if server_exploration_closed and server_accepted_targets
+            else grounded_files
             or list(self._grounded_files)
             or list(self._direct_match_files)
             or list(self._bundle_primary_files)
@@ -658,9 +703,17 @@ class FormsyContextEngine(ContextEngine):
             )
             or list(self._bundle_must_edit)
         )
+        stronger_target_evidence = bool(
+            server_accepted_targets
+            or grounded_files
+            or self._grounded_files
+            or self._direct_match_files
+            or self._bundle_primary_files
+        )
         candidate_target_conflict = bool(
             self._bundle_must_edit
             and candidate_targets
+            and not stronger_target_evidence
             and set(self._bundle_must_edit) != set(candidate_targets)
         )
         candidate_target_changed = (
@@ -668,10 +721,18 @@ class FormsyContextEngine(ContextEngine):
             and bool(previous_targets)
             and set(previous_targets) != set(candidate_targets)
         )
+        if server_exploration_closed and server_accepted_targets:
+            candidate_target_conflict = False
+            candidate_target_changed = False
         contradiction_found = (
             candidate_target_conflict
             or candidate_target_changed
             or self._has_contradiction(payload, metadata)
+        )
+        grounded_useful = bool(
+            coverage != "poor"
+            and has_grounded_evidence
+            and candidate_targets
         )
         is_first_symbolic_seed = mode != "legacy" and phase != "grounded" and self._retrieval_trace.seed_calls == 0
 
@@ -693,7 +754,7 @@ class FormsyContextEngine(ContextEngine):
         elif phase == "grounded":
             self._grounded_search_count += 1
             self._retrieval_trace.grounded_calls += 1
-            if has_grounded_evidence and useful and not contradiction_found:
+            if grounded_useful and not contradiction_found:
                 self._grounded_symbols = grounded_symbols or list(self._grounded_symbols)
                 self._grounded_files = grounded_files or list(self._grounded_files)
                 self._retrieval_state = "grounded"
@@ -740,9 +801,22 @@ class FormsyContextEngine(ContextEngine):
             value = payload.get(key)
             if value is not None:
                 setattr(self, f"_{key}", value)
+        self._test_plan_commands = self._extract_test_plan_commands(self._test_plan)
         self._preferred_edit_targets = self._select_preferred_edit_targets()
         self._target_conflict = candidate_target_conflict
         self._target_changed_after_grounding = candidate_target_changed
+        if server_exploration_closed and server_accepted_targets:
+            self._set_accepted_targets(server_accepted_targets, test_plan_files=test_plan_files)
+            self._grounded_files = list(server_accepted_targets)
+            if server_state:
+                self._retrieval_state = server_state
+            if server_preferred_next:
+                preferred_next = server_preferred_next
+            elif self._retrieval_state == "grounded":
+                preferred_next = "edit"
+            if server_blocked_reason:
+                self._retrieval_trace.blocked_tool_reason = server_blocked_reason
+            self._preferred_edit_targets = self._select_preferred_edit_targets()
         self._sync_trace_state(state=self._retrieval_state)
 
         next_retrieval = self._next_retrieval_hint(metadata=metadata, payload=payload)
@@ -886,6 +960,7 @@ class FormsyContextEngine(ContextEngine):
         if path and path not in self._grounded_files:
             self._grounded_files.append(path)
         self._retrieval_state = "context_read"
+        self._grounded_search_required = True
         self._sync_trace_state(state="context_read")
         self._last_retrieval_decision = {
             "decision": "context_read",
@@ -1028,6 +1103,28 @@ class FormsyContextEngine(ContextEngine):
                         paths.append(path)
         return paths
 
+    @staticmethod
+    def _extract_test_plan_commands(test_plan: Any) -> list[str]:
+        if not isinstance(test_plan, dict):
+            return []
+        commands: list[str] = []
+        direct = test_plan.get("commands")
+        if isinstance(direct, list):
+            for item in direct:
+                if isinstance(item, str) and item.strip() and item not in commands:
+                    commands.append(item)
+        phases = test_plan.get("phases")
+        if isinstance(phases, list):
+            for phase in phases:
+                if not isinstance(phase, dict):
+                    continue
+                phase_commands = phase.get("commands")
+                if isinstance(phase_commands, list):
+                    for item in phase_commands:
+                        if isinstance(item, str) and item.strip() and item not in commands:
+                            commands.append(item)
+        return commands
+
     def _sync_trace_state(self, *, state: Optional[str] = None) -> None:
         if state is not None:
             self._retrieval_state = state
@@ -1055,7 +1152,40 @@ class FormsyContextEngine(ContextEngine):
             return True
         accepted = set(self._retrieval_trace.accepted_targets)
         test_plan_files = set(self._retrieval_trace.test_plan_files)
-        return path in accepted or path in test_plan_files
+        if path in accepted or path in test_plan_files:
+            return True
+        if path.startswith("tests/") and self._retrieval_state in {"grounded", "context_read"}:
+            return True
+        return False
+
+    def _is_context_read_phase_terminal_allowed(self, command: str) -> bool:
+        text = " ".join(str(command or "").split()).lower()
+        if not text:
+            return False
+        if self._is_broad_discovery_command(text):
+            return False
+        if any(marker in text for marker in ("cat >", "<<", "tee ", ".write(", "open(")):
+            return False
+        if text.startswith("python tests/runtests.py") or " python tests/runtests.py" in text:
+            return True
+        allowed_snippets = (
+            "pytest ",
+            "git diff",
+            "git status",
+            "cat ",
+            "sed -n",
+        )
+        return any(snippet in text for snippet in allowed_snippets)
+
+    def _matches_test_plan_command(self, command: str) -> bool:
+        text = " ".join(str(command or "").split()).strip().lower()
+        if not text:
+            return False
+        for planned in self._test_plan_commands:
+            planned_text = " ".join(str(planned).split()).strip().lower()
+            if planned_text and (text == planned_text or text.startswith(planned_text)):
+                return True
+        return False
 
     def _has_contradiction(self, payload: dict[str, Any], metadata: dict[str, Any]) -> bool:
         if self._target_conflict or self._target_changed_after_grounding:
@@ -1175,6 +1305,23 @@ class FormsyContextEngine(ContextEngine):
     def get_tool_block_message(self, tool_name: str, args: dict[str, Any] | None = None) -> str | None:
         """Return a block message when a non-retrieval tool would bypass grounding."""
         if tool_name == "context_search":
+            args = args or {}
+            if self._grounded_search_required:
+                metadata = args.get("metadata") if isinstance(args.get("metadata"), dict) else {}
+                mode = str(metadata.get("retrieval_mode") or args.get("retrieval_mode") or "").strip().lower()
+                phase = str(metadata.get("grounding_phase") or args.get("grounding_phase") or "").strip().lower()
+                if phase == "grounded" and mode in {"", "symbolic"}:
+                    return None
+                return self._gate_block(tool_name, (
+                    "Retrieval gate active: context_read requires exactly one grounded "
+                    "context_search next, with metadata.grounding_phase='grounded'."
+                ))
+            if self._retrieval_trace.exploration_closed:
+                return self._gate_block(tool_name, (
+                    "Retrieval gate active: accepted targets close exploration; additional "
+                    "context_search calls are blocked. Continue with accepted-target reads, "
+                    "editing, or tests."
+                ))
             return None
 
         args = args or {}
@@ -1216,10 +1363,12 @@ class FormsyContextEngine(ContextEngine):
             ))
         if tool_name == "terminal" and self._retrieval_trace.exploration_closed:
             command = str(args.get("command") or args.get("cmd") or "")
+            if self._test_plan_commands and self._matches_test_plan_command(command):
+                return None
             if self._is_broad_discovery_command(command):
                 return self._gate_block(tool_name, (
-                    "Retrieval gate active: accepted targets close exploration; broad grep/find/search "
-                    "commands are blocked."
+                    "Retrieval gate active: accepted targets plus server test plan are available; "
+                    "broad grep/find/search commands are blocked."
                 ))
 
         if self._retrieval_state == "not_started":
@@ -1251,12 +1400,16 @@ class FormsyContextEngine(ContextEngine):
                 "shell/file exploration or editing."
             ))
         if self._retrieval_state == "context_read":
-            if tool_name in read_or_discovery_tools:
+            if tool_name in {"read_file", "context_read"}:
                 return None
+            if tool_name == "terminal":
+                command = str(args.get("command") or args.get("cmd") or "")
+                if self._is_context_read_phase_terminal_allowed(command):
+                    return None
             return self._gate_block(tool_name, (
-                "Retrieval gate active: context_read unlocked direct inspection, but editing "
-                "requires a grounded_search context_search with metadata.grounding_phase='grounded' "
-                "and grounded_files/grounded_symbols."
+                "Retrieval gate active: context_read requires exactly one grounded context_search "
+                "before repro, broad terminal exploration, or editing. Only narrow target "
+                "inspection or targeted test commands are allowed in this phase."
             ))
         if self._retrieval_state == "degraded_recovery":
             if tool_name in read_or_discovery_tools:
@@ -1267,6 +1420,7 @@ class FormsyContextEngine(ContextEngine):
                 "requires grounded evidence from a relevant file or symbol."
             ))
         if self._retrieval_state in {"grounded", "legacy_fallback"}:
+            self._grounded_search_required = False
             return None
         return None
 

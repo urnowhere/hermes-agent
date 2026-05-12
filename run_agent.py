@@ -9418,11 +9418,56 @@ class AIAgent:
             function_result,
             failed=failed,
         )
+        retrieval_status = None
+        try:
+            if self.context_compressor and hasattr(self.context_compressor, "get_retrieval_status"):
+                retrieval_status = self.context_compressor.get_retrieval_status()
+        except Exception:
+            retrieval_status = None
+        if (
+            decision.action == "warn"
+            and decision.code == "idempotent_no_progress_warning"
+            and decision.count >= 3
+        ):
+            try:
+                if isinstance(retrieval_status, dict) and (
+                    retrieval_status.get("exploration_closed")
+                    or retrieval_status.get("retrieval_state") in {"context_read", "grounded"}
+                ):
+                    decision = ToolGuardrailDecision(
+                        action="halt",
+                        code="idempotent_no_progress_halt",
+                        message=(
+                            f"Stopped {tool_name}: it returned the same result {decision.count} "
+                            "times while retrieval was already grounded enough for direct "
+                            "inspection. Stop repeating the same inspection command and change strategy."
+                        ),
+                        tool_name=tool_name,
+                        count=decision.count,
+                        signature=decision.signature,
+                    )
+                    self._set_tool_guardrail_halt(decision)
+            except Exception:
+                pass
         if decision.action in {"warn", "halt"}:
             function_result = append_toolguard_guidance(function_result, decision)
         if decision.should_halt:
             self._set_tool_guardrail_halt(decision)
         return function_result
+
+    @staticmethod
+    def _is_retrieval_gate_blocked_result(function_result: str) -> bool:
+        if not function_result:
+            return False
+        try:
+            parsed = json.loads(function_result)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            error = str(parsed.get("error") or "")
+            if error.startswith("Retrieval gate active"):
+                return True
+        return "Retrieval gate active" in function_result
 
     def _guardrail_block_result(self, decision: ToolGuardrailDecision) -> str:
         self._set_tool_guardrail_halt(decision)
@@ -9717,7 +9762,7 @@ class AIAgent:
         results = [None] * num_tools
         for i, (tc, name, args, block_result, blocked_by_guardrail) in enumerate(parsed_calls):
             if block_result is not None:
-                results[i] = (name, args, block_result, 0.0, True, True)
+                results[i] = (name, args, block_result, 0.0, True, blocked_by_guardrail)
 
         # Touch activity before launching workers so the gateway knows
         # we're executing tools (not stuck).
@@ -9886,7 +9931,7 @@ class AIAgent:
         # ── Post-execution: display per-tool results ─────────────────────
         for i, (tc, name, args, block_result, blocked_by_guardrail) in enumerate(parsed_calls):
             r = results[i]
-            blocked = False
+            blocked_by_guardrail = False
             if r is None:
                 # Tool was cancelled (interrupt) or thread didn't return
                 if self._interrupt_requested:
@@ -9895,9 +9940,9 @@ class AIAgent:
                     function_result = f"Error executing tool '{name}': thread did not return a result"
                 tool_duration = 0.0
             else:
-                function_name, function_args, function_result, tool_duration, is_error, blocked = r
+                function_name, function_args, function_result, tool_duration, is_error, blocked_by_guardrail = r
 
-                if not blocked:
+                if not blocked_by_guardrail:
                     function_result = self._append_guardrail_observation(
                         function_name,
                         function_args,
@@ -9909,7 +9954,7 @@ class AIAgent:
                     result_preview = function_result[:200] if len(function_result) > 200 else function_result
                     logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
 
-                if not blocked and self.tool_progress_callback:
+                if not blocked_by_guardrail and self.tool_progress_callback:
                     try:
                         self.tool_progress_callback(
                             "tool.completed", function_name, None, None,
@@ -9937,7 +9982,7 @@ class AIAgent:
             self._current_tool = None
             self._touch_activity(f"tool completed: {name} ({tool_duration:.1f}s)")
 
-            if not blocked and self.tool_complete_callback:
+            if not blocked_by_guardrail and self.tool_complete_callback:
                 try:
                     self.tool_complete_callback(tc.id, name, args, function_result)
                 except Exception as cb_err:
@@ -10032,7 +10077,8 @@ class AIAgent:
                 if ce_block_message is not None:
                     _block_msg = ce_block_message
 
-            _execution_blocked = _block_msg is not None or _guardrail_block_decision is not None
+            _blocked_by_guardrail = _guardrail_block_decision is not None
+            _execution_blocked = _block_msg is not None or _blocked_by_guardrail
 
             if _execution_blocked:
                 # Tool blocked by plugin or guardrail policy — skip counters,
@@ -10305,6 +10351,16 @@ class AIAgent:
                     function_args,
                     function_result,
                     failed=_is_error_result,
+                )
+                result_preview = function_result if self.verbose_logging else (
+                    function_result[:200] if len(function_result) > 200 else function_result
+                )
+            elif not _blocked_by_guardrail:
+                function_result = self._append_guardrail_observation(
+                    function_name,
+                    function_args,
+                    function_result,
+                    failed=True,
                 )
                 result_preview = function_result if self.verbose_logging else (
                     function_result[:200] if len(function_result) > 200 else function_result

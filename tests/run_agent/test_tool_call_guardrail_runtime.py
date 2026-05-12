@@ -255,6 +255,151 @@ def test_context_engine_gate_blocks_read_file_until_grounded_search_completes():
     mock_hfc.assert_not_called()
 
 
+def test_repeated_read_file_after_exploration_closed_halts_without_hard_stop():
+    agent = _make_agent("read_file", max_iterations=10)
+    agent.context_compressor = SimpleNamespace(
+        last_prompt_tokens=0,
+        should_compress=lambda *_args, **_kwargs: False,
+        get_retrieval_status=lambda: {
+            "retrieval_status": "good",
+            "retrieval_state": "grounded",
+            "exploration_closed": True,
+        }
+    )
+    responses = [
+        _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[_mock_tool_call("read_file", json.dumps({"path": "django/contrib/staticfiles/storage.py"}), f"r{i}")],
+        )
+        for i in range(1, 6)
+    ]
+    agent.client.chat.completions.create.side_effect = responses
+
+    repeated_result = "same file contents"
+    with (
+        patch("run_agent.handle_function_call", return_value=repeated_result) as mock_hfc,
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("inspect the same file repeatedly")
+
+    assert mock_hfc.call_count == 3
+    assert result["turn_exit_reason"] == "guardrail_halt"
+    assert result["guardrail"]["code"] == "idempotent_no_progress_halt"
+    assert "stopped retrying read_file" in result["final_response"].lower()
+
+
+def test_repeated_read_only_terminal_after_exploration_closed_halts_without_hard_stop():
+    agent = _make_agent("terminal", max_iterations=10)
+    agent.context_compressor = SimpleNamespace(
+        last_prompt_tokens=0,
+        should_compress=lambda *_args, **_kwargs: False,
+        get_retrieval_status=lambda: {
+            "retrieval_status": "good",
+            "retrieval_state": "grounded",
+            "exploration_closed": True,
+        },
+    )
+    args = {"command": "PYTHONPATH=/tmp python -c \"print('same output')\""}
+    responses = [
+        _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[_mock_tool_call("terminal", json.dumps(args), f"t{i}")],
+        )
+        for i in range(1, 6)
+    ]
+    agent.client.chat.completions.create.side_effect = responses
+
+    with (
+        patch("run_agent.handle_function_call", return_value="same output") as mock_hfc,
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("verify the same command output")
+
+    assert mock_hfc.call_count == 3
+    assert result["turn_exit_reason"] == "guardrail_halt"
+    assert result["guardrail"]["code"] == "idempotent_no_progress_halt"
+    assert "stopped retrying terminal" in result["final_response"].lower()
+
+
+def test_repeated_read_only_terminal_in_context_read_state_halts_without_hard_stop():
+    agent = _make_agent("terminal", max_iterations=10)
+    agent.context_compressor = SimpleNamespace(
+        last_prompt_tokens=0,
+        should_compress=lambda *_args, **_kwargs: False,
+        get_retrieval_status=lambda: {
+            "retrieval_status": "good",
+            "retrieval_state": "context_read",
+            "exploration_closed": False,
+        },
+    )
+    args = {"command": "PYTHONPATH=/tmp python -c \"print('same output')\""}
+    responses = [
+        _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[_mock_tool_call("terminal", json.dumps(args), f"ct{i}")],
+        )
+        for i in range(1, 6)
+    ]
+    agent.client.chat.completions.create.side_effect = responses
+
+    with (
+        patch("run_agent.handle_function_call", return_value="same output") as mock_hfc,
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("keep verifying the same reproduction command")
+
+    assert mock_hfc.call_count == 3
+    assert result["turn_exit_reason"] == "guardrail_halt"
+    assert result["guardrail"]["code"] == "idempotent_no_progress_halt"
+    assert "stopped retrying terminal" in result["final_response"].lower()
+
+
+def test_repeated_successful_repro_terminal_in_context_read_state_halts_without_hard_stop():
+    agent = _make_agent("terminal", max_iterations=10)
+    agent.context_compressor = SimpleNamespace(
+        last_prompt_tokens=0,
+        should_compress=lambda *_args, **_kwargs: False,
+        get_retrieval_status=lambda: {
+            "retrieval_status": "good",
+            "retrieval_state": "context_read",
+            "exploration_closed": False,
+        },
+    )
+    args = {"command": "PYTHONPATH=/tmp python /tmp/repro.py"}
+    responses = [
+        _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[_mock_tool_call("terminal", json.dumps(args), f"rt{i}")],
+        )
+        for i in range(1, 6)
+    ]
+    agent.client.chat.completions.create.side_effect = responses
+    same_repro_output = "Yields from post_process\\n\\nDUPLICATES FOUND: {'a.css': 4, 'b.css': 3}"
+
+    with (
+        patch("run_agent.handle_function_call", return_value=same_repro_output) as mock_hfc,
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("keep rerunning the same repro")
+
+    assert mock_hfc.call_count == 3
+    assert result["turn_exit_reason"] == "guardrail_halt"
+    assert result["guardrail"]["code"] == "idempotent_no_progress_halt"
+    assert "stopped retrying terminal" in result["final_response"].lower()
+
+
 def test_default_run_conversation_warns_without_guardrail_halt():
     agent = _make_agent("web_search", max_iterations=10)
     same_args = {"query": "same"}

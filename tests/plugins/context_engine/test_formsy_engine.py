@@ -420,7 +420,31 @@ def test_formsy_engine_enforces_seed_read_grounded_sequence():
     assert "ok: true" in read_result
     status_after_read = engine.get_retrieval_status()
     assert status_after_read["retrieval_state"] == "context_read"
-    assert engine.get_tool_block_message("terminal", {"command": "ls"}) is None
+    assert engine.get_tool_block_message("terminal", {"command": "ls"}) is not None
+    assert engine.get_tool_block_message("terminal", {"command": "python tests/runtests.py staticfiles_tests.test_storage -v 2"}) is None
+    assert engine.get_tool_block_message("terminal", {"command": "python -c \"print('inspect target')\""}) is not None
+    assert engine.get_tool_block_message(
+        "context_search",
+        {
+            "query": "retry seed",
+            "metadata": {
+                "retrieval_mode": "symbolic",
+                "grounding_phase": "seed",
+                "response_format": "bundle",
+            },
+        },
+    ) is not None
+    assert engine.get_tool_block_message(
+        "context_search",
+        {
+            "query": "confirm grounded source details",
+            "metadata": {
+                "retrieval_mode": "symbolic",
+                "grounding_phase": "grounded",
+                "response_format": "bundle",
+            },
+        },
+    ) is None
     assert engine.get_tool_block_message("patch", {"path": "django/contrib/auth/validators.py"}) is not None
     assert status_after_read["last_decision"]["next_retrieval"] == {
         "query": "confirm grounded source details",
@@ -463,12 +487,16 @@ def test_formsy_engine_enforces_seed_read_grounded_sequence():
     assert grounded_result["preferred_next_step"] == "edit"
     assert grounded_result["accepted_targets"] == ["django/contrib/auth/validators.py"]
     assert grounded_result["exploration_closed"] is True
+    assert grounded_result["retrieval_decision"]["contradiction_found"] is False
+    assert grounded_result["retrieval_decision"]["target_conflict"] is False
     assert engine.get_tool_block_message("terminal", {"command": "ls"}) is None
+    assert engine.get_tool_block_message("context_search", {"query": "more"}) is not None
     assert engine.get_tool_block_message("terminal", {"command": "grep -R UsernameValidator django"}) is not None
     assert engine.get_tool_block_message("patch", {"path": "django/contrib/auth/validators.py"}) is None
     assert engine.get_tool_block_message("search_files", {"query": "validators"}) is not None
     assert engine.get_tool_block_message("read_file", {"path": "django/contrib/auth/other.py"}) is not None
     assert engine.get_tool_block_message("context_read", {"path": "django/contrib/auth/other.py"}) is not None
+    assert engine.get_tool_block_message("context_read", {"path": "tests/staticfiles_tests/test_storage.py"}) is None
     assert json.loads(
         engine.handle_tool_call(
             "context_read",
@@ -495,6 +523,178 @@ def test_formsy_engine_enforces_seed_read_grounded_sequence():
     assert status["legacy_calls"] == 0
     assert status["accepted_targets"] == ["django/contrib/auth/validators.py"]
     assert status["blocked_tool_reason"]
+
+
+def test_formsy_engine_accepts_grounded_target_without_new_matches():
+    engine = FormsyContextEngine()
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            if kwargs["metadata"].get("grounding_phase") == "grounded":
+                return {
+                    "extra_context": "Grounded validator notes",
+                    "symbolic_prompt": (
+                        "Formal Semantics:\nusername validation must reject newline anchors\n"
+                        "Constraints:\npreserve ASCII and Unicode validator behavior\n"
+                        "Retrieval Strategy:\ninspect auth validator classes\n"
+                        "Retrieved Facts:\nvalidators.py contains regex validators"
+                    ),
+                    "matches": [],
+                    "coverage": "good",
+                    "grounded_files": ["django/contrib/auth/validators.py"],
+                    "bundle": {"must_edit": ["django/__init__.py"]},
+                }
+            return {
+                "extra_context": "Seed validator notes",
+                "symbolic_prompt": (
+                    "Formal Semantics:\nusername validation must reject newline anchors\n"
+                    "Constraints:\npreserve ASCII and Unicode validator behavior\n"
+                    "Retrieval Strategy:\ninspect auth validator classes\n"
+                    "Retrieved Facts:\nvalidators.py contains regex validators"
+                ),
+                "matches": [{"path": "django/contrib/auth/validators.py"}],
+                "coverage": "partial",
+            }
+
+        async def memory_read(self, **kwargs):
+            return {
+                "path": "django/contrib/auth/validators.py",
+                "start_line": 1,
+                "end_line": 25,
+                "content": "class ASCIIUsernameValidator: ...",
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "django__django-14053",
+        "revision": "latest",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+
+    engine.handle_tool_call(
+        "context_search",
+        {
+            "query": "username validator regex",
+            "repo_id": "django__django-14053",
+            "metadata": {
+                "retrieval_mode": "symbolic",
+                "grounding_phase": "seed",
+                "response_format": "bundle",
+            },
+        },
+    )
+    engine.handle_tool_call(
+        "context_read",
+        {
+            "path": "django/contrib/auth/validators.py",
+            "repo_id": "django__django-14053",
+            "start_line": 1,
+            "end_line": 25,
+        },
+    )
+
+    grounded_result = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {
+                "query": "confirm UsernameValidator regex anchor fix in validators.py",
+                "repo_id": "django__django-14053",
+                "metadata": {
+                    "retrieval_mode": "symbolic",
+                    "grounding_phase": "grounded",
+                    "response_format": "bundle",
+                    "grounded_files": ["django/contrib/auth/validators.py"],
+                },
+            },
+        )
+    )
+
+    assert grounded_result["retrieval_state"] == "grounded"
+    assert grounded_result["preferred_next_step"] == "edit"
+    assert grounded_result["accepted_targets"] == ["django/contrib/auth/validators.py"]
+    assert grounded_result["bundle_must_edit"] == ["django/__init__.py"]
+    assert engine.get_tool_block_message("context_search", {"query": "more"}) is not None
+
+
+def test_formsy_engine_honors_server_grounded_closeout_fields():
+    engine = FormsyContextEngine()
+    calls = []
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            calls.append(kwargs)
+            if kwargs["metadata"].get("grounding_phase") == "grounded":
+                return {
+                    "extra_context": "Grounded validator notes",
+                    "matches": [],
+                    "coverage": "good",
+                    "test_plan": {
+                        "commands": [
+                            "python tests/runtests.py staticfiles_tests.test_storage -v 2",
+                        ],
+                    },
+                    "bundle": {"must_edit": ["django/__init__.py"]},
+                    "retrieval_state": "grounded",
+                    "preferred_next_step": "edit",
+                    "accepted_targets": ["django/contrib/auth/validators.py"],
+                    "exploration_closed": True,
+                    "blocked_tool_reason": "grounded target accepted; broad search disabled",
+                }
+            return {
+                "extra_context": "Seed validator notes",
+                "matches": [{"path": "django/contrib/auth/validators.py"}],
+                "coverage": "partial",
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "django__django-14053",
+        "revision": "latest",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+
+    engine.handle_tool_call(
+        "context_search",
+        {
+            "query": "username validator regex",
+            "repo_id": "django__django-14053",
+            "metadata": {
+                "retrieval_mode": "symbolic",
+                "grounding_phase": "seed",
+                "response_format": "bundle",
+            },
+        },
+    )
+
+    grounded_result = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {
+                "query": "confirm UsernameValidator regex anchor fix in validators.py",
+                "repo_id": "django__django-14053",
+                "metadata": {
+                    "retrieval_mode": "symbolic",
+                    "grounding_phase": "grounded",
+                    "response_format": "bundle",
+                },
+            },
+        )
+    )
+
+    assert grounded_result["retrieval_state"] == "grounded"
+    assert grounded_result["preferred_next_step"] == "edit"
+    assert grounded_result["accepted_targets"] == ["django/contrib/auth/validators.py"]
+    assert grounded_result["exploration_closed"] is True
+    assert grounded_result["blocked_tool_reason"] == "grounded target accepted; broad search disabled"
+    assert engine.get_tool_block_message("context_search", {"query": "more"}) is not None
+    assert engine.get_tool_block_message(
+        "terminal",
+        {"command": "python tests/runtests.py staticfiles_tests.test_storage -v 2"},
+    ) is None
+    assert engine.get_tool_block_message("terminal", {"command": "grep -rn post_process django"}) is not None
+    assert calls[-1]["metadata"]["retrieval_mode"] == "symbolic"
 
 
 def test_formsy_engine_records_missing_symbolic_prompt_as_weak_signal():
@@ -632,17 +832,18 @@ def test_formsy_engine_prefers_grounded_targets_over_bundle_must_edit():
     )
 
     decision = grounded_result["retrieval_decision"]
-    assert grounded_result["retrieval_state"] == "grounded_retry"
-    assert grounded_result["preferred_next_step"] == "context_search"
+    assert grounded_result["retrieval_state"] == "grounded"
+    assert grounded_result["preferred_next_step"] == "edit"
+    assert grounded_result["accepted_targets"] == ["django/contrib/auth/validators.py"]
     assert decision["constraints_present"] is True
     assert decision["constraints_quality"] == "present"
     assert decision["bundle_must_edit"] == ["django/__init__.py"]
     assert decision["preferred_edit_targets"] == ["django/contrib/auth/validators.py"]
-    assert decision["target_conflict"] is True
-    assert decision["contradiction_found"] is True
+    assert decision["target_conflict"] is False
+    assert decision["contradiction_found"] is False
     assert decision["target_changed_after_grounding"] is False
     assert engine.get_retrieval_status()["preferred_edit_targets"] == ["django/contrib/auth/validators.py"]
-    assert engine.get_retrieval_status()["exploration_closed"] is False
+    assert engine.get_retrieval_status()["exploration_closed"] is True
 
 
 def test_formsy_engine_enters_degraded_recovery_after_weak_legacy_fallback():

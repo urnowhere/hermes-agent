@@ -154,6 +154,35 @@ second `context_search`:
 The agent should not edit before this grounded call unless it has explicitly
 entered legacy fallback mode.
 
+### 4.1 Force the grounded search immediately after `context_read`
+
+After `context_read`, the next retrieval action must be exactly one grounded
+`context_search`.
+
+Required runtime behavior:
+
+```text
+context_read
+  -> grounded context_search
+```
+
+Not allowed between `context_read` and the grounded search:
+
+```text
+custom repro scripts
+broad terminal exploration
+patch/edit
+extra seed context_search calls
+```
+
+The only allowed work in `context_read` is:
+
+```text
+read_file/context_read on the grounded target
+read_file/context_read on directly relevant test files
+targeted test commands
+```
+
 ### 5. Follow `suggested_queries`
 
 If `context_search` returns `suggested_queries`, Hermes should use one of them
@@ -257,6 +286,30 @@ If that state is reached, the policy engine must immediately switch to
 `degraded_recovery` and unlock the smallest safe shell surface for the selected
 candidate files. Deadlock is a policy error.
 
+### 6.4 Prevent repro loops after successful confirmation
+
+If terminal output clearly confirms the bug, Hermes should treat that as a
+phase transition rather than a reason to rerun the same repro.
+
+Examples of confirmation markers:
+
+```text
+DUPLICATES FOUND
+AssertionError with the expected failing condition
+known failure banner from a targeted test command
+```
+
+Required behavior:
+
+```text
+repro succeeds once
+  -> repro_complete = true
+  -> next action must be grounded_search, edit, or targeted test
+```
+
+The agent must not rerun the same repro command class with the same effective
+output over and over while no source file changed.
+
 ### 7. Normalize metadata in the plugin
 
 The Hermes plugin should normalize top-level retrieval controls into
@@ -331,6 +384,39 @@ search state is weak and the agent has exhausted symbolic retries plus legacy
 fallback, the gate should downgrade to degraded recovery instead of refusing
 all terminal actions.
 
+### 8.3 Prefer grounded target + server test plan over custom repro
+
+If Hermes already has:
+
+```text
+retrieval_state == grounded
+accepted_targets != []
+test_plan.commands or test_plan.phases[*].commands is non-empty
+```
+
+then the runtime should skip custom repro by default and move to:
+
+```text
+edit -> targeted_test -> submit
+```
+
+Allowed terminal commands in this state:
+
+```text
+commands returned by the server test plan
+lightweight inspection such as git diff / git status / cat / sed -n
+```
+
+Blocked by default:
+
+```text
+invented repro scripts
+broad grep/find/search
+ad hoc test commands not in the server plan
+```
+
+The escape hatch is only for real contradiction or test-failure diagnosis.
+
 ### 9. Block editing until retrieval is valid
 
 Hermes should not edit source files until at least one condition is true:
@@ -346,6 +432,24 @@ If none is true, editing should be blocked.
 If retrieval remains invalid after bounded degraded recovery, Hermes should
 continue gathering shell evidence or retry retrieval. It must not sit in a
 state where editing is blocked and no follow-up action is permitted.
+
+### 9.1 Block terminal file creation before grounding is complete
+
+If the retrieval gate would block `write_file`, it must also block equivalent
+terminal write patterns in the same phase.
+
+Examples:
+
+```text
+cat > file
+heredocs
+tee file
+python -c open(...).write(...)
+python scripts that create repro files
+```
+
+This prevents shell-based file creation from bypassing the retrieval state
+machine.
 
 ### 10. Add retrieval decision logs
 
@@ -370,6 +474,23 @@ Example:
   "matches_count": 0,
   "decision": "retry_symbolic_search",
   "reason": "No structured file or symbol matches were selected."
+}
+```
+
+### 10.1 Add no-progress terminal loop logs
+
+Hermes should log when repeated successful terminal commands are being treated
+as non-progress loops, not just repeated failures.
+
+Example:
+
+```json
+{
+  "tool": "terminal",
+  "loop_type": "idempotent_no_progress",
+  "command_class": "python /tmp/repro.py",
+  "repeat_count": 3,
+  "reason": "same effective output while retrieval phase did not advance"
 }
 ```
 
@@ -412,6 +533,25 @@ context_search seed
 This is an agent-side recovery bug. The server may still be returning weak
 results, but the immediate regression is that the agent does not recover cleanly
 from those weak results.
+
+## Current Runtime Status
+
+The current Hermes runtime now enforces these behaviors:
+
+```text
+1. context_search is mandatory before shell discovery
+2. context_read sets a hard grounded-search-required latch
+3. grounded retrieval closes exploration around accepted targets
+4. read_file/context_read may inspect accepted targets and tests/*
+5. context_read allows only narrow inspection or targeted test commands
+6. grounded state prefers server test-plan commands over ad hoc broad search
+7. repeated successful read-only terminal commands count as no-progress
+```
+
+The highest-value remaining work is to promote this from a set of guardrails
+into a first-class agent execution state machine in `run_agent.py`, with phase
+budgets and explicit `repro_complete`, `patch_version`, and `patch_submitted`
+latches.
 
 ## Summary
 
