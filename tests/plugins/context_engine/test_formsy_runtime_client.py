@@ -185,3 +185,67 @@ async def test_runtime_client_memory_read_uses_read_endpoint(monkeypatch):
         "start_line": 203,
         "end_line": 249,
     }
+
+
+@pytest.mark.asyncio
+async def test_runtime_client_compile_repo_uses_compile_endpoint(monkeypatch):
+    monkeypatch.setenv("FORMALCC_API_KEY", "fsy_test_secret_token")
+    client = RuntimeClient(
+        base_url="https://runtime.example",
+        api_key_env="FORMALCC_API_KEY",
+    )
+    calls = []
+
+    class FakeAsyncClient:
+        async def request(self, method, url, json=None, headers=None):
+            calls.append({
+                "method": method,
+                "url": url,
+                "json": json,
+                "headers": headers,
+            })
+            return httpx.Response(
+                200,
+                json={
+                    "repo_id": "urnowhere__hermes-agent",
+                    "revision": "abc123def456",
+                    "parsed_file_count": 1,
+                },
+                request=httpx.Request(method, url, json=json, headers=headers),
+            )
+
+    client._client = FakeAsyncClient()
+
+    result = await client.compile_repo(
+        repo_id="urnowhere__hermes-agent",
+        files=[{
+            "path": "pkg/mod.py",
+            "content": "x = 1\n",
+            "language": "python",
+            "is_test": False,
+        }],
+        revision="abc123def456",
+        metadata={"instance_id": "urnowhere__hermes-agent"},
+    )
+
+    assert result == {
+        "repo_id": "urnowhere__hermes-agent",
+        "revision": "abc123def456",
+        "parsed_file_count": 1,
+    }
+    assert calls[0]["method"] == "POST"
+    assert calls[0]["url"] == "https://runtime.example/api/v1/compile"
+    assert calls[0]["json"] == {
+        "repo_id": "urnowhere__hermes-agent",
+        "files": [{
+            "path": "pkg/mod.py",
+            "content": "x = 1\n",
+            "language": "python",
+            "is_test": False,
+        }],
+        "revision": "abc123def456",
+        "mode": "replace",
+        "removed_paths": [],
+        "enable_w2": False,
+        "metadata": {"instance_id": "urnowhere__hermes-agent"},
+    }
