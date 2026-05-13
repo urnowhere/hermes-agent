@@ -1,19 +1,24 @@
 """Tests for the Formsy context engine plugin."""
 
 import json
+import subprocess
 from inspect import iscoroutinefunction, signature
 from typing import cast
+
+import pytest
 
 from plugins.context_engine.formsy.config import EngineConfigManager
 from plugins.context_engine.formsy.client import EngineClient
 from plugins.context_engine.formsy.engine import FormsyContextEngine
 from plugins.formsy import RuntimeClient
-from plugins.formsy.models import (
-    CompileBundle,
-    CompiledMessage,
-    Metrics,
-    SceneType,
-)
+
+
+@pytest.fixture(autouse=True)
+def _disable_git_identity_for_existing_tests(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+
+    monkeypatch.setattr("plugins.context_engine.formsy.engine.subprocess.run", fake_run)
 
 
 def test_formsy_engine_methods_match_context_engine_sync_contract():
@@ -52,23 +57,14 @@ def test_formsy_engine_tracks_usage_and_threshold():
     assert engine.should_compress(749) is False
 
 
-def test_formsy_engine_compress_runs_client_and_returns_messages(monkeypatch):
+def test_formsy_engine_compress_returns_messages_without_runtime_compile(monkeypatch):
     engine = FormsyContextEngine()
-    calls = []
 
-    class FakeClient:
-        async def compile(self, **kwargs):
-            calls.append(kwargs)
-            return CompileBundle(
-                scene=SceneType.GENERAL,
-                compiled_messages=[
-                    CompiledMessage(role="system", content="compiled context"),
-                    CompiledMessage(role="user", content="latest request"),
-                ],
-                metrics=Metrics(elapsed_ms=12),
-            )
+    class UnexpectedCompileClient:
+        async def runtime_compile(self, **kwargs):
+            raise AssertionError("runtime compile should not be called")
 
-    engine._engine_client = FakeClient()
+    engine._engine_client = UnexpectedCompileClient()
     engine._config = type("Config", (), {"workspace_id": "ws_test"})()
     engine._session_id = "session-123"
 
@@ -76,15 +72,8 @@ def test_formsy_engine_compress_runs_client_and_returns_messages(monkeypatch):
 
     result = engine.compress(messages, current_tokens=900, focus_topic="parser")
 
-    assert result == [
-        {"role": "system", "content": "compiled context"},
-        {"role": "user", "content": "latest request"},
-    ]
-    assert engine.compression_count == 1
-    assert calls[0]["workspace_id"] == "ws_test"
-    assert calls[0]["session_id"] == "session-123"
-    assert calls[0]["hints"]["focus_topic"] == "parser"
-    assert calls[0]["task"]["instruction"] == "fix the parser"
+    assert result is messages
+    assert engine.compression_count == 0
 
 
 def test_formsy_engine_exposes_memory_search_tool():
@@ -96,8 +85,8 @@ def test_formsy_engine_exposes_memory_search_tool():
     params = schemas[0]["parameters"]
     assert params["required"] == ["query"]
     assert "query" in params["properties"]
-    assert "repo_id" in params["properties"]
-    assert "revision" in params["properties"]
+    assert "repo_id" not in params["properties"]
+    assert "revision" not in params["properties"]
     assert "budget" in params["properties"]
     assert "limit" in params["properties"]
     metadata = params["properties"]["metadata"]
@@ -112,11 +101,149 @@ def test_formsy_engine_exposes_memory_search_tool():
     assert "retrieval_feedback" in metadata["properties"]
     assert "fallback" in metadata["properties"]["grounding_phase"]["enum"]
     assert "proactively" in schemas[0]["description"]
-    assert "django__django-14053" in schemas[0]["description"]
+    assert "current git remote URL and commit" in schemas[0]["description"]
     read_params = schemas[1]["parameters"]
     assert read_params["required"] == ["path"]
+    assert "repo_id" not in read_params["properties"]
+    assert "revision" not in read_params["properties"]
     assert "start_line" in read_params["properties"]
     assert "end_line" in read_params["properties"]
+
+
+def test_formsy_engine_infers_repo_id_from_common_git_urls():
+    assert (
+        FormsyContextEngine._repo_id_from_git_url("https://github.com/urnowhere/hermes-agent.git")
+        == "urnowhere__hermes-agent"
+    )
+    assert (
+        FormsyContextEngine._repo_id_from_git_url("git@github.com:django/django.git")
+        == "django__django"
+    )
+    assert (
+        FormsyContextEngine._repo_id_from_git_url("ssh://git@github.com/pallets/flask.git")
+        == "pallets__flask"
+    )
+
+
+def test_formsy_engine_memory_search_derives_repo_and_revision_from_git(monkeypatch):
+    engine = FormsyContextEngine()
+    calls = []
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            calls.append(kwargs)
+            return {"matches": []}
+
+    def fake_run(cmd, **kwargs):
+        if cmd == ["git", "remote", "get-url", "origin"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="https://github.com/urnowhere/hermes-agent.git\n")
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="abc123def456\n")
+        raise AssertionError(f"unexpected git command: {cmd}")
+
+    monkeypatch.setattr("plugins.context_engine.formsy.engine.subprocess.run", fake_run)
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "configured__repo",
+        "revision": "configured-revision",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+
+    result = engine.handle_tool_call(
+        "context_search",
+        {
+            "query": "parser state handling",
+            "repo_id": "llm__provided",
+            "revision": "llm-revision",
+        },
+    )
+
+    assert json.loads(result)["ok"] is True
+    assert calls == [{
+        "repo_id": "urnowhere__hermes-agent",
+        "session_id": "session-123",
+        "query": "parser state handling",
+        "revision": "abc123def456",
+        "budget": 4000,
+        "metadata": {
+            "retrieval_mode": "symbolic",
+            "grounding_phase": "seed",
+            "response_format": "bundle",
+            "case_id": "urnowhere__hermes-agent",
+            "trace_id": "session-123",
+        },
+    }]
+
+
+def test_formsy_engine_memory_search_compiles_before_query(monkeypatch):
+    engine = FormsyContextEngine()
+    calls = []
+
+    class FakeClient:
+        async def compile_repo(self, **kwargs):
+            calls.append(("compile", kwargs))
+            return {
+                "repo_id": kwargs["repo_id"],
+                "revision": kwargs["revision"],
+                "parsed_file_count": len(kwargs["files"]),
+            }
+
+        async def memory_search(self, **kwargs):
+            calls.append(("memory_search", kwargs))
+            return {"matches": []}
+
+    def fake_run(cmd, **kwargs):
+        if cmd == ["git", "remote", "get-url", "origin"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="https://github.com/urnowhere/hermes-agent.git\n")
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="abc123def456\n")
+        raise AssertionError(f"unexpected git command: {cmd}")
+
+    monkeypatch.setattr("plugins.context_engine.formsy.engine.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        FormsyContextEngine,
+        "_collect_memory_source_files",
+        staticmethod(lambda root: [{
+            "path": "pkg/mod.py",
+            "content": "x = 1\n",
+            "language": "python",
+            "is_test": False,
+        }]),
+    )
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "",
+        "revision": "latest",
+        "query_budget": 4000,
+        "workspace_id": "ws_test",
+    })()
+    engine._session_id = "session-123"
+
+    result = engine.handle_tool_call(
+        "context_search",
+        {"query": "parser state handling"},
+    )
+
+    assert json.loads(result)["ok"] is True
+    assert [name for name, _ in calls] == ["compile", "memory_search"]
+    assert calls[0][1] == {
+        "repo_id": "urnowhere__hermes-agent",
+        "files": [{
+            "path": "pkg/mod.py",
+            "content": "x = 1\n",
+            "language": "python",
+            "is_test": False,
+        }],
+        "revision": "abc123def456",
+        "metadata": {
+            "instance_id": "urnowhere__hermes-agent",
+            "query": "parser state handling",
+            "source_file_count": 1,
+        },
+        "session_id": "session-123",
+    }
+    assert calls[1][1]["revision"] == "abc123def456"
 
 
 def test_formsy_engine_memory_search_tool_queries_runtime():

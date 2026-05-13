@@ -2,20 +2,17 @@
 
 import json
 import logging
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from hermes_constants import get_hermes_home
 from agent.context_engine import ContextEngine
 from plugins.formsy import RuntimeClient
 from .config import EngineConfigManager, EngineConfig
 from .client import EngineClient
-from .message_converter import (
-    convert_compile_bundle_to_messages,
-    detect_scene,
-    extract_task,
-)
 
 logger = logging.getLogger("formsy.context_engine")
 
@@ -93,6 +90,8 @@ class FormsyContextEngine(ContextEngine):
         self._last_gate_failure: dict[str, Any] = {}
         self._grounded_search_required: bool = False
         self._test_plan_commands: list[str] = []
+        self._memory_compiled_identity: tuple[str, str] | None = None
+        self._memory_compile_revision: str = ""
 
         self.last_prompt_tokens = 0
         self.last_completion_tokens = 0
@@ -143,14 +142,11 @@ class FormsyContextEngine(ContextEngine):
         current_tokens: int = None,
         focus_topic: Optional[str] = None,
     ) -> list[dict]:
-        """Compile context via FormalCC Runtime."""
+        """Return messages unchanged; Formsy memory is accessed through tools."""
         if current_tokens is not None:
             self.last_prompt_tokens = current_tokens
 
-        compiled = self._run_async(
-            self._compress_async(messages, current_tokens=current_tokens, focus_topic=focus_topic)
-        )
-        return compiled if isinstance(compiled, list) else messages
+        return messages
 
     def on_session_start(self, session_id: str, **kwargs) -> None:
         """Initialize runtime state when a Hermes session starts."""
@@ -213,9 +209,8 @@ class FormsyContextEngine(ContextEngine):
                     "context_search returns a candidate file or span, use context_read next "
                     "instead of shell grep/find or direct file reads. The memory compile step "
                     "has already completed before the task starts, so this tool is ready to "
-                    "use immediately. For SWE-bench tasks, pass repo_id and revision from "
-                    "the task metadata directly, for example repo_id='django__django-14053' "
-                    "and revision='latest'."
+                    "use immediately. Repository identity is derived from the current git "
+                    "remote URL and commit; do not provide repo_id or revision."
                 ),
                 "parameters": {
                     "type": "object",
@@ -223,15 +218,6 @@ class FormsyContextEngine(ContextEngine):
                         "query": {
                             "type": "string",
                             "description": "Natural-language query describing the code, behavior, or fact to find.",
-                        },
-                        "repo_id": {
-                            "type": "string",
-                            "description": "External repository identifier required by Formsy query API. Use the task metadata repo_id directly, e.g. django__django-14053.",
-                        },
-                        "revision": {
-                            "type": "string",
-                            "description": "Logical revision label to query. Use the task metadata revision directly when provided; otherwise use latest.",
-                            "default": "latest",
                         },
                         "budget": {
                             "type": "integer",
@@ -308,15 +294,6 @@ class FormsyContextEngine(ContextEngine):
                             "type": "string",
                             "description": "Repository-relative file path to read.",
                         },
-                        "repo_id": {
-                            "type": "string",
-                            "description": "External repository identifier required by Formsy query API. Use the task metadata repo_id directly, e.g. django__django-14053.",
-                        },
-                        "revision": {
-                            "type": "string",
-                            "description": "Logical revision label to query. Use the task metadata revision directly when provided; otherwise use latest.",
-                            "default": "latest",
-                        },
                         "start_line": {
                             "type": "integer",
                             "description": "Optional 1-indexed first source line to read.",
@@ -348,14 +325,22 @@ class FormsyContextEngine(ContextEngine):
             return json.dumps({"ok": False, "query": query, "error": "Formsy engine client is not initialized"})
 
         session_id = self._session_id or self._context.get("session_id") or "unknown"
-        repo_id = str(args.get("repo_id") or (self._config.repo_id if self._config else "") or "").strip()
+        repo_id, revision = self._resolve_repository_identity()
         if not repo_id:
             return json.dumps({
                 "ok": False,
                 "query": query,
-                "error": "context_search requires repo_id. Set formsy.repo_id or pass repo_id in the tool call.",
+                "error": "context_search could not infer repo_id from the current git remote.",
             })
-        revision = str(args.get("revision") or (self._config.revision if self._config else "latest") or "latest")
+        if not self._ensure_memory_compiled(repo_id=repo_id, revision=revision, query=query, session_id=session_id):
+            return json.dumps({
+                "ok": False,
+                "query": query,
+                "repo_id": repo_id,
+                "revision": revision,
+                "error": "Formsy memory compile failed before context_search",
+            })
+        revision = self._memory_compile_revision or revision
         budget = self._coerce_positive_int(args.get("budget"), self._config.query_budget if self._config else 4000)
         self._retrieval_trace.retrieval_budget = budget
         metadata = self._build_query_metadata(args, repo_id=repo_id, session_id=session_id)
@@ -448,14 +433,13 @@ class FormsyContextEngine(ContextEngine):
             return json.dumps({"ok": False, "path": path, "error": "Formsy engine client is not initialized"})
 
         session_id = self._session_id or self._context.get("session_id") or "unknown"
-        repo_id = str(args.get("repo_id") or (self._config.repo_id if self._config else "") or "").strip()
+        repo_id, revision = self._resolve_repository_identity()
         if not repo_id:
             return json.dumps({
                 "ok": False,
                 "path": path,
-                "error": "context_read requires repo_id. Set formsy.repo_id or pass repo_id in the tool call.",
+                "error": "context_read could not infer repo_id from the current git remote.",
             })
-        revision = str(args.get("revision") or (self._config.revision if self._config else "latest") or "latest")
         start_line = self._optional_positive_int(args.get("start_line"))
         end_line = self._optional_positive_int(args.get("end_line"))
         result = self._run_async(
@@ -534,6 +518,156 @@ class FormsyContextEngine(ContextEngine):
             return None
         return max(1, number)
 
+    def _resolve_repository_identity(self) -> tuple[str, str]:
+        repo_id = ""
+        revision = ""
+        remote_url = self._git_output(["git", "remote", "get-url", "origin"])
+        if remote_url:
+            repo_id = self._repo_id_from_git_url(remote_url)
+        revision = self._git_output(["git", "rev-parse", "HEAD"])
+        if not repo_id and self._config:
+            repo_id = str(self._config.repo_id or "").strip()
+        if not revision and self._config:
+            revision = str(self._config.revision or "").strip()
+        return repo_id, revision or "latest"
+
+    def _ensure_memory_compiled(self, *, repo_id: str, revision: str, query: str, session_id: str) -> bool:
+        identity_key = (repo_id, revision)
+        if self._memory_compiled_identity == identity_key:
+            return True
+        if not self._engine_client or not hasattr(self._engine_client, "compile_repo"):
+            return True
+
+        files = self._collect_memory_source_files(Path.cwd())
+        result = self._run_async(
+            self._engine_client.compile_repo(
+                repo_id=repo_id,
+                files=files,
+                revision=revision,
+                metadata={
+                    "instance_id": repo_id,
+                    "query": query,
+                    "source_file_count": len(files),
+                },
+                session_id=session_id,
+            )
+        )
+        if result is None:
+            return False
+
+        self._memory_compiled_identity = identity_key
+        self._memory_compile_revision = str(
+            result.get("revision") if isinstance(result, dict) else ""
+            or revision
+        )
+        return True
+
+    @staticmethod
+    def _collect_memory_source_files(root: Path) -> list[dict[str, Any]]:
+        allowed_suffixes = {
+            ".py",
+            ".js",
+            ".jsx",
+            ".ts",
+            ".tsx",
+            ".java",
+            ".go",
+            ".rs",
+            ".c",
+            ".cc",
+            ".cpp",
+            ".h",
+            ".hpp",
+            ".md",
+            ".toml",
+            ".yaml",
+            ".yml",
+            ".json",
+        }
+        excluded_parts = {
+            ".git",
+            ".venv",
+            "venv",
+            "node_modules",
+            "__pycache__",
+            ".pytest_cache",
+            ".mypy_cache",
+            "dist",
+            "build",
+            "runs",
+        }
+        files: list[dict[str, Any]] = []
+        try:
+            paths = root.rglob("*")
+        except Exception:
+            return files
+        for path in paths:
+            try:
+                if not path.is_file() or path.suffix.lower() not in allowed_suffixes:
+                    continue
+                if any(part in excluded_parts for part in path.relative_to(root).parts):
+                    continue
+                rel = path.relative_to(root).as_posix()
+                content = path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                continue
+            files.append({
+                "path": rel,
+                "content": content,
+                "language": path.suffix.lower().lstrip(".") or "text",
+                "is_test": (
+                    rel.startswith("tests/")
+                    or rel.startswith("test/")
+                    or "/tests/" in f"/{rel}/"
+                    or rel.endswith("_test.py")
+                    or rel.endswith(".test.js")
+                    or rel.endswith(".test.ts")
+                ),
+            })
+        return files
+
+    @staticmethod
+    def _git_output(cmd: list[str]) -> str:
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=2,
+            )
+        except Exception:
+            return ""
+        if result.returncode != 0:
+            return ""
+        return (result.stdout or "").strip()
+
+    @staticmethod
+    def _repo_id_from_git_url(remote_url: str) -> str:
+        value = remote_url.strip()
+        if not value:
+            return ""
+
+        path = ""
+        if "://" in value:
+            parsed = urlparse(value)
+            path = parsed.path
+        elif ":" in value and not value.startswith("/"):
+            path = value.split(":", 1)[1]
+        else:
+            path = value
+
+        path = path.strip("/")
+        if path.endswith(".git"):
+            path = path[:-4]
+        parts = [part for part in path.split("/") if part]
+        if len(parts) < 2:
+            return ""
+        owner, repo = parts[-2], parts[-1]
+        if not owner or not repo:
+            return ""
+        return f"{owner}__{repo}"
+
     @staticmethod
     def _extract_extra_context(result: Any) -> str:
         if not isinstance(result, dict):
@@ -609,6 +743,8 @@ class FormsyContextEngine(ContextEngine):
         self._last_gate_failure = {}
         self._grounded_search_required = False
         self._test_plan_commands = []
+        self._memory_compiled_identity = None
+        self._memory_compile_revision = ""
 
     @staticmethod
     def _has_useful_matches(matches: Any) -> bool:
@@ -1450,73 +1586,3 @@ class FormsyContextEngine(ContextEngine):
             self._grounded_search_required = False
             return None
         return None
-
-    async def _compress_async(
-        self,
-        messages: list[dict],
-        current_tokens: int = None,
-        focus_topic: Optional[str] = None,
-    ) -> list[dict]:
-        """Compile context via Formsy Runtime."""
-        if not self._engine_client:
-            logger.warning("Engine client not initialized; returning original messages")
-            return messages
-
-        context = dict(self._context)
-        session_id = self._session_id or context.get("session_id") or "unknown"
-        self._session_id = session_id
-        turn_id = f"{session_id}_turn_{self._turn_counter:04d}"
-
-        # Detect scene from context
-        scene = detect_scene(context)
-
-        # Build identity hints
-        identity: Optional[dict] = None
-        if repo_id := context.get("repo_id"):
-            identity = {
-                "repo_id": repo_id,
-                "revision": context.get("revision", "main"),
-            }
-        elif document_id := context.get("document_id"):
-            identity = {"document_id": document_id}
-
-        # Extract task from messages
-        task = extract_task(messages)
-
-        # Build hints
-        hints: dict[str, Any] = {}
-        if focus_topic:
-            hints["focus_topic"] = focus_topic
-        if current_tokens is not None:
-            hints["current_tokens"] = current_tokens
-        hints["bypass_router"] = False
-
-        logger.info(
-            f"Compiling context: session={session_id}, scene={scene}, "
-            f"focus_topic={focus_topic}"
-        )
-
-        bundle = await self._engine_client.compile(
-            workspace_id=self._config.workspace_id,
-            session_id=session_id,
-            turn_id=turn_id,
-            scene=scene,
-            identity=identity,
-            task=task,
-            hints=hints,
-        )
-
-        if bundle is None:
-            # Graceful degradation: return original messages
-            logger.warning("Compile failed; returning original messages")
-            return messages
-
-        compiled = convert_compile_bundle_to_messages(bundle)
-
-        if not compiled:
-            logger.warning("Compile returned empty messages; returning originals")
-            return messages
-
-        self.compression_count += 1
-        logger.info(f"Compiled to {len(compiled)} messages (was {len(messages)})")
-        return compiled

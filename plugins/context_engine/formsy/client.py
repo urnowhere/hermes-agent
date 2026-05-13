@@ -4,7 +4,6 @@ import logging
 from typing import Optional, Any
 
 from plugins.formsy import RuntimeClient
-from plugins.formsy.models import CompileRequest, CompileBundle, Task
 from plugins.formsy.errors import RuntimeAPIError, TimeoutError as FormalCCTimeoutError
 
 logger = logging.getLogger("formsy.context_engine.client")
@@ -16,40 +15,28 @@ class EngineClient:
     def __init__(self, runtime_client: RuntimeClient):
         self.runtime_client = runtime_client
 
-    async def compile(
+    async def compile_repo(
         self,
-        workspace_id: str,
-        session_id: str,
-        turn_id: str,
-        scene: str = "auto",
-        identity: Optional[dict[str, Any]] = None,
-        task: Optional[dict[str, Any]] = None,
-        hints: Optional[dict[str, Any]] = None,
-    ) -> Optional[CompileBundle]:
-        """Compile context via Runtime API."""
+        repo_id: str,
+        files: list[dict[str, Any]],
+        revision: str = "latest",
+        metadata: Optional[dict[str, Any]] = None,
+        session_id: str = "",
+    ) -> Optional[dict[str, Any]]:
+        """Compile repository source for memory search/read endpoints."""
         try:
-            request = CompileRequest(
-                scene=scene,
-                workspace_id=workspace_id,
-                session_id=session_id,
-                turn_id=turn_id,
-                identity=identity,
-                task=Task(**task) if isinstance(task, dict) else task,
-                hints=hints,
+            return await self.runtime_client.compile_repo(
+                repo_id=repo_id,
+                files=files,
+                revision=revision,
+                metadata=metadata,
+                session_id=session_id or None,
             )
-
-            response = await self.runtime_client.compile(request)
-            logger.info(
-                f"Compile completed: scene={response.bundle.scene}, "
-                f"elapsed={response.bundle.metrics.elapsed_ms}ms"
-            )
-            return response.bundle
-
         except (RuntimeAPIError, FormalCCTimeoutError) as e:
-            logger.warning(f"Compile failed: {e}")
+            logger.warning(f"Repository compile failed: {e}")
             return None
         except Exception as e:
-            logger.error(f"Unexpected error in compile: {e}")
+            logger.error(f"Unexpected error in repository compile: {e}")
             return None
 
     async def memory_search(

@@ -12,8 +12,6 @@ from .models import (
     MemoryPrefetchResponse,
     MemorySyncTurnRequest,
     SessionEndRequest,
-    CompileRequest,
-    CompileResponse,
 )
 from .utils import generate_request_id
 
@@ -231,19 +229,34 @@ class RuntimeClient:
             session_id=request.session_id,
         )
     
-    async def compile(self, request: CompileRequest) -> CompileResponse:
-        """Call compile endpoint."""
-        logger.debug(f"Compile: session={request.session_id}, scene={request.scene}")
-        
-        response_data = await self._request(
+    async def compile_repo(
+        self,
+        repo_id: str,
+        files: list[dict[str, Any]],
+        revision: str | None = None,
+        metadata: Optional[dict[str, Any]] = None,
+        mode: str = "replace",
+        removed_paths: Optional[list[str]] = None,
+        enable_w2: bool = False,
+        session_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Compile repository source for memory search/read endpoints."""
+        logger.debug(f"Compile repo: repo_id={repo_id}, files={len(files)}")
+
+        return await self._request(
             "POST",
-            "/v1/runtime/compile",
-            data=request.model_dump(mode="json"),
-            session_id=request.session_id,
+            "/api/v1/compile",
+            data={
+                "repo_id": repo_id,
+                "files": files,
+                "revision": revision,
+                "mode": mode,
+                "removed_paths": removed_paths or [],
+                "enable_w2": enable_w2,
+                "metadata": metadata or {},
+            },
+            session_id=session_id,
         )
-        if "bundle" in response_data:
-            return CompileResponse(bundle=response_data["bundle"])
-        return CompileResponse(bundle=response_data)
     
     async def memory_search(
         self,
