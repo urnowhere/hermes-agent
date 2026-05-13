@@ -417,17 +417,30 @@ def _result_hash(result: str | None) -> str:
     if parsed is not None:
         try:
             canonical = json.dumps(
-                parsed,
+                _normalize_result_for_hash(parsed),
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
                 default=str,
             )
         except TypeError:
-            canonical = str(parsed)
+            canonical = str(_normalize_result_for_hash(parsed))
     else:
-        canonical = result or ""
+        canonical = _normalize_result_for_hash(result or "")
     return _sha256(canonical)
+
+
+def _normalize_result_for_hash(value: Any) -> Any:
+    if isinstance(value, str):
+        text = value
+        text = re.sub(r"0x[0-9a-fA-F]+", "<HEXADDR>", text)
+        text = re.sub(r"/tmp/[A-Za-z0-9._-]+", "/tmp/<TMP>", text)
+        return text
+    if isinstance(value, list):
+        return [_normalize_result_for_hash(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _normalize_result_for_hash(val) for key, val in value.items()}
+    return value
 
 
 def _as_bool(value: Any, default: bool) -> bool:

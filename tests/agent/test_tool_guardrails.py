@@ -250,6 +250,22 @@ def test_compound_read_only_terminal_command_participates_in_no_progress_trackin
     assert warn.code == "idempotent_no_progress_warning"
 
 
+def test_terminal_no_progress_hash_ignores_object_addresses():
+    controller = ToolCallGuardrailController(
+        ToolCallGuardrailConfig(no_progress_warn_after=2, no_progress_block_after=2)
+    )
+    args = {"command": "python /tmp/repro.py"}
+    result1 = "DUPLICATES FOUND: {'a.css': 4} <Obj at 0x10abc1234>"
+    result2 = "DUPLICATES FOUND: {'a.css': 4} <Obj at 0x10def5678>"
+
+    assert controller.before_call("terminal", args).action == "allow"
+    assert controller.after_call("terminal", args, result1, failed=False).action == "allow"
+    assert controller.before_call("terminal", args).action == "allow"
+    warn = controller.after_call("terminal", args, result2, failed=False)
+    assert warn.action == "warn"
+    assert warn.code == "idempotent_no_progress_warning"
+
+
 def test_destructive_terminal_command_is_not_treated_as_no_progress():
     controller = ToolCallGuardrailController(
         ToolCallGuardrailConfig(no_progress_warn_after=2, no_progress_block_after=2)

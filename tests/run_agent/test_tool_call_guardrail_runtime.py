@@ -400,6 +400,167 @@ def test_repeated_successful_repro_terminal_in_context_read_state_halts_without_
     assert "stopped retrying terminal" in result["final_response"].lower()
 
 
+def test_repeated_successful_terminal_in_degraded_recovery_halts_without_hard_stop():
+    agent = _make_agent("terminal", max_iterations=10)
+    agent.context_compressor = SimpleNamespace(
+        last_prompt_tokens=0,
+        should_compress=lambda *_args, **_kwargs: False,
+        get_retrieval_status=lambda: {
+            "retrieval_status": "failed",
+            "retrieval_state": "degraded_recovery",
+            "exploration_closed": False,
+        },
+    )
+    args = {"command": "git log --oneline --all -- tests/auth_tests/test_validators.py | grep -i \"30257\""}
+    responses = [
+        _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[_mock_tool_call("terminal", json.dumps(args), f"dr{i}")],
+        )
+        for i in range(1, 6)
+    ]
+    agent.client.chat.completions.create.side_effect = responses
+    repeated_output = "cbf7e71558 Fixed #30257 -- Made UsernameValidators prohibit trailing newlines."
+
+    with (
+        patch("run_agent.handle_function_call", return_value=repeated_output) as mock_hfc,
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("keep digging through git history")
+
+    assert mock_hfc.call_count == 1
+    assert result["turn_exit_reason"] == "guardrail_halt"
+    assert result["guardrail"]["code"] == "degraded_recovery_already_fixed_halt"
+    assert "stopped retrying terminal" in result["final_response"].lower()
+
+
+def test_degraded_recovery_shell_budget_halts_even_when_outputs_vary():
+    agent = _make_agent("terminal", max_iterations=10)
+    agent.context_compressor = SimpleNamespace(
+        last_prompt_tokens=0,
+        should_compress=lambda *_args, **_kwargs: False,
+        get_retrieval_status=lambda: {
+            "retrieval_status": "failed",
+            "retrieval_state": "degraded_recovery",
+            "exploration_closed": False,
+            "accepted_targets": [],
+        },
+    )
+    responses = [
+        _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[_mock_tool_call("terminal", json.dumps({"command": f"git log step {i}"}), f"dg{i}")],
+        )
+        for i in range(1, 10)
+    ]
+    agent.client.chat.completions.create.side_effect = responses
+    outputs = [f"varying output {i}" for i in range(1, 10)]
+
+    with (
+        patch("run_agent.handle_function_call", side_effect=outputs) as mock_hfc,
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("keep digging through history")
+
+    assert mock_hfc.call_count == 6
+    assert result["turn_exit_reason"] == "guardrail_halt"
+    assert result["guardrail"]["code"] == "degraded_recovery_shell_budget_halt"
+    assert "stopped retrying terminal" in result["final_response"].lower()
+
+
+def test_degraded_recovery_detects_already_fixed_checkout_before_budget_stop():
+    agent = _make_agent("terminal", max_iterations=10)
+    agent.context_compressor = SimpleNamespace(
+        last_prompt_tokens=0,
+        should_compress=lambda *_args, **_kwargs: False,
+        get_retrieval_status=lambda: {
+            "retrieval_status": "failed",
+            "retrieval_state": "degraded_recovery",
+            "exploration_closed": False,
+            "accepted_targets": [],
+        },
+    )
+    responses = [
+        _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[_mock_tool_call("terminal", json.dumps({"command": f"git inspect step {i}"}), f"fx{i}")],
+        )
+        for i in range(1, 10)
+    ]
+    agent.client.chat.completions.create.side_effect = responses
+    outputs = [
+        "noise 1",
+        "noise 2",
+        "noise 3",
+        "noise 4",
+        "noise 5",
+        "commit cbf7e71558 Fixed #30257 -- Made UsernameValidators prohibit trailing newlines.\\n"
+        "diff --git a/tests/auth_tests/test_validators.py b/tests/auth_tests/test_validators.py\\n"
+        "+        invalid_usernames = [\\\"o'connell\\\", 'Éric', 'jean marc', \\\"أحمد\\\", 'trailingnewline\\\\n']\\n"
+        "+    regex = r'^[\\\\w.@+-]+\\\\Z'",
+    ]
+
+    with (
+        patch("run_agent.handle_function_call", side_effect=outputs) as mock_hfc,
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("keep checking whether the checkout is already fixed")
+
+    assert mock_hfc.call_count == 6
+    assert result["turn_exit_reason"] == "guardrail_halt"
+    assert result["guardrail"]["code"] == "degraded_recovery_already_fixed_halt"
+    assert "stopped retrying terminal" in result["final_response"].lower()
+
+
+def test_degraded_recovery_detects_already_fixed_from_read_file_evidence():
+    agent = _make_agent("read_file", max_iterations=10)
+    agent.context_compressor = SimpleNamespace(
+        last_prompt_tokens=0,
+        should_compress=lambda *_args, **_kwargs: False,
+        get_retrieval_status=lambda: {
+            "retrieval_status": "failed",
+            "retrieval_state": "degraded_recovery",
+            "exploration_closed": False,
+            "accepted_targets": [],
+        },
+    )
+    responses = [
+        _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[_mock_tool_call("read_file", json.dumps({"path": "./django/contrib/auth/validators.py"}), "rf1")],
+        ),
+        _mock_response(content="done", finish_reason="stop", tool_calls=None),
+    ]
+    agent.client.chat.completions.create.side_effect = responses
+    fixed_file_output = (
+        "     9|class ASCIIUsernameValidator(validators.RegexValidator):\\n"
+        "    10|    regex = r'^[\\\\w.@+-]+\\\\Z'\\n"
+        "    18|class UnicodeUsernameValidator(validators.RegexValidator):\\n"
+        "    20|    regex = r'^[\\\\w.@+-]+\\\\Z'\\n"
+    )
+
+    with (
+        patch("run_agent.handle_function_call", return_value=fixed_file_output) as mock_hfc,
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("check whether validators.py is already fixed")
+
+    assert mock_hfc.call_count == 1
+    assert result["turn_exit_reason"].startswith("text_response")
+
+
 def test_default_run_conversation_warns_without_guardrail_halt():
     agent = _make_agent("web_search", max_iterations=10)
     same_args = {"query": "same"}

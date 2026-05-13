@@ -734,6 +734,7 @@ class FormsyContextEngine(ContextEngine):
             and has_grounded_evidence
             and candidate_targets
         )
+        compile_missing = self._is_compile_missing(payload)
         is_first_symbolic_seed = mode != "legacy" and phase != "grounded" and self._retrieval_trace.seed_calls == 0
 
         if mode == "legacy":
@@ -787,6 +788,15 @@ class FormsyContextEngine(ContextEngine):
             self._symbolic_retry_count += 1
             self._retrieval_state = "inspect_candidates"
             preferred_next = "context_read"
+        elif compile_missing:
+            self._symbolic_failures += 1
+            self._symbolic_retry_count += 1
+            if is_first_symbolic_seed:
+                self._retrieval_trace.seed_calls += 1
+            else:
+                self._retrieval_trace.retry_calls += 1
+            self._retrieval_state = "degraded_recovery"
+            preferred_next = "bounded_shell_inspection"
         else:
             self._symbolic_failures += 1
             self._symbolic_retry_count += 1
@@ -891,7 +901,7 @@ class FormsyContextEngine(ContextEngine):
             suggested_queries = payload.get("suggested_queries")
             if isinstance(suggested_queries, list) and suggested_queries:
                 query = next((str(item) for item in suggested_queries if str(item).strip()), None)
-                if query:
+                if query and "compile the repository before querying" not in query.lower():
                     return {
                         "query": query,
                         "retrieval_mode": "symbolic",
@@ -952,6 +962,15 @@ class FormsyContextEngine(ContextEngine):
             return "no matches returned"
         return "retrieval result accepted"
 
+    @staticmethod
+    def _is_compile_missing(payload: dict[str, Any]) -> bool:
+        missing = payload.get("missing_context")
+        if isinstance(missing, list):
+            text = " ".join(str(item) for item in missing).lower()
+            if "compiled repository not found" in text:
+                return True
+        return False
+
     def _record_context_read(self, requested_path: str, result: Any) -> None:
         if isinstance(result, dict):
             path = str(result.get("path") or requested_path)
@@ -959,17 +978,24 @@ class FormsyContextEngine(ContextEngine):
             path = requested_path
         if path and path not in self._grounded_files:
             self._grounded_files.append(path)
-        self._retrieval_state = "context_read"
-        self._grounded_search_required = True
-        self._sync_trace_state(state="context_read")
+        if self._retrieval_state == "degraded_recovery":
+            self._retrieval_state = "grounded"
+            self._set_accepted_targets([path])
+            self._grounded_search_required = False
+        else:
+            self._retrieval_state = "context_read"
+            self._grounded_search_required = True
+        self._sync_trace_state(state=self._retrieval_state)
         self._last_retrieval_decision = {
-            "decision": "context_read",
+            "decision": self._retrieval_state,
             "grounded_files": list(self._grounded_files),
             "accepted_targets": list(self._retrieval_trace.accepted_targets),
             "exploration_closed": self._retrieval_trace.exploration_closed,
             "retrieval_budget": self._retrieval_trace.retrieval_budget,
-            "next_state": "grounded_search",
-            "next_retrieval": {
+        }
+        if self._retrieval_state == "context_read":
+            self._last_retrieval_decision["next_state"] = "grounded_search"
+            self._last_retrieval_decision["next_retrieval"] = {
                 "query": "confirm grounded source details",
                 "retrieval_mode": "symbolic",
                 "grounding_phase": "grounded",
@@ -980,8 +1006,9 @@ class FormsyContextEngine(ContextEngine):
                 "template_family": self._template_family,
                 "retrieval_targets": self._retrieval_targets,
                 "test_plan": self._test_plan,
-            },
-        }
+            }
+        else:
+            self._last_retrieval_decision["next_state"] = "edit_or_test"
 
     @staticmethod
     def _extract_symbolic_prompt_sections(symbolic_prompt: str) -> list[str]:

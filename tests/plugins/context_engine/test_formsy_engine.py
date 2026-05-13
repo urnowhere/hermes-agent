@@ -348,6 +348,53 @@ def test_formsy_engine_memory_search_marks_poor_symbolic_results_for_retry():
     assert engine.get_retrieval_status()["symbolic_prompt_sections"] == []
 
 
+def test_formsy_engine_compile_missing_goes_directly_to_degraded_recovery():
+    engine = FormsyContextEngine()
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            return {
+                "extra_context": "",
+                "matches": [],
+                "coverage": "poor",
+                "suggested_queries": [
+                    "compile the repository before querying",
+                    "ASCIIUsernameValidator UnicodeUsernameValidator username validator regex",
+                ],
+                "missing_context": [
+                    "\"Compiled repository not found for repo_id='django__django-14053' revision='latest'\"",
+                ],
+                "test_plan": {},
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "django__django-14053",
+        "revision": "latest",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+
+    result = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {
+                "query": "username validator regex",
+                "repo_id": "django__django-14053",
+                "metadata": {
+                    "retrieval_mode": "symbolic",
+                    "grounding_phase": "seed",
+                    "response_format": "bundle",
+                },
+            },
+        )
+    )
+
+    assert result["retrieval_state"] == "degraded_recovery"
+    assert result["preferred_next_step"] == "bounded_shell_inspection"
+    assert result["next_retrieval"]["recovery_mode"] == "degraded_recovery"
+
+
 def test_formsy_engine_enforces_seed_read_grounded_sequence():
     engine = FormsyContextEngine()
     search_calls = []
@@ -999,6 +1046,84 @@ def test_formsy_engine_degrades_instead_of_full_block_after_failed_grounded_sear
     assert grounded_result["preferred_next_step"] == "bounded_shell_inspection"
     assert engine.get_tool_block_message("terminal", {"command": "grep -R UsernameValidator django"}) is None
     assert engine.get_tool_block_message("patch", {"path": "django/contrib/auth/validators.py"}) is not None
+
+
+def test_formsy_engine_promotes_degraded_recovery_read_of_target_to_grounded():
+    engine = FormsyContextEngine()
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            if kwargs["metadata"].get("retrieval_mode") == "legacy":
+                return {
+                    "extra_context": "Still weak",
+                    "matches": [],
+                    "coverage": "poor",
+                    "missing_context": ["Legacy fallback did not recover grounded evidence."],
+                }
+            return {
+                "extra_context": "No useful matches",
+                "matches": [],
+                "coverage": "poor",
+                "suggested_queries": ["auth validator regex anchors"],
+            }
+
+        async def memory_read(self, **kwargs):
+            return {
+                "path": "django/contrib/auth/validators.py",
+                "start_line": 1,
+                "end_line": 25,
+                "content": "class ASCIIUsernameValidator: ...",
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "django__django-14053",
+        "revision": "latest",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+
+    engine.handle_tool_call(
+        "context_search",
+        {
+            "query": "username validator regex",
+            "repo_id": "django__django-14053",
+            "metadata": {
+                "retrieval_mode": "symbolic",
+                "grounding_phase": "seed",
+                "response_format": "bundle",
+            },
+        },
+    )
+    engine.handle_tool_call(
+        "context_search",
+        {
+            "query": "auth validator regex anchors",
+            "repo_id": "django__django-14053",
+            "metadata": {
+                "retrieval_mode": "legacy",
+                "grounding_phase": "fallback",
+                "response_format": "bundle",
+            },
+        },
+    )
+    assert engine.get_retrieval_status()["retrieval_state"] == "degraded_recovery"
+
+    engine.handle_tool_call(
+        "context_read",
+        {
+            "path": "django/contrib/auth/validators.py",
+            "repo_id": "django__django-14053",
+            "start_line": 1,
+            "end_line": 25,
+        },
+    )
+
+    status = engine.get_retrieval_status()
+    assert status["retrieval_state"] == "grounded"
+    assert status["accepted_targets"] == ["django/contrib/auth/validators.py"]
+    assert status["exploration_closed"] is True
+    assert engine.get_tool_block_message("patch", {"path": "django/contrib/auth/validators.py"}) is None
 
 
 def test_formsy_engine_memory_read_tool_queries_runtime():

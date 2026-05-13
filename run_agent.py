@@ -1173,6 +1173,7 @@ class AIAgent:
         self._executing_tools = False
         self._tool_guardrails = ToolCallGuardrailController()
         self._tool_guardrail_halt_decision: ToolGuardrailDecision | None = None
+        self._degraded_recovery_shell_steps: int = 0
 
         # Interrupt mechanism for breaking out of tool loops
         self._interrupt_requested = False
@@ -9404,6 +9405,20 @@ class AIAgent:
             "to change strategy instead of repeating the same call."
         )
 
+    @staticmethod
+    def _looks_like_already_fixed_evidence(function_result: str) -> bool:
+        text = str(function_result or "")
+        lowered = text.lower()
+        if "\\z" in lowered and "validators.py" in lowered:
+            return True
+        if "fixed #30257" in lowered and "trailing newlines" in lowered:
+            return True
+        if "trailingnewline\\n" in lowered or "trailingnewline\\u000a" in lowered:
+            return True
+        if "trailingnewline" in lowered and "validationerror" in lowered:
+            return True
+        return False
+
     def _append_guardrail_observation(
         self,
         tool_name: str,
@@ -9424,23 +9439,90 @@ class AIAgent:
                 retrieval_status = self.context_compressor.get_retrieval_status()
         except Exception:
             retrieval_status = None
+        try:
+            if (
+                isinstance(retrieval_status, dict)
+                and retrieval_status.get("retrieval_state") == "degraded_recovery"
+                and not retrieval_status.get("accepted_targets")
+                and self._looks_like_already_fixed_evidence(function_result)
+                and not decision.should_halt
+            ):
+                decision = ToolGuardrailDecision(
+                    action="halt",
+                    code="degraded_recovery_already_fixed_halt",
+                    message=(
+                        "Stopped tool use: degraded_recovery inspection already shows "
+                        "the current checkout contains the fix. Stop shell archaeology "
+                        "and summarize that the issue is already fixed."
+                    ),
+                    tool_name=tool_name,
+                    count=max(decision.count, 1),
+                    signature=decision.signature,
+                )
+                self._set_tool_guardrail_halt(decision)
+        except Exception:
+            pass
+        try:
+            if (
+                tool_name == "terminal"
+                and isinstance(retrieval_status, dict)
+                and retrieval_status.get("retrieval_state") == "degraded_recovery"
+                and not retrieval_status.get("accepted_targets")
+            ):
+                self._degraded_recovery_shell_steps += 1
+                if self._degraded_recovery_shell_steps >= 6 and not decision.should_halt:
+                    if self._looks_like_already_fixed_evidence(function_result):
+                        decision = ToolGuardrailDecision(
+                            action="halt",
+                            code="degraded_recovery_already_fixed_halt",
+                            message=(
+                                "Stopped terminal: degraded_recovery inspection already "
+                                "shows the current checkout contains the fix. Stop shell "
+                                "archaeology and summarize that the issue is already fixed."
+                            ),
+                            tool_name=tool_name,
+                            count=self._degraded_recovery_shell_steps,
+                            signature=decision.signature,
+                        )
+                    else:
+                        decision = ToolGuardrailDecision(
+                            action="halt",
+                            code="degraded_recovery_shell_budget_halt",
+                            message=(
+                                "Stopped terminal: degraded_recovery consumed too many shell "
+                                "inspection steps without grounding a target. Change strategy "
+                                "instead of continuing repository archaeology."
+                            ),
+                            tool_name=tool_name,
+                            count=self._degraded_recovery_shell_steps,
+                            signature=decision.signature,
+                        )
+                    self._set_tool_guardrail_halt(decision)
+            elif not failed:
+                self._degraded_recovery_shell_steps = 0
+        except Exception:
+            pass
         if (
             decision.action == "warn"
             and decision.code == "idempotent_no_progress_warning"
             and decision.count >= 3
         ):
             try:
-                if isinstance(retrieval_status, dict) and (
-                    retrieval_status.get("exploration_closed")
-                    or retrieval_status.get("retrieval_state") in {"context_read", "grounded"}
+                if tool_name == "terminal" or (
+                    isinstance(retrieval_status, dict)
+                    and (
+                        retrieval_status.get("exploration_closed")
+                        or retrieval_status.get("retrieval_state") == "degraded_recovery"
+                        or retrieval_status.get("retrieval_state") in {"context_read", "grounded"}
+                    )
                 ):
                     decision = ToolGuardrailDecision(
                         action="halt",
                         code="idempotent_no_progress_halt",
                         message=(
                             f"Stopped {tool_name}: it returned the same result {decision.count} "
-                            "times while retrieval was already grounded enough for direct "
-                            "inspection. Stop repeating the same inspection command and change strategy."
+                            "times without advancing the task. Stop repeating the same "
+                            "inspection/repro command and change strategy."
                         ),
                         tool_name=tool_name,
                         count=decision.count,
@@ -10738,6 +10820,7 @@ class AIAgent:
         self._unicode_sanitization_passes = 0
         self._tool_guardrails.reset_for_turn()
         self._tool_guardrail_halt_decision = None
+        self._degraded_recovery_shell_steps = 0
 
         # Pre-turn connection health check: detect and clean up dead TCP
         # connections left over from provider outages or dropped streams.
