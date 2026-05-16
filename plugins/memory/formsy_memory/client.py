@@ -46,6 +46,11 @@ class MemoryClient:
 
             response = await self.runtime_client.memory_prefetch(request)
             logger.info(f"Memory prefetch completed: {response.elapsed_ms}ms")
+            logger.debug(f"Memory prefetch response: memory_block_len={len(response.memory_block or '')}, "
+                        f"retrieved_facts={len(response.retrieved_facts or [])}, "
+                        f"artifacts={len(response.artifacts or [])}")
+            if response.memory_block:
+                logger.debug(f"Memory block preview: {response.memory_block[:200]}...")
             return response
 
         except (RuntimeAPIError, FormalCCTimeoutError) as e:

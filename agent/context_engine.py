@@ -146,6 +146,15 @@ class ContextEngine(ABC):
         self.last_total_tokens = 0
         self.compression_count = 0
 
+    def on_user_turn(self, user_message: str) -> None:
+        """Called at the start of each user turn, before the agent loop runs.
+
+        Engines that maintain per-task state (e.g. retrieval grounding) should
+        override this to reset that state when a new task is detected.
+
+        Default is a no-op.
+        """
+
     # -- Optional: tools ---------------------------------------------------
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
@@ -167,6 +176,18 @@ class ContextEngine(ABC):
         """
         import json
         return json.dumps({"error": f"Unknown context engine tool: {name}"})
+
+    def observe_tool_result(self, tool_name: str, args: Dict[str, Any], result: str) -> None:
+        """Observe the result of any tool call (not just context-engine tools).
+
+        Called after every non-blocked tool execution so the engine can update
+        its internal state based on what the agent just did.  Default is a no-op.
+
+        Args:
+            tool_name: The name of the tool that was called.
+            args: The arguments passed to the tool.
+            result: The raw string result returned by the tool.
+        """
 
     # -- Optional: status / display ----------------------------------------
 

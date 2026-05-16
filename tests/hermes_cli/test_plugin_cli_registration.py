@@ -169,6 +169,23 @@ class TestMemoryPluginCliDiscovery:
 
         assert len(cmds) == 0
 
+    def test_discovers_formsy_memory_cli_when_active(self, monkeypatch):
+        """The bundled FormSy memory plugin exposes a CLI when active."""
+        import plugins.memory as pm
+
+        mod_key = "plugins.memory.formsy_memory.cli"
+        sys.modules.pop(mod_key, None)
+        monkeypatch.setattr(pm, "_get_active_memory_provider", lambda: "formsy_memory")
+        try:
+            cmds = pm.discover_plugin_cli_commands()
+        finally:
+            sys.modules.pop(mod_key, None)
+
+        assert len(cmds) == 1
+        assert cmds[0]["name"] == "formsy_memory"
+        assert callable(cmds[0]["setup_fn"])
+        assert cmds[0]["handler_fn"].__name__ == "formsy_memory_command"
+
 
 # ── Honcho register_cli ──────────────────────────────────────────────────
 

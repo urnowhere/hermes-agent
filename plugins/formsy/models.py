@@ -212,8 +212,37 @@ class MemoryPrefetchRequest(BaseModel):
 
 class MemoryPrefetchResponse(BaseModel):
     memory_block: str
-    retrieved_count: int = 0
-    elapsed_ms: int = 0
+    metrics: Optional[Dict[str, Any]] = None
+    retrieved_facts: Optional[List[Dict[str, Any]]] = None
+    artifacts: Optional[List[Dict[str, Any]]] = None
+    advisory: Optional[Dict[str, Any]] = None
+
+    @property
+    def elapsed_ms(self) -> int:
+        """Compatibility accessor — server nests elapsed_ms inside metrics."""
+        if isinstance(self.metrics, dict):
+            return int(self.metrics.get("elapsed_ms") or 0)
+        return 0
+
+    @property
+    def retrieved_count(self) -> int:
+        return len(self.retrieved_facts) if self.retrieved_facts else 0
+
+
+class CodingSummary(BaseModel):
+    task_type: Optional[str] = None
+    problem_summary: Optional[str] = None
+    accepted_targets: List[str] = Field(default_factory=list)
+    changed_files: List[str] = Field(default_factory=list)
+    changed_symbols: List[str] = Field(default_factory=list)
+    root_cause: Optional[str] = None
+    patch_summary: Optional[str] = None
+    tests_run: List[str] = Field(default_factory=list)
+    test_result: Optional[str] = None
+    failure_lessons: List[str] = Field(default_factory=list)
+    context_query: Optional[str] = None
+    retrieval_state: Optional[str] = None
+    confidence: Optional[float] = Field(default=None, ge=0, le=1)
 
 
 class MemorySyncTurnRequest(BaseModel):
@@ -223,6 +252,8 @@ class MemorySyncTurnRequest(BaseModel):
     identity: Optional[Dict[str, Any]] = None
     messages: List[Dict[str, Any]]
     sync_mode: SyncMode = SyncMode.ASYNC_BEST_EFFORT
+    coding_summary: Optional[CodingSummary] = None
+    artifacts: Optional[List[ArtifactRef]] = None
 
 
 class SessionEndRequest(BaseModel):

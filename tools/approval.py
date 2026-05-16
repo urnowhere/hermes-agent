@@ -719,12 +719,16 @@ def _get_approval_mode() -> str:
     return _normalize_approval_mode(mode)
 
 
-def _get_approval_timeout() -> int:
-    """Read the approval timeout from config. Defaults to 60 seconds."""
+def _get_approval_timeout() -> int | None:
+    """Read the approval timeout from config. Defaults to 60 seconds.
+
+    Returns None if timeout is 0 or negative, meaning wait indefinitely.
+    """
     try:
-        return int(_get_approval_config().get("timeout", 60))
+        val = int(_get_approval_config().get("timeout", 60))
     except (ValueError, TypeError):
-        return 60
+        val = 60
+    return None if val <= 0 else val
 
 
 def _get_cron_approval_mode() -> str:
@@ -1107,11 +1111,13 @@ def check_all_command_guards(command: str, env_type: str,
             # 1800s) kills the agent while the user is still responding to
             # the approval prompt.  Mirrors the _wait_for_process() cadence
             # in tools/environments/base.py.
+            # Set gateway_timeout to 0 (or negative) to wait indefinitely.
             timeout = _get_approval_config().get("gateway_timeout", 300)
             try:
                 timeout = int(timeout)
             except (ValueError, TypeError):
                 timeout = 300
+            wait_forever = timeout <= 0
 
             try:
                 from tools.environments.base import touch_activity_if_due
@@ -1119,17 +1125,21 @@ def check_all_command_guards(command: str, env_type: str,
                 touch_activity_if_due = None
 
             _now = time.monotonic()
-            _deadline = _now + max(timeout, 0)
+            _deadline = None if wait_forever else _now + timeout
             _activity_state = {"last_touch": _now, "start": _now}
             resolved = False
             while True:
-                _remaining = _deadline - time.monotonic()
-                if _remaining <= 0:
-                    break
+                if not wait_forever:
+                    _remaining = _deadline - time.monotonic()
+                    if _remaining <= 0:
+                        break
+                    slice_timeout = min(1.0, _remaining)
+                else:
+                    slice_timeout = 1.0
                 # 1s poll slice — the event is set immediately when the
                 # user responds, so slice length only controls heartbeat
                 # cadence, not user-visible responsiveness.
-                if entry.event.wait(timeout=min(1.0, _remaining)):
+                if entry.event.wait(timeout=slice_timeout):
                     resolved = True
                     break
                 if touch_activity_if_due is not None:

@@ -27,6 +27,7 @@ class RuntimeClient:
         base_url: str,
         memory_search_endpoint: str = "/api/v1/query",
         api_key_env: str = "FORMALCC_API_KEY",
+        api_key: str = "",
         timeout_s: int = 30,
         max_retries: int = 3,
     ):
@@ -34,7 +35,7 @@ class RuntimeClient:
         self.memory_search_endpoint = self._normalize_endpoint(memory_search_endpoint)
         self.timeout_s = timeout_s
         self.max_retries = max_retries
-        self.auth_manager = AuthManager(api_key_env)
+        self.auth_manager = AuthManager(api_key_env, api_key=api_key)
         self._client: Optional[httpx.AsyncClient] = None
 
     @staticmethod
@@ -75,7 +76,12 @@ class RuntimeClient:
         """Make HTTP request to Runtime API."""
         if not self._client:
             raise RuntimeError("Client not initialized. Use async context manager.")
-        
+
+        # Lazy auth verification: call /v1/auth/verify once on first real request,
+        # skipping the verify endpoint itself to avoid infinite recursion.
+        if endpoint != "/v1/auth/verify":
+            await self.auth_manager.verify(self._client, self.base_url)
+
         url = f"{self.base_url}{endpoint}"
         headers = self._get_headers(session_id)
         
@@ -268,6 +274,7 @@ class RuntimeClient:
         enable_profiling: bool = False,
         profiling_top_n: int = 20,
         metadata: Optional[dict[str, Any]] = None,
+        identity: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Call memory search endpoint (for tool calls)."""
         logger.debug(f"Memory search: query={query[:50]}...")
@@ -280,6 +287,8 @@ class RuntimeClient:
             "profiling_top_n": profiling_top_n,
             "metadata": metadata or {"instance_id": repo_id},
         }
+        if identity:
+            request_body["identity"] = identity
         
         return await self._request(
             "POST",
@@ -296,6 +305,7 @@ class RuntimeClient:
         revision: str = "latest",
         start_line: int | None = None,
         end_line: int | None = None,
+        identity: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Call repository source read endpoint (for tool calls)."""
         logger.debug(f"Memory read: path={path}...")
@@ -308,6 +318,8 @@ class RuntimeClient:
             request_body["start_line"] = start_line
         if end_line is not None:
             request_body["end_line"] = end_line
+        if identity:
+            request_body["identity"] = identity
 
         return await self._request(
             "POST",

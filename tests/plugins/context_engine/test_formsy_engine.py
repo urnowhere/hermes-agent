@@ -385,6 +385,71 @@ def test_formsy_engine_memory_search_prefers_nested_metadata():
     }]
 
 
+def test_formsy_engine_memory_search_merges_memory_provider_hints():
+    engine = FormsyContextEngine()
+    calls = []
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            calls.append(kwargs)
+            return {"matches": []}
+
+    class HintProvider:
+        def get_context_hints(self):
+            return {
+                "memory_artifact_ids": ["artifact-1", "artifact-2"],
+                "memory_query_hints": ["search auth tests", "search auth tests"],
+                "memory_test_hints": ["python -m pytest tests/auth"],
+                "memory_status": "warm",
+                "memory_freshness": "fresh",
+            }
+
+    class FakeMemoryManager:
+        providers = [HintProvider()]
+
+    engine._engine_client = FakeClient()
+    engine._memory_manager = FakeMemoryManager()
+    engine._config = type("Config", (), {
+        "repo_id": "django__django-14053",
+        "revision": "latest",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+
+    result = engine.handle_tool_call(
+        "context_search",
+        {
+            "query": "parser state handling",
+            "repo_id": "django__django-14053",
+            "metadata": {
+                "memory_artifact_ids": ["artifact-2", "artifact-3"],
+                "memory_query_hints": ["existing hint"],
+            },
+        },
+    )
+
+    assert json.loads(result)["ok"] is True
+    assert calls == [{
+        "repo_id": "django__django-14053",
+        "session_id": "session-123",
+        "query": "parser state handling",
+        "revision": "latest",
+        "budget": 4000,
+        "metadata": {
+            "retrieval_mode": "symbolic",
+            "grounding_phase": "seed",
+            "response_format": "bundle",
+            "case_id": "django__django-14053",
+            "trace_id": "session-123",
+            "memory_artifact_ids": ["artifact-2", "artifact-3", "artifact-1"],
+            "memory_query_hints": ["existing hint", "search auth tests"],
+            "memory_test_hints": ["python -m pytest tests/auth"],
+            "memory_status": "warm",
+            "memory_freshness": "fresh",
+        },
+    }]
+
+
 def test_formsy_engine_memory_search_marks_poor_symbolic_results_for_retry():
     engine = FormsyContextEngine()
     calls = []

@@ -64,8 +64,8 @@ class FakeMemoryProvider(MemoryProvider):
     def shutdown(self):
         self.shutdown_called = True
 
-    def on_turn_start(self, turn_number, message):
-        self.turn_starts.append((turn_number, message))
+    def on_turn_start(self, turn_number, message, **kwargs):
+        self.turn_starts.append((turn_number, message, kwargs))
 
     def on_session_end(self, messages):
         self.session_end_called = True
@@ -310,7 +310,7 @@ class TestMemoryManager:
         p = FakeMemoryProvider("p")
         mgr.add_provider(p)
         mgr.on_turn_start(3, "hello")
-        assert p.turn_starts == [(3, "hello")]
+        assert p.turn_starts == [(3, "hello", {})]
 
     def test_on_session_end(self):
         mgr = MemoryManager()

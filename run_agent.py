@@ -33,6 +33,7 @@ import os
 import random
 import re
 import ssl
+import subprocess
 import sys
 import tempfile
 import time
@@ -147,6 +148,7 @@ from agent.model_metadata import (
     query_ollama_num_ctx,
 )
 from agent.context_compressor import ContextCompressor
+from agent.runtime_identity import ResolvedIdentitySnapshot
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
@@ -1717,6 +1719,7 @@ class AIAgent:
             _agent_cfg = _load_agent_config()
         except Exception:
             _agent_cfg = {}
+        self._runtime_identity_snapshot = self._build_runtime_identity_snapshot(_agent_cfg)
         try:
             self._tool_guardrails = ToolCallGuardrailController(
                 ToolCallGuardrailConfig.from_mapping(
@@ -1809,6 +1812,7 @@ class AIAgent:
                             _init_kwargs["agent_workspace"] = "hermes"
                         except Exception:
                             pass
+                        _init_kwargs["runtime_identity_snapshot"] = self._runtime_identity_snapshot
                         self._memory_manager.initialize_all(**_init_kwargs)
                         logger.info("Memory provider '%s' activated", _mem_provider_name)
                     else:
@@ -2117,6 +2121,8 @@ class AIAgent:
                     platform=self.platform or "cli",
                     model=self.model,
                     context_length=getattr(self.context_compressor, "context_length", 0),
+                    memory_manager=self._memory_manager,
+                    runtime_identity_snapshot=self._runtime_identity_snapshot,
                 )
             except Exception as _ce_err:
                 logger.debug("Context engine on_session_start: %s", _ce_err)
@@ -4751,9 +4757,21 @@ class AIAgent:
         if not (self._memory_manager and final_response and original_user_message):
             return
         try:
+            context_artifacts: list = []
+            accepted_targets: list = []
+            engine = getattr(self, "context_compressor", None)
+            if engine is not None and hasattr(engine, "get_retrieval_status"):
+                try:
+                    _status = engine.get_retrieval_status()
+                    context_artifacts = list(_status.get("context_artifact_ids") or [])
+                    accepted_targets = list(_status.get("accepted_targets") or [])
+                except Exception:
+                    pass
             self._memory_manager.sync_all(
                 original_user_message, final_response,
                 session_id=self.session_id or "",
+                context_artifacts=context_artifacts or None,
+                accepted_targets=accepted_targets or None,
             )
             self._memory_manager.queue_prefetch_all(
                 original_user_message,
@@ -4818,11 +4836,19 @@ class AIAgent:
         - Browser daemon sessions
         - Active child agents (subagent delegation)
         - OpenAI/httpx client connections
+        - Memory provider (flush episodes to storage)
 
         Safe to call multiple times (idempotent).  Each cleanup step is
         independently guarded so a failure in one does not prevent the rest.
         """
         task_id = getattr(self, "session_id", None) or ""
+
+        # 0. Flush memory episodes to storage before cleanup
+        try:
+            messages = getattr(self, "messages", [])
+            self.shutdown_memory_provider(messages)
+        except Exception:
+            pass
 
         # 1. Kill background processes for this task
         try:
@@ -5505,6 +5531,175 @@ class AIAgent:
             f"thread={self._thread_identity()} provider={provider} "
             f"base_url={base_url} model={model}"
         )
+
+    def _build_runtime_identity_snapshot(self, agent_cfg: dict) -> ResolvedIdentitySnapshot:
+        formsy_cfg = agent_cfg.get("formsy", {}) if isinstance(agent_cfg, dict) else {}
+        if not isinstance(formsy_cfg, dict):
+            formsy_cfg = {}
+
+        workspace_id = str(formsy_cfg.get("workspace_id") or "ws_default").strip() or "ws_default"
+        snapshot = ResolvedIdentitySnapshot(
+            workspace_id=workspace_id,
+            session_id=str(self.session_id or "").strip(),
+        )
+        snapshot.set_source(
+            "workspace_id",
+            "formsy_config" if formsy_cfg.get("workspace_id") else "formsy_default",
+        )
+        snapshot.set_source("session_id", "agent_session")
+
+        user_id = str(self._user_id or "").strip()
+        if user_id:
+            snapshot.user_id = user_id
+            snapshot.set_source("user_id", "gateway_auth")
+        else:
+            snapshot.mark_limited("missing_user_id")
+
+        profile_id = "default"
+        profile_source = "defaulted"
+        try:
+            from hermes_cli.profiles import get_active_profile_name
+
+            active_profile = str(get_active_profile_name() or "").strip()
+            if active_profile:
+                profile_id = active_profile
+                profile_source = "active_profile"
+        except Exception:
+            pass
+        snapshot.profile_id = profile_id
+        snapshot.set_source("profile_id", profile_source)
+
+        return snapshot
+
+    def _refresh_runtime_identity_snapshot(self, *, turn_number: int | None = None) -> None:
+        snapshot = self._runtime_identity_snapshot
+        snapshot.session_id = str(self.session_id or "").strip()
+        snapshot.set_source("session_id", "agent_session")
+
+        if turn_number is not None and turn_number > 0:
+            snapshot.turn_id = f"{snapshot.session_id}:turn:{turn_number}"
+            snapshot.set_source("turn_id", "turn_counter")
+
+        repo_id = ""
+        branch = ""
+        revision = ""
+        repo_source = ""
+        branch_source = ""
+        revision_source = ""
+
+        remote_url = self._git_output(["git", "remote", "get-url", "origin"])
+        if remote_url:
+            repo_id = self._repo_id_from_git_url(remote_url)
+            if repo_id:
+                repo_source = "git_remote"
+        branch = self._git_output(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+        if branch:
+            branch_source = "git_branch"
+        revision = self._git_output(["git", "rev-parse", "HEAD"])
+        if revision:
+            revision_source = "git_head"
+
+        formsy_cfg = {}
+        try:
+            from hermes_cli.config import load_config as _load_agent_config
+
+            loaded_cfg = _load_agent_config()
+            if isinstance(loaded_cfg, dict) and isinstance(loaded_cfg.get("formsy"), dict):
+                formsy_cfg = loaded_cfg.get("formsy") or {}
+        except Exception:
+            formsy_cfg = {}
+
+        if not repo_id:
+            repo_cfg = str(formsy_cfg.get("repo_id") or "").strip()
+            if repo_cfg:
+                repo_id = repo_cfg
+                repo_source = "formsy_config"
+        if not revision:
+            revision_cfg = str(formsy_cfg.get("revision") or "").strip()
+            if revision_cfg:
+                revision = revision_cfg
+                revision_source = "formsy_config"
+
+        snapshot.repo_id = repo_id or None
+        if repo_id:
+            snapshot.set_source("repo_id", repo_source or "unknown")
+            snapshot.clear_limited("missing_repo_id")
+        else:
+            snapshot.source_flags.pop("repo_id", None)
+            snapshot.mark_limited("missing_repo_id")
+
+        snapshot.branch = branch or None
+        if branch:
+            snapshot.set_source("branch", branch_source or "unknown")
+        else:
+            snapshot.source_flags.pop("branch", None)
+
+        if revision:
+            snapshot.revision = revision
+            snapshot.set_source("revision", revision_source or "unknown")
+            snapshot.clear_limited("revision_unknown")
+        else:
+            snapshot.revision = "latest"
+            snapshot.set_source("revision", "default_latest")
+            snapshot.mark_limited("revision_unknown")
+
+        logger.debug(
+            "runtime identity refreshed: session=%s turn=%s repo=%s branch=%s revision=%s sources=%s limited=%s",
+            snapshot.session_id,
+            snapshot.turn_id,
+            snapshot.repo_id,
+            snapshot.branch,
+            snapshot.revision,
+            snapshot.source_flags,
+            sorted(snapshot.limited_scope_flags),
+        )
+
+    def _update_runtime_identity_session(self, new_session_id: str, *, reset: bool = False) -> None:
+        snapshot = self._runtime_identity_snapshot
+        snapshot.session_id = str(new_session_id or "").strip()
+        snapshot.set_source("session_id", "agent_session")
+        if reset:
+            snapshot.turn_id = None
+            snapshot.source_flags.pop("turn_id", None)
+        elif self._user_turn_count > 0:
+            snapshot.turn_id = f"{snapshot.session_id}:turn:{self._user_turn_count}"
+            snapshot.set_source("turn_id", "turn_counter")
+
+    @staticmethod
+    def _git_output(cmd: list[str]) -> str:
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=2,
+            )
+        except Exception:
+            return ""
+        if result.returncode != 0:
+            return ""
+        return (result.stdout or "").strip()
+
+    @staticmethod
+    def _repo_id_from_git_url(remote_url: str) -> str:
+        value = remote_url.strip()
+        if not value:
+            return ""
+        if "://" in value:
+            parsed = urlparse(value)
+            path = parsed.path
+        elif ":" in value and not value.startswith("/"):
+            path = value.split(":", 1)[1]
+        else:
+            path = value
+        path = path.strip("/")
+        if path.endswith(".git"):
+            path = path[:-4]
+        parts = [part for part in path.split("/") if part]
+        if len(parts) < 2:
+            return ""
+        return f"{parts[-2]}__{parts[-1]}"
 
     def _openai_client_lock(self) -> threading.RLock:
         lock = getattr(self, "_client_lock", None)
@@ -9327,10 +9522,12 @@ class AIAgent:
         try:
             _old_sid = locals().get("old_session_id")
             if _old_sid and hasattr(self.context_compressor, "on_session_start"):
+                self._update_runtime_identity_session(self.session_id or "", reset=False)
                 self.context_compressor.on_session_start(
                     self.session_id or "",
                     boundary_reason="compression",
                     old_session_id=_old_sid,
+                    runtime_identity_snapshot=self._runtime_identity_snapshot,
                 )
         except Exception as _ce_err:
             logger.debug("context engine on_session_start (compression): %s", _ce_err)
@@ -9343,11 +9540,13 @@ class AIAgent:
         try:
             _old_sid = locals().get("old_session_id")
             if _old_sid and self._memory_manager:
+                self._update_runtime_identity_session(self.session_id or "", reset=False)
                 self._memory_manager.on_session_switch(
                     self.session_id or "",
                     parent_session_id=_old_sid,
                     reset=False,
                     reason="compression",
+                    runtime_identity_snapshot=self._runtime_identity_snapshot,
                 )
         except Exception as _me_err:
             logger.debug("memory manager on_session_switch (compression): %s", _me_err)
@@ -9419,6 +9618,17 @@ class AIAgent:
             return True
         return False
 
+    @staticmethod
+    def _looks_like_submission_command(function_args: dict) -> bool:
+        """Return True if the terminal command is a task-submission command.
+
+        Submission commands (e.g. echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT)
+        must never be blocked by the already-fixed guardrail — the agent is
+        finishing work, not doing archaeology.
+        """
+        cmd = str((function_args or {}).get("command") or "")
+        return "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in cmd
+
     def _append_guardrail_observation(
         self,
         tool_name: str,
@@ -9446,6 +9656,7 @@ class AIAgent:
                 and not retrieval_status.get("accepted_targets")
                 and self._looks_like_already_fixed_evidence(function_result)
                 and not decision.should_halt
+                and not self._looks_like_submission_command(function_args)
             ):
                 decision = ToolGuardrailDecision(
                     action="halt",
@@ -9468,8 +9679,25 @@ class AIAgent:
                 and isinstance(retrieval_status, dict)
                 and retrieval_status.get("retrieval_state") == "degraded_recovery"
                 and not retrieval_status.get("accepted_targets")
+                and not self._looks_like_submission_command(function_args)
             ):
-                self._degraded_recovery_shell_steps += 1
+                # Only count non-progressing terminal steps against the budget.
+                # A step is progressing if it succeeded (exit_code 0) and produced
+                # non-empty output — i.e. the agent is making real forward progress
+                # (editing, verifying) rather than doing archaeology.
+                _is_progressing = False
+                if not failed:
+                    try:
+                        _tr = json.loads(function_result)
+                        if isinstance(_tr, dict) and _tr.get("exit_code") == 0 and str(_tr.get("output") or "").strip():
+                            _is_progressing = True
+                    except Exception:
+                        pass
+                if _is_progressing:
+                    # Reset the counter — productive work resets the budget.
+                    self._degraded_recovery_shell_steps = 0
+                else:
+                    self._degraded_recovery_shell_steps += 1
                 if self._degraded_recovery_shell_steps >= 6 and not decision.should_halt:
                     if self._looks_like_already_fixed_evidence(function_result):
                         decision = ToolGuardrailDecision(
@@ -10089,6 +10317,18 @@ class AIAgent:
             }
             messages.append(tool_msg)
 
+            # ── Detect successful task submission ────────────────────────
+            # If this was a submission command (e.g. echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT)
+            # and it succeeded, mark the task as complete so the conversation loop exits.
+            if name == "terminal" and self._looks_like_submission_command(function_args):
+                try:
+                    result_data = json.loads(function_result)
+                    if result_data.get("exit_code") == 0 and "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in result_data.get("output", ""):
+                        self._task_submission_completed = True
+                        logger.info("Task submission detected: exit_code=0, output contains COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT")
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    pass
+
             # ── Per-tool /steer drain ───────────────────────────────────
             # Same as the sequential path: drain between each collected
             # result so the steer lands as early as possible.
@@ -10437,6 +10677,13 @@ class AIAgent:
                 result_preview = function_result if self.verbose_logging else (
                     function_result[:200] if len(function_result) > 200 else function_result
                 )
+                # Let the context engine observe every completed tool result so it
+                # can update grounding state (e.g. read_file in degraded_recovery).
+                if self.context_compressor and hasattr(self.context_compressor, "observe_tool_result"):
+                    try:
+                        self.context_compressor.observe_tool_result(function_name, function_args, function_result)
+                    except Exception:
+                        pass
             elif not _blocked_by_guardrail:
                 function_result = self._append_guardrail_observation(
                     function_name,
@@ -10493,6 +10740,18 @@ class AIAgent:
                 "tool_call_id": tool_call.id
             }
             messages.append(tool_msg)
+
+            # ── Detect successful task submission ────────────────────────
+            # If this was a submission command (e.g. echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT)
+            # and it succeeded, mark the task as complete so the conversation loop exits.
+            if function_name == "terminal" and self._looks_like_submission_command(function_args):
+                try:
+                    result_data = json.loads(function_result)
+                    if result_data.get("exit_code") == 0 and "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in result_data.get("output", ""):
+                        self._task_submission_completed = True
+                        logger.info("Task submission detected: exit_code=0, output contains COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT")
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    pass
 
             # ── Per-tool /steer drain ───────────────────────────────────
             # Drain pending steer BETWEEN individual tool calls so the
@@ -10821,6 +11080,7 @@ class AIAgent:
         self._tool_guardrails.reset_for_turn()
         self._tool_guardrail_halt_decision = None
         self._degraded_recovery_shell_steps = 0
+        self._task_submission_completed = False
 
         # Pre-turn connection health check: detect and clean up dead TCP
         # connections left over from provider outages or dropped streams.
@@ -10873,6 +11133,15 @@ class AIAgent:
         
         # Track user turns for memory flush and periodic nudge logic
         self._user_turn_count += 1
+
+        # Notify the context engine of the new user turn so it can reset
+        # per-task state (e.g. retrieval grounding) when a new task is injected.
+        if self.context_compressor and hasattr(self.context_compressor, "on_user_turn"):
+            try:
+                _msg_text = user_message if isinstance(user_message, str) else ""
+                self.context_compressor.on_user_turn(_msg_text)
+            except Exception:
+                pass
 
         # Reset the streaming context scrubber at the top of each turn so a
         # hung span from a prior interrupted stream can't taint this turn's
@@ -11097,10 +11366,19 @@ class AIAgent:
         # Notify memory providers of the new turn so cadence tracking works.
         # Must happen BEFORE prefetch_all() so providers know which turn it is
         # and can gate context/dialectic refresh via contextCadence/dialecticCadence.
+        try:
+            self._refresh_runtime_identity_snapshot(turn_number=self._user_turn_count)
+        except Exception:
+            pass
+
         if self._memory_manager:
             try:
                 _turn_msg = original_user_message if isinstance(original_user_message, str) else ""
-                self._memory_manager.on_turn_start(self._user_turn_count, _turn_msg)
+                self._memory_manager.on_turn_start(
+                    self._user_turn_count,
+                    _turn_msg,
+                    runtime_identity_snapshot=self._runtime_identity_snapshot,
+                )
             except Exception:
                 pass
 
@@ -13671,6 +13949,14 @@ class AIAgent:
                             pass
 
                     self._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
+
+                    # Check if a task submission command completed successfully
+                    if self._task_submission_completed:
+                        _turn_exit_reason = "task_submission_completed"
+                        final_response = "(Task submitted successfully)"
+                        if not self.quiet_mode:
+                            self._safe_print(f"✅ Task submission completed successfully")
+                        break
 
                     if self._tool_guardrail_halt_decision is not None:
                         decision = self._tool_guardrail_halt_decision

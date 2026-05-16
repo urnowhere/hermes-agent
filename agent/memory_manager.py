@@ -314,11 +314,25 @@ class MemoryManager:
 
     # -- Sync ----------------------------------------------------------------
 
-    def sync_all(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+    def sync_all(
+        self,
+        user_content: str,
+        assistant_content: str,
+        *,
+        session_id: str = "",
+        context_artifacts: Optional[List[str]] = None,
+        accepted_targets: Optional[List[str]] = None,
+        **kwargs: Any,
+    ) -> None:
         """Sync a completed turn to all providers."""
+        extra: Dict[str, Any] = dict(kwargs)
+        if context_artifacts is not None:
+            extra["context_artifacts"] = context_artifacts
+        if accepted_targets is not None:
+            extra["accepted_targets"] = accepted_targets
         for provider in self._providers:
             try:
-                provider.sync_turn(user_content, assistant_content, session_id=session_id)
+                provider.sync_turn(user_content, assistant_content, session_id=session_id, **extra)
             except Exception as e:
                 logger.warning(
                     "Memory provider '%s' sync_turn failed: %s",

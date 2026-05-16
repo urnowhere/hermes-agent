@@ -47,6 +47,7 @@ class EngineClient:
         revision: str = "latest",
         budget: int = 4000,
         metadata: Optional[dict[str, Any]] = None,
+        identity: Optional[dict[str, Any]] = None,
     ) -> Optional[dict[str, Any]]:
         """Search Formsy memory/context for relevant snippets."""
         try:
@@ -57,6 +58,7 @@ class EngineClient:
                 revision=revision,
                 budget=budget,
                 metadata=metadata,
+                **({"identity": identity} if identity else {}),
             )
         except (RuntimeAPIError, FormalCCTimeoutError) as e:
             logger.warning(f"Memory search failed: {e}")
@@ -73,6 +75,7 @@ class EngineClient:
         revision: str = "latest",
         start_line: int | None = None,
         end_line: int | None = None,
+        identity: Optional[dict[str, Any]] = None,
     ) -> Optional[dict[str, Any]]:
         """Read exact source context from Formsy compiled repository memory."""
         try:
@@ -83,6 +86,7 @@ class EngineClient:
                 revision=revision,
                 start_line=start_line,
                 end_line=end_line,
+                **({"identity": identity} if identity else {}),
             )
         except (RuntimeAPIError, FormalCCTimeoutError) as e:
             logger.warning(f"Memory read failed: {e}")

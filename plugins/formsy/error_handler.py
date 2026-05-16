@@ -80,8 +80,8 @@ class ErrorHandler:
         if isinstance(error, RuntimeAPIError):
             if error.status_code == 401:
                 suggestions.extend([
-                    "Run 'hermes formalcc-memory validate' to check your configuration",
-                    "Verify your API key with 'echo $FORMALCC_API_KEY'",
+                    "Run 'hermes formsy_memory validate' to check your configuration",
+                    "Verify your API key with 'echo $FORMSY_API_KEY' or 'echo $FORMALCC_API_KEY'",
                     "Generate a new API key from the FormalCC dashboard",
                 ])
             elif error.status_code == 503:

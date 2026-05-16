@@ -33,6 +33,7 @@ class RetrievalTrace:
     blocked_tool_reason: str = ""
     contradiction_retry_used: bool = False
     contradiction_legacy_used: bool = False
+    context_artifact_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -48,6 +49,7 @@ class RetrievalTrace:
             "blocked_tool_reason": self.blocked_tool_reason,
             "contradiction_retry_used": self.contradiction_retry_used,
             "contradiction_legacy_used": self.contradiction_legacy_used,
+            "context_artifact_ids": list(self.context_artifact_ids),
         }
 
 
@@ -61,6 +63,8 @@ class FormsyContextEngine(ContextEngine):
         self._session_id: Optional[str] = None
         self._turn_counter: int = 0
         self._context: dict[str, Any] = {}
+        self._identity_snapshot: Any = None
+        self._memory_manager: Any = None
         self._retrieval_trace = RetrievalTrace()
         self._retrieval_state: str = "not_started"
         self._symbolic_failures: int = 0
@@ -115,6 +119,7 @@ class FormsyContextEngine(ContextEngine):
             base_url=self._config.base_url,
             memory_search_endpoint=self._config.memory_search_endpoint,
             api_key_env=self._config.api_key_env,
+            api_key=self._config.api_key,
             timeout_s=self._config.timeout_s,
             max_retries=self._config.max_retries,
         )
@@ -153,6 +158,8 @@ class FormsyContextEngine(ContextEngine):
         self._session_id = session_id
         self._context = dict(kwargs)
         self._context["session_id"] = session_id
+        self._identity_snapshot = kwargs.get("runtime_identity_snapshot")
+        self._memory_manager = kwargs.get("memory_manager")
 
         if self._engine_client:
             return
@@ -178,9 +185,10 @@ class FormsyContextEngine(ContextEngine):
         })
 
     def on_session_end(self, session_id: str, messages: list[dict[str, Any]]) -> None:
-        """Close the underlying async HTTP client at a real session boundary."""
+        """Flush the session episode to the memory store, then close the HTTP client."""
         if not self._runtime_client:
             return
+        self._flush_session_for_task_boundary(messages=messages)
         self._run_async(self._runtime_client.__aexit__(None, None, None))
         self._runtime_client = None
         self._engine_client = None
@@ -192,6 +200,153 @@ class FormsyContextEngine(ContextEngine):
         self._session_id = None
         self._context = {}
         self._reset_retrieval_state()
+
+    # Task-injection markers that indicate a fresh SWE-bench / batch task is
+    # starting inside the same Hermes session.  When any of these appear in a
+    # new user message the retrieval state machine must be reset so the new
+    # task starts from "not_started" rather than inheriting grounding from the
+    # previous task.
+    _TASK_INJECTION_MARKERS = (
+        "<pr_description>",
+        "<instructions>",
+        "<task_description>",
+        "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+    )
+
+    def on_user_turn(self, user_message: str) -> None:
+        """Reset retrieval state when a new task is injected into the session.
+
+        In batch / SWE-bench runs the runner injects a new task as a user
+        message into the same long-running Hermes session.  Without a reset
+        the retrieval gate would still be in the grounded/exploration_closed
+        state from the previous task, blocking context_search entirely.
+
+        Before resetting, we flush the current session to the memory store so
+        the episode from the just-completed task is available for the next run.
+        """
+        if not user_message:
+            return
+        # Only reset when the message looks like a fresh task injection.
+        # Regular conversational follow-ups should not reset grounding.
+        msg_lower = user_message[:2000].lower()
+        if any(marker.lower() in msg_lower for marker in self._TASK_INJECTION_MARKERS):
+            logger.debug("on_user_turn: task injection detected, flushing session then resetting retrieval state")
+            self._flush_session_for_task_boundary()
+            self._reset_retrieval_state()
+
+    def _flush_session_for_task_boundary(self, messages: list[dict[str, Any]] | None = None) -> None:
+        """Best-effort: call session_end on the runtime client so the current
+        task's episode is written to the memory store before the next task starts.
+
+        This makes memory hits available on repeated runs of the same case
+        within a single long-running Hermes session (e.g. SWE-bench batch runs).
+        Failures are swallowed — this is advisory only.
+        """
+        if not self._runtime_client or not self._session_id:
+            return
+        try:
+            from plugins.formsy.models import SessionEndRequest
+            config = self._config
+            workspace_id = getattr(config, "workspace_id", "") if config else ""
+            summary_hint = self._build_session_summary_hint(messages or [])
+            request = SessionEndRequest(
+                workspace_id=workspace_id or "",
+                session_id=self._session_id,
+                identity=self._current_runtime_identity() or None,
+                summary_hint=summary_hint or None,
+            )
+            self._run_async(self._runtime_client.session_end(request))
+            logger.debug("_flush_session_for_task_boundary: session_end flushed for session %s", self._session_id)
+        except Exception as exc:
+            logger.debug("_flush_session_for_task_boundary: session_end flush failed (non-fatal): %s", exc)
+
+    @staticmethod
+    def _build_session_summary_hint(messages: list[dict[str, Any]]) -> str:
+        """Build a brief summary hint from the conversation for the memory store."""
+        if not messages:
+            return ""
+        assistant_texts = [
+            str(msg.get("content") or "").strip()
+            for msg in messages
+            if isinstance(msg, dict) and msg.get("role") == "assistant"
+            and str(msg.get("content") or "").strip()
+        ]
+        if assistant_texts:
+            return assistant_texts[-1][:2000]
+        user_texts = [
+            str(msg.get("content") or "").strip()
+            for msg in messages
+            if isinstance(msg, dict) and msg.get("role") == "user"
+            and str(msg.get("content") or "").strip()
+        ]
+        if user_texts:
+            return user_texts[-1][:2000]
+        return ""
+
+    def _try_memory_prefetch_fallback(
+        self, *, query: str, repo_id: str, session_id: str
+    ) -> str | None:
+        """Attempt a memory-only prefetch when source compile has failed.
+
+        Queries the in-memory store for episodes/facts from previous runs without
+        requiring compiled source. Returns a JSON string on success (memory hit),
+        or None if the prefetch fails or returns no useful content.
+        """
+        if not self._runtime_client:
+            return None
+        try:
+            from plugins.formsy.models import MemoryPrefetchRequest
+            config = self._config
+            workspace_id = getattr(config, "workspace_id", "") if config else ""
+            turn_id = f"prefetch-{session_id}-{self._turn_counter}"
+            request = MemoryPrefetchRequest(
+                workspace_id=workspace_id or "ws_default",
+                session_id=session_id,
+                turn_id=turn_id,
+                query=query,
+            )
+            response = self._run_async(self._runtime_client.memory_prefetch(request))
+        except Exception as exc:
+            logger.debug("memory_prefetch fallback failed (non-fatal): %s", exc)
+            return None
+
+        if response is None:
+            return None
+
+        memory_block = getattr(response, "memory_block", "") or ""
+        retrieved_facts = getattr(response, "retrieved_facts", None) or []
+        retrieved_count = getattr(response, "retrieved_count", 0) or 0
+
+        # Only treat as a hit if there's actual content
+        if not memory_block.strip() and not retrieved_facts:
+            logger.debug("memory_prefetch fallback: no useful content returned")
+            return None
+
+        logger.debug(
+            "memory_prefetch fallback: hit with %d facts, %d chars of memory_block",
+            retrieved_count,
+            len(memory_block),
+        )
+        self._retrieval_state = "grounded"
+        self._sync_trace_state(state=self._retrieval_state)
+        return json.dumps({
+            "ok": True,
+            "query": query,
+            "repo_id": repo_id,
+            "source": "memory_prefetch_fallback",
+            "memory_block": memory_block,
+            "retrieved_count": retrieved_count,
+            "retrieved_facts": [
+                (f.model_dump() if hasattr(f, "model_dump") else dict(f))
+                for f in retrieved_facts
+            ],
+            "coverage": "memory_only",
+            "note": (
+                "Source compile was unavailable; results are from the memory store only "
+                "(episodes and facts from previous runs). Use these to guide your approach "
+                "without re-running the full exploration flow."
+            ),
+        })
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
         """Expose Formsy memory/context search to the agent."""
@@ -326,6 +481,7 @@ class FormsyContextEngine(ContextEngine):
 
         session_id = self._session_id or self._context.get("session_id") or "unknown"
         repo_id, revision = self._resolve_repository_identity()
+        identity = self._current_runtime_identity()
         if not repo_id:
             return json.dumps({
                 "ok": False,
@@ -333,17 +489,35 @@ class FormsyContextEngine(ContextEngine):
                 "error": "context_search could not infer repo_id from the current git remote.",
             })
         if not self._ensure_memory_compiled(repo_id=repo_id, revision=revision, query=query, session_id=session_id):
+            # Source compile failed — attempt a memory-only prefetch before falling back to
+            # degraded_recovery. This surfaces episodes/facts from previous runs without
+            # requiring compiled source, enabling a memory hit on repeated tasks.
+            memory_hit = self._try_memory_prefetch_fallback(
+                query=query, repo_id=repo_id, session_id=session_id
+            )
+            if memory_hit is not None:
+                return memory_hit
+            self._retrieval_state = "degraded_recovery"
+            self._sync_trace_state(state=self._retrieval_state)
             return json.dumps({
                 "ok": False,
                 "query": query,
                 "repo_id": repo_id,
                 "revision": revision,
                 "error": "Formsy memory compile failed before context_search",
+                "recovery_mode": "degraded_recovery",
+                "preferred_next_step": "bounded_shell_inspection",
+                "allowed_tools": ["terminal", "read_file", "search_files"],
+                "retrieval_feedback": (
+                    "Memory compile failed. Falling back to bounded shell inspection. "
+                    "Use terminal/read_file/search_files to locate relevant files directly."
+                ),
             })
         revision = self._memory_compile_revision or revision
         budget = self._coerce_positive_int(args.get("budget"), self._config.query_budget if self._config else 4000)
         self._retrieval_trace.retrieval_budget = budget
         metadata = self._build_query_metadata(args, repo_id=repo_id, session_id=session_id)
+        self._merge_memory_hints(metadata)
         phase = str(metadata.get("grounding_phase") or "").strip().lower()
         if phase == "grounded":
             if self._grounded_files and not metadata.get("grounded_files"):
@@ -366,6 +540,7 @@ class FormsyContextEngine(ContextEngine):
                 revision=revision,
                 budget=budget,
                 metadata=metadata,
+                **({"identity": identity} if identity else {}),
             )
         )
         if result is None:
@@ -406,6 +581,12 @@ class FormsyContextEngine(ContextEngine):
         payload["direct_match_files"] = self._extract_match_files(matches)
         payload["bundle_primary_files"] = self._extract_bundle_primary_files(result.get("bundle"))
         payload["bundle_must_edit"] = self._extract_bundle_must_edit(result.get("bundle"))
+        self._collect_context_artifact_ids(result.get("artifacts"))
+        bundle = result.get("bundle")
+        if isinstance(bundle, dict):
+            bundle_id = str(bundle.get("bundle_id") or "").strip()
+            if bundle_id:
+                self._collect_context_artifact_ids([bundle_id])
         self._record_context_search_result(
             query=query,
             metadata=metadata,
@@ -434,6 +615,7 @@ class FormsyContextEngine(ContextEngine):
 
         session_id = self._session_id or self._context.get("session_id") or "unknown"
         repo_id, revision = self._resolve_repository_identity()
+        identity = self._current_runtime_identity()
         if not repo_id:
             return json.dumps({
                 "ok": False,
@@ -450,11 +632,13 @@ class FormsyContextEngine(ContextEngine):
                 revision=revision,
                 start_line=start_line,
                 end_line=end_line,
+                **({"identity": identity} if identity else {}),
             )
         )
         if result is None:
             return json.dumps({"ok": False, "path": path, "error": "Formsy context read failed"})
 
+        self._collect_context_artifact_ids(result.get("artifacts") if isinstance(result, dict) else None)
         self._record_context_read(path, result)
         return self._format_memory_read_result(path, result)
 
@@ -519,6 +703,11 @@ class FormsyContextEngine(ContextEngine):
         return max(1, number)
 
     def _resolve_repository_identity(self) -> tuple[str, str]:
+        if self._identity_snapshot is not None:
+            repo_id = str(getattr(self._identity_snapshot, "repo_id", "") or "").strip()
+            revision = str(getattr(self._identity_snapshot, "revision", "") or "").strip()
+            if repo_id:
+                return repo_id, revision or "latest"
         repo_id = ""
         revision = ""
         remote_url = self._git_output(["git", "remote", "get-url", "origin"])
@@ -529,7 +718,27 @@ class FormsyContextEngine(ContextEngine):
             repo_id = str(self._config.repo_id or "").strip()
         if not revision and self._config:
             revision = str(self._config.revision or "").strip()
+        if self._identity_snapshot is not None:
+            if repo_id:
+                self._identity_snapshot.repo_id = repo_id
+                if hasattr(self._identity_snapshot, "set_source"):
+                    self._identity_snapshot.set_source("repo_id", "context_engine_fallback")
+                if hasattr(self._identity_snapshot, "clear_limited"):
+                    self._identity_snapshot.clear_limited("missing_repo_id")
+            if revision:
+                self._identity_snapshot.revision = revision
+                if hasattr(self._identity_snapshot, "set_source"):
+                    self._identity_snapshot.set_source("revision", "context_engine_fallback")
+                if hasattr(self._identity_snapshot, "clear_limited"):
+                    self._identity_snapshot.clear_limited("revision_unknown")
         return repo_id, revision or "latest"
+
+    def _current_runtime_identity(self) -> dict[str, Any]:
+        if self._identity_snapshot is not None:
+            identity_fn = getattr(self._identity_snapshot, "to_runtime_identity", None)
+            if callable(identity_fn):
+                return dict(identity_fn())
+        return {}
 
     def _ensure_memory_compiled(self, *, repo_id: str, revision: str, query: str, session_id: str) -> bool:
         identity_key = (repo_id, revision)
@@ -595,12 +804,34 @@ class FormsyContextEngine(ContextEngine):
             "dist",
             "build",
             "runs",
+            # Low-value directories for context search — skip to keep payload small
+            "docs",
+            "migrations",
+            "locale",
+            "fixtures",
         }
-        files: list[dict[str, Any]] = []
+        # Hard caps to prevent server overload on large repos.
+        # Non-test source files are collected first (higher priority), then test
+        # files are appended if budget remains.
+        MAX_COMPILE_FILES = 500
+        MAX_COMPILE_BYTES = 4 * 1024 * 1024  # 4 MB
+
+        def _is_test(rel: str) -> bool:
+            return (
+                rel.startswith("tests/")
+                or rel.startswith("test/")
+                or "/tests/" in f"/{rel}/"
+                or rel.endswith("_test.py")
+                or rel.endswith(".test.js")
+                or rel.endswith(".test.ts")
+            )
+
+        source_files: list[dict[str, Any]] = []
+        test_files: list[dict[str, Any]] = []
         try:
-            paths = root.rglob("*")
+            paths = list(root.rglob("*"))
         except Exception:
-            return files
+            return []
         for path in paths:
             try:
                 if not path.is_file() or path.suffix.lower() not in allowed_suffixes:
@@ -611,19 +842,30 @@ class FormsyContextEngine(ContextEngine):
                 content = path.read_text(encoding="utf-8", errors="ignore")
             except Exception:
                 continue
-            files.append({
+            entry = {
                 "path": rel,
                 "content": content,
                 "language": path.suffix.lower().lstrip(".") or "text",
-                "is_test": (
-                    rel.startswith("tests/")
-                    or rel.startswith("test/")
-                    or "/tests/" in f"/{rel}/"
-                    or rel.endswith("_test.py")
-                    or rel.endswith(".test.js")
-                    or rel.endswith(".test.ts")
-                ),
-            })
+                "is_test": _is_test(rel),
+            }
+            if entry["is_test"]:
+                test_files.append(entry)
+            else:
+                source_files.append(entry)
+
+        # Fill quota with source files first, then test files.
+        files: list[dict[str, Any]] = []
+        total_bytes = 0
+        for entry in source_files:
+            if len(files) >= MAX_COMPILE_FILES or total_bytes >= MAX_COMPILE_BYTES:
+                break
+            files.append(entry)
+            total_bytes += len(entry["content"])
+        for entry in test_files:
+            if len(files) >= MAX_COMPILE_FILES or total_bytes >= MAX_COMPILE_BYTES:
+                break
+            files.append(entry)
+            total_bytes += len(entry["content"])
         return files
 
     @staticmethod
@@ -713,6 +955,51 @@ class FormsyContextEngine(ContextEngine):
             metadata.setdefault("trace_id", session_id)
         return metadata
 
+    def _merge_memory_hints(self, metadata: dict[str, Any]) -> None:
+        manager = self._memory_manager or self._context.get("memory_manager")
+        if manager is None or not hasattr(manager, "providers"):
+            return
+        for provider in manager.providers:
+            if not hasattr(provider, "get_context_hints"):
+                continue
+            try:
+                hints = provider.get_context_hints()
+            except Exception:
+                logger.debug("memory provider get_context_hints failed", exc_info=True)
+                continue
+            if not isinstance(hints, dict):
+                continue
+            for key in (
+                "memory_artifact_ids",
+                "memory_query_hints",
+                "memory_test_hints",
+                "memory_status",
+                "memory_freshness",
+            ):
+                value = hints.get(key)
+                if value in (None, "", []):
+                    continue
+                if isinstance(value, list):
+                    existing = metadata.get(key)
+                    if isinstance(existing, list):
+                        metadata[key] = self._dedupe_string_list(existing + value)
+                    else:
+                        metadata[key] = self._dedupe_string_list(value)
+                else:
+                    metadata.setdefault(key, value)
+
+    @staticmethod
+    def _dedupe_string_list(values: list[Any]) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for value in values:
+            text = str(value or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            result.append(text)
+        return result
+
     def _reset_retrieval_state(self) -> None:
         self._retrieval_trace = RetrievalTrace()
         self._retrieval_state = "not_started"
@@ -743,8 +1030,9 @@ class FormsyContextEngine(ContextEngine):
         self._last_gate_failure = {}
         self._grounded_search_required = False
         self._test_plan_commands = []
-        self._memory_compiled_identity = None
-        self._memory_compile_revision = ""
+        # NOTE: _memory_compiled_identity and _memory_compile_revision are intentionally
+        # NOT reset here. The compiled repo remains valid on the server for the same
+        # (repo_id, revision) pair across task boundaries within the same session.
 
     @staticmethod
     def _has_useful_matches(matches: Any) -> bool:
@@ -1112,8 +1400,14 @@ class FormsyContextEngine(ContextEngine):
             path = str(result.get("path") or requested_path)
         else:
             path = requested_path
+        norm = path.lstrip("./") if path.startswith("./") else path
         if path and path not in self._grounded_files:
             self._grounded_files.append(path)
+        # If the agent read a test file, track it in test_plan_files regardless
+        # of how grounding happened (server test_plan may be absent in degraded_recovery).
+        if norm.startswith("tests/") or norm.startswith("test_"):
+            if path not in self._retrieval_trace.test_plan_files:
+                self._retrieval_trace.test_plan_files.append(path)
         if self._retrieval_state == "degraded_recovery":
             self._retrieval_state = "grounded"
             self._set_accepted_targets([path])
@@ -1266,6 +1560,19 @@ class FormsyContextEngine(ContextEngine):
                         paths.append(path)
         return paths
 
+    def _collect_context_artifact_ids(self, artifacts: Any) -> None:
+        if not isinstance(artifacts, list):
+            return
+        for artifact in artifacts:
+            if isinstance(artifact, dict):
+                artifact_id = str(artifact.get("artifact_id") or "").strip()
+            elif isinstance(artifact, str):
+                artifact_id = artifact.strip()
+            else:
+                continue
+            if artifact_id and artifact_id not in self._retrieval_trace.context_artifact_ids:
+                self._retrieval_trace.context_artifact_ids.append(artifact_id)
+
     @staticmethod
     def _extract_test_plan_commands(test_plan: Any) -> list[str]:
         if not isinstance(test_plan, dict):
@@ -1313,11 +1620,14 @@ class FormsyContextEngine(ContextEngine):
     def _is_context_read_allowed(self, path: str) -> bool:
         if not self._retrieval_trace.exploration_closed and not self._retrieval_trace.accepted_targets:
             return True
-        accepted = set(self._retrieval_trace.accepted_targets)
-        test_plan_files = set(self._retrieval_trace.test_plan_files)
-        if path in accepted or path in test_plan_files:
+        # Normalize ./foo/bar → foo/bar so prefix checks work regardless of how
+        # the agent prefixes the path.
+        norm = path.lstrip("./") if path.startswith("./") else path
+        accepted = {p.lstrip("./") if p.startswith("./") else p for p in self._retrieval_trace.accepted_targets}
+        test_plan_files = {p.lstrip("./") if p.startswith("./") else p for p in self._retrieval_trace.test_plan_files}
+        if norm in accepted or path in accepted or norm in test_plan_files or path in test_plan_files:
             return True
-        if path.startswith("tests/") and self._retrieval_state in {"grounded", "context_read"}:
+        if norm.startswith("tests/") and self._retrieval_state in {"grounded", "context_read"}:
             return True
         return False
 
@@ -1420,6 +1730,7 @@ class FormsyContextEngine(ContextEngine):
             "exploration_closed": self._retrieval_trace.exploration_closed,
             "blocked_tool_reason": self._retrieval_trace.blocked_tool_reason,
             "test_plan_files": list(self._retrieval_trace.test_plan_files),
+            "context_artifact_ids": list(self._retrieval_trace.context_artifact_ids),
             "suggested_queries": list(self._last_suggested_queries),
             "requirement_analysis": self._requirement_analysis,
             "template_family": self._template_family,
@@ -1586,3 +1897,39 @@ class FormsyContextEngine(ContextEngine):
             self._grounded_search_required = False
             return None
         return None
+
+    def observe_tool_result(self, tool_name: str, args: dict[str, Any], result: str) -> None:
+        """Update engine state based on a completed tool call.
+
+        When the agent uses read_file in degraded_recovery and gets a successful
+        result, treat the read path as grounded evidence so that subsequent
+        patch/write_file calls on that file are unblocked.
+
+        When the agent reads a tests/ file in any grounded state, add it to
+        test_plan_files so the engine can surface the correct test runner command.
+        """
+        if tool_name != "read_file":
+            return
+        path = str(args.get("path") or "").strip()
+        if not path:
+            return
+        try:
+            parsed = json.loads(result)
+            if isinstance(parsed, dict) and parsed.get("error"):
+                return
+            if isinstance(parsed, dict) and parsed.get("dedup"):
+                # File was unchanged since last read — still counts as grounded.
+                pass
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        norm = path.lstrip("./") if path.startswith("./") else path
+
+        if self._retrieval_state == "degraded_recovery":
+            self._record_context_read(path, {"path": path})
+        elif self._retrieval_state in {"grounded", "context_read", "legacy_fallback"}:
+            # Track test files read by the agent so test_plan_files is populated
+            # even when grounding came from degraded_recovery (no server test_plan).
+            if norm.startswith("tests/") or norm.startswith("test_"):
+                if path not in self._retrieval_trace.test_plan_files:
+                    self._retrieval_trace.test_plan_files.append(path)

@@ -10,15 +10,16 @@ from dataclasses import dataclass, asdict
 @dataclass
 class EngineConfig:
     """Configuration for the Formsy context engine."""
-    base_url: str = "https://api.formsy.ai"
+    base_url: str = "http://127.0.0.1:8000"
     memory_search_endpoint: str = "/api/v1/query"
     api_key_env: str = "FORMALCC_API_KEY"
+    api_key: str = ""
     repo_id: str = ""
     revision: str = "latest"
     query_budget: int = 4000
     workspace_id: str = "ws_default"
     tenant_id: Optional[str] = None
-    timeout_s: int = 30
+    timeout_s: int = 120
     max_retries: int = 3
     default_scene: str = "auto"
 
