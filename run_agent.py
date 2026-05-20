@@ -4780,6 +4780,52 @@ class AIAgent:
         except Exception:
             pass
 
+    def _record_external_memory_tool_evidence(
+        self,
+        function_name: str,
+        function_args: dict,
+        function_result: str,
+    ) -> None:
+        """Feed useful tool evidence into memory providers for turn summaries."""
+        if not self._memory_manager:
+            return
+
+        command = ""
+        evidence = str(function_result or "")
+        if function_name == "terminal":
+            command = str(function_args.get("command") or "").strip()
+            try:
+                parsed = json.loads(evidence)
+                output = parsed.get("output")
+                if isinstance(output, str):
+                    evidence = output
+            except Exception:
+                pass
+        elif function_name == "patch":
+            path = str(function_args.get("path") or "").strip()
+            mode = str(function_args.get("mode") or "").strip()
+            command = " ".join(part for part in ("patch", mode, path) if part)
+            try:
+                parsed = json.loads(evidence)
+                diff = parsed.get("diff")
+                if isinstance(diff, str) and diff.strip():
+                    evidence = diff
+            except Exception:
+                pass
+        else:
+            return
+
+        if not command and not evidence:
+            return
+        for provider in getattr(self._memory_manager, "providers", []):
+            recorder = getattr(provider, "record_terminal_call", None)
+            if not callable(recorder):
+                continue
+            try:
+                recorder(command, evidence)
+            except Exception:
+                pass
+
     def release_clients(self) -> None:
         """Release LLM client resources WITHOUT tearing down session tool state.
 
@@ -9605,26 +9651,12 @@ class AIAgent:
         )
 
     @staticmethod
-    def _looks_like_already_fixed_evidence(function_result: str) -> bool:
-        text = str(function_result or "")
-        lowered = text.lower()
-        if "\\z" in lowered and "validators.py" in lowered:
-            return True
-        if "fixed #30257" in lowered and "trailing newlines" in lowered:
-            return True
-        if "trailingnewline\\n" in lowered or "trailingnewline\\u000a" in lowered:
-            return True
-        if "trailingnewline" in lowered and "validationerror" in lowered:
-            return True
-        return False
-
-    @staticmethod
     def _looks_like_submission_command(function_args: dict) -> bool:
         """Return True if the terminal command is a task-submission command.
 
         Submission commands (e.g. echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT)
-        must never be blocked by the already-fixed guardrail — the agent is
-        finishing work, not doing archaeology.
+        must never be blocked by degraded-recovery shell guardrails — the agent
+        is finishing work, not doing archaeology.
         """
         cmd = str((function_args or {}).get("command") or "")
         return "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in cmd
@@ -9651,30 +9683,6 @@ class AIAgent:
             retrieval_status = None
         try:
             if (
-                isinstance(retrieval_status, dict)
-                and retrieval_status.get("retrieval_state") == "degraded_recovery"
-                and not retrieval_status.get("accepted_targets")
-                and self._looks_like_already_fixed_evidence(function_result)
-                and not decision.should_halt
-                and not self._looks_like_submission_command(function_args)
-            ):
-                decision = ToolGuardrailDecision(
-                    action="halt",
-                    code="degraded_recovery_already_fixed_halt",
-                    message=(
-                        "Stopped tool use: degraded_recovery inspection already shows "
-                        "the current checkout contains the fix. Stop shell archaeology "
-                        "and summarize that the issue is already fixed."
-                    ),
-                    tool_name=tool_name,
-                    count=max(decision.count, 1),
-                    signature=decision.signature,
-                )
-                self._set_tool_guardrail_halt(decision)
-        except Exception:
-            pass
-        try:
-            if (
                 tool_name == "terminal"
                 and isinstance(retrieval_status, dict)
                 and retrieval_status.get("retrieval_state") == "degraded_recovery"
@@ -9699,32 +9707,18 @@ class AIAgent:
                 else:
                     self._degraded_recovery_shell_steps += 1
                 if self._degraded_recovery_shell_steps >= 6 and not decision.should_halt:
-                    if self._looks_like_already_fixed_evidence(function_result):
-                        decision = ToolGuardrailDecision(
-                            action="halt",
-                            code="degraded_recovery_already_fixed_halt",
-                            message=(
-                                "Stopped terminal: degraded_recovery inspection already "
-                                "shows the current checkout contains the fix. Stop shell "
-                                "archaeology and summarize that the issue is already fixed."
-                            ),
-                            tool_name=tool_name,
-                            count=self._degraded_recovery_shell_steps,
-                            signature=decision.signature,
-                        )
-                    else:
-                        decision = ToolGuardrailDecision(
-                            action="halt",
-                            code="degraded_recovery_shell_budget_halt",
-                            message=(
-                                "Stopped terminal: degraded_recovery consumed too many shell "
-                                "inspection steps without grounding a target. Change strategy "
-                                "instead of continuing repository archaeology."
-                            ),
-                            tool_name=tool_name,
-                            count=self._degraded_recovery_shell_steps,
-                            signature=decision.signature,
-                        )
+                    decision = ToolGuardrailDecision(
+                        action="halt",
+                        code="degraded_recovery_shell_budget_halt",
+                        message=(
+                            "Stopped terminal: degraded_recovery consumed too many shell "
+                            "inspection steps without grounding a target. Change strategy "
+                            "instead of continuing repository archaeology."
+                        ),
+                        tool_name=tool_name,
+                        count=self._degraded_recovery_shell_steps,
+                        signature=decision.signature,
+                    )
                     self._set_tool_guardrail_halt(decision)
             elif not failed:
                 self._degraded_recovery_shell_steps = 0
@@ -10298,6 +10292,9 @@ class AIAgent:
                 except Exception as cb_err:
                     logging.debug(f"Tool complete callback error: {cb_err}")
 
+            if not blocked_by_guardrail:
+                self._record_external_memory_tool_evidence(name, args, function_result)
+
             function_result = maybe_persist_tool_result(
                 content=function_result,
                 tool_name=name,
@@ -10720,6 +10717,9 @@ class AIAgent:
                     self.tool_complete_callback(tool_call.id, function_name, function_args, function_result)
                 except Exception as cb_err:
                     logging.debug(f"Tool complete callback error: {cb_err}")
+
+            if not _execution_blocked:
+                self._record_external_memory_tool_evidence(function_name, function_args, function_result)
 
             function_result = maybe_persist_tool_result(
                 content=function_result,

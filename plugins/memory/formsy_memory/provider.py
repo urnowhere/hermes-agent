@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import re
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -53,6 +55,9 @@ class FormSyMemoryProvider(MemoryProvider):
         self._terminal_calls: list[dict] = []
         self._pending_sync_queue: list[dict] = []
         self._pending_sync_queue_max: int = 100
+        self._async_loop: Any = None
+        self._async_thread: threading.Thread | None = None
+        self._async_lock = threading.Lock()
 
     @property
     def name(self) -> str:
@@ -140,7 +145,7 @@ class FormSyMemoryProvider(MemoryProvider):
             {"role": "assistant", "content": str(assistant_content or "")},
         ]
         coding_summary = self._build_coding_summary(kwargs)
-        artifacts = self._build_artifact_refs()
+        artifacts = self._build_artifact_refs(kwargs.get("context_artifacts"))
         event = {
             "workspace_id": self._current_workspace_id(),
             "session_id": active_session_id,
@@ -296,6 +301,7 @@ class FormSyMemoryProvider(MemoryProvider):
             self._run_async(self._runtime_client.__aexit__(None, None, None))
         self._runtime_client = None
         self._memory_client = None
+        self._stop_async_loop()
 
     def _reset_turn_memory_trace(self) -> None:
         self._memory_artifact_ids = []
@@ -368,6 +374,8 @@ class FormSyMemoryProvider(MemoryProvider):
 
         artifacts = getattr(response, "artifacts", None)
         self._memory_artifact_ids = self._extract_artifact_ids(artifacts)
+        memory_block = str(getattr(response, "memory_block", "") or "").strip()
+        retrieved_facts = getattr(response, "retrieved_facts", None)
         self._memory_query_hints = self._coerce_string_list(
             advisory.get("query_hints")
             or self._nested_get(advisory, "bundle", "query_hints")
@@ -377,6 +385,8 @@ class FormSyMemoryProvider(MemoryProvider):
             or self._nested_get(advisory, "bundle", "test_hints")
         )
         self._memory_status = str(advisory.get("status") or "").strip()
+        if not self._memory_status and (memory_block or self._memory_artifact_ids or retrieved_facts):
+            self._memory_status = "hit"
         self._memory_freshness = str(advisory.get("freshness") or "").strip()
 
     def _build_coding_summary(self, kwargs: dict[str, Any]) -> Optional[CodingSummary]:
@@ -438,11 +448,16 @@ class FormSyMemoryProvider(MemoryProvider):
             confidence=confidence,
         )
 
-    def _build_artifact_refs(self) -> list[ArtifactRef]:
+    def _build_artifact_refs(self, artifact_ids: Any = None) -> list[ArtifactRef]:
         """Build ArtifactRef objects from accumulated context artifact IDs."""
         workspace_id = self._current_workspace_id()
         refs: list[ArtifactRef] = []
-        for artifact_id in self._context_artifact_ids:
+        ids = self._coerce_string_list(artifact_ids) + list(self._context_artifact_ids)
+        seen: set[str] = set()
+        for artifact_id in ids:
+            if artifact_id in seen:
+                continue
+            seen.add(artifact_id)
             refs.append(ArtifactRef(
                 artifact_id=artifact_id,
                 artifact_type=ArtifactType.CODE_CONTEXT,
@@ -476,12 +491,50 @@ class FormSyMemoryProvider(MemoryProvider):
 
     def _run_async(self, coro):
         try:
-            from model_tools import _run_async
-
-            return _run_async(coro)
+            loop = self._ensure_async_loop()
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
+            return future.result(timeout=300)
         except Exception:
             logger.exception("FormSy memory async call failed")
             return None
+
+    def _ensure_async_loop(self):
+        with self._async_lock:
+            if self._async_loop is not None and self._async_thread and self._async_thread.is_alive():
+                return self._async_loop
+
+            ready = threading.Event()
+            loop_holder: dict[str, Any] = {}
+
+            def _run_loop() -> None:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop_holder["loop"] = loop
+                ready.set()
+                loop.run_forever()
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                loop.close()
+
+            thread = threading.Thread(target=_run_loop, name="formsy-memory-async", daemon=True)
+            thread.start()
+            ready.wait(timeout=5)
+            self._async_loop = loop_holder["loop"]
+            self._async_thread = thread
+            return self._async_loop
+
+    def _stop_async_loop(self) -> None:
+        with self._async_lock:
+            loop = self._async_loop
+            thread = self._async_thread
+            self._async_loop = None
+            self._async_thread = None
+        if loop is not None and thread is not None and thread.is_alive():
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(timeout=5)
 
     def _current_workspace_id(self) -> str:
         if self._identity_snapshot is not None:

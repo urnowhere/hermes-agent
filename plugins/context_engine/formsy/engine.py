@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -96,6 +97,7 @@ class FormsyContextEngine(ContextEngine):
         self._test_plan_commands: list[str] = []
         self._memory_compiled_identity: tuple[str, str] | None = None
         self._memory_compile_revision: str = ""
+        self._context_read_cache: dict[str, list[dict[str, Any]]] = {}
 
         self.last_prompt_tokens = 0
         self.last_completion_tokens = 0
@@ -582,6 +584,7 @@ class FormsyContextEngine(ContextEngine):
         payload["bundle_primary_files"] = self._extract_bundle_primary_files(result.get("bundle"))
         payload["bundle_must_edit"] = self._extract_bundle_must_edit(result.get("bundle"))
         self._collect_context_artifact_ids(result.get("artifacts"))
+        self._cache_extra_context_for_reads(payload.get("extra_context"))
         bundle = result.get("bundle")
         if isinstance(bundle, dict):
             bundle_id = str(bundle.get("bundle_id") or "").strip()
@@ -636,11 +639,111 @@ class FormsyContextEngine(ContextEngine):
             )
         )
         if result is None:
+            cached = self._cached_context_read(path, start_line=start_line, end_line=end_line)
+            if cached is not None:
+                self._record_context_read(path, cached)
+                return self._format_memory_read_result(path, cached)
             return json.dumps({"ok": False, "path": path, "error": "Formsy context read failed"})
 
         self._collect_context_artifact_ids(result.get("artifacts") if isinstance(result, dict) else None)
         self._record_context_read(path, result)
         return self._format_memory_read_result(path, result)
+
+    def _cache_extra_context_for_reads(self, extra_context: Any) -> None:
+        """Cache source snippets returned by context_search for read fallback.
+
+        The runtime query endpoint can return exact file snippets before the read
+        endpoint is queried. If a later read for the same path fails, returning
+        the already supplied snippet is more useful than forcing shell fallback.
+        """
+        if not isinstance(extra_context, str) or "```" not in extra_context:
+            return
+
+        lines = extra_context.splitlines()
+        index = 0
+        while index < len(lines):
+            line = lines[index]
+            if not line.startswith("### "):
+                index += 1
+                continue
+
+            location = line[4:].strip().split(" ", 1)[0]
+            path = location
+            start_line = None
+            end_line = None
+            if ":" in location:
+                maybe_path, maybe_span = location.rsplit(":", 1)
+                span_parts = maybe_span.split("-", 1)
+                try:
+                    start_line = int(span_parts[0])
+                    end_line = int(span_parts[1]) if len(span_parts) > 1 else start_line
+                    path = maybe_path
+                except (TypeError, ValueError):
+                    path = location
+                    start_line = None
+                    end_line = None
+
+            index += 1
+            while index < len(lines) and not lines[index].startswith("```"):
+                index += 1
+            if index >= len(lines):
+                break
+            index += 1
+            content_lines: list[str] = []
+            while index < len(lines) and not lines[index].startswith("```"):
+                content_lines.append(lines[index])
+                index += 1
+            content = "\n".join(content_lines)
+            if path and content:
+                entry = {
+                    "path": path,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "content": content,
+                    "truncated": True,
+                    "source": "context_search_cache",
+                }
+                cached_entries = self._context_read_cache.setdefault(path, [])
+                if entry not in cached_entries:
+                    cached_entries.append(entry)
+            index += 1
+
+    def _cached_context_read(
+        self,
+        path: str,
+        *,
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> dict[str, Any] | None:
+        entries = self._context_read_cache.get(path) or []
+        if not entries:
+            return None
+
+        if start_line is None and end_line is None:
+            return dict(entries[0])
+
+        requested_start = start_line if start_line is not None else end_line
+        requested_end = end_line if end_line is not None else requested_start
+        if requested_start is None or requested_end is None:
+            return dict(entries[0])
+
+        for entry in entries:
+            cached_start = entry.get("start_line")
+            cached_end = entry.get("end_line")
+            if not isinstance(cached_start, int) or not isinstance(cached_end, int):
+                continue
+            if cached_start <= requested_start <= cached_end and requested_end <= cached_end:
+                return dict(entry)
+
+        for entry in entries:
+            cached_start = entry.get("start_line")
+            cached_end = entry.get("end_line")
+            if not isinstance(cached_start, int) or not isinstance(cached_end, int):
+                continue
+            if cached_start <= requested_end and cached_end >= requested_start:
+                return dict(entry)
+
+        return dict(entries[0])
 
     @staticmethod
     def _format_memory_read_result(requested_path: str, result: Any) -> str:
@@ -747,7 +850,7 @@ class FormsyContextEngine(ContextEngine):
         if not self._engine_client or not hasattr(self._engine_client, "compile_repo"):
             return True
 
-        files = self._collect_memory_source_files(Path.cwd())
+        files = self._collect_memory_source_files(Path.cwd(), query=query)
         result = self._run_async(
             self._engine_client.compile_repo(
                 repo_id=repo_id,
@@ -772,7 +875,7 @@ class FormsyContextEngine(ContextEngine):
         return True
 
     @staticmethod
-    def _collect_memory_source_files(root: Path) -> list[dict[str, Any]]:
+    def _collect_memory_source_files(root: Path, query: str = "") -> list[dict[str, Any]]:
         allowed_suffixes = {
             ".py",
             ".js",
@@ -811,10 +914,12 @@ class FormsyContextEngine(ContextEngine):
             "fixtures",
         }
         # Hard caps to prevent server overload on large repos.
-        # Non-test source files are collected first (higher priority), then test
-        # files are appended if budget remains.
+        # Keep room for tests so compile-time context_read can inspect the files
+        # returned in a test plan instead of only implementation modules.
         MAX_COMPILE_FILES = 500
         MAX_COMPILE_BYTES = 4 * 1024 * 1024  # 4 MB
+        RESERVED_TEST_FILES = 100
+        RESERVED_SOURCE_BYTE_RATIO = 0.8
 
         def _is_test(rel: str) -> bool:
             return (
@@ -825,6 +930,31 @@ class FormsyContextEngine(ContextEngine):
                 or rel.endswith(".test.js")
                 or rel.endswith(".test.ts")
             )
+
+        def _query_terms(value: str) -> list[str]:
+            terms: list[str] = []
+            for raw in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", value.lower()):
+                terms.append(raw)
+                for part in raw.split("_"):
+                    if len(part) >= 3:
+                        terms.append(part)
+            seen: set[str] = set()
+            return [term for term in terms if not (term in seen or seen.add(term))]
+
+        query_terms = _query_terms(query)
+
+        def _query_score(entry: dict[str, Any]) -> int:
+            if not query_terms:
+                return 0
+            path_text = str(entry.get("path") or "").lower()
+            content_text = str(entry.get("content") or "").lower()
+            score = 0
+            for term in query_terms:
+                if term in path_text:
+                    score += 10
+                if term in content_text:
+                    score += 1
+            return score
 
         source_files: list[dict[str, Any]] = []
         test_files: list[dict[str, Any]] = []
@@ -853,15 +983,31 @@ class FormsyContextEngine(ContextEngine):
             else:
                 source_files.append(entry)
 
-        # Fill quota with source files first, then test files.
+        if query_terms:
+            test_files.sort(key=lambda entry: (-_query_score(entry), str(entry.get("path") or "")))
+
         files: list[dict[str, Any]] = []
         total_bytes = 0
+        reserved_test_files = min(RESERVED_TEST_FILES, len(test_files))
+        source_file_limit = MAX_COMPILE_FILES - reserved_test_files
+        source_byte_limit = (
+            int(MAX_COMPILE_BYTES * RESERVED_SOURCE_BYTE_RATIO)
+            if reserved_test_files
+            else MAX_COMPILE_BYTES
+        )
+        source_index = 0
         for entry in source_files:
+            if len(files) >= source_file_limit or total_bytes >= source_byte_limit:
+                break
+            files.append(entry)
+            total_bytes += len(entry["content"])
+            source_index += 1
+        for entry in test_files:
             if len(files) >= MAX_COMPILE_FILES or total_bytes >= MAX_COMPILE_BYTES:
                 break
             files.append(entry)
             total_bytes += len(entry["content"])
-        for entry in test_files:
+        for entry in source_files[source_index:]:
             if len(files) >= MAX_COMPILE_FILES or total_bytes >= MAX_COMPILE_BYTES:
                 break
             files.append(entry)
@@ -1030,6 +1176,7 @@ class FormsyContextEngine(ContextEngine):
         self._last_gate_failure = {}
         self._grounded_search_required = False
         self._test_plan_commands = []
+        self._context_read_cache = {}
         # NOTE: _memory_compiled_identity and _memory_compile_revision are intentionally
         # NOT reset here. The compiled repo remains valid on the server for the same
         # (repo_id, revision) pair across task boundaries within the same session.
@@ -1846,6 +1993,8 @@ class FormsyContextEngine(ContextEngine):
                 ))
 
         if self._retrieval_state == "not_started":
+            if self._has_memory_recall() and self._is_memory_recall_action_allowed(tool_name, args):
+                return None
             return self._gate_block(tool_name, (
                 "Retrieval gate active: call context_search first with "
                 "metadata.retrieval_mode='symbolic' and metadata.grounding_phase='seed'."
@@ -1897,6 +2046,49 @@ class FormsyContextEngine(ContextEngine):
             self._grounded_search_required = False
             return None
         return None
+
+    def _has_memory_recall(self) -> bool:
+        manager = self._memory_manager or self._context.get("memory_manager")
+        if manager is None or not hasattr(manager, "providers"):
+            return False
+        for provider in manager.providers:
+            getter = getattr(provider, "get_context_hints", None)
+            if not callable(getter):
+                continue
+            try:
+                hints = getter()
+            except Exception:
+                continue
+            if not isinstance(hints, dict):
+                continue
+            status = str(hints.get("memory_status") or "").strip().lower()
+            if status in {"hit", "fresh", "warm", "memory_hit"}:
+                return True
+            for key in ("memory_artifact_ids", "memory_query_hints", "memory_test_hints"):
+                value = hints.get(key)
+                if isinstance(value, list) and value:
+                    return True
+        return False
+
+    @staticmethod
+    def _is_memory_recall_action_allowed(tool_name: str, args: dict[str, Any]) -> bool:
+        if tool_name in {"patch", "write_file"}:
+            return True
+        if tool_name != "terminal":
+            return False
+        command = str(args.get("command") or args.get("cmd") or "").strip()
+        lowered = command.lower()
+        if "complete_task_and_submit_final_output" in lowered:
+            return True
+        if lowered.startswith("git diff"):
+            return True
+        if lowered in {"cat patch.txt", "cat ./patch.txt"}:
+            return True
+        if "runtests.py" in lowered or lowered.startswith(("pytest ", "python -m pytest ")):
+            return True
+        if "reproduce.py" in lowered and lowered.startswith(("python ", "python3 ")):
+            return True
+        return False
 
     def observe_tool_result(self, tool_name: str, args: dict[str, Any], result: str) -> None:
         """Update engine state based on a completed tool call.

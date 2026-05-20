@@ -204,7 +204,7 @@ def test_formsy_engine_memory_search_compiles_before_query(monkeypatch):
     monkeypatch.setattr(
         FormsyContextEngine,
         "_collect_memory_source_files",
-        staticmethod(lambda root: [{
+        staticmethod(lambda root, query="": [{
             "path": "pkg/mod.py",
             "content": "x = 1\n",
             "language": "python",
@@ -244,6 +244,40 @@ def test_formsy_engine_memory_search_compiles_before_query(monkeypatch):
         "session_id": "session-123",
     }
     assert calls[1][1]["revision"] == "abc123def456"
+
+
+def test_formsy_engine_compile_payload_reserves_query_relevant_tests(tmp_path):
+    source_root = tmp_path / "repo"
+    source_root.mkdir()
+    package = source_root / "django" / "contrib" / "sample"
+    package.mkdir(parents=True)
+    for index in range(510):
+        (package / f"module_{index}.py").write_text(f"VALUE_{index} = {index}\n", encoding="utf-8")
+
+    tests_root = source_root / "tests"
+    for index in range(130):
+        test_dir = tests_root / f"suite_{index}"
+        test_dir.mkdir(parents=True)
+        (test_dir / "test_misc.py").write_text("def test_misc():\n    assert True\n", encoding="utf-8")
+
+    target = tests_root / "auth_tests" / "test_validators.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "from django.contrib.auth.validators import UnicodeUsernameValidator\n"
+        "def test_unicode_username_validator():\n"
+        "    assert UnicodeUsernameValidator.regex\n",
+        encoding="utf-8",
+    )
+
+    files = FormsyContextEngine._collect_memory_source_files(
+        source_root,
+        query="UnicodeUsernameValidator username validator regex",
+    )
+
+    paths = [entry["path"] for entry in files]
+    assert len(files) == 500
+    assert "tests/auth_tests/test_validators.py" in paths
+    assert any(entry["is_test"] for entry in files)
 
 
 def test_formsy_engine_memory_search_tool_queries_runtime():
@@ -762,6 +796,90 @@ def test_formsy_engine_enforces_seed_read_grounded_sequence():
     assert status["legacy_calls"] == 0
     assert status["accepted_targets"] == ["django/contrib/auth/validators.py"]
     assert status["blocked_tool_reason"]
+
+
+def test_formsy_engine_context_read_falls_back_to_search_snippet():
+    engine = FormsyContextEngine()
+    read_calls = []
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            return {
+                "extra_context": (
+                    "### django/contrib/auth/validators.py:1-25 (Promoted from direct query match.)\n"
+                    "```python\n"
+                    "class ASCIIUsernameValidator:\n"
+                    "    regex = r'^[\\w.@+-]+$'\n"
+                    "```\n"
+                ),
+                "matches": [{"path": "django/contrib/auth/validators.py"}],
+                "coverage": "partial",
+            }
+
+        async def memory_read(self, **kwargs):
+            read_calls.append(kwargs)
+            return None
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "django__django-11099",
+        "revision": "latest",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+
+    seed_result = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {
+                "query": "username validator regex",
+                "metadata": {
+                    "retrieval_mode": "symbolic",
+                    "grounding_phase": "seed",
+                    "response_format": "bundle",
+                },
+            },
+        )
+    )
+    assert seed_result["preferred_next_step"] == "context_read"
+
+    read_result = engine.handle_tool_call(
+        "context_read",
+        {
+            "path": "django/contrib/auth/validators.py",
+            "start_line": 1,
+            "end_line": 30,
+        },
+    )
+
+    assert read_calls
+    assert "ok: true" in read_result
+    assert "class ASCIIUsernameValidator" in read_result
+    assert "lines: 1-25" in read_result
+
+
+def test_formsy_engine_allows_memory_backed_actions_before_new_retrieval():
+    engine = FormsyContextEngine()
+
+    class FakeProvider:
+        def get_context_hints(self):
+            return {"memory_status": "hit", "memory_artifact_ids": ["ctx-prior"]}
+
+    engine._memory_manager = type("Manager", (), {"providers": [FakeProvider()]})()
+
+    assert engine.get_tool_block_message(
+        "terminal",
+        {"command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt"},
+    ) is None
+    assert engine.get_tool_block_message(
+        "patch",
+        {
+            "path": "django/contrib/auth/validators.py",
+            "old_string": "old",
+            "new_string": "new",
+        },
+    ) is None
+    assert engine.get_tool_block_message("terminal", {"command": "grep -R UsernameValidator django"}) is not None
 
 
 def test_formsy_engine_accepts_grounded_target_without_new_matches():

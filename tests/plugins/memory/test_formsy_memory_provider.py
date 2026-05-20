@@ -1,6 +1,7 @@
 """Tests for FormSy memory provider shared identity snapshot behavior."""
 
 import asyncio
+from types import SimpleNamespace
 
 from agent.runtime_identity import ResolvedIdentitySnapshot
 from plugins.memory.formsy_memory.config import MemoryConfig
@@ -116,6 +117,24 @@ def test_sync_turn_includes_artifact_refs_from_context_artifacts():
         assert a.workspace_id == "ws_formsy"
 
 
+def test_sync_turn_includes_artifact_refs_from_sync_kwargs():
+    provider = _make_provider()
+
+    provider.sync_turn(
+        "user query",
+        "response",
+        context_artifacts=["ctx-from-engine", "ctx-from-engine", "ctx-other"],
+    )
+
+    call = provider._memory_client.sync_calls[0]
+    artifacts = call["artifacts"]
+    assert artifacts is not None
+    assert [a.artifact_id for a in artifacts] == ["ctx-from-engine", "ctx-other"]
+    for a in artifacts:
+        assert a.artifact_type == ArtifactType.CODE_CONTEXT
+        assert a.workspace_id == "ws_formsy"
+
+
 def test_sync_turn_no_artifacts_when_none_recorded():
     provider = _make_provider()
 
@@ -155,6 +174,38 @@ def test_on_turn_start_resets_per_turn_state():
     assert provider._context_artifact_ids == []
     assert provider._terminal_calls == []
     assert provider._turn_counter == 2
+
+
+def test_prefetch_response_without_advisory_records_memory_hit_status():
+    provider = _make_provider()
+
+    provider._record_prefetch_response(
+        SimpleNamespace(
+            memory_block="Prior run changed validators.py and tests passed.",
+            retrieved_facts=[],
+            artifacts=[],
+            advisory=None,
+        )
+    )
+
+    assert provider.get_context_hints()["memory_status"] == "hit"
+
+
+def test_provider_async_bridge_reuses_loop_inside_running_event_loop():
+    provider = FormSyMemoryProvider()
+
+    async def loop_id():
+        return id(asyncio.get_running_loop())
+
+    async def run_twice():
+        first = provider._run_async(loop_id())
+        second = provider._run_async(loop_id())
+        return first, second
+
+    first, second = asyncio.run(run_twice())
+    provider._stop_async_loop()
+
+    assert first == second
 
 
 def test_build_coding_summary_with_terminal_calls():

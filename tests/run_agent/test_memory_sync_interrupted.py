@@ -85,6 +85,8 @@ class TestSyncExternalMemoryForTurn:
         agent._memory_manager.sync_all.assert_called_once_with(
             "What's the weather in Paris?", "It's sunny and 22°C.",
             session_id="test_session_001",
+            context_artifacts=None,
+            accepted_targets=None,
         )
         agent._memory_manager.queue_prefetch_all.assert_called_once_with(
             "What's the weather in Paris?",
@@ -167,6 +169,63 @@ class TestSyncExternalMemoryForTurn:
         )
         # sync_all still happened before the prefetch blew up.
         agent._memory_manager.sync_all.assert_called_once()
+
+    def test_completed_turn_passes_context_artifacts_to_memory(self):
+        agent = _bare_agent()
+        agent.context_compressor = MagicMock()
+        agent.context_compressor.get_retrieval_status.return_value = {
+            "context_artifact_ids": ["ctx-1", "ctx-2"],
+            "accepted_targets": ["src/fix.py"],
+        }
+
+        agent._sync_external_memory_for_turn(
+            original_user_message="fix bug",
+            final_response="done",
+            interrupted=False,
+        )
+
+        agent._memory_manager.sync_all.assert_called_once_with(
+            "fix bug", "done",
+            session_id="test_session_001",
+            context_artifacts=["ctx-1", "ctx-2"],
+            accepted_targets=["src/fix.py"],
+        )
+
+    def test_tool_evidence_records_terminal_output_for_memory_summary(self):
+        agent = _bare_agent()
+        recorder = MagicMock()
+        provider = MagicMock()
+        provider.record_terminal_call = recorder
+        agent._memory_manager.providers = [provider]
+
+        agent._record_external_memory_tool_evidence(
+            "terminal",
+            {"command": "git diff -- src/fix.py"},
+            '{"output": "diff --git a/src/fix.py b/src/fix.py\\n", "exit_code": 0}',
+        )
+
+        recorder.assert_called_once_with(
+            "git diff -- src/fix.py",
+            "diff --git a/src/fix.py b/src/fix.py\n",
+        )
+
+    def test_tool_evidence_records_patch_diff_for_memory_summary(self):
+        agent = _bare_agent()
+        recorder = MagicMock()
+        provider = MagicMock()
+        provider.record_terminal_call = recorder
+        agent._memory_manager.providers = [provider]
+
+        agent._record_external_memory_tool_evidence(
+            "patch",
+            {"mode": "replace", "path": "src/fix.py"},
+            '{"success": true, "diff": "diff --git a/src/fix.py b/src/fix.py\\n"}',
+        )
+
+        recorder.assert_called_once_with(
+            "patch replace src/fix.py",
+            "diff --git a/src/fix.py b/src/fix.py\n",
+        )
 
     # --- The specific matrix the reporter asked about ------------------
 

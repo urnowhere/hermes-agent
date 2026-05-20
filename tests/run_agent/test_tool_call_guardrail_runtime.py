@@ -400,7 +400,7 @@ def test_repeated_successful_repro_terminal_in_context_read_state_halts_without_
     assert "stopped retrying terminal" in result["final_response"].lower()
 
 
-def test_repeated_successful_terminal_in_degraded_recovery_halts_without_hard_stop():
+def test_repeated_successful_terminal_in_degraded_recovery_uses_no_progress_halt():
     agent = _make_agent("terminal", max_iterations=10)
     agent.context_compressor = SimpleNamespace(
         last_prompt_tokens=0,
@@ -431,9 +431,9 @@ def test_repeated_successful_terminal_in_degraded_recovery_halts_without_hard_st
     ):
         result = agent.run_conversation("keep digging through git history")
 
-    assert mock_hfc.call_count == 1
+    assert mock_hfc.call_count == 3
     assert result["turn_exit_reason"] == "guardrail_halt"
-    assert result["guardrail"]["code"] == "degraded_recovery_already_fixed_halt"
+    assert result["guardrail"]["code"] == "idempotent_no_progress_halt"
     assert "stopped retrying terminal" in result["final_response"].lower()
 
 
@@ -474,7 +474,7 @@ def test_degraded_recovery_shell_budget_halts_even_when_outputs_vary():
     assert "stopped retrying terminal" in result["final_response"].lower()
 
 
-def test_degraded_recovery_detects_already_fixed_checkout_before_budget_stop():
+def test_degraded_recovery_shell_budget_halts_after_already_fixed_looking_output():
     agent = _make_agent("terminal", max_iterations=10)
     agent.context_compressor = SimpleNamespace(
         last_prompt_tokens=0,
@@ -517,8 +517,70 @@ def test_degraded_recovery_detects_already_fixed_checkout_before_budget_stop():
 
     assert mock_hfc.call_count == 6
     assert result["turn_exit_reason"] == "guardrail_halt"
-    assert result["guardrail"]["code"] == "degraded_recovery_already_fixed_halt"
+    assert result["guardrail"]["code"] == "degraded_recovery_shell_budget_halt"
     assert "stopped retrying terminal" in result["final_response"].lower()
+
+
+def test_degraded_recovery_allows_patch_inspection_then_submission():
+    agent = _make_agent("terminal", max_iterations=10)
+    agent.context_compressor = SimpleNamespace(
+        last_prompt_tokens=0,
+        should_compress=lambda *_args, **_kwargs: False,
+        get_retrieval_status=lambda: {
+            "retrieval_status": "failed",
+            "retrieval_state": "degraded_recovery",
+            "exploration_closed": False,
+            "accepted_targets": [],
+        },
+    )
+    patch_output = (
+        "diff --git a/django/contrib/auth/validators.py b/django/contrib/auth/validators.py\n"
+        "--- a/django/contrib/auth/validators.py\n"
+        "+++ b/django/contrib/auth/validators.py\n"
+        "-    regex = r'^[\\w.@+-]+$'\n"
+        "+    regex = r'\\A[\\w.@+-]+\\Z'\n"
+    )
+    responses = [
+        _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[_mock_tool_call("terminal", json.dumps({"command": "cat patch.txt"}), "patch-read")],
+        ),
+        _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[
+                _mock_tool_call(
+                    "terminal",
+                    json.dumps({"command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt"}),
+                    "submit",
+                )
+            ],
+        ),
+    ]
+    agent.client.chat.completions.create.side_effect = responses
+
+    with (
+        patch(
+            "run_agent.handle_function_call",
+            side_effect=[
+                json.dumps({"output": patch_output, "exit_code": 0, "error": None}),
+                json.dumps({
+                    "output": "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n" + patch_output,
+                    "exit_code": 0,
+                    "error": None,
+                }),
+            ],
+        ) as mock_hfc,
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("submit the patch again")
+
+    assert mock_hfc.call_count == 2
+    assert result["turn_exit_reason"] == "task_submission_completed"
+    assert result.get("guardrail") is None
 
 
 def test_degraded_recovery_detects_already_fixed_from_read_file_evidence():
@@ -654,6 +716,5 @@ def test_config_enabled_hard_stop_run_conversation_returns_controlled_guardrail_
         call_ids = [tc["id"] for tc in assistant_msg["tool_calls"]]
         following_results = [m for m in result["messages"] if m.get("role") == "tool" and m.get("tool_call_id") in call_ids]
         assert len(following_results) == len(call_ids)
-
 
 
