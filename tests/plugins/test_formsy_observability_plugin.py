@@ -171,7 +171,6 @@ def test_submit_uses_formsy_api_key_from_hermes_config(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.delenv("FORMSY_OBSERVABILITY_API_KEY", raising=False)
     monkeypatch.delenv("FORMSY_API_KEY", raising=False)
-    monkeypatch.delenv("FORMALCC_API_KEY", raising=False)
     captured = {}
 
     class Response:

@@ -11,8 +11,8 @@ from plugins.formsy.runtime_client import RuntimeClient
 
 @pytest.mark.asyncio
 async def test_runtime_client_logs_http_error_context(caplog, monkeypatch):
-    monkeypatch.setenv("FORMALCC_API_KEY", "fsy_test_secret_token")
-    client = RuntimeClient(base_url="https://runtime.example", api_key_env="FORMALCC_API_KEY")
+    monkeypatch.setenv("FORMSY_API_KEY", "fsy_test_secret_token")
+    client = RuntimeClient(base_url="https://runtime.example", api_key_env="FORMSY_API_KEY")
 
     class FakeAsyncClient:
         async def request(self, method, url, json=None, headers=None):
@@ -45,11 +45,11 @@ async def test_runtime_client_logs_http_error_context(caplog, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_runtime_client_memory_search_uses_configured_endpoint(monkeypatch):
-    monkeypatch.setenv("FORMALCC_API_KEY", "fsy_test_secret_token")
+    monkeypatch.setenv("FORMSY_API_KEY", "fsy_test_secret_token")
     client = RuntimeClient(
         base_url="https://runtime.example",
         memory_search_endpoint="api/v1/query",
-        api_key_env="FORMALCC_API_KEY",
+        api_key_env="FORMSY_API_KEY",
     )
     calls = []
 
@@ -93,10 +93,10 @@ async def test_runtime_client_memory_search_uses_configured_endpoint(monkeypatch
 
 @pytest.mark.asyncio
 async def test_runtime_client_memory_search_forwards_metadata(monkeypatch):
-    monkeypatch.setenv("FORMALCC_API_KEY", "fsy_test_secret_token")
+    monkeypatch.setenv("FORMSY_API_KEY", "fsy_test_secret_token")
     client = RuntimeClient(
         base_url="https://runtime.example",
-        api_key_env="FORMALCC_API_KEY",
+        api_key_env="FORMSY_API_KEY",
     )
     calls = []
 
@@ -143,10 +143,10 @@ async def test_runtime_client_memory_search_forwards_metadata(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_runtime_client_memory_read_uses_read_endpoint(monkeypatch):
-    monkeypatch.setenv("FORMALCC_API_KEY", "fsy_test_secret_token")
+    monkeypatch.setenv("FORMSY_API_KEY", "fsy_test_secret_token")
     client = RuntimeClient(
         base_url="https://runtime.example",
-        api_key_env="FORMALCC_API_KEY",
+        api_key_env="FORMSY_API_KEY",
     )
     calls = []
 
@@ -189,10 +189,10 @@ async def test_runtime_client_memory_read_uses_read_endpoint(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_runtime_client_compile_repo_uses_compile_endpoint(monkeypatch):
-    monkeypatch.setenv("FORMALCC_API_KEY", "fsy_test_secret_token")
+    monkeypatch.setenv("FORMSY_API_KEY", "fsy_test_secret_token")
     client = RuntimeClient(
         base_url="https://runtime.example",
-        api_key_env="FORMALCC_API_KEY",
+        api_key_env="FORMSY_API_KEY",
     )
     calls = []
 

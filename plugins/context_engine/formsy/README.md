@@ -15,7 +15,7 @@ Context engine plugin for Hermes Agent that integrates with the Formsy Runtime A
 Set the following environment variable:
 
 ```bash
-export FORMALCC_API_KEY=fsy_live_your_key_here
+export FORMSY_API_KEY=fsy_live_your_key_here
 ```
 
 Optional configuration in Hermes `config.yaml`:

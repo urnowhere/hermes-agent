@@ -76,13 +76,13 @@ class ConfigManager:
         # Override with environment variables
         env_overrides = {
             "api_key_env": "FORMSY_API_KEY" if os.environ.get("FORMSY_API_KEY") else None,
-            "base_url": os.environ.get("FORMSY_BASE_URL") or os.environ.get("FORMALCC_BASE_URL"),
-            "workspace_id": os.environ.get("FORMSY_WORKSPACE_ID") or os.environ.get("FORMALCC_WORKSPACE_ID"),
-            "tenant_id": os.environ.get("FORMSY_TENANT_ID") or os.environ.get("FORMALCC_TENANT_ID"),
-            "timeout_s": os.environ.get("FORMSY_TIMEOUT") or os.environ.get("FORMALCC_TIMEOUT"),
-            "repo_id": os.environ.get("FORMSY_REPO_ID") or os.environ.get("FORMALCC_REPO_ID"),
-            "revision": os.environ.get("FORMSY_REVISION") or os.environ.get("FORMALCC_REVISION"),
-            "query_budget": os.environ.get("FORMSY_QUERY_BUDGET") or os.environ.get("FORMALCC_QUERY_BUDGET"),
+            "base_url": os.environ.get("FORMSY_BASE_URL"),
+            "workspace_id": os.environ.get("FORMSY_WORKSPACE_ID"),
+            "tenant_id": os.environ.get("FORMSY_TENANT_ID"),
+            "timeout_s": os.environ.get("FORMSY_TIMEOUT"),
+            "repo_id": os.environ.get("FORMSY_REPO_ID"),
+            "revision": os.environ.get("FORMSY_REVISION"),
+            "query_budget": os.environ.get("FORMSY_QUERY_BUDGET"),
         }
 
         for key, value in env_overrides.items():

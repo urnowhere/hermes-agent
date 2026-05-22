@@ -12,7 +12,7 @@ class EngineConfig:
     """Configuration for the Formsy context engine."""
     base_url: str = "http://127.0.0.1:8000"
     memory_search_endpoint: str = "/api/v1/query"
-    api_key_env: str = "FORMALCC_API_KEY"
+    api_key_env: str = "FORMSY_API_KEY"
     api_key: str = ""
     repo_id: str = ""
     revision: str = "latest"
@@ -60,14 +60,14 @@ class EngineConfigManager:
                 config_data.update(json.load(f))
 
         env_overrides = {
-            "base_url": os.environ.get("FORMALCC_BASE_URL"),
-            "memory_search_endpoint": os.environ.get("FORMALCC_MEMORY_SEARCH_ENDPOINT"),
-            "repo_id": os.environ.get("FORMALCC_REPO_ID"),
-            "revision": os.environ.get("FORMALCC_REVISION"),
-            "query_budget": os.environ.get("FORMALCC_QUERY_BUDGET"),
-            "workspace_id": os.environ.get("FORMALCC_WORKSPACE_ID"),
-            "tenant_id": os.environ.get("FORMALCC_TENANT_ID"),
-            "timeout_s": os.environ.get("FORMALCC_TIMEOUT"),
+            "base_url": os.environ.get("FORMSY_BASE_URL"),
+            "memory_search_endpoint": os.environ.get("FORMSY_MEMORY_SEARCH_ENDPOINT"),
+            "repo_id": os.environ.get("FORMSY_REPO_ID"),
+            "revision": os.environ.get("FORMSY_REVISION"),
+            "query_budget": os.environ.get("FORMSY_QUERY_BUDGET"),
+            "workspace_id": os.environ.get("FORMSY_WORKSPACE_ID"),
+            "tenant_id": os.environ.get("FORMSY_TENANT_ID"),
+            "timeout_s": os.environ.get("FORMSY_TIMEOUT"),
         }
 
         for key, value in env_overrides.items():

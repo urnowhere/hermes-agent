@@ -14,7 +14,7 @@ class ErrorHandler:
             if error.status_code == 401:
                 return (
                     "Authentication failed. Please check:\n"
-                    "  1. Your API key is set correctly in $FORMALCC_API_KEY\n"
+                    "  1. Your API key is set correctly in $FORMSY_API_KEY\n"
                     "  2. The API key format is valid (fsy_live_* or fsy_test_*)\n"
                     "  3. The API key has not expired"
                 )
@@ -81,7 +81,7 @@ class ErrorHandler:
             if error.status_code == 401:
                 suggestions.extend([
                     "Run 'hermes formsy_memory validate' to check your configuration",
-                    "Verify your API key with 'echo $FORMSY_API_KEY' or 'echo $FORMALCC_API_KEY'",
+                    "Verify your API key with 'echo $FORMSY_API_KEY'",
                     "Generate a new API key from the FormalCC dashboard",
                 ])
             elif error.status_code == 503:
@@ -99,7 +99,7 @@ class ErrorHandler:
 
         elif isinstance(error, FormalCCTimeoutError):
             suggestions.extend([
-                "Increase timeout: export FORMALCC_TIMEOUT=60",
+                "Increase timeout: export FORMSY_TIMEOUT=60",
                 "Check network latency to the API",
                 "Try a different network connection",
             ])

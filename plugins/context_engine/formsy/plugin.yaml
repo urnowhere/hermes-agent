@@ -23,7 +23,7 @@ config_schema:
       default: "/api/v1/query"
     api_key_env:
       type: string
-      default: "FORMALCC_API_KEY"
+      default: "FORMSY_API_KEY"
     repo_id:
       type: string
       default: ""

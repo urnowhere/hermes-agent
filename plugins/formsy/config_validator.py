@@ -106,7 +106,7 @@ class ConfigValidator:
         result = ConfigValidationResult(valid=True)
 
         # Validate API key from environment
-        api_key_env = config.get("api_key_env", "FORMALCC_API_KEY")
+        api_key_env = config.get("api_key_env", "FORMSY_API_KEY")
         api_key = os.environ.get(api_key_env)
         if api_key:
             key_result = cls.validate_api_key(api_key)
@@ -152,7 +152,7 @@ class ConfigGenerator:
         """Generate default configuration."""
         return {
             "base_url": "https://api.formsy.ai",
-            "api_key_env": "FORMALCC_API_KEY",
+            "api_key_env": "FORMSY_API_KEY",
             "workspace_id": "ws_default",
             "tenant_id": None,
             "timeout_s": 30,
@@ -180,19 +180,19 @@ class ConfigGenerator:
         template = """# FormalCC Hermes Plugin Configuration
 
 # Required: API key for FormalCC Runtime API
-FORMALCC_API_KEY=fsy_live_your_key_here
+FORMSY_API_KEY=fsy_live_your_key_here
 
 # Optional: Override base URL (default: https://api.formsy.ai)
-# FORMALCC_BASE_URL=https://api.formsy.ai
+# FORMSY_BASE_URL=https://api.formsy.ai
 
 # Optional: Override workspace ID (default: ws_default)
-# FORMALCC_WORKSPACE_ID=ws_default
+# FORMSY_WORKSPACE_ID=ws_default
 
 # Optional: Set tenant ID
-# FORMALCC_TENANT_ID=your_tenant
+# FORMSY_TENANT_ID=your_tenant
 
 # Optional: Override timeout in seconds (default: 30)
-# FORMALCC_TIMEOUT=30
+# FORMSY_TIMEOUT=30
 """
         with open(path, "w") as f:
             f.write(template)

@@ -81,14 +81,13 @@ def _get_hermes_home() -> Path:
 def _workspace_id() -> str:
     return (
         os.getenv("FORMSY_WORKSPACE_ID")
-        or os.getenv("FORMALCC_WORKSPACE_ID")
         or os.getenv("HERMES_WORKSPACE_ID")
         or "local"
     )
 
 
 def _repo_id() -> str:
-    explicit = os.getenv("FORMSY_REPO_ID") or os.getenv("FORMALCC_REPO_ID")
+    explicit = os.getenv("FORMSY_REPO_ID")
     if explicit:
         return explicit
     cwd = os.getenv("TERMINAL_CWD") or os.getcwd()
@@ -96,7 +95,7 @@ def _repo_id() -> str:
 
 
 def _revision() -> str:
-    return os.getenv("FORMSY_REVISION") or os.getenv("FORMALCC_REVISION") or ""
+    return os.getenv("FORMSY_REVISION") or ""
 
 
 def _formsy_config() -> dict[str, Any]:
@@ -121,7 +120,6 @@ def _submit_url() -> str:
     base = (
         os.getenv("FORMSY_OBSERVABILITY_URL")
         or os.getenv("FORMSY_BASE_URL")
-        or os.getenv("FORMALCC_BASE_URL")
         or _string(cfg.get("base_url"))
         or "http://127.0.0.1:8000"
     ).rstrip("/")
@@ -139,7 +137,6 @@ def _api_key() -> str:
         or _string(cfg.get("api_key"))
         or os.getenv(api_key_env)
         or os.getenv("FORMSY_API_KEY")
-        or os.getenv("FORMALCC_API_KEY")
         or ""
     )
 

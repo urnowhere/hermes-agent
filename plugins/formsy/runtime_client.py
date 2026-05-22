@@ -26,7 +26,7 @@ class RuntimeClient:
         self,
         base_url: str,
         memory_search_endpoint: str = "/api/v1/query",
-        api_key_env: str = "FORMALCC_API_KEY",
+        api_key_env: str = "FORMSY_API_KEY",
         api_key: str = "",
         timeout_s: int = 30,
         max_retries: int = 3,

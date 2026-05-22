@@ -15,7 +15,7 @@ logger = logging.getLogger("formsy.auth")
 class AuthManager:
     """Manages authentication for Runtime API."""
 
-    def __init__(self, api_key_env: str = "FORMALCC_API_KEY", api_key: str = ""):
+    def __init__(self, api_key_env: str = "FORMSY_API_KEY", api_key: str = ""):
         self.api_key_env = api_key_env
         # A directly-supplied key takes precedence and skips format validation,
         # since local servers may use key formats that differ from cloud keys.

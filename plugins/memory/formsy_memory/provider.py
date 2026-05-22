@@ -78,7 +78,6 @@ class FormSyMemoryProvider(MemoryProvider):
             cfg.api_key
             or os.environ.get(api_key_env)
             or os.environ.get("FORMSY_API_KEY")
-            or os.environ.get("FORMALCC_API_KEY")
         )
 
         return bool(cfg.base_url and has_key)
