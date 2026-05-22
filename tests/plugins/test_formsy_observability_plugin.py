@@ -69,9 +69,11 @@ def test_reporter_aggregates_metrics_without_sensitive_content(monkeypatch):
     assert final["counters"]["input_tokens"] == 1200
     assert final["counters"]["output_tokens"] == 300
     assert final["server_correlation"]["used_observation_ids"] == ["obs-1"]
+    assert final["task"]["case_id"] == "fix the sensitive auth bug"
+    assert final["observed_behavior"]["first_test_command_summary"] == "pytest tests/test_auth.py"
     assert final["observed_behavior"]["first_test_command_kind"] == "python"
     assert final["privacy"] == {
-        "redaction": "metrics_only",
+        "redaction": "metrics_and_redacted_summaries",
         "contains_prompt": False,
         "contains_source": False,
         "contains_diff": False,
@@ -79,10 +81,39 @@ def test_reporter_aggregates_metrics_without_sensitive_content(monkeypatch):
     }
 
     encoded = json.dumps(final, ensure_ascii=False)
-    assert "fix the sensitive auth bug" not in encoded
-    assert "pytest tests/test_auth.py" not in encoded
     assert "src/auth/token.py" not in encoded
     assert "sha256:" in encoded
+
+
+def test_reporter_redacts_readable_summaries(monkeypatch):
+    module = _load_plugin_module()
+    reporter = module.FormSyObservationReporter()
+    reporter.enabled = True
+    submitted = []
+    monkeypatch.setattr(reporter, "_submit_async", lambda report: submitted.append(report))
+
+    reporter.on_session_start(session_id="sess-1", model="claude-test", platform="cli")
+    reporter.pre_llm_call(
+        session_id="sess-1",
+        user_message="fix deploy with API_KEY=fsy_live_super_secret_value_that_is_long_enough",
+        is_first_turn=True,
+        model="claude-test",
+        platform="cli",
+    )
+    reporter.pre_tool_call(
+        "terminal",
+        {"command": "pytest tests/test_auth.py --token abcdefghijklmnopqrstuvwxyz123456"},
+        task_id="task-1",
+        session_id="sess-1",
+    )
+    reporter.on_session_finalize(session_id="sess-1")
+
+    final = submitted[-1]
+    assert final["task"]["case_id"] == "fix deploy with API_KEY=<redacted>"
+    assert final["observed_behavior"]["first_test_command_summary"] == "pytest tests/test_auth.py --token <redacted>"
+    encoded = json.dumps(final, ensure_ascii=False)
+    assert "fsy_live_super_secret" not in encoded
+    assert "abcdefghijklmnopqrstuvwxyz123456" not in encoded
 
 
 def test_submit_failure_spools_metrics_only_report(tmp_path, monkeypatch):

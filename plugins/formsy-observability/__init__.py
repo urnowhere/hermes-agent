@@ -29,6 +29,11 @@ _TEST_COMMAND_RE = re.compile(
     r"yarn\s+test|go\s+test|cargo\s+test|mvn\s+test|gradle\s+test|make\s+test)\b",
     re.IGNORECASE,
 )
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b([A-Z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASS|CREDENTIAL)[A-Z0-9_]*)\s*=\s*([^\s;&|]+)"
+)
+_BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
+_LONG_TOKEN_RE = re.compile(r"\b[A-Za-z0-9._~+/=-]{32,}\b")
 
 _CONTEXT_SEARCH_TOOLS = {
     "cc_memory_search",
@@ -110,8 +115,6 @@ def _formsy_config() -> dict[str, Any]:
         return {}
     if isinstance(payload.get("formsy"), dict):
         return payload["formsy"]
-    if isinstance(payload.get("formalcc"), dict):
-        return payload["formalcc"]
     return {}
 
 
@@ -174,7 +177,7 @@ class TaskState:
     platform: str = ""
     source_instance_id: str = field(default_factory=lambda: f"{socket.gethostname()}-{os.getpid()}")
     first_task_label: str = ""
-    first_test_command_hash: str | None = None
+    first_test_command_summary: str | None = None
     first_test_command_kind: str | None = None
     edited_file_hashes: set[str] = field(default_factory=set)
     used_observation_ids: set[str] = field(default_factory=set)
@@ -362,8 +365,8 @@ class FormSyObservationReporter:
                 state.counters.shell_fallback_count += 1
             if self._is_test_command(command):
                 state.counters.test_command_count += 1
-                if not state.first_test_command_hash:
-                    state.first_test_command_hash = _hash_text(command)
+                if not state.first_test_command_summary:
+                    state.first_test_command_summary = self._text_summary(command, max_chars=160)
                     state.first_test_command_kind = self._test_command_kind(command)
 
     def _observe_tool_result(self, state: TaskState, tool_name: str, args: dict[str, Any], result: Any) -> None:
@@ -418,7 +421,7 @@ class FormSyObservationReporter:
                 "cost_usd": state.counters.cost_usd,
             },
             "observed_behavior": {
-                "first_test_command_hash": state.first_test_command_hash,
+                "first_test_command_summary": state.first_test_command_summary,
                 "first_test_command_kind": state.first_test_command_kind,
                 "edited_file_hashes": sorted(state.edited_file_hashes),
                 "edited_file_count": len(state.edited_file_hashes) or state.counters.file_edit_count,
@@ -429,7 +432,7 @@ class FormSyObservationReporter:
                 "server_request_count": state.counters.server_request_count,
             },
             "privacy": {
-                "redaction": "metrics_only",
+                "redaction": "metrics_and_redacted_summaries",
                 "contains_prompt": False,
                 "contains_source": False,
                 "contains_diff": False,
@@ -452,7 +455,7 @@ class FormSyObservationReporter:
                 "agent_name": "hermes",
                 "agent_version": self.agent_version,
                 "instance_id": report.get("source", {}).get("instance_id"),
-                "capabilities": ["task_report", "metrics_only", "hermes_plugin_hooks"],
+                "capabilities": ["task_report", "metrics_and_redacted_summaries", "hermes_plugin_hooks"],
             },
             "reports": [report],
         }
@@ -501,8 +504,21 @@ class FormSyObservationReporter:
     @staticmethod
     def _task_label(user_message: Any) -> str:
         if isinstance(user_message, str):
-            return _hash_text(user_message.strip()) if user_message.strip() else ""
+            return FormSyObservationReporter._text_summary(user_message, max_chars=96)
         return ""
+
+    @staticmethod
+    def _text_summary(value: str, *, max_chars: int) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        text = _SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}=<redacted>", text)
+        text = _BEARER_RE.sub("Bearer <redacted>", text)
+        text = _LONG_TOKEN_RE.sub("<redacted>", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 3].rstrip() + "..."
 
     @staticmethod
     def _path_hash_from_args(args: dict[str, Any]) -> str:

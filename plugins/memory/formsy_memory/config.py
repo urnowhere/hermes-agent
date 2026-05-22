@@ -40,7 +40,6 @@ class ConfigManager:
     def __init__(self, hermes_home: Path):
         self.hermes_home = hermes_home
         self.config_file = hermes_home / "formsy-memory-config.json"
-        self.legacy_config_file = hermes_home / "formalcc-config.json"
 
     def load_config(self, hermes_config: Optional[dict] = None) -> MemoryConfig:
         """Load configuration from multiple sources."""
@@ -62,15 +61,10 @@ class ConfigManager:
         if hermes_config:
             if "formsy" in hermes_config:
                 config_data.update(hermes_config["formsy"])
-            elif "formalcc" in hermes_config:
-                config_data.update(hermes_config["formalcc"])
 
         # Load from local config file
         if self.config_file.exists():
             with open(self.config_file, "r") as f:
-                config_data.update(json.load(f))
-        elif self.legacy_config_file.exists():
-            with open(self.legacy_config_file, "r") as f:
                 config_data.update(json.load(f))
 
         # Override with environment variables
