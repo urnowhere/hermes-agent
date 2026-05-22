@@ -1,0 +1,15 @@
+name: formsy-observability
+version: 0.1.0
+description: "Task-level FormSy observability reporter for Hermes. Aggregates counters through hooks and submits metrics-only reports without prompt/source/diff/shell output."
+author: FormSy
+kind: standalone
+hooks:
+  - on_session_start
+  - pre_llm_call
+  - post_api_request
+  - pre_tool_call
+  - post_tool_call
+  - post_llm_call
+  - on_session_end
+  - on_session_finalize
+  - on_session_reset
