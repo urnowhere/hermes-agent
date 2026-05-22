@@ -2,372 +2,301 @@
 
 Date: 2026-05-22
 
-This note tracks the proposed design for making FormSy usable by Hermes users
-without requiring direct changes to the Hermes model loop.
+This note tracks the design for making Hermes better at coding and bug-fix
+tasks with FormSy, while avoiding direct changes to the Hermes model loop.
 
-## Goal
+## Business Goal
 
-Make FormSy usable by Hermes users without requiring direct changes to
-`run_agent.py`. The integration should degrade gracefully when Hermes core does
-not accept agent-loop guardrails.
+The goal is not merely to integrate FormSy. The goal is:
 
-## Design Principle
+- improve coding and bug-fix success rate
+- reduce wasted context and tool-output tokens
+- preserve enterprise/private-model compatibility
+- make the Hermes integration acceptable to the Hermes community
 
-FormSy should depend only on accepted extension surfaces:
+Direct `run_agent.py` changes can make Hermes align tightly with FormSy context
+and memory responses, but they are hard to upstream. A public model proxy can
+avoid loop patches, but it introduces a new architecture, duplicates part of
+Hermes's provider stack, and fails when the upstream model is reachable only
+inside an enterprise network.
 
-- memory provider plugin
-- context engine plugin
-- generic observability plugin hooks
-- optional model-provider/proxy configuration
+So the primary design should not be "repair model output." The primary design
+should be "make FormSy valuable through normal Hermes extension points."
 
-It should not require Hermes to change:
+## Core Conclusion
 
-- the tool-calling loop
-- final-response handling
-- retry behavior
-- message role construction
-- iteration-budget logic
-- session persistence logic
+If the specific requirement is:
 
-## Split the Integration Into Two Tiers
+> Convert malformed assistant text into structured tool calls after the model
+> has responded.
 
-Tier 1 is the default, community-friendly integration.
+then there are only two natural places to do it:
 
-It contains:
+- inside the agent loop, after Hermes receives the model response
+- in the provider/proxy path, before Hermes receives the model response
 
-- `plugins/memory/formsy_memory`
-- `plugins/context_engine/formsy`
-- `plugins/formsy-observability`
-- shared `plugins/formsy` runtime client
+Both options are expensive for this project:
 
-This tier uses normal Hermes plugin/provider surfaces. If Hermes accepts only
-these pieces, FormSy still provides memory, repository context retrieval, and
-task-level observability.
+- agent-loop repair is unlikely to be accepted upstream
+- proxy repair creates deployment and business-model problems
 
-Tier 2 is optional robustness for models that emit tool calls as plain text.
+Therefore the no-loop-patch design should drop tool-call repair as a required
+feature. FormSy should observe malformed text tool-call attempts, but should not
+try to fix them in Hermes core or in a mandatory proxy.
 
-It should not patch `run_agent.py`. Instead, it can be implemented as either:
+## Recommended Architecture
 
-- an OpenAI-compatible FormSy model proxy, configured as the model `base_url`
-- a Hermes model-provider plugin that wraps an upstream provider
+Use a no-repair, plugin-first architecture:
 
-Both options sit outside the Hermes loop. They can inspect the provider request
-and response before Hermes sees the response.
+```text
+Hermes -> upstream model directly
+Hermes -> FormSy memory API through memory provider plugin
+Hermes -> FormSy context API through context engine plugin
+Hermes -> FormSy observability API through generic plugin hooks
+```
 
-## Move Text Tool-Call Repair Out of the Agent Loop
+This keeps Hermes in charge of:
 
-The current loop patch detects assistant text such as:
+- model/provider selection
+- the agent loop
+- tool execution
+- retries and budgets
+- session persistence
+- CLI/TUI/gateway behavior
+
+FormSy owns:
+
+- compact memory recall
+- repository context retrieval
+- server-side context bundling
+- optional context compression
+- task-level observability
+- token-saving tool-result summarization where existing hooks allow it
+
+## How FormSy Still Improves Coding Without Loop Changes
+
+The current loop patch tries to recover when a model emits a malformed tool
+call. That is useful, but it is not the main source of FormSy value.
+
+The main source of value should be that the model needs fewer, better tool
+calls and receives smaller, more relevant context.
+
+### Trace Evidence
+
+The saved Hermes trace at:
+
+```text
+/Users/wayneliu/.hermes/sessions/saved/hermes_conversation_20260520_200851.json
+```
+
+supports this direction.
+
+In that run, the model used structured tool calls successfully. The expensive
+parts were not malformed text tool calls. The expensive parts were:
+
+- `context_search` returned very large tool results, around 10-12 KB each.
+- `context_read` failed for the primary target, forcing fallback to file reads.
+- Retrieval gates blocked normal `read_file` / `write_file` attempts until the
+  model satisfied FormSy's expected retrieval sequence.
+- The first context bundle contained noisy likely-edit targets, including
+  reproduction and unrelated model files.
+- The test plan fell back to broad `pytest -v` with weak confidence.
+- Terminal test output returned thousands of characters.
+
+This trace shows that the highest-leverage no-loop-patch work is:
+
+- smaller and sharper context bundles
+- more reliable `context_read`
+- less intrusive retrieval gating
+- better test-plan generation
+- terminal/test output summarization
+
+Those improvements directly support the business goal: better bug-fix success
+and lower token use, while keeping Hermes on its normal model path.
+
+### 1. Return Agent-Native Context Bundles
+
+`context_search` should return a compact bundle that is directly useful to a
+coding agent:
+
+- problem summary
+- likely files and symbols
+- relevant snippets under a token budget
+- must-read files
+- likely edit targets
+- test plan
+- known prior memory hints
+- confidence / coverage
+- suggested next query only when needed
+
+This reduces the number of back-and-forth retrieval calls. Instead of requiring
+Hermes to keep asking FormSy for alignment, FormSy gives Hermes a normal tool
+result that already fits the agent workflow.
+
+The bundle should be compact enough to fit in the tool result without flooding
+the model. Exact source reads still go through `context_read` when needed.
+
+### 2. Add a Higher-Level Context Tool
+
+Keep `context_search` and `context_read`, but consider adding one higher-level
+tool through the context engine, for example:
+
+```text
+formsy_context_bundle
+```
+
+Purpose:
+
+- do search, grounding, memory hint merge, and test-plan generation server-side
+- return one concise bug-fix context package
+- avoid requiring the model to discover the exact FormSy retrieval sequence
+
+This remains a normal Hermes tool. No loop change is required.
+
+### 3. Use Real Context Compression Through the Context Engine
+
+The current FormSy context engine implements `compress(...)` as a pass-through.
+For token savings, this is a major accepted extension point.
+
+Future FormSy compression should:
+
+- compress old conversation turns
+- preserve active task state
+- preserve accepted retrieval targets
+- preserve unresolved test failures
+- preserve memory/context artifact ids
+- omit raw shell noise and stale exploration
+
+This gives token savings without touching the model loop. It also improves
+long-running bug-fix tasks, where context pressure causes failures.
+
+### 4. Use Existing Tool-Result Transformation Hooks
+
+Hermes already has plugin hooks for result canonicalization:
+
+- `transform_tool_result`
+- `transform_terminal_output`
+
+FormSy can use these hooks to reduce token waste from:
+
+- long terminal output
+- repetitive test failures
+- huge search/read results
+- noisy diagnostics
+
+This is a better upstream story than loop mutation because Hermes already
+exposes these hooks for plugins.
+
+The transform should be conservative:
+
+- preserve return code
+- preserve failing test names
+- preserve stack trace head/tail
+- preserve file paths and line numbers
+- never hide command failure
+- keep raw output out of FormSy telemetry unless explicitly allowed
+
+The saved trace has a concrete example: one targeted test command returned a
+multi-kilobyte pytest session output. The model usually needs the command,
+return code, failing tests, and failure snippets, not the entire uncompressed
+stream.
+
+### 5. Keep Memory Recall Ephemeral and Compact
+
+Use the memory provider and existing pre-turn injection behavior:
+
+- prefetch once per user turn
+- inject compact memory context into the user message
+- do not persist injected memory into session history
+- sync compact coding summaries after completed turns
+
+This improves repeated bug-fix work without requiring any model path changes.
+
+### 6. Report Malformed Tool Calls, Do Not Repair Them
+
+If a model emits text such as:
 
 - `to=functions.terminal`
 - `<function=terminal>`
 
-and asks the model to retry with structured tool calls. That is useful, but it
-is exactly the kind of loop behavior Hermes maintainers may reject.
-
-The important point is where the bad shape first appears.
-
-Hermes expects the model provider to return one of two normal shapes:
-
-- an assistant text message, which Hermes treats as the final answer
-- an assistant message with structured `tool_calls`, which Hermes sends to the
-  tool executor
-
-The problematic response is in the middle: the model *intended* to call a tool,
-but returned that intent as plain text. If Hermes core handles that case, Hermes
-must add special retry logic inside the model loop. That touches final-answer
-handling, role ordering, retry budgets, and session persistence.
-
-A provider/proxy repair layer moves the fix earlier. Instead of changing how
-Hermes reacts after it receives a malformed response, the proxy normalizes the
-provider response before Hermes sees it. From Hermes's point of view, nothing
-special happened: it simply receives either normal text or normal structured
-`tool_calls`.
-
-The no-loop-patch replacement is therefore:
-
-1. Hermes sends a normal chat-completions request with `tools`.
-2. The FormSy proxy forwards the request to the configured upstream model.
-3. If the upstream response already contains structured `tool_calls`, the proxy
-   passes it through unchanged.
-4. If the upstream response is plain text that clearly encodes a known requested
-   tool call, the proxy converts it into the provider's structured tool-call
-   shape.
-5. If conversion is ambiguous, unsafe, or references a tool not present in the
-   request schema, the proxy passes the text through unchanged.
-6. Hermes receives either a normal structured tool call or a normal assistant
-   text response. No Hermes loop retry branch is needed.
+FormSy should record it in observability:
 
-This is similar to normal provider compatibility work. Different model APIs
-already need adapters that translate provider-specific response shapes into the
-OpenAI-compatible shape Hermes consumes. Text-tool-call repair is treated as one
-more conservative normalization step, not as new agent-loop behavior.
+- `text_tool_call_attempt_count`
+- `first_text_tool_call_attempt_tool`
+- `first_text_tool_call_attempt_summary`
 
-This boundary is useful because:
+This gives product feedback and model-quality data without controlling the
+Hermes loop.
 
-- Hermes core stays unchanged.
-- The repair can be enabled or disabled per provider/proxy.
-- The proxy can use the request `tools` array as the allowlist for valid tool
-  names.
-- Ambiguous responses can be passed through unchanged instead of forcing a
-  retry.
-- The same proxy can be reused by Hermes, OpenCode, Codex-style clients, or any
-  code agent that speaks OpenAI-compatible chat completions.
+The operational guidance becomes:
 
-In short: the loop patch says "Hermes should recover from malformed provider
-output." The proxy design says "FormSy should make provider output look normal
-before Hermes receives it."
-
-## Proxy Repair Constraints
-
-The repair layer should be conservative:
-
-- only repair when exactly one known tool call is detected
-- require valid JSON or a narrowly supported argument syntax
-- reject unknown tool names
-- reject multiple conflicting tool calls
-- reject incomplete arguments
-- never execute tools itself
-- never mutate session history
-- add a response metadata/debug header or trace field when repair happened
-- expose a config flag, default off or conservative
+> FormSy improves context, memory, and token use. It does not guarantee repair
+> for providers/models that fail structured tool calling.
 
-Suggested config:
+That is honest and much easier to upstream.
 
-```yaml
-formsy:
-  tool_call_repair:
-    enabled: false
-    mode: conservative
-    max_repairs_per_turn: 1
-```
+## Optional Cross-Agent Surface: MCP
 
-For Hermes users who do not enable the proxy/provider wrapper, malformed text
-tool calls remain normal model output. Observability can count them, but FormSy
-does not try to control the Hermes loop.
+For OpenCode, Codex-style clients, and other agents, a FormSy MCP server may be
+a better portability layer than a model proxy.
 
-## Plugin-Only Fallback Behavior
+An MCP server can expose the same capabilities:
 
-Without Tier 2, FormSy should still improve success rate through prompt and
-tool-surface design rather than runtime loop mutation:
+- `formsy_context_bundle`
+- `formsy_context_search`
+- `formsy_context_read`
+- `formsy_memory_search`
+- `formsy_task_report`
 
-- make `context_search` and `context_read` tool schemas explicit and compact
-- include tool-use guidance in tool descriptions, not by modifying the system
-  prompt
-- use `pre_llm_call` only for ephemeral user-message context
-- use observability to report malformed textual tool-call attempts
-- keep memory sync and context retrieval independent of repair behavior
+This keeps FormSy out of the model path and lets each agent keep its own model
+provider handling.
 
-This means the worst case is not integration failure. The worst case is that a
-weak model writes a malformed final response, and FormSy records that outcome
-for debugging.
+MCP is optional for Hermes because Hermes already has native plugin surfaces,
+but it is a good cross-agent adoption path.
 
-## What Must Be Added Before Coding
+## Proxy Is Deferred, Not Primary
 
-The design is not ready for implementation until these choices and contracts are
-written down.
+An OpenAI-compatible FormSy proxy can still exist later, but it should not be
+the default answer to the no-loop-patch problem.
 
-### Pick the First Tier 2 Target
+Use a proxy only when all of these are true:
 
-The first implementation should be the OpenAI-compatible FormSy model proxy.
+- the user explicitly wants response repair
+- the upstream model is reachable from where the proxy runs
+- the user accepts the extra deployment component
+- the proxy is thin and does not replace Hermes provider management
 
-Reason: the current Hermes model-provider plugin surface is declarative. It can
-prepare messages, add request kwargs, fetch model catalogs, and describe
-provider metadata, but it does not own the provider HTTP response. That means a
-model-provider plugin alone cannot convert malformed assistant text into
-structured `tool_calls` without adding a new Hermes core hook.
-
-So the first code path should be:
-
-```text
-Hermes -> FormSy proxy /v1/chat/completions -> upstream model provider
-```
-
-The Hermes model-provider wrapper can still be useful later as a convenience
-profile that points Hermes at the proxy, but the repair logic should live in the
-proxy path first.
-
-### Define the Proxy API Contract
-
-Before coding, specify which OpenAI-compatible endpoints are supported:
-
-- `POST /v1/chat/completions`
-- `GET /v1/models`
-
-For the first version, decide whether streaming is supported. The simplest
-safe first version is:
-
-- support non-streaming requests
-- pass streaming requests through unchanged, or reject them with a clear error
-- add streaming repair only after the non-streaming repair logic is proven
-
-The response contract should preserve:
-
-- upstream `id`
-- upstream `model`
-- upstream `usage`
-- upstream `finish_reason` when no repair happens
-- OpenAI-compatible `choices[*].message.tool_calls` when repair happens
-
-When repair happens, the proxy should add a non-invasive debug marker, such as:
-
-```json
-{
-  "formsy_repair": {
-    "applied": true,
-    "kind": "text_tool_call_to_structured_tool_call"
-  }
-}
-```
-
-If that top-level marker is too risky for strict clients, use an HTTP response
-header instead.
-
-### Define the Repair Parser Contract
-
-The parser should be conservative and testable as a pure function:
-
-```python
-repair_text_tool_call(content: str, tools: list[dict]) -> RepairResult
-```
-
-Inputs:
-
-- assistant text content
-- request `tools` array
-
-Outputs:
-
-- `applied = false` with original content unchanged
-- or `applied = true` with one structured tool call
-
-Supported first-version text forms:
-
-- `<function=tool_name>{"arg": "value"}</function>`
-- `<function=tool_name>{"arg": "value"}`
-- `to=functions.tool_name` followed by one JSON object
-
-Rejection cases:
-
-- no request `tools`
-- tool name is not present in request `tools`
-- more than one candidate tool call
-- malformed JSON arguments
-- arguments are not a JSON object
-- candidate includes unknown or ambiguous tool names
-- text contains substantial prose around the candidate that makes intent unclear
-
-The parser must never execute tools. It only rewrites the model response.
-
-### Define Configuration
-
-Add a concrete config contract before implementation:
-
-```yaml
-formsy:
-  tool_call_repair:
-    enabled: false
-    mode: conservative
-    max_repairs_per_response: 1
-  proxy:
-    base_url: http://127.0.0.1:8787/v1
-    upstream_base_url: https://api.openai.com/v1
-    upstream_provider: openai
-    upstream_model: ""
-```
-
-Environment variables should be named before coding, for example:
-
-- `FORMSY_PROXY_BASE_URL`
-- `FORMSY_PROXY_UPSTREAM_BASE_URL`
-- `FORMSY_PROXY_UPSTREAM_API_KEY`
-- `FORMSY_TOOL_CALL_REPAIR_ENABLED`
-
-Keep secrets in environment variables, not `config.yaml`.
-
-### Define Observability Additions
-
-The plugin-only Tier 1 path should record malformed text tool-call attempts
-without controlling the loop.
-
-Add fields such as:
-
-- `counters.text_tool_call_attempt_count`
-- `observed_behavior.first_text_tool_call_attempt_summary`
-- `observed_behavior.first_text_tool_call_attempt_tool`
-
-The summary must be redacted and bounded, following the existing task/test
-summary privacy pattern.
-
-### Define Tests Before Implementation
-
-Add tests in three layers.
-
-Parser unit tests:
-
-- converts one unambiguous known tool call
-- rejects unknown tools
-- rejects malformed JSON
-- rejects multiple tool calls
-- rejects prose-heavy ambiguous text
-
-Proxy tests:
-
-- passes through structured `tool_calls` unchanged
-- converts one accepted text-form tool call
-- preserves upstream usage/model/id
-- does not execute tools
-- passes through ambiguous text unchanged
-- handles upstream errors without hiding them
-
-Hermes integration tests:
-
-- FormSy memory/context/observability still work without the proxy
-- observability records text-form tool-call attempts as metrics
-- no test requires `run_agent.py` to retry malformed text tool calls
-
-### Define the Migration Boundary
-
-Before deleting loop code, decide what counts as replacement coverage:
-
-- parser tests pass
-- proxy pass-through tests pass
-- observability malformed-attempt tests pass
-- existing memory/context/observability tests pass
-- no remaining FormSy acceptance test depends on loop-level retry behavior
-
-Only after that should the `run_agent.py` guardrail and its loop-specific tests
-be removed.
+For enterprise-private models, the proxy must be self-hosted inside the same
+network, or skipped entirely.
 
 ## Minimal Hermes Core Ask
 
-The preferred upstream ask is no FormSy-specific loop patch.
+The preferred upstream ask is no FormSy-specific model-loop patch.
 
-If Hermes maintainers are open to a generic extension later, the smallest
-acceptable hook would be a provider-response normalization hook before final
-response handling:
+The default integration should require only:
 
-```python
-post_provider_response(response, request_tools, session_id, task_id) -> response
-```
+- memory provider plugin
+- context engine plugin
+- generic plugin hooks
+- optional MCP configuration for non-Hermes agents
 
-But this should be treated as an optional upstream enhancement, not a blocker.
-The FormSy default integration should work without it.
+If Hermes maintainers later want a generic response-normalization hook, FormSy
+could use it. But this must not be a blocker for adoption.
 
 ## Migration From Current Loop Patch
 
 1. Remove the text-tool-call leak retry logic from `run_agent.py`.
-2. Remove tests that assert Hermes retries malformed text tool calls inside the
-   model loop.
-3. Add observability-only detection of malformed text tool-call patterns, so
-   reports can show that a model attempted a text-form tool call.
-4. Implement proxy/provider-wrapper tests outside the Hermes loop:
-   - pass through valid structured tool calls
-   - convert one unambiguous text-form tool call when the tool exists in the
-     request schema
-   - pass through unknown or ambiguous text unchanged
-   - never execute tools in the proxy
-5. Keep memory, context engine, and observability tests as the primary Hermes
-   integration tests.
+2. Remove tests that require Hermes to retry malformed text tool calls inside
+   the model loop.
+3. Add observability-only detection of malformed text tool-call patterns.
+4. Improve context tool outputs so FormSy returns compact, agent-native bundles.
+5. Add or improve tests for:
+   - context bundle shape and token bounds
+   - memory hint merge
+   - terminal/tool result summarization
+   - context compression behavior
+   - malformed text tool-call observability
+6. Keep proxy experiments outside the required Hermes integration path.
 
 ## Acceptance Story
 
@@ -389,6 +318,5 @@ formsy:
   base_url: https://api.formsy.ai
 ```
 
-Users who need malformed-tool-call repair can opt into the FormSy proxy/model
-provider wrapper separately. Users who do not need it get the normal Hermes
-behavior.
+Hermes continues to call the user's chosen model directly. FormSy improves the
+quality and compactness of context and memory around that model.
