@@ -60,6 +60,11 @@ from pathlib import Path
 
 from hermes_constants import get_hermes_home
 
+_TEXT_TOOL_CALL_LEAK_PATTERN = re.compile(
+    r"(?:^|[\s>|])to=functions\.([A-Za-z_][\w.]*)|<function=([A-Za-z_][\w.]*)\b",
+    re.IGNORECASE,
+)
+
 
 _OPENAI_CLS_CACHE: Optional[type] = None
 
@@ -3298,6 +3303,26 @@ class AIAgent:
             marker in assistant_text for marker in workspace_markers
         )
         return (user_targets_workspace or assistant_targets_workspace) and assistant_mentions_action
+
+    def _leaked_text_tool_call_names(self, content: str) -> List[str]:
+        """Return tool names leaked as text instead of structured tool calls."""
+        if not isinstance(content, str) or not content:
+            return []
+
+        names: List[str] = []
+        for match in _TEXT_TOOL_CALL_LEAK_PATTERN.finditer(content):
+            raw_name = match.group(1) or match.group(2) or ""
+            raw_name = raw_name.strip()
+            if not raw_name:
+                continue
+            tool_name = raw_name.rsplit(".", 1)[-1]
+            if tool_name in self.valid_tool_names and tool_name not in names:
+                names.append(tool_name)
+        return names
+
+    def _looks_like_leaked_text_tool_call(self, content: str) -> bool:
+        """Detect text-form tool calls that should have been structured calls."""
+        return bool(self._leaked_text_tool_call_names(content))
 
 
     def _extract_reasoning(self, assistant_message) -> Optional[str]:
@@ -11341,6 +11366,7 @@ class AIAgent:
         final_response = None
         interrupted = False
         codex_ack_continuations = 0
+        text_tool_leak_retries = 0
         length_continue_retries = 0
         truncated_tool_call_retries = 0
         truncated_response_prefix = ""
@@ -14041,6 +14067,51 @@ class AIAgent:
                 else:
                     # No tool calls - this is the final response
                     final_response = assistant_message.content or ""
+
+                    leaked_tool_names = self._leaked_text_tool_call_names(final_response)
+                    if leaked_tool_names:
+                        text_tool_leak_retries += 1
+                        logger.warning(
+                            "Assistant emitted tool-call markup as text instead of "
+                            "structured tool_calls (tools=%s, retry=%s/2, snippet=%r)",
+                            ",".join(leaked_tool_names),
+                            text_tool_leak_retries,
+                            final_response[:300],
+                        )
+
+                        if text_tool_leak_retries <= 2:
+                            self._emit_status(
+                                "⚠️ Model emitted tool-call markup as text — "
+                                "retrying with structured tool-call instruction"
+                            )
+                            messages.append({
+                                "role": "assistant",
+                                "content": "",
+                                "finish_reason": "incomplete",
+                            })
+                            messages.append({
+                                "role": "user",
+                                "content": (
+                                    "[System: You emitted tool-call markup as ordinary "
+                                    "assistant text. Do not write <function=...>, "
+                                    "<parameter=...>, or to=functions.* in the message. "
+                                    "Use the API's structured tool_calls field for any "
+                                    "tool invocation, then continue the task.]"
+                                ),
+                            })
+                            self._session_messages = messages
+                            self._save_session_log(messages)
+                            continue
+
+                        _turn_exit_reason = "text_tool_call_leak_halt"
+                        final_response = (
+                            "I stopped because the model repeatedly emitted tool calls "
+                            "as plain text instead of structured tool calls. Try a "
+                            "model/provider with reliable tool-call support, or reduce "
+                            "the prompt's competing tool-call format instructions."
+                        )
+                        messages.append({"role": "assistant", "content": final_response})
+                        break
                     
                     # Fix: unmute output when entering the no-tool-call branch
                     # so the user can see empty-response warnings and recovery

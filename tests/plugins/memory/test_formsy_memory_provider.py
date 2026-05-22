@@ -41,12 +41,13 @@ class _CaptureMemoryClient:
         )
 
 
-def _make_provider(workspace_id="ws_formsy", session_id="session-1", revision="rev-1"):
+def _make_provider(workspace_id="ws_formsy", session_id="session-1", revision="rev-1", hermes_home=None):
     provider = FormSyMemoryProvider()
     provider._config = MemoryConfig(workspace_id=workspace_id)
     provider._memory_client = _CaptureMemoryClient()
     provider._run_async = lambda coro: asyncio.run(coro)
     provider._session_id = session_id
+    provider._hermes_home = hermes_home
     provider._turn_id = f"{session_id}:turn:1"
     provider._identity_snapshot = ResolvedIdentitySnapshot(
         workspace_id=workspace_id,
@@ -221,6 +222,30 @@ def test_build_coding_summary_with_terminal_calls():
     assert cs.task_type == "bugfix"
     assert "pytest tests/foo_test.py" in cs.tests_run
     assert "pytest tests/bar_test.py" in cs.tests_run
+
+
+def test_local_memory_store_recalls_across_provider_instances(tmp_path):
+    first = _make_provider(session_id="session-1", hermes_home=tmp_path)
+    first.record_terminal_call(
+        "git diff -- django/contrib/auth/validators.py",
+        "diff --git a/django/contrib/auth/validators.py b/django/contrib/auth/validators.py\n"
+        "-    regex = r'^[\\w.@+-]+$'\n"
+        "+    regex = r'\\A[\\w.@+-]+\\Z'\n",
+    )
+    first.record_terminal_call(
+        "python3 tests/runtests.py auth_tests.test_validators -v 2",
+        "OK",
+    )
+    first.sync_turn("fix username validator regex", "done", accepted_targets=["django/contrib/auth/validators.py"])
+
+    second = _make_provider(session_id="session-2", hermes_home=tmp_path)
+    block = second._prefetch_from_local_store("ASCIIUsernameValidator UnicodeUsernameValidator username validator regex")
+
+    assert "Relevant Memory" in block
+    assert "django/contrib/auth/validators.py" in block
+    assert "auth_tests.test_validators" in block
+    assert second.get_context_hints()["memory_status"] == "hit"
+    assert "python3 tests/runtests.py auth_tests.test_validators -v 2" in second.get_context_hints()["memory_test_hints"]
 
 
 def test_sync_turn_coding_summary_confidence_clamped():

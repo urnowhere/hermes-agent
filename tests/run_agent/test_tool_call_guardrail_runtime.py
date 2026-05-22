@@ -653,6 +653,74 @@ def test_default_run_conversation_warns_without_guardrail_halt():
     assert any("repeated_exact_failure_warning" in content for content in tool_contents)
 
 
+def test_text_form_tool_call_leak_retries_with_structured_tool_nudge():
+    agent = _make_agent("terminal", max_iterations=5)
+    leaked = (
+        "THOUGHT: I should inspect the file.\n\n"
+        "<function=terminal>\n"
+        "<parameter=command>cat django/contrib/auth/validators.py</parameter>"
+    )
+    responses = [
+        _mock_response(content=leaked, finish_reason="stop", tool_calls=None),
+        _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[_mock_tool_call("terminal", json.dumps({"command": "pwd"}), "call_1")],
+        ),
+        _mock_response(content="done", finish_reason="stop", tool_calls=None),
+    ]
+    agent.client.chat.completions.create.side_effect = responses
+
+    def _fake_execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count=0):
+        for call in assistant_message.tool_calls:
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "name": call.function.name,
+                    "content": '{"ok": true}',
+                }
+            )
+
+    with (
+        patch.object(agent, "_execute_tool_calls", side_effect=_fake_execute_tool_calls) as mock_exec,
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("inspect the repo")
+
+    assert result["final_response"] == "done"
+    assert mock_exec.call_count == 1
+    assert any(
+        msg.get("role") == "user"
+        and "Use the API's structured tool_calls field" in (msg.get("content") or "")
+        for msg in result["messages"]
+    )
+    assert not any(leaked in (msg.get("content") or "") for msg in result["messages"])
+
+
+def test_text_form_tool_call_leak_halts_after_retries():
+    agent = _make_agent("terminal", max_iterations=5)
+    leaked = 'assistant to=functions.terminal {"command": "pwd"}'
+    agent.client.chat.completions.create.side_effect = [
+        _mock_response(content=leaked, finish_reason="stop", tool_calls=None),
+        _mock_response(content=leaked, finish_reason="stop", tool_calls=None),
+        _mock_response(content=leaked, finish_reason="stop", tool_calls=None),
+    ]
+
+    with (
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("run a command")
+
+    assert result["turn_exit_reason"] == "text_tool_call_leak_halt"
+    assert "plain text instead of structured tool calls" in result["final_response"]
+    assert not any(leaked in (msg.get("content") or "") for msg in result["messages"])
+
+
 def test_run_conversation_exposes_retrieval_and_coding_status():
     agent = _make_agent("web_search", max_iterations=3)
     agent.context_compressor = SimpleNamespace(
@@ -716,5 +784,4 @@ def test_config_enabled_hard_stop_run_conversation_returns_controlled_guardrail_
         call_ids = [tc["id"] for tc in assistant_msg["tool_calls"]]
         following_results = [m for m in result["messages"] if m.get("role") == "tool" and m.get("tool_call_id") in call_ids]
         assert len(following_results) == len(call_ids)
-
 

@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -131,9 +132,11 @@ class FormSyMemoryProvider(MemoryProvider):
             )
         )
         if response is None:
-            return ""
+            return self._prefetch_from_local_store(query)
         self._record_prefetch_response(response)
-        return response.memory_block or ""
+        if response.memory_block:
+            return response.memory_block
+        return self._prefetch_from_local_store(query)
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "", **kwargs) -> None:
         if not self._memory_client or not self._config:
@@ -157,6 +160,7 @@ class FormSyMemoryProvider(MemoryProvider):
         }
         self._flush_pending_sync_queue()
         self._dispatch_sync_event(event)
+        self._append_local_memory_event(event)
 
     def on_session_end(self, messages: list[dict[str, Any]]) -> None:
         if not self._runtime_client or not self._config:
@@ -388,6 +392,161 @@ class FormSyMemoryProvider(MemoryProvider):
         if not self._memory_status and (memory_block or self._memory_artifact_ids or retrieved_facts):
             self._memory_status = "hit"
         self._memory_freshness = str(advisory.get("freshness") or "").strip()
+
+    def _append_local_memory_event(self, event: dict[str, Any]) -> None:
+        """Persist a compact local copy so new Hermes clients can recall it."""
+        if self._hermes_home is None:
+            return
+        try:
+            coding_summary = event.get("coding_summary")
+            if hasattr(coding_summary, "model_dump"):
+                coding_summary = coding_summary.model_dump(mode="json", exclude_none=True)
+            artifacts = event.get("artifacts") or []
+            artifact_ids = [
+                str(getattr(artifact, "artifact_id", "") or "").strip()
+                for artifact in artifacts
+                if str(getattr(artifact, "artifact_id", "") or "").strip()
+            ]
+            record = {
+                "created_at": time.time(),
+                "workspace_id": event.get("workspace_id"),
+                "session_id": event.get("session_id"),
+                "turn_id": event.get("turn_id"),
+                "identity": event.get("identity") or {},
+                "messages": event.get("messages") or [],
+                "coding_summary": coding_summary,
+                "artifact_ids": artifact_ids,
+            }
+            path = self._local_memory_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            self._trim_local_memory_store(max_records=500)
+        except Exception:
+            logger.debug("local FormSy memory append failed", exc_info=True)
+
+    def _prefetch_from_local_store(self, query: str) -> str:
+        matches = self._local_memory_matches(query)
+        if not matches:
+            return ""
+
+        self._memory_status = "hit"
+        self._memory_freshness = "local"
+        self._memory_artifact_ids = self._dedupe_string_list(
+            [artifact_id for record, _score in matches for artifact_id in record.get("artifact_ids", [])]
+        )
+        self._memory_query_hints = self._dedupe_string_list(
+            path
+            for record, _score in matches
+            for path in ((record.get("coding_summary") or {}).get("changed_files") or [])
+        )
+        self._memory_test_hints = self._dedupe_string_list(
+            command
+            for record, _score in matches
+            for command in ((record.get("coding_summary") or {}).get("tests_run") or [])
+        )
+
+        lines = ["## Relevant Memory", "", "### Prior Runs"]
+        for record, score in matches[:3]:
+            summary = record.get("coding_summary") or {}
+            identity = record.get("identity") or {}
+            parts = [
+                f"session={record.get('session_id')}",
+                f"score={score:.2f}",
+            ]
+            repo_id = identity.get("repo_id")
+            if repo_id:
+                parts.append(f"repo={repo_id}")
+            lines.append(f"- [{'|'.join(parts)}] {self._local_memory_summary(summary, record)}")
+        lines.append("- Treat memory as historical hints; verify current code if the working tree may have changed.")
+        return "\n".join(lines)
+
+    def _local_memory_matches(self, query: str) -> list[tuple[dict[str, Any], float]]:
+        if self._hermes_home is None:
+            return []
+        path = self._local_memory_path()
+        if not path.exists():
+            return []
+        query_terms = self._terms(query)
+        current_identity = self._current_runtime_identity()
+        current_repo = str(current_identity.get("repo_id") or "").strip()
+        current_workspace = self._current_workspace_id()
+        records: list[tuple[dict[str, Any], float]] = []
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            return []
+
+        for line in lines[-500:]:
+            try:
+                record = json.loads(line)
+            except Exception:
+                continue
+            if str(record.get("workspace_id") or "") != current_workspace:
+                continue
+            identity = record.get("identity") or {}
+            repo_id = str(identity.get("repo_id") or "").strip()
+            if current_repo and repo_id and current_repo != repo_id:
+                continue
+            text = self._local_memory_search_text(record)
+            terms = self._terms(text)
+            overlap = len(query_terms & terms)
+            score = min(0.7, overlap * 0.08)
+            if current_repo and repo_id == current_repo:
+                score += 0.25
+            if (record.get("coding_summary") or {}).get("patch_summary"):
+                score += 0.1
+            if not query_terms and text:
+                score += 0.1
+            if score <= 0:
+                continue
+            records.append((record, min(score, 1.0)))
+        records.sort(key=lambda item: (item[1], float(item[0].get("created_at") or 0)), reverse=True)
+        return records[:5]
+
+    @staticmethod
+    def _local_memory_search_text(record: dict[str, Any]) -> str:
+        summary = record.get("coding_summary") or {}
+        messages = record.get("messages") or []
+        parts: list[str] = []
+        for value in summary.values():
+            if isinstance(value, list):
+                parts.extend(str(item) for item in value)
+            else:
+                parts.append(str(value))
+        parts.extend(str(msg.get("content") or "") for msg in messages if isinstance(msg, dict))
+        return "\n".join(parts)
+
+    @staticmethod
+    def _local_memory_summary(summary: dict[str, Any], record: dict[str, Any]) -> str:
+        chunks: list[str] = []
+        changed = summary.get("changed_files") or []
+        if changed:
+            chunks.append("changed " + ", ".join(str(path) for path in changed[:3]))
+        patch = str(summary.get("patch_summary") or "").strip()
+        if patch:
+            chunks.append("patch " + " ".join(patch.split())[:500])
+        tests = summary.get("tests_run") or []
+        if tests:
+            chunks.append("tests " + "; ".join(str(command) for command in tests[:3]))
+        if not chunks:
+            messages = record.get("messages") or []
+            chunks.extend(str(msg.get("content") or "").strip()[:300] for msg in messages if isinstance(msg, dict))
+        return " | ".join(chunk for chunk in chunks if chunk)[:1500]
+
+    def _local_memory_path(self) -> Path:
+        base = self._hermes_home or Path.home() / ".hermes"
+        return base / "formsy-memory-local.jsonl"
+
+    def _trim_local_memory_store(self, *, max_records: int) -> None:
+        path = self._local_memory_path()
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+            if len(lines) <= max_records:
+                return
+            path.write_text("\n".join(lines[-max_records:]) + "\n", encoding="utf-8")
+        except Exception:
+            logger.debug("local FormSy memory trim failed", exc_info=True)
 
     def _build_coding_summary(self, kwargs: dict[str, Any]) -> Optional[CodingSummary]:
         """Build a CodingSummary from per-turn accumulated state and caller-supplied kwargs."""
@@ -627,6 +786,29 @@ class FormSyMemoryProvider(MemoryProvider):
             if text:
                 items.append(text)
         return items
+
+    @staticmethod
+    def _dedupe_string_list(values: Any) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for value in values or []:
+            text = str(value or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            result.append(text)
+        return result
+
+    @staticmethod
+    def _terms(text: str) -> set[str]:
+        terms = set()
+        for raw in re.findall(r"[A-Za-z0-9_./:-]+", text or ""):
+            if len(raw) > 2:
+                terms.add(raw.lower())
+            for part in re.split(r"[^A-Za-z0-9]+", raw):
+                if len(part) > 2:
+                    terms.add(part.lower())
+        return terms
 
     @staticmethod
     def _extract_artifact_ids(artifacts: Any) -> list[str]:
