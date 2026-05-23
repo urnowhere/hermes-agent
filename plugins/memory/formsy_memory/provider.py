@@ -133,12 +133,16 @@ class FormSyMemoryProvider(MemoryProvider):
         if response is None:
             return self._prefetch_from_local_store(query)
         self._record_prefetch_response(response)
+        local_block = self._prefetch_from_local_store(query)
         if response.memory_block:
-            return response.memory_block
-        return self._prefetch_from_local_store(query)
+            return self._merge_memory_blocks(local_block, response.memory_block)
+        return local_block
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "", **kwargs) -> None:
         if not self._memory_client or not self._config:
+            return
+        if self._is_skill_review_turn(user_content):
+            logger.debug("Skipping FormSy memory sync for Hermes skill-review turn")
             return
         active_session_id = str(session_id or self._session_id or "").strip() or "unknown"
         turn_id = self._turn_id or f"{active_session_id}:turn:{max(self._turn_counter, 1)}"
@@ -437,12 +441,12 @@ class FormSyMemoryProvider(MemoryProvider):
         self._memory_query_hints = self._dedupe_string_list(
             path
             for record, _score in matches
-            for path in ((record.get("coding_summary") or {}).get("changed_files") or [])
+            for path in self._local_memory_query_hint_paths(record)
         )
         self._memory_test_hints = self._dedupe_string_list(
             command
             for record, _score in matches
-            for command in ((record.get("coding_summary") or {}).get("tests_run") or [])
+            for command in self._local_memory_test_commands(record)
         )
 
         lines = ["## Relevant Memory", "", "### Prior Runs"]
@@ -481,6 +485,11 @@ class FormSyMemoryProvider(MemoryProvider):
                 record = json.loads(line)
             except Exception:
                 continue
+            summary = record.get("coding_summary")
+            if not isinstance(summary, dict) or not summary:
+                continue
+            if not self._record_has_coherent_coding_summary(record):
+                continue
             if str(record.get("workspace_id") or "") != current_workspace:
                 continue
             identity = record.get("identity") or {}
@@ -490,6 +499,8 @@ class FormSyMemoryProvider(MemoryProvider):
             text = self._local_memory_search_text(record)
             terms = self._terms(text)
             overlap = len(query_terms & terms)
+            if query_terms and overlap < (2 if len(query_terms) >= 3 else 1):
+                continue
             score = min(0.7, overlap * 0.08)
             if current_repo and repo_id == current_repo:
                 score += 0.25
@@ -508,11 +519,29 @@ class FormSyMemoryProvider(MemoryProvider):
         summary = record.get("coding_summary") or {}
         messages = record.get("messages") or []
         parts: list[str] = []
-        for value in summary.values():
+        for key in (
+            "task_type",
+            "problem_summary",
+            "root_cause",
+            "patch_summary",
+            "test_result",
+            "context_query",
+        ):
+            value = summary.get(key)
+            if value:
+                parts.append(str(value))
+        for key in (
+            "accepted_targets",
+            "changed_files",
+            "changed_symbols",
+            "failure_lessons",
+        ):
+            value = summary.get(key)
             if isinstance(value, list):
                 parts.extend(str(item) for item in value)
-            else:
-                parts.append(str(value))
+        for command in summary.get("tests_run") or []:
+            if FormSyMemoryProvider._is_test_or_verification_command(str(command)):
+                parts.append(str(command))
         parts.extend(str(msg.get("content") or "") for msg in messages if isinstance(msg, dict))
         return "\n".join(parts)
 
@@ -526,12 +555,32 @@ class FormSyMemoryProvider(MemoryProvider):
         if patch:
             chunks.append("patch " + " ".join(patch.split())[:500])
         tests = summary.get("tests_run") or []
+        tests = [command for command in tests if FormSyMemoryProvider._is_test_or_verification_command(str(command))]
         if tests:
             chunks.append("tests " + "; ".join(str(command) for command in tests[:3]))
         if not chunks:
             messages = record.get("messages") or []
             chunks.extend(str(msg.get("content") or "").strip()[:300] for msg in messages if isinstance(msg, dict))
         return " | ".join(chunk for chunk in chunks if chunk)[:1500]
+
+    @staticmethod
+    def _local_memory_query_hint_paths(record: dict[str, Any]) -> list[str]:
+        summary = record.get("coding_summary") or {}
+        changed = summary.get("changed_files") or []
+        if changed:
+            return [str(path) for path in changed if str(path or "").strip()]
+        accepted = summary.get("accepted_targets") or []
+        return [str(path) for path in accepted if str(path or "").strip()]
+
+    @staticmethod
+    def _local_memory_test_commands(record: dict[str, Any]) -> list[str]:
+        summary = record.get("coding_summary") or {}
+        commands = summary.get("tests_run") or []
+        return [
+            str(command)
+            for command in commands
+            if FormSyMemoryProvider._is_test_or_verification_command(str(command))
+        ]
 
     def _local_memory_path(self) -> Path:
         base = self._hermes_home or Path.home() / ".hermes"
@@ -560,7 +609,11 @@ class FormSyMemoryProvider(MemoryProvider):
         )
         tests_run: list[str] = self._coerce_string_list(
             kwargs.get("tests_run")
-            or [call["command"] for call in self._terminal_calls if call.get("command")]
+            or [
+                call["command"]
+                for call in self._terminal_calls
+                if self._is_test_or_verification_command(str(call.get("command") or ""))
+            ]
         )
         retrieval_state = str(kwargs.get("retrieval_state") or "").strip() or None
         task_type = str(kwargs.get("task_type") or "").strip() or None
@@ -571,6 +624,15 @@ class FormSyMemoryProvider(MemoryProvider):
             or self._extract_patch_summary_from_terminal()
             or None
         )
+        if not self._coding_summary_paths_coherent(
+            accepted_targets,
+            changed_files,
+            patch_summary,
+        ):
+            logger.info(
+                "Dropping incoherent FormSy coding summary: changed files do not overlap accepted targets"
+            )
+            return None
         test_result = str(kwargs.get("test_result") or "").strip() or None
         failure_lessons: list[str] = self._coerce_string_list(kwargs.get("failure_lessons") or [])
         context_query = str(kwargs.get("context_query") or "").strip() or None
@@ -800,12 +862,33 @@ class FormSyMemoryProvider(MemoryProvider):
 
     @staticmethod
     def _terms(text: str) -> set[str]:
+        stopwords = {
+            "command",
+            "commands",
+            "context",
+            "context_search",
+            "directory",
+            "file",
+            "files",
+            "filename",
+            "filenames",
+            "modify",
+            "post",
+            "process",
+            "source",
+            "task",
+            "test",
+            "tests",
+            "tool",
+            "tools",
+            "workflow",
+        }
         terms = set()
         for raw in re.findall(r"[A-Za-z0-9_./:-]+", text or ""):
-            if len(raw) > 2:
+            if len(raw) > 2 and raw.lower() not in stopwords:
                 terms.add(raw.lower())
             for part in re.split(r"[^A-Za-z0-9]+", raw):
-                if len(part) > 2:
+                if len(part) > 2 and part.lower() not in stopwords:
                     terms.add(part.lower())
         return terms
 
@@ -856,6 +939,107 @@ class FormSyMemoryProvider(MemoryProvider):
                 idx = result.find("diff --git")
                 return result[idx:idx + 2000].strip()
         return ""
+
+    @staticmethod
+    def _is_skill_review_turn(user_content: str) -> bool:
+        text = str(user_content or "")
+        return (
+            "Review the conversation above and update the skill library" in text
+            or "Target shape of the library: CLASS-LEVEL skills" in text
+        )
+
+    @staticmethod
+    def _is_test_or_verification_command(command: str) -> bool:
+        lowered = command.strip().lower()
+        if not lowered:
+            return False
+        if "complete_task_and_submit_final_output" in lowered:
+            return False
+        if lowered.startswith(("cat ", "git diff", "patch ")):
+            return False
+        if "runtests.py" in lowered:
+            return True
+        if lowered.startswith(("pytest ", "python -m pytest ", "python3 -m pytest ")):
+            return True
+        if re.match(r"^(?:python|python3)\s+reproduce(?:[_-].*)?\.py(?:\s|$)", lowered):
+            return True
+        if " manage.py test" in lowered or lowered.startswith(("python manage.py test", "python3 manage.py test")):
+            return True
+        return False
+
+    @classmethod
+    def _record_has_coherent_coding_summary(cls, record: dict[str, Any]) -> bool:
+        summary = record.get("coding_summary") or {}
+        if not isinstance(summary, dict):
+            return True
+        return cls._coding_summary_paths_coherent(
+            summary.get("accepted_targets") or [],
+            summary.get("changed_files") or [],
+            summary.get("patch_summary") or "",
+        )
+
+    @classmethod
+    def _coding_summary_paths_coherent(
+        cls,
+        accepted_targets: list[str],
+        changed_files: list[str],
+        patch_summary: str | None,
+    ) -> bool:
+        """Detect stale patch.txt summaries attached to the wrong retrieval target."""
+        accepted = cls._normalize_repo_paths(accepted_targets)
+        touched = cls._normalize_repo_paths(changed_files)
+        touched.update(cls._extract_patch_paths(patch_summary or ""))
+        if not accepted or not touched:
+            return True
+        return bool(accepted & touched)
+
+    @classmethod
+    def _normalize_repo_paths(cls, values: Any) -> set[str]:
+        if isinstance(values, str):
+            values = [values]
+        if not isinstance(values, list):
+            return set()
+        paths: set[str] = set()
+        for value in values:
+            text = cls._normalize_repo_path(str(value or ""))
+            if text:
+                paths.add(text)
+        return paths
+
+    @staticmethod
+    def _normalize_repo_path(path: str) -> str:
+        text = path.strip().replace("\\", "/")
+        while text.startswith("./"):
+            text = text[2:]
+        if text.startswith("a/") or text.startswith("b/"):
+            text = text[2:]
+        return text
+
+    @classmethod
+    def _extract_patch_paths(cls, patch_summary: str) -> set[str]:
+        paths: set[str] = set()
+        for match in re.finditer(r"^diff --git\s+a/(\S+)\s+b/(\S+)", patch_summary or "", re.MULTILINE):
+            paths.add(cls._normalize_repo_path(match.group(1)))
+            paths.add(cls._normalize_repo_path(match.group(2)))
+        for match in re.finditer(r"^(?:---|\+\+\+)\s+(?:a/|b/)?(\S+)", patch_summary or "", re.MULTILINE):
+            path = cls._normalize_repo_path(match.group(1))
+            if path != "/dev/null":
+                paths.add(path)
+        return {path for path in paths if path}
+
+    @staticmethod
+    def _merge_memory_blocks(local_block: str, server_block: str) -> str:
+        local = str(local_block or "").strip()
+        server = str(server_block or "").strip()
+        if not local:
+            return server
+        if not server:
+            return local
+        if local in server:
+            return server
+        if server in local:
+            return local
+        return f"{local}\n\n## Runtime Memory\n{server}"
 
     def _build_summary_hint(self, messages: list[dict[str, Any]]) -> str:
         parts: list[str] = []

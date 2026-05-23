@@ -1,8 +1,10 @@
 """Formsy context engine implementation."""
 
+import hashlib
 import json
 import logging
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -95,9 +97,14 @@ class FormsyContextEngine(ContextEngine):
         self._last_gate_failure: dict[str, Any] = {}
         self._grounded_search_required: bool = False
         self._test_plan_commands: list[str] = []
-        self._memory_compiled_identity: tuple[str, str] | None = None
+        self._memory_compiled_identity: tuple[str, str, str] | None = None
         self._memory_compile_revision: str = ""
         self._context_read_cache: dict[str, list[dict[str, Any]]] = {}
+        self._last_async_error: str = ""
+        self._terminal_command_counts: dict[str, int] = {}
+        self._last_terminal_test_failed: bool = False
+        self._failed_test_recovery_search_used: bool = False
+        self._terminal_test_outcomes: dict[str, list[bool]] = {}
 
         self.last_prompt_tokens = 0
         self.last_completion_tokens = 0
@@ -507,19 +514,37 @@ class FormsyContextEngine(ContextEngine):
                 "repo_id": repo_id,
                 "revision": revision,
                 "error": "Formsy memory compile failed before context_search",
+                "compile_error": self._last_async_error,
+                "retrieval_status": "failed",
                 "recovery_mode": "degraded_recovery",
                 "preferred_next_step": "bounded_shell_inspection",
                 "allowed_tools": ["terminal", "read_file", "search_files"],
                 "retrieval_feedback": (
                     "Memory compile failed. Falling back to bounded shell inspection. "
-                    "Use terminal/read_file/search_files to locate relevant files directly."
+                    "Use at most one targeted search_files call, then read_file the likely "
+                    "target. Do not repeat identical terminal repro commands; patch or rerun "
+                    "context_search after the server compile issue is fixed."
                 ),
             })
         revision = self._memory_compile_revision or revision
         budget = self._coerce_positive_int(args.get("budget"), self._config.query_budget if self._config else 4000)
         self._retrieval_trace.retrieval_budget = budget
         metadata = self._build_query_metadata(args, repo_id=repo_id, session_id=session_id)
+        if self._config is not None:
+            timeout_s = int(getattr(self._config, "timeout_s", 120) or 120)
+            server_wait_budget = max(10, min(timeout_s - 10, 90))
+            metadata.setdefault("query_timeout_s", server_wait_budget)
+            metadata.setdefault("fanout_timeout_s", server_wait_budget)
         self._merge_memory_hints(metadata)
+        if (
+            self._last_terminal_test_failed
+            and self._retrieval_trace.exploration_closed
+            and self._retrieval_trace.accepted_targets
+        ):
+            metadata["grounding_phase"] = "grounded"
+            metadata["grounded_files"] = list(self._retrieval_trace.accepted_targets)
+            metadata["test_failure_recovery"] = True
+            self._failed_test_recovery_search_used = True
         phase = str(metadata.get("grounding_phase") or "").strip().lower()
         if phase == "grounded":
             if self._grounded_files and not metadata.get("grounded_files"):
@@ -578,6 +603,16 @@ class FormsyContextEngine(ContextEngine):
         ):
             if key in result:
                 payload[key] = result[key]
+        for key in (
+            "memory_status",
+            "memory_freshness",
+            "memory_query_hints",
+            "memory_test_hints",
+        ):
+            if metadata.get(key) not in (None, "", []):
+                payload[key] = metadata[key]
+        if self._has_memory_recall():
+            payload["memory_recall"] = True
         coverage = str(payload.get("coverage") or "").strip().lower()
         matches = payload.get("matches")
         payload["direct_match_files"] = self._extract_match_files(matches)
@@ -780,10 +815,12 @@ class FormsyContextEngine(ContextEngine):
 
     def _run_async(self, coro):
         """Run Formsy async API calls from the synchronous ContextEngine API."""
+        self._last_async_error = ""
         try:
             from model_tools import _run_async
             return _run_async(coro)
-        except Exception:
+        except Exception as exc:
+            self._last_async_error = f"{exc.__class__.__name__}: {exc}"
             logger.exception("Formsy async call failed")
             return None
 
@@ -844,10 +881,32 @@ class FormsyContextEngine(ContextEngine):
         return {}
 
     def _ensure_memory_compiled(self, *, repo_id: str, revision: str, query: str, session_id: str) -> bool:
-        identity_key = (repo_id, revision)
-        if self._memory_compiled_identity == identity_key:
+        query_signature = self._query_signature(query)
+        identity_key = (repo_id, revision, query_signature)
+        if self._compiled_identity_satisfies(
+            self._memory_compiled_identity,
+            repo_id=repo_id,
+            revision=revision,
+            query_signature=query_signature,
+        ):
             return True
         if not self._engine_client or not hasattr(self._engine_client, "compile_repo"):
+            return True
+
+        status = self._compile_status(
+            repo_id=repo_id,
+            revision=revision,
+            session_id=session_id,
+        )
+        if self._existing_compile_satisfies_query(status, query):
+            self._memory_compiled_identity = self._compiled_identity_from_status(
+                status,
+                repo_id=repo_id,
+                revision=revision,
+                fallback_query_signature=query_signature,
+            )
+            status_revision = str(status.get("revision") or "").strip() if isinstance(status, dict) else ""
+            self._memory_compile_revision = status_revision or revision
             return True
 
         files = self._collect_memory_source_files(Path.cwd(), query=query)
@@ -860,11 +919,20 @@ class FormsyContextEngine(ContextEngine):
                     "instance_id": repo_id,
                     "query": query,
                     "source_file_count": len(files),
+                    "compile_profile": "interactive_context_search",
+                    "source_scope": "query_bounded",
+                    "query_signature": query_signature,
+                    "function_embeddings": "deferred",
+                    "sync_function_embeddings": False,
                 },
                 session_id=session_id,
+                mode="merge",
             )
         )
         if result is None:
+            client_error = getattr(self._engine_client, "last_error", "")
+            if client_error:
+                self._last_async_error = str(client_error)
             return False
 
         self._memory_compiled_identity = identity_key
@@ -873,6 +941,102 @@ class FormsyContextEngine(ContextEngine):
             or revision
         )
         return True
+
+    def _compile_status(
+        self,
+        *,
+        repo_id: str,
+        revision: str,
+        session_id: str,
+    ) -> dict[str, Any] | None:
+        if not self._engine_client or not hasattr(self._engine_client, "compile_status"):
+            return None
+        result = self._run_async(
+            self._engine_client.compile_status(
+                repo_id=repo_id,
+                revision=revision,
+                session_id=session_id,
+            )
+        )
+        return result if isinstance(result, dict) else None
+
+    @staticmethod
+    def _query_signature(query: str) -> str:
+        normalized = " ".join(str(query or "").lower().split())
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _compiled_identity_satisfies(
+        identity: tuple[str, str, str] | None,
+        *,
+        repo_id: str,
+        revision: str,
+        query_signature: str,
+    ) -> bool:
+        if identity is None:
+            return False
+        compiled_repo_id, compiled_revision, compiled_query = identity
+        if compiled_repo_id != repo_id or compiled_revision != revision:
+            return False
+        return compiled_query in {"*", query_signature}
+
+    @classmethod
+    def _compiled_identity_from_status(
+        cls,
+        status: dict[str, Any] | None,
+        *,
+        repo_id: str,
+        revision: str,
+        fallback_query_signature: str,
+    ) -> tuple[str, str, str]:
+        if isinstance(status, dict):
+            metadata = status.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+            status_revision = str(status.get("revision") or "").strip() or revision
+            if str(metadata.get("source_scope") or "").strip().lower() == "full":
+                return (repo_id, status_revision, "*")
+            profile = str(metadata.get("compile_profile") or "").strip().lower()
+            parsed_file_count = cls._coerce_positive_int(status.get("parsed_file_count"), 0)
+            if profile != "interactive_context_search" and parsed_file_count > 260:
+                return (repo_id, status_revision, "*")
+            signature = str(metadata.get("query_signature") or "").strip()
+            if signature:
+                return (repo_id, status_revision, signature)
+        return (repo_id, revision, fallback_query_signature)
+
+    @classmethod
+    def _existing_compile_satisfies_query(
+        cls,
+        status: dict[str, Any] | None,
+        query: str,
+    ) -> bool:
+        if not isinstance(status, dict):
+            return False
+        metadata = status.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        if str(metadata.get("source_scope") or "").strip().lower() == "full":
+            return True
+
+        profile = str(metadata.get("compile_profile") or "").strip().lower()
+        looks_query_bounded = bool(
+            profile == "interactive_context_search"
+            or metadata.get("query")
+            or metadata.get("source_file_count")
+        )
+        parsed_file_count = cls._coerce_positive_int(status.get("parsed_file_count"), 0)
+        if not looks_query_bounded and parsed_file_count > 260:
+            return True
+
+        signature = str(metadata.get("query_signature") or "").strip()
+        if signature and signature == cls._query_signature(query):
+            return True
+
+        previous_query = " ".join(str(metadata.get("query") or "").lower().split())
+        current_query = " ".join(str(query or "").lower().split())
+        return bool(previous_query and previous_query == current_query)
 
     @staticmethod
     def _collect_memory_source_files(root: Path, query: str = "") -> list[dict[str, Any]]:
@@ -916,9 +1080,9 @@ class FormsyContextEngine(ContextEngine):
         # Hard caps to prevent server overload on large repos.
         # Keep room for tests so compile-time context_read can inspect the files
         # returned in a test plan instead of only implementation modules.
-        MAX_COMPILE_FILES = 500
-        MAX_COMPILE_BYTES = 4 * 1024 * 1024  # 4 MB
-        RESERVED_TEST_FILES = 100
+        MAX_COMPILE_FILES = 260
+        MAX_COMPILE_BYTES = 2 * 1024 * 1024  # 2 MB
+        RESERVED_TEST_FILES = 60
         RESERVED_SOURCE_BYTE_RATIO = 0.8
 
         def _is_test(rel: str) -> bool:
@@ -984,6 +1148,7 @@ class FormsyContextEngine(ContextEngine):
                 source_files.append(entry)
 
         if query_terms:
+            source_files.sort(key=lambda entry: (-_query_score(entry), str(entry.get("path") or "")))
             test_files.sort(key=lambda entry: (-_query_score(entry), str(entry.get("path") or "")))
 
         files: list[dict[str, Any]] = []
@@ -1177,9 +1342,15 @@ class FormsyContextEngine(ContextEngine):
         self._grounded_search_required = False
         self._test_plan_commands = []
         self._context_read_cache = {}
+        self._last_async_error = ""
+        self._terminal_command_counts = {}
+        self._last_terminal_test_failed = False
+        self._failed_test_recovery_search_used = False
+        self._terminal_test_outcomes = {}
         # NOTE: _memory_compiled_identity and _memory_compile_revision are intentionally
-        # NOT reset here. The compiled repo remains valid on the server for the same
-        # (repo_id, revision) pair across task boundaries within the same session.
+        # NOT reset here. The compiled repo remains valid across task boundaries,
+        # but the identity includes the query signature so query-bounded compiles
+        # from one SWE-bench case don't suppress compilation for the next case.
 
     @staticmethod
     def _has_useful_matches(matches: Any) -> bool:
@@ -1398,6 +1569,8 @@ class FormsyContextEngine(ContextEngine):
             if server_blocked_reason:
                 self._retrieval_trace.blocked_tool_reason = server_blocked_reason
             self._preferred_edit_targets = self._select_preferred_edit_targets()
+        if metadata.get("test_failure_recovery"):
+            self._last_terminal_test_failed = False
         self._sync_trace_state(state=self._retrieval_state)
 
         next_retrieval = self._next_retrieval_hint(metadata=metadata, payload=payload)
@@ -1555,9 +1728,13 @@ class FormsyContextEngine(ContextEngine):
         if norm.startswith("tests/") or norm.startswith("test_"):
             if path not in self._retrieval_trace.test_plan_files:
                 self._retrieval_trace.test_plan_files.append(path)
-        if self._retrieval_state == "degraded_recovery":
+        previous_state = self._retrieval_state
+        if previous_state == "degraded_recovery":
             self._retrieval_state = "grounded"
             self._set_accepted_targets([path])
+            self._grounded_search_required = False
+        elif previous_state == "grounded" and self._retrieval_trace.accepted_targets:
+            self._retrieval_state = "grounded"
             self._grounded_search_required = False
         else:
             self._retrieval_state = "context_read"
@@ -1616,6 +1793,13 @@ class FormsyContextEngine(ContextEngine):
             candidates = bundle.get("must_edit_files")
         if candidates is None and isinstance(bundle.get("edit_targets"), dict):
             candidates = bundle["edit_targets"].get("must_edit")
+        if candidates is None and isinstance(bundle.get("primary_files"), list):
+            candidates = [
+                item
+                for item in bundle["primary_files"]
+                if isinstance(item, dict)
+                and str(item.get("priority") or "").strip().lower() == "must_edit"
+            ]
         if isinstance(candidates, str):
             return [candidates]
         if isinstance(candidates, list):
@@ -1764,27 +1948,43 @@ class FormsyContextEngine(ContextEngine):
             self._retrieval_trace.test_plan_files = seen_test
         self._retrieval_trace.exploration_closed = bool(self._retrieval_trace.accepted_targets)
 
+    @staticmethod
+    def _normalize_repo_path(path: str) -> str:
+        text = str(path or "").strip().replace("\\", "/")
+        return text.lstrip("./") if text.startswith("./") else text
+
     def _is_context_read_allowed(self, path: str) -> bool:
         if not self._retrieval_trace.exploration_closed and not self._retrieval_trace.accepted_targets:
             return True
-        # Normalize ./foo/bar → foo/bar so prefix checks work regardless of how
+        # Normalize ./foo/bar -> foo/bar so prefix checks work regardless of how
         # the agent prefixes the path.
-        norm = path.lstrip("./") if path.startswith("./") else path
-        accepted = {p.lstrip("./") if p.startswith("./") else p for p in self._retrieval_trace.accepted_targets}
-        test_plan_files = {p.lstrip("./") if p.startswith("./") else p for p in self._retrieval_trace.test_plan_files}
+        norm = self._normalize_repo_path(path)
+        accepted = {self._normalize_repo_path(p) for p in self._retrieval_trace.accepted_targets}
+        test_plan_files = {self._normalize_repo_path(p) for p in self._retrieval_trace.test_plan_files}
         if norm in accepted or path in accepted or norm in test_plan_files or path in test_plan_files:
             return True
         if norm.startswith("tests/") and self._retrieval_state in {"grounded", "context_read"}:
             return True
         return False
 
+    def _is_edit_target_accepted(self, path: str) -> bool:
+        norm = self._normalize_repo_path(path)
+        accepted = {self._normalize_repo_path(p) for p in self._retrieval_trace.accepted_targets}
+        return norm in accepted
+
     def _is_context_read_phase_terminal_allowed(self, command: str) -> bool:
         text = " ".join(str(command or "").split()).lower()
         if not text:
             return False
+        if self._is_terminal_bookkeeping_or_test_command(command):
+            return True
         if self._is_broad_discovery_command(text):
             return False
-        if any(marker in text for marker in ("cat >", "<<", "tee ", ".write(", "open(")):
+        if self._is_terminal_write_command(text):
+            return False
+        if self._is_terminal_source_introspection_command(text):
+            return False
+        if any(marker in text for marker in (".write(", "open(")):
             return False
         if text.startswith("python tests/runtests.py") or " python tests/runtests.py" in text:
             return True
@@ -1806,6 +2006,50 @@ class FormsyContextEngine(ContextEngine):
             if planned_text and (text == planned_text or text.startswith(planned_text)):
                 return True
         return False
+
+    def _is_context_read_phase_edit_allowed(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> bool:
+        if tool_name not in {"patch", "write_file"}:
+            return False
+        path = str(args.get("path") or args.get("file") or args.get("filepath") or "").strip()
+        if not path:
+            return False
+
+        norm = self._normalize_repo_path(path)
+        grounded = {self._normalize_repo_path(item) for item in self._grounded_files}
+        if norm not in grounded:
+            return False
+
+        must_edit = {self._normalize_repo_path(item) for item in self._bundle_must_edit}
+        if norm in must_edit:
+            return True
+
+        preferred = {self._normalize_repo_path(item) for item in self._preferred_edit_targets}
+        primary = {self._normalize_repo_path(item) for item in self._bundle_primary_files}
+        return len(preferred) == 1 and norm in preferred and norm in primary
+
+    def _promote_context_read_target_for_edit(self, args: dict[str, Any]) -> None:
+        path = str(args.get("path") or args.get("file") or args.get("filepath") or "").strip()
+        if not path:
+            return
+        self._set_accepted_targets(
+            [path],
+            test_plan_files=list(self._retrieval_trace.test_plan_files),
+        )
+        self._grounded_files = [path]
+        self._grounded_search_required = False
+        self._sync_trace_state(state="grounded")
+        self._last_retrieval_decision = {
+            "decision": "grounded",
+            "grounded_files": list(self._grounded_files),
+            "accepted_targets": list(self._retrieval_trace.accepted_targets),
+            "exploration_closed": self._retrieval_trace.exploration_closed,
+            "retrieval_budget": self._retrieval_trace.retrieval_budget,
+            "reason": "must_edit context_read target accepted for edit",
+        }
 
     def _has_contradiction(self, payload: dict[str, Any], metadata: dict[str, Any]) -> bool:
         if self._target_conflict or self._target_changed_after_grounding:
@@ -1847,13 +2091,210 @@ class FormsyContextEngine(ContextEngine):
             return True
         return text.startswith("find ") or text.startswith("grep ") or text.startswith("rg ")
 
+    @staticmethod
+    def _is_terminal_write_command(command: str) -> bool:
+        text = " ".join(str(command or "").split()).lower()
+        if not text:
+            return False
+        if "<<" in text or " tee " in f" {text} ":
+            return True
+        return bool(re.search(r"(^|[\s;&|])\d*>{1,2}\s*\S+", text))
+
+    @staticmethod
+    def _is_terminal_source_introspection_command(command: str) -> bool:
+        text = " ".join(str(command or "").split()).lower()
+        if not text:
+            return False
+        if "inspect.getsource" in text or "__code__.co_filename" in text:
+            return True
+        repo_open_patterns = (
+            "open('django/",
+            'open("django/',
+            "open('./django/",
+            'open("./django/',
+            "open('tests/",
+            'open("tests/',
+            "open('./tests/",
+            'open("./tests/',
+        )
+        if any(pattern in text for pattern in repo_open_patterns):
+            return any(marker in text for marker in (".read(", ".readline(", ".readlines(", " for "))
+        if "read_text(" in text and any(prefix in text for prefix in ("'django/", '"django/', "'tests/", '"tests/')):
+            return True
+        return False
+
+    @classmethod
+    def _is_terminal_ad_hoc_python_command(cls, command: str) -> bool:
+        normalized = cls._normalize_terminal_command(command).lower()
+        if not normalized:
+            return False
+        for segment in re.split(r"\s*(?:&&|;)\s*", normalized):
+            if re.match(r"^(?:cd\s+\S+\s+&&\s+)?python3?\s+-c\b", segment):
+                return True
+        return False
+
+    @staticmethod
+    def _normalize_terminal_command(command: str) -> str:
+        return " ".join(str(command or "").split()).strip()
+
+    @staticmethod
+    def _looks_like_terminal_path(token: str) -> bool:
+        value = str(token or "").strip()
+        if not value or value.startswith("-"):
+            return False
+        if value in {".", ".."}:
+            return False
+        if "/" in value or value.startswith("."):
+            return True
+        return bool(re.search(r"\.(py|txt|md|json|toml|yaml|yml|cfg|ini|css|js|ts|html|rst)$", value))
+
+    @classmethod
+    def _first_terminal_path_arg(cls, args: list[str]) -> str:
+        for arg in args:
+            if cls._looks_like_terminal_path(arg):
+                return arg
+        return ""
+
+    @classmethod
+    def _last_terminal_path_arg(cls, args: list[str]) -> str:
+        for arg in reversed(args):
+            if cls._looks_like_terminal_path(arg):
+                return arg
+        return ""
+
+    @classmethod
+    def _terminal_read_path(cls, command: str) -> str:
+        text = str(command or "").strip()
+        if not text or any(marker in text for marker in ("|", ">", "<")):
+            return ""
+        for segment in re.split(r"\s*(?:&&|;)\s*", text):
+            if not segment.strip():
+                continue
+            try:
+                parts = shlex.split(segment)
+            except ValueError:
+                continue
+            if not parts:
+                continue
+            executable = Path(parts[0]).name
+            if executable == "cat":
+                return cls._first_terminal_path_arg(parts[1:])
+            if executable in {"head", "tail", "sed"}:
+                return cls._last_terminal_path_arg(parts[1:])
+        return ""
+
+    def _is_terminal_bookkeeping_or_test_command(self, command: str) -> bool:
+        normalized = self._normalize_terminal_command(command).lower()
+        if not normalized:
+            return False
+        if "complete_task_and_submit_final_output" in normalized:
+            return True
+        if self._is_terminal_cwd_probe(command):
+            return True
+        if normalized.startswith(("git diff", "git status")):
+            return True
+        if normalized in {"cat patch.txt", "cat ./patch.txt"}:
+            return True
+        if self._test_plan_commands and self._matches_test_plan_command(command):
+            return True
+        if self._is_terminal_test_command(command):
+            return True
+        return False
+
+    def _is_terminal_test_command(self, command: str) -> bool:
+        normalized = self._normalize_terminal_command(command).lower()
+        if not normalized:
+            return False
+        if self._test_plan_commands and self._matches_test_plan_command(command):
+            return True
+        return "runtests.py" in normalized or normalized.startswith(("pytest ", "python -m pytest "))
+
+    @classmethod
+    def _is_terminal_cwd_probe(cls, command: str) -> bool:
+        normalized = cls._normalize_terminal_command(command).lower()
+        if normalized in {
+            "pwd",
+            "pwd && ls -la",
+            "pwd; ls -la",
+            "ls -la",
+            "ls -la .",
+        }:
+            return True
+        return bool(
+            re.fullmatch(
+                r"python3?\s+-c\s+['\"]import os;\s*print\(os\.getcwd\(\)\)['\"]",
+                normalized,
+            )
+        )
+
+    @staticmethod
+    def _terminal_result_failed(result: str) -> bool:
+        output = str(result or "")
+        try:
+            parsed = json.loads(output)
+        except (json.JSONDecodeError, TypeError):
+            parsed = None
+        if isinstance(parsed, dict):
+            exit_code = parsed.get("exit_code")
+            if isinstance(exit_code, int) and exit_code != 0:
+                return True
+            output = " ".join(
+                str(parsed.get(key) or "")
+                for key in ("output", "error")
+                if parsed.get(key) is not None
+            )
+        return bool(re.search(r"\bFAILED\b|\bFAIL:|\bERROR:", output))
+
+    def _terminal_repeat_block_message(self, command: str) -> str | None:
+        normalized = self._normalize_terminal_command(command)
+        if not normalized:
+            return None
+        if self._is_terminal_test_command(command):
+            outcomes = self._terminal_test_outcomes.get(normalized, [])
+            if outcomes and outcomes[-1] is True:
+                return (
+                    "Retrieval gate active: this exact test command already passed since "
+                    "the last code edit. Patch the accepted target, run a broader distinct "
+                    "test command, or finalize instead of rerunning it."
+                )
+            if len(outcomes) >= 2 and outcomes[-1] is False and outcomes[-2] is False:
+                return (
+                    "Retrieval gate active: this exact test command failed twice without "
+                    "a code edit. Use one grounded recovery context_search, inspect the "
+                    "accepted target, or patch before rerunning it."
+                )
+            return None
+        if self._is_terminal_bookkeeping_or_test_command(command):
+            return None
+        if self._terminal_command_counts.get(normalized, 0) < 2:
+            return None
+        return (
+            "Retrieval gate active: this terminal command already ran twice. "
+            "Change strategy, patch the accepted target, or use the server test plan "
+            "instead of repeating the same shell probe."
+        )
+
     def _select_preferred_edit_targets(self) -> list[str]:
+        if self._retrieval_trace.accepted_targets:
+            return list(self._retrieval_trace.accepted_targets)
         if self._grounded_files:
             return list(self._grounded_files)
-        if self._direct_match_files:
-            return list(self._direct_match_files)
+        if self._bundle_must_edit:
+            must_edit = list(self._bundle_must_edit)
+            primary = {self._normalize_repo_path(path) for path in self._bundle_primary_files}
+            direct = {self._normalize_repo_path(path) for path in self._direct_match_files}
+            must_norm = {self._normalize_repo_path(path) for path in must_edit}
+            if (
+                not primary
+                or must_norm & primary
+                or (direct and must_norm & direct)
+                or (not direct and not self._bundle_primary_files)
+            ):
+                return must_edit
         if self._bundle_primary_files:
             return list(self._bundle_primary_files)
+        if self._direct_match_files:
+            return list(self._direct_match_files)
         if isinstance(self._retrieval_targets, list):
             return [str(target) for target in self._retrieval_targets if str(target).strip()]
         return list(self._bundle_must_edit)
@@ -1896,6 +2337,8 @@ class FormsyContextEngine(ContextEngine):
             "target_changed_after_grounding": self._target_changed_after_grounding,
             "last_decision": dict(self._last_retrieval_decision),
             "last_gate_failure": dict(self._last_gate_failure),
+            "last_terminal_test_failed": self._last_terminal_test_failed,
+            "failed_test_recovery_search_used": self._failed_test_recovery_search_used,
         }
 
     def _retrieval_status(self) -> str:
@@ -1938,6 +2381,12 @@ class FormsyContextEngine(ContextEngine):
                     "context_search next, with metadata.grounding_phase='grounded'."
                 ))
             if self._retrieval_trace.exploration_closed:
+                if (
+                    self._last_terminal_test_failed
+                    and not self._failed_test_recovery_search_used
+                    and self._retrieval_trace.accepted_targets
+                ):
+                    return None
                 return self._gate_block(tool_name, (
                     "Retrieval gate active: accepted targets close exploration; additional "
                     "context_search calls are blocked. Continue with accepted-target reads, "
@@ -1969,6 +2418,12 @@ class FormsyContextEngine(ContextEngine):
         if tool_name not in gated_tools:
             return None
 
+        if tool_name == "terminal":
+            command = str(args.get("command") or args.get("cmd") or "")
+            repeat_message = self._terminal_repeat_block_message(command)
+            if repeat_message:
+                return self._gate_block(tool_name, repeat_message)
+
         if tool_name == "read_file":
             requested_path = str(args.get("path") or "").strip()
             if self._is_context_read_allowed(requested_path):
@@ -1977,6 +2432,13 @@ class FormsyContextEngine(ContextEngine):
                 "Retrieval gate active: read_file is limited to accepted targets or test-plan files "
                 "after a grounded target has been accepted."
             ))
+        if tool_name in {"patch", "write_file"} and self._retrieval_trace.accepted_targets:
+            requested_path = str(args.get("path") or args.get("file") or args.get("filepath") or "").strip()
+            if requested_path and not self._is_edit_target_accepted(requested_path):
+                return self._gate_block(tool_name, (
+                    "Retrieval gate active: editing is limited to accepted targets after "
+                    "grounding closes exploration."
+                ))
         if tool_name == "search_files" and self._retrieval_trace.exploration_closed:
             return self._gate_block(tool_name, (
                 "Retrieval gate active: accepted targets close exploration; search_files is blocked "
@@ -1984,12 +2446,42 @@ class FormsyContextEngine(ContextEngine):
             ))
         if tool_name == "terminal" and self._retrieval_trace.exploration_closed:
             command = str(args.get("command") or args.get("cmd") or "")
-            if self._test_plan_commands and self._matches_test_plan_command(command):
+            if self._is_terminal_bookkeeping_or_test_command(command):
                 return None
+            if self._is_terminal_write_command(command):
+                return self._gate_block(tool_name, (
+                    "Retrieval gate active: terminal writes are blocked after grounding closes "
+                    "exploration. Use patch/write_file on the accepted target or run the server "
+                    "test plan instead."
+                ))
+            if self._is_terminal_source_introspection_command(command):
+                return self._gate_block(tool_name, (
+                    "Retrieval gate active: terminal source introspection is blocked after "
+                    "grounding closes exploration. Use context_read/read_file on accepted "
+                    "targets or test-plan files instead."
+                ))
+            if self._is_terminal_ad_hoc_python_command(command):
+                return self._gate_block(tool_name, (
+                    "Retrieval gate active: ad-hoc python -c probes are blocked after "
+                    "grounding closes exploration. Use the server test plan, patch the "
+                    "accepted target, or finalize after passing tests."
+                ))
+            read_path = self._terminal_read_path(command)
+            if read_path and not self._is_context_read_allowed(read_path):
+                return self._gate_block(tool_name, (
+                    "Retrieval gate active: terminal file reads are limited to accepted "
+                    "targets or test-plan files after grounding closes exploration. "
+                    "Use context_read/read_file on an allowed path instead."
+                ))
             if self._is_broad_discovery_command(command):
                 return self._gate_block(tool_name, (
                     "Retrieval gate active: accepted targets plus server test plan are available; "
                     "broad grep/find/search commands are blocked."
+                ))
+            if not read_path:
+                return self._gate_block(tool_name, (
+                    "Retrieval gate active: terminal commands after grounding are limited "
+                    "to bookkeeping, accepted-target reads, and test commands."
                 ))
 
         if self._retrieval_state == "not_started":
@@ -2024,6 +2516,9 @@ class FormsyContextEngine(ContextEngine):
             ))
         if self._retrieval_state == "context_read":
             if tool_name in {"read_file", "context_read"}:
+                return None
+            if self._is_context_read_phase_edit_allowed(tool_name, args):
+                self._promote_context_read_target_for_edit(args)
                 return None
             if tool_name == "terminal":
                 command = str(args.get("command") or args.get("cmd") or "")
@@ -2100,6 +2595,28 @@ class FormsyContextEngine(ContextEngine):
         When the agent reads a tests/ file in any grounded state, add it to
         test_plan_files so the engine can surface the correct test runner command.
         """
+        if tool_name == "terminal":
+            command = str(args.get("command") or args.get("cmd") or "")
+            if self._is_terminal_test_command(command):
+                normalized = self._normalize_terminal_command(command)
+                self._last_terminal_test_failed = self._terminal_result_failed(result)
+                if normalized:
+                    outcomes = self._terminal_test_outcomes.setdefault(normalized, [])
+                    outcomes.append(not self._last_terminal_test_failed)
+                    del outcomes[:-3]
+                if self._last_terminal_test_failed:
+                    self._failed_test_recovery_search_used = False
+                return
+            normalized = self._normalize_terminal_command(command)
+            if normalized and not self._is_terminal_bookkeeping_or_test_command(command):
+                self._terminal_command_counts[normalized] = (
+                    self._terminal_command_counts.get(normalized, 0) + 1
+                )
+            return
+        if tool_name in {"patch", "write_file"}:
+            self._terminal_command_counts = {}
+            self._terminal_test_outcomes = {}
+            return
         if tool_name != "read_file":
             return
         path = str(args.get("path") or "").strip()

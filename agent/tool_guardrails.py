@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
-import shlex
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -238,7 +236,6 @@ class ToolCallGuardrailController:
         return self._halt_decision
 
     def before_call(self, tool_name: str, args: Mapping[str, Any] | None) -> ToolGuardrailDecision:
-        args = _coerce_args(args)
         signature = ToolCallSignature.from_call(tool_name, _coerce_args(args))
         if not self.config.hard_stop_enabled:
             return ToolGuardrailDecision(tool_name=tool_name, signature=signature)
@@ -260,7 +257,7 @@ class ToolCallGuardrailController:
             self._halt_decision = decision
             return decision
 
-        if self._is_idempotent(tool_name, args):
+        if self._is_idempotent(tool_name):
             record = self._no_progress.get(signature)
             if record is not None:
                 _result_hash, repeat_count = record
@@ -350,7 +347,7 @@ class ToolCallGuardrailController:
         self._exact_failure_counts.pop(signature, None)
         self._same_tool_failure_counts.pop(tool_name, None)
 
-        if not self._is_idempotent(tool_name, args):
+        if not self._is_idempotent(tool_name):
             self._no_progress.pop(signature, None)
             return ToolGuardrailDecision(tool_name=tool_name, signature=signature)
 
@@ -377,11 +374,9 @@ class ToolCallGuardrailController:
 
         return ToolGuardrailDecision(tool_name=tool_name, count=repeat_count, signature=signature)
 
-    def _is_idempotent(self, tool_name: str, args: Mapping[str, Any] | None = None) -> bool:
+    def _is_idempotent(self, tool_name: str) -> bool:
         if tool_name in self.config.mutating_tools:
-            if tool_name != "terminal":
-                return False
-            return _terminal_command_is_repeatable_read(_coerce_args(args))
+            return False
         return tool_name in self.config.idempotent_tools
 
 
@@ -417,30 +412,17 @@ def _result_hash(result: str | None) -> str:
     if parsed is not None:
         try:
             canonical = json.dumps(
-                _normalize_result_for_hash(parsed),
+                parsed,
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
                 default=str,
             )
         except TypeError:
-            canonical = str(_normalize_result_for_hash(parsed))
+            canonical = str(parsed)
     else:
-        canonical = _normalize_result_for_hash(result or "")
+        canonical = result or ""
     return _sha256(canonical)
-
-
-def _normalize_result_for_hash(value: Any) -> Any:
-    if isinstance(value, str):
-        text = value
-        text = re.sub(r"0x[0-9a-fA-F]+", "<HEXADDR>", text)
-        text = re.sub(r"/tmp/[A-Za-z0-9._-]+", "/tmp/<TMP>", text)
-        return text
-    if isinstance(value, list):
-        return [_normalize_result_for_hash(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _normalize_result_for_hash(val) for key, val in value.items()}
-    return value
 
 
 def _as_bool(value: Any, default: bool) -> bool:
@@ -471,87 +453,3 @@ def _positive_int(value: Any, default: int) -> int:
 
 def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
-
-
-def _terminal_command_is_repeatable_read(args: Mapping[str, Any]) -> bool:
-    command = str(args.get("command") or args.get("cmd") or "").strip()
-    if not command:
-        return False
-
-    normalized = " ".join(command.split()).lower()
-    if not normalized:
-        return False
-
-    destructive_markers = (
-        "git checkout ",
-        "git restore ",
-        "git apply ",
-        " patch ",
-        "patch ",
-        "sed -i",
-        "perl -pi",
-        "pip install",
-        "uv pip install",
-        "npm install",
-        "npm run build",
-        "cargo build",
-        "cargo test",
-        "pytest --lf",
-        "rm ",
-        " mv ",
-        " cp ",
-        " touch ",
-        " mkdir ",
-        " rmdir ",
-        " chmod ",
-        " chown ",
-        "tee ",
-        ">>",
-        "> /",
-        ">./",
-        "> ./",
-    )
-    if any(marker in f" {normalized} " for marker in destructive_markers):
-        return False
-
-    segments = [segment.strip() for segment in re.split(r"\s*(?:&&|\|\||;|\|)\s*", command) if segment.strip()]
-    if not segments:
-        segments = [command]
-
-    def _segment_is_read_only(segment: str) -> bool:
-        try:
-            tokens = shlex.split(segment, posix=True)
-        except ValueError:
-            tokens = segment.split()
-        while tokens and _ENV_ASSIGN_RE.match(tokens[0]):
-            tokens.pop(0)
-        if not tokens:
-            return False
-
-        head = tokens[0].lower()
-        if head == "git":
-            sub = tokens[1].lower() if len(tokens) > 1 else ""
-            return sub in {"diff", "status", "show", "log", "grep"}
-        if head in {"grep", "rg", "find", "ls", "cat", "head", "tail", "wc", "stat", "file", "jq", "yq", "awk", "echo", "printf"}:
-            return True
-        if head == "sed":
-            return "-i" not in tokens[1:]
-        if head == "pytest":
-            return True
-        if head == "xargs":
-            return len(tokens) > 1 and tokens[1].lower() in {"grep", "rg", "find", "ls", "cat", "head", "tail", "wc", "stat", "file", "jq", "yq", "awk", "echo", "printf"}
-        if head in {"python", "python3"}:
-            if len(tokens) >= 2 and tokens[1] == "-c":
-                return True
-            if len(tokens) >= 3 and tokens[1] == "-m" and tokens[2] == "pytest":
-                return True
-            if len(tokens) >= 2 and tokens[1].endswith("runtests.py"):
-                return True
-            if len(tokens) >= 2 and tokens[1].endswith(".py"):
-                return True
-        return False
-
-    return all(_segment_is_read_only(segment) for segment in segments)

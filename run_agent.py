@@ -60,11 +60,6 @@ from pathlib import Path
 
 from hermes_constants import get_hermes_home
 
-_TEXT_TOOL_CALL_LEAK_PATTERN = re.compile(
-    r"(?:^|[\s>|])to=functions\.([A-Za-z_][\w.]*)|<function=([A-Za-z_][\w.]*)\b",
-    re.IGNORECASE,
-)
-
 
 _OPENAI_CLS_CACHE: Optional[type] = None
 
@@ -1180,7 +1175,6 @@ class AIAgent:
         self._executing_tools = False
         self._tool_guardrails = ToolCallGuardrailController()
         self._tool_guardrail_halt_decision: ToolGuardrailDecision | None = None
-        self._degraded_recovery_shell_steps: int = 0
 
         # Interrupt mechanism for breaking out of tool loops
         self._interrupt_requested = False
@@ -3303,27 +3297,6 @@ class AIAgent:
             marker in assistant_text for marker in workspace_markers
         )
         return (user_targets_workspace or assistant_targets_workspace) and assistant_mentions_action
-
-    def _leaked_text_tool_call_names(self, content: str) -> List[str]:
-        """Return tool names leaked as text instead of structured tool calls."""
-        if not isinstance(content, str) or not content:
-            return []
-
-        names: List[str] = []
-        for match in _TEXT_TOOL_CALL_LEAK_PATTERN.finditer(content):
-            raw_name = match.group(1) or match.group(2) or ""
-            raw_name = raw_name.strip()
-            if not raw_name:
-                continue
-            tool_name = raw_name.rsplit(".", 1)[-1]
-            if tool_name in self.valid_tool_names and tool_name not in names:
-                names.append(tool_name)
-        return names
-
-    def _looks_like_leaked_text_tool_call(self, content: str) -> bool:
-        """Detect text-form tool calls that should have been structured calls."""
-        return bool(self._leaked_text_tool_call_names(content))
-
 
     def _extract_reasoning(self, assistant_message) -> Optional[str]:
         """
@@ -9700,84 +9673,6 @@ class AIAgent:
             function_result,
             failed=failed,
         )
-        retrieval_status = None
-        try:
-            if self.context_compressor and hasattr(self.context_compressor, "get_retrieval_status"):
-                retrieval_status = self.context_compressor.get_retrieval_status()
-        except Exception:
-            retrieval_status = None
-        try:
-            if (
-                tool_name == "terminal"
-                and isinstance(retrieval_status, dict)
-                and retrieval_status.get("retrieval_state") == "degraded_recovery"
-                and not retrieval_status.get("accepted_targets")
-                and not self._looks_like_submission_command(function_args)
-            ):
-                # Only count non-progressing terminal steps against the budget.
-                # A step is progressing if it succeeded (exit_code 0) and produced
-                # non-empty output — i.e. the agent is making real forward progress
-                # (editing, verifying) rather than doing archaeology.
-                _is_progressing = False
-                if not failed:
-                    try:
-                        _tr = json.loads(function_result)
-                        if isinstance(_tr, dict) and _tr.get("exit_code") == 0 and str(_tr.get("output") or "").strip():
-                            _is_progressing = True
-                    except Exception:
-                        pass
-                if _is_progressing:
-                    # Reset the counter — productive work resets the budget.
-                    self._degraded_recovery_shell_steps = 0
-                else:
-                    self._degraded_recovery_shell_steps += 1
-                if self._degraded_recovery_shell_steps >= 6 and not decision.should_halt:
-                    decision = ToolGuardrailDecision(
-                        action="halt",
-                        code="degraded_recovery_shell_budget_halt",
-                        message=(
-                            "Stopped terminal: degraded_recovery consumed too many shell "
-                            "inspection steps without grounding a target. Change strategy "
-                            "instead of continuing repository archaeology."
-                        ),
-                        tool_name=tool_name,
-                        count=self._degraded_recovery_shell_steps,
-                        signature=decision.signature,
-                    )
-                    self._set_tool_guardrail_halt(decision)
-            elif not failed:
-                self._degraded_recovery_shell_steps = 0
-        except Exception:
-            pass
-        if (
-            decision.action == "warn"
-            and decision.code == "idempotent_no_progress_warning"
-            and decision.count >= 3
-        ):
-            try:
-                if tool_name == "terminal" or (
-                    isinstance(retrieval_status, dict)
-                    and (
-                        retrieval_status.get("exploration_closed")
-                        or retrieval_status.get("retrieval_state") == "degraded_recovery"
-                        or retrieval_status.get("retrieval_state") in {"context_read", "grounded"}
-                    )
-                ):
-                    decision = ToolGuardrailDecision(
-                        action="halt",
-                        code="idempotent_no_progress_halt",
-                        message=(
-                            f"Stopped {tool_name}: it returned the same result {decision.count} "
-                            "times without advancing the task. Stop repeating the same "
-                            "inspection/repro command and change strategy."
-                        ),
-                        tool_name=tool_name,
-                        count=decision.count,
-                        signature=decision.signature,
-                    )
-                    self._set_tool_guardrail_halt(decision)
-            except Exception:
-                pass
         if decision.action in {"warn", "halt"}:
             function_result = append_toolguard_guidance(function_result, decision)
         if decision.should_halt:
@@ -11104,7 +10999,6 @@ class AIAgent:
         self._unicode_sanitization_passes = 0
         self._tool_guardrails.reset_for_turn()
         self._tool_guardrail_halt_decision = None
-        self._degraded_recovery_shell_steps = 0
         self._task_submission_completed = False
 
         # Pre-turn connection health check: detect and clean up dead TCP
@@ -11366,7 +11260,6 @@ class AIAgent:
         final_response = None
         interrupted = False
         codex_ack_continuations = 0
-        text_tool_leak_retries = 0
         length_continue_retries = 0
         truncated_tool_call_retries = 0
         truncated_response_prefix = ""
@@ -14067,51 +13960,6 @@ class AIAgent:
                 else:
                     # No tool calls - this is the final response
                     final_response = assistant_message.content or ""
-
-                    leaked_tool_names = self._leaked_text_tool_call_names(final_response)
-                    if leaked_tool_names:
-                        text_tool_leak_retries += 1
-                        logger.warning(
-                            "Assistant emitted tool-call markup as text instead of "
-                            "structured tool_calls (tools=%s, retry=%s/2, snippet=%r)",
-                            ",".join(leaked_tool_names),
-                            text_tool_leak_retries,
-                            final_response[:300],
-                        )
-
-                        if text_tool_leak_retries <= 2:
-                            self._emit_status(
-                                "⚠️ Model emitted tool-call markup as text — "
-                                "retrying with structured tool-call instruction"
-                            )
-                            messages.append({
-                                "role": "assistant",
-                                "content": "",
-                                "finish_reason": "incomplete",
-                            })
-                            messages.append({
-                                "role": "user",
-                                "content": (
-                                    "[System: You emitted tool-call markup as ordinary "
-                                    "assistant text. Do not write <function=...>, "
-                                    "<parameter=...>, or to=functions.* in the message. "
-                                    "Use the API's structured tool_calls field for any "
-                                    "tool invocation, then continue the task.]"
-                                ),
-                            })
-                            self._session_messages = messages
-                            self._save_session_log(messages)
-                            continue
-
-                        _turn_exit_reason = "text_tool_call_leak_halt"
-                        final_response = (
-                            "I stopped because the model repeatedly emitted tool calls "
-                            "as plain text instead of structured tool calls. Try a "
-                            "model/provider with reliable tool-call support, or reduce "
-                            "the prompt's competing tool-call format instructions."
-                        )
-                        messages.append({"role": "assistant", "content": final_response})
-                        break
                     
                     # Fix: unmute output when entering the no-tool-call branch
                     # so the user can see empty-response warnings and recovery

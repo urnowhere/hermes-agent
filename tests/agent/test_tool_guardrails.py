@@ -220,64 +220,6 @@ def test_mutating_or_unknown_tools_are_not_blocked_for_repeated_identical_succes
         assert controller.after_call("custom_tool", {"x": 1}, "ok", failed=False).action == "allow"
 
 
-def test_read_only_terminal_command_participates_in_no_progress_tracking():
-    controller = ToolCallGuardrailController(
-        ToolCallGuardrailConfig(no_progress_warn_after=2, no_progress_block_after=2)
-    )
-    args = {"command": "PYTHONPATH=/tmp python -c \"print('ok')\""}
-    result = "same output"
-
-    assert controller.before_call("terminal", args).action == "allow"
-    assert controller.after_call("terminal", args, result, failed=False).action == "allow"
-    assert controller.before_call("terminal", args).action == "allow"
-    warn = controller.after_call("terminal", args, result, failed=False)
-    assert warn.action == "warn"
-    assert warn.code == "idempotent_no_progress_warning"
-
-
-def test_compound_read_only_terminal_command_participates_in_no_progress_tracking():
-    controller = ToolCallGuardrailController(
-        ToolCallGuardrailConfig(no_progress_warn_after=2, no_progress_block_after=2)
-    )
-    args = {"command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt"}
-    result = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\npatch body"
-
-    assert controller.before_call("terminal", args).action == "allow"
-    assert controller.after_call("terminal", args, result, failed=False).action == "allow"
-    assert controller.before_call("terminal", args).action == "allow"
-    warn = controller.after_call("terminal", args, result, failed=False)
-    assert warn.action == "warn"
-    assert warn.code == "idempotent_no_progress_warning"
-
-
-def test_terminal_no_progress_hash_ignores_object_addresses():
-    controller = ToolCallGuardrailController(
-        ToolCallGuardrailConfig(no_progress_warn_after=2, no_progress_block_after=2)
-    )
-    args = {"command": "python /tmp/repro.py"}
-    result1 = "DUPLICATES FOUND: {'a.css': 4} <Obj at 0x10abc1234>"
-    result2 = "DUPLICATES FOUND: {'a.css': 4} <Obj at 0x10def5678>"
-
-    assert controller.before_call("terminal", args).action == "allow"
-    assert controller.after_call("terminal", args, result1, failed=False).action == "allow"
-    assert controller.before_call("terminal", args).action == "allow"
-    warn = controller.after_call("terminal", args, result2, failed=False)
-    assert warn.action == "warn"
-    assert warn.code == "idempotent_no_progress_warning"
-
-
-def test_destructive_terminal_command_is_not_treated_as_no_progress():
-    controller = ToolCallGuardrailController(
-        ToolCallGuardrailConfig(no_progress_warn_after=2, no_progress_block_after=2)
-    )
-    args = {"command": "git checkout django/contrib/staticfiles/storage.py"}
-
-    assert controller.before_call("terminal", args).action == "allow"
-    assert controller.after_call("terminal", args, "Updated 1 path from the index", failed=False).action == "allow"
-    assert controller.before_call("terminal", args).action == "allow"
-    assert controller.after_call("terminal", args, "Updated 1 path from the index", failed=False).action == "allow"
-
-
 def test_reset_for_turn_clears_bounded_guardrail_state():
     controller = ToolCallGuardrailController(
         ToolCallGuardrailConfig(hard_stop_enabled=True, exact_failure_block_after=2, no_progress_block_after=2)

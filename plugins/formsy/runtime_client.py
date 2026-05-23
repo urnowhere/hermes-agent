@@ -263,6 +263,25 @@ class RuntimeClient:
             },
             session_id=session_id,
         )
+
+    async def compile_status(
+        self,
+        repo_id: str,
+        revision: str | None = None,
+        session_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Return compiled repository status when a snapshot already exists."""
+        logger.debug(f"Compile status: repo_id={repo_id}, revision={revision}")
+
+        return await self._request(
+            "POST",
+            "/api/v1/compile/status",
+            data={
+                "repo_id": repo_id,
+                "revision": revision,
+            },
+            session_id=session_id,
+        )
     
     async def memory_search(
         self,

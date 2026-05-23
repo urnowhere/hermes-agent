@@ -159,7 +159,12 @@ def test_formsy_engine_memory_search_derives_repo_and_revision_from_git(monkeypa
         },
     )
 
-    assert json.loads(result)["ok"] is True
+    data = json.loads(result)
+    assert data["ok"] is True
+    assert data["memory_recall"] is True
+    assert data["memory_status"] == "warm"
+    assert data["memory_query_hints"] == ["existing hint", "search auth tests"]
+    assert data["memory_test_hints"] == ["python -m pytest tests/auth"]
     assert calls == [{
         "repo_id": "urnowhere__hermes-agent",
         "session_id": "session-123",
@@ -227,22 +232,26 @@ def test_formsy_engine_memory_search_compiles_before_query(monkeypatch):
 
     assert json.loads(result)["ok"] is True
     assert [name for name, _ in calls] == ["compile", "memory_search"]
-    assert calls[0][1] == {
-        "repo_id": "urnowhere__hermes-agent",
-        "files": [{
-            "path": "pkg/mod.py",
-            "content": "x = 1\n",
-            "language": "python",
-            "is_test": False,
-        }],
-        "revision": "abc123def456",
-        "metadata": {
-            "instance_id": "urnowhere__hermes-agent",
-            "query": "parser state handling",
-            "source_file_count": 1,
-        },
-        "session_id": "session-123",
-    }
+    assert calls[0][1]["repo_id"] == "urnowhere__hermes-agent"
+    assert calls[0][1]["files"] == [{
+        "path": "pkg/mod.py",
+        "content": "x = 1\n",
+        "language": "python",
+        "is_test": False,
+    }]
+    assert calls[0][1]["revision"] == "abc123def456"
+    assert calls[0][1]["session_id"] == "session-123"
+    assert calls[0][1]["mode"] == "merge"
+    assert calls[0][1]["metadata"] | {
+        "instance_id": "urnowhere__hermes-agent",
+        "query": "parser state handling",
+        "source_file_count": 1,
+        "compile_profile": "interactive_context_search",
+        "source_scope": "query_bounded",
+        "function_embeddings": "deferred",
+        "sync_function_embeddings": False,
+    } == calls[0][1]["metadata"]
+    assert calls[0][1]["metadata"]["query_signature"]
     assert calls[1][1]["revision"] == "abc123def456"
 
 
@@ -475,6 +484,8 @@ def test_formsy_engine_memory_search_merges_memory_provider_hints():
             "response_format": "bundle",
             "case_id": "django__django-14053",
             "trace_id": "session-123",
+            "query_timeout_s": 90,
+            "fanout_timeout_s": 90,
             "memory_artifact_ids": ["artifact-2", "artifact-3", "artifact-1"],
             "memory_query_hints": ["existing hint", "search auth tests"],
             "memory_test_hints": ["python -m pytest tests/auth"],
@@ -972,6 +983,104 @@ def test_formsy_engine_accepts_grounded_target_without_new_matches():
     assert grounded_result["accepted_targets"] == ["django/contrib/auth/validators.py"]
     assert grounded_result["bundle_must_edit"] == ["django/__init__.py"]
     assert engine.get_tool_block_message("context_search", {"query": "more"}) is not None
+
+
+def test_formsy_engine_extracts_must_edit_from_context_bundle_primary_files():
+    bundle = {
+        "primary_files": [
+            {
+                "path": "django/contrib/postgres/validators.py",
+                "priority": "likely_edit",
+            },
+            {
+                "path": "django/contrib/auth/validators.py",
+                "priority": "must_edit",
+            },
+        ],
+    }
+
+    assert FormsyContextEngine._extract_bundle_must_edit(bundle) == [
+        "django/contrib/auth/validators.py"
+    ]
+
+
+def test_formsy_engine_allows_patch_after_reading_bundle_must_edit_target():
+    engine = FormsyContextEngine()
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            return {
+                "extra_context": "Seed validator notes",
+                "matches": [
+                    {"path": "django/contrib/auth/validators.py"},
+                    {"path": "tests/auth_tests/test_validators.py"},
+                    {"path": "django/contrib/auth/models.py"},
+                ],
+                "coverage": "partial",
+                "bundle": {
+                    "primary_files": [
+                        {
+                            "path": "django/contrib/auth/validators.py",
+                            "priority": "must_edit",
+                        }
+                    ],
+                },
+            }
+
+        async def memory_read(self, **kwargs):
+            return {
+                "path": "django/contrib/auth/validators.py",
+                "start_line": 1,
+                "end_line": 25,
+                "content": "class ASCIIUsernameValidator: ...",
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "django__django-14053",
+        "revision": "latest",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+
+    seed_result = json.loads(engine.handle_tool_call(
+        "context_search",
+        {
+            "query": "username validator regex",
+            "repo_id": "django__django-14053",
+            "metadata": {
+                "retrieval_mode": "symbolic",
+                "grounding_phase": "seed",
+                "response_format": "bundle",
+            },
+        },
+    ))
+    assert seed_result["retrieval_decision"]["preferred_edit_targets"] == [
+        "django/contrib/auth/validators.py"
+    ]
+
+    engine.handle_tool_call(
+        "context_read",
+        {
+            "path": "django/contrib/auth/validators.py",
+            "repo_id": "django__django-14053",
+            "start_line": 1,
+            "end_line": 25,
+        },
+    )
+
+    assert engine.get_tool_block_message(
+        "patch",
+        {"path": "django/contrib/auth/validators.py"},
+    ) is None
+    status = engine.get_retrieval_status()
+    assert status["retrieval_state"] == "grounded"
+    assert status["accepted_targets"] == ["django/contrib/auth/validators.py"]
+    assert status["last_gate_failure"] == {}
+    assert engine.get_tool_block_message(
+        "patch",
+        {"path": "django/contrib/auth/models.py"},
+    ) is not None
 
 
 def test_formsy_engine_honors_server_grounded_closeout_fields():
@@ -1543,3 +1652,399 @@ def test_formsy_config_loads_global_formsy_config_when_session_kwargs_do_not_inc
     assert config.query_budget == 4000
     assert config.workspace_id == "ws_local"
     assert config.timeout_s == 45
+
+
+def test_formsy_engine_blocks_terminal_file_read_bypass_after_grounding():
+    engine = FormsyContextEngine()
+    engine._sync_trace_state(state="grounded")
+    engine._set_accepted_targets(
+        ["django/contrib/staticfiles/storage.py"],
+        test_plan_files=["tests/staticfiles_tests/test_storage.py"],
+    )
+
+    assert engine.get_tool_block_message(
+        "terminal",
+        {"command": "cat django/contrib/staticfiles/storage.py"},
+    ) is None
+    assert engine.get_tool_block_message(
+        "terminal",
+        {"command": "sed -n '1,120p' tests/staticfiles_tests/test_storage.py"},
+    ) is None
+    assert engine.get_tool_block_message(
+        "terminal",
+        {"command": "cat patch.txt"},
+    ) is None
+
+    blocked = engine.get_tool_block_message(
+        "terminal",
+        {"command": "cat django/contrib/staticfiles/management/commands/collectstatic.py"},
+    )
+
+    assert blocked is not None
+    assert "terminal file reads are limited" in blocked
+
+
+def test_formsy_engine_blocks_terminal_write_bypass_after_grounding():
+    engine = FormsyContextEngine()
+    engine._sync_trace_state(state="grounded")
+    engine._set_accepted_targets(
+        ["django/contrib/staticfiles/storage.py"],
+        test_plan_files=["tests/staticfiles_tests/test_storage.py"],
+    )
+
+    blocked = engine.get_tool_block_message(
+        "terminal",
+        {"command": "cat > reproduce.py <<'PY'\nprint('repro')\nPY"},
+    )
+
+    assert blocked is not None
+    assert "terminal writes are blocked" in blocked
+
+
+def test_formsy_engine_blocks_terminal_source_introspection_after_grounding():
+    engine = FormsyContextEngine()
+    engine._sync_trace_state(state="grounded")
+    engine._set_accepted_targets(
+        ["django/contrib/staticfiles/storage.py"],
+        test_plan_files=["tests/staticfiles_tests/test_storage.py"],
+    )
+
+    inspect_blocked = engine.get_tool_block_message(
+        "terminal",
+        {
+            "command": (
+                "python3 -c \"import inspect; "
+                "from django.contrib.staticfiles.storage import HashedFilesMixin; "
+                "print(inspect.getsource(HashedFilesMixin.post_process))\""
+            )
+        },
+    )
+    open_blocked = engine.get_tool_block_message(
+        "terminal",
+        {"command": "python3 -c \"with open('django/contrib/staticfiles/storage.py') as f: print(f.readlines())\""},
+    )
+
+    assert inspect_blocked is not None
+    assert "source introspection is blocked" in inspect_blocked
+    assert open_blocked is not None
+    assert "source introspection is blocked" in open_blocked
+
+
+def test_formsy_engine_keeps_grounded_after_reading_accepted_target():
+    engine = FormsyContextEngine()
+    engine._sync_trace_state(state="grounded")
+    engine._set_accepted_targets(
+        ["django/contrib/staticfiles/storage.py"],
+        test_plan_files=["tests/staticfiles_tests/test_storage.py"],
+    )
+
+    engine._record_context_read(
+        "django/contrib/staticfiles/storage.py",
+        {"path": "django/contrib/staticfiles/storage.py", "content": "source"},
+    )
+
+    status = engine.get_retrieval_status()
+    assert status["retrieval_state"] == "grounded"
+    assert engine._grounded_search_required is False
+    assert engine.get_tool_block_message("terminal", {"command": "pwd && ls -la"}) is None
+    assert engine.get_tool_block_message(
+        "terminal",
+        {"command": "python3 -c \"import os; print(os.getcwd())\""},
+    ) is None
+    blocked = engine.get_tool_block_message(
+        "terminal",
+        {"command": "python3 -c \"print('hello')\""},
+    )
+    assert blocked is not None
+    assert "ad-hoc python -c probes are blocked" in blocked
+
+
+def test_formsy_engine_blocks_repeated_passed_test_until_next_edit():
+    engine = FormsyContextEngine()
+    engine._sync_trace_state(state="grounded")
+    engine._set_accepted_targets(["django/contrib/staticfiles/storage.py"])
+    command = "python3 tests/runtests.py staticfiles_tests -v 1"
+
+    assert engine.get_tool_block_message("terminal", {"command": command}) is None
+    engine.observe_tool_result(
+        "terminal",
+        {"command": command},
+        json.dumps({"exit_code": 0, "output": "OK", "error": None}),
+    )
+
+    blocked = engine.get_tool_block_message("terminal", {"command": command})
+
+    assert blocked is not None
+    assert "already passed" in blocked
+
+    engine.observe_tool_result("patch", {"path": "django/contrib/staticfiles/storage.py"}, "")
+    assert engine.get_tool_block_message("terminal", {"command": command}) is None
+
+
+def test_formsy_engine_blocks_generic_terminal_after_grounding():
+    engine = FormsyContextEngine()
+    engine._sync_trace_state(state="grounded")
+    engine._set_accepted_targets(
+        ["django/contrib/staticfiles/storage.py"],
+        test_plan_files=["tests/staticfiles_tests/test_storage.py"],
+    )
+
+    assert engine.get_tool_block_message(
+        "terminal",
+        {"command": "cat django/contrib/staticfiles/storage.py"},
+    ) is None
+    assert engine.get_tool_block_message(
+        "terminal",
+        {"command": "python3 tests/runtests.py staticfiles_tests.test_storage -v 2"},
+    ) is None
+    blocked = engine.get_tool_block_message("terminal", {"command": "ls django"})
+
+    assert blocked is not None
+    assert "terminal commands after grounding are limited" in blocked
+
+
+def test_formsy_engine_allows_one_grounded_recovery_search_after_test_failure():
+    engine = FormsyContextEngine()
+    engine._sync_trace_state(state="grounded")
+    engine._set_accepted_targets(
+        ["django/contrib/staticfiles/storage.py"],
+        test_plan_files=["tests/staticfiles_tests/test_storage.py"],
+    )
+    engine._test_plan_commands = [
+        "python3 tests/runtests.py staticfiles_tests.test_storage -v 2"
+    ]
+    calls = []
+
+    class FakeClient:
+        async def compile_status(self, **kwargs):
+            return {"parsed_file_count": 1000, "metadata": {}}
+
+        async def memory_search(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "coverage": "partial",
+                "matches": [{"path": "django/contrib/staticfiles/storage.py"}],
+                "bundle": {
+                    "primary_files": [
+                        {
+                            "path": "django/contrib/staticfiles/storage.py",
+                            "priority": "must_edit",
+                        }
+                    ],
+                },
+                "accepted_targets": ["django/contrib/staticfiles/storage.py"],
+                "exploration_closed": True,
+                "retrieval_state": "grounded",
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "django__django",
+        "revision": "latest",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+    engine.observe_tool_result(
+        "terminal",
+        {"command": "python3 tests/runtests.py staticfiles_tests.test_storage -v 2"},
+        json.dumps({"exit_code": 1, "output": "FAILED (failures=2)", "error": None}),
+    )
+
+    assert engine.get_tool_block_message(
+        "context_search",
+        {
+            "query": "collectstatic post_process yield exception handling faulty.css",
+            "metadata": {"grounding_phase": "seed", "retrieval_mode": "symbolic"},
+        },
+    ) is None
+
+    engine.handle_tool_call(
+        "context_search",
+        {
+            "query": "collectstatic post_process yield exception handling faulty.css",
+            "metadata": {"grounding_phase": "seed", "retrieval_mode": "symbolic"},
+        },
+    )
+
+    assert calls[-1]["metadata"]["grounding_phase"] == "grounded"
+    assert calls[-1]["metadata"]["grounded_files"] == [
+        "django/contrib/staticfiles/storage.py"
+    ]
+    assert calls[-1]["metadata"]["test_failure_recovery"] is True
+    assert engine.get_tool_block_message(
+        "context_search",
+        {"query": "another search"},
+    ) is not None
+
+
+def test_formsy_engine_blocks_repeated_non_test_terminal_probe():
+    engine = FormsyContextEngine()
+    engine._sync_trace_state(state="degraded_recovery")
+    command = 'python3 -c "print(1)"'
+
+    assert engine.get_tool_block_message("terminal", {"command": command}) is None
+    engine.observe_tool_result(
+        "terminal",
+        {"command": command},
+        json.dumps({"exit_code": 0, "output": "1\n", "error": None}),
+    )
+    assert engine.get_tool_block_message("terminal", {"command": command}) is None
+    engine.observe_tool_result(
+        "terminal",
+        {"command": command},
+        json.dumps({"exit_code": 0, "output": "1\n", "error": None}),
+    )
+
+    blocked = engine.get_tool_block_message("terminal", {"command": command})
+
+    assert blocked is not None
+    assert "already ran twice" in blocked
+    assert engine.get_tool_block_message(
+        "terminal",
+        {"command": "python tests/runtests.py staticfiles_tests.test_storage -v 2"},
+    ) is None
+
+    engine.observe_tool_result("patch", {"path": "django/contrib/staticfiles/storage.py"}, "")
+    assert engine.get_tool_block_message("terminal", {"command": command}) is None
+
+
+def test_formsy_engine_reuses_existing_compile_for_same_query():
+    query = "HashedFilesMixin post_process duplicate yields"
+    engine = FormsyContextEngine()
+    calls = []
+
+    class FakeClient:
+        async def compile_status(self, **kwargs):
+            calls.append(("status", kwargs))
+            return {
+                "repo_id": "django__django",
+                "revision": "abc123",
+                "parsed_file_count": 260,
+                "metadata": {
+                    "compile_profile": "interactive_context_search",
+                    "query_signature": FormsyContextEngine._query_signature(query),
+                },
+            }
+
+        async def compile_repo(self, **kwargs):
+            calls.append(("compile", kwargs))
+            raise AssertionError("compile_repo should be skipped")
+
+    engine._engine_client = FakeClient()
+
+    assert engine._ensure_memory_compiled(
+        repo_id="django__django",
+        revision="abc123",
+        query=query,
+        session_id="session-123",
+    ) is True
+    assert [name for name, _ in calls] == ["status"]
+
+
+def test_formsy_engine_compile_status_does_not_reuse_different_query_bounded_compile():
+    engine = FormsyContextEngine()
+
+    status = {
+        "repo_id": "django__django",
+        "revision": "abc123",
+        "parsed_file_count": 260,
+        "metadata": {
+            "compile_profile": "interactive_context_search",
+            "query": "auth validators username regex",
+        },
+    }
+
+    assert engine._existing_compile_satisfies_query(
+        status,
+        "HashedFilesMixin post_process duplicate yields",
+    ) is False
+
+
+def test_formsy_engine_in_memory_compile_identity_is_query_scoped(monkeypatch):
+    engine = FormsyContextEngine()
+    old_query = "auth validators username regex"
+    new_query = "HashedFilesMixin post_process duplicate yields"
+    calls = []
+
+    class FakeClient:
+        async def compile_status(self, **kwargs):
+            calls.append(("status", kwargs))
+            return {
+                "repo_id": "django__django",
+                "revision": "abc123",
+                "parsed_file_count": 260,
+                "metadata": {
+                    "compile_profile": "interactive_context_search",
+                    "query_signature": FormsyContextEngine._query_signature(old_query),
+                },
+            }
+
+        async def compile_repo(self, **kwargs):
+            calls.append(("compile", kwargs))
+            return {
+                "repo_id": kwargs["repo_id"],
+                "revision": kwargs["revision"],
+                "parsed_file_count": len(kwargs["files"]),
+            }
+
+    monkeypatch.setattr(
+        FormsyContextEngine,
+        "_collect_memory_source_files",
+        staticmethod(lambda root, query="": [{
+            "path": "django/contrib/staticfiles/storage.py",
+            "content": "class HashedFilesMixin: pass\n",
+            "language": "python",
+            "is_test": False,
+        }]),
+    )
+
+    engine._engine_client = FakeClient()
+    engine._memory_compiled_identity = (
+        "django__django",
+        "abc123",
+        FormsyContextEngine._query_signature(old_query),
+    )
+
+    assert engine._ensure_memory_compiled(
+        repo_id="django__django",
+        revision="abc123",
+        query=new_query,
+        session_id="session-123",
+    ) is True
+    assert [name for name, _ in calls] == ["status", "compile"]
+    assert engine._memory_compiled_identity == (
+        "django__django",
+        "abc123",
+        FormsyContextEngine._query_signature(new_query),
+    )
+
+
+def test_formsy_engine_reuses_large_non_interactive_compile_status():
+    status = {
+        "repo_id": "django__django",
+        "revision": "abc123",
+        "parsed_file_count": 1000,
+        "metadata": {},
+    }
+
+    assert FormsyContextEngine._existing_compile_satisfies_query(
+        status,
+        "HashedFilesMixin post_process duplicate yields",
+    ) is True
+
+
+def test_formsy_engine_does_not_reuse_old_query_bounded_compile_for_different_query():
+    status = {
+        "repo_id": "django__django",
+        "revision": "abc123",
+        "parsed_file_count": 500,
+        "metadata": {
+            "query": "auth validators username regex",
+            "source_file_count": 500,
+        },
+    }
+
+    assert FormsyContextEngine._existing_compile_satisfies_query(
+        status,
+        "HashedFilesMixin post_process duplicate yields",
+    ) is False

@@ -101,6 +101,17 @@ def test_sync_turn_no_coding_summary_when_no_kwargs():
     assert call["coding_summary"] is None
 
 
+def test_sync_turn_skips_skill_review_turns():
+    provider = _make_provider()
+
+    provider.sync_turn(
+        "Review the conversation above and update the skill library. Be ACTIVE.",
+        "updated a skill reference",
+    )
+
+    assert provider._memory_client.sync_calls == []
+
+
 def test_sync_turn_includes_artifact_refs_from_context_artifacts():
     provider = _make_provider()
     provider.record_context_artifacts(["artifact-abc", "artifact-xyz"])
@@ -212,6 +223,9 @@ def test_provider_async_bridge_reuses_loop_inside_running_event_loop():
 def test_build_coding_summary_with_terminal_calls():
     provider = _make_provider()
     provider.record_terminal_call("pytest tests/foo_test.py", "1 passed")
+    provider.record_terminal_call("git diff -- src/foo.py > patch.txt", "diff --git ...")
+    provider.record_terminal_call("cat patch.txt", "diff --git ...")
+    provider.record_terminal_call("echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt", "done")
     provider.record_terminal_call("pytest tests/bar_test.py", "2 passed")
 
     provider.sync_turn("user", "assistant", task_type="bugfix")
@@ -222,6 +236,8 @@ def test_build_coding_summary_with_terminal_calls():
     assert cs.task_type == "bugfix"
     assert "pytest tests/foo_test.py" in cs.tests_run
     assert "pytest tests/bar_test.py" in cs.tests_run
+    assert "cat patch.txt" not in cs.tests_run
+    assert "git diff -- src/foo.py > patch.txt" not in cs.tests_run
 
 
 def test_local_memory_store_recalls_across_provider_instances(tmp_path):
@@ -246,6 +262,108 @@ def test_local_memory_store_recalls_across_provider_instances(tmp_path):
     assert "auth_tests.test_validators" in block
     assert second.get_context_hints()["memory_status"] == "hit"
     assert "python3 tests/runtests.py auth_tests.test_validators -v 2" in second.get_context_hints()["memory_test_hints"]
+
+
+def test_local_memory_store_skips_incoherent_stale_patch_records(tmp_path):
+    bad = _make_provider(session_id="session-bad", hermes_home=tmp_path)
+    bad.record_terminal_call(
+        "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt",
+        "diff --git a/django/contrib/staticfiles/storage.py b/django/contrib/staticfiles/storage.py\n"
+        "-                yield name, hashed_name, processed\n",
+    )
+    bad.sync_turn(
+        "fix ASCIIUsernameValidator UnicodeUsernameValidator regex",
+        "done",
+        accepted_targets=["django/db/backends/postgresql/operations.py"],
+    )
+
+    good = _make_provider(session_id="session-good", hermes_home=tmp_path)
+    good.record_terminal_call(
+        "git diff -- django/contrib/auth/validators.py",
+        "diff --git a/django/contrib/auth/validators.py b/django/contrib/auth/validators.py\n"
+        "-    regex = r'^[\\w.@+-]+$'\n"
+        "+    regex = r'\\A[\\w.@+-]+\\Z'\n",
+    )
+    good.sync_turn(
+        "fix ASCIIUsernameValidator UnicodeUsernameValidator regex",
+        "done",
+        accepted_targets=["django/contrib/auth/validators.py"],
+    )
+
+    second = _make_provider(session_id="session-2", hermes_home=tmp_path)
+    block = second._prefetch_from_local_store(
+        "ASCIIUsernameValidator UnicodeUsernameValidator username validator regex"
+    )
+
+    assert "django/contrib/auth/validators.py" in block
+    assert "django/contrib/staticfiles/storage.py" not in block
+    assert second.get_context_hints()["memory_query_hints"] == [
+        "django/contrib/auth/validators.py"
+    ]
+
+
+def test_local_memory_store_filters_generic_prompt_overlap_between_cases(tmp_path):
+    auth = _make_provider(session_id="session-auth", hermes_home=tmp_path)
+    auth.record_terminal_call(
+        "git diff -- django/contrib/auth/validators.py",
+        "diff --git a/django/contrib/auth/validators.py b/django/contrib/auth/validators.py\n"
+        " class ASCIIUsernameValidator(validators.RegexValidator):\n"
+        "-    regex = r'^[\\w.@+-]+$'\n"
+        "+    regex = r'\\A[\\w.@+-]+\\Z'\n",
+    )
+    auth.sync_turn(
+        "Explore the directory and filenames before fixing UsernameValidator",
+        "done",
+        accepted_targets=["django/contrib/auth/validators.py"],
+    )
+
+    staticfiles = _make_provider(session_id="session-staticfiles", hermes_home=tmp_path)
+    staticfiles.record_terminal_call(
+        "git diff -- django/contrib/staticfiles/storage.py",
+        "diff --git a/django/contrib/staticfiles/storage.py b/django/contrib/staticfiles/storage.py\n"
+        " class HashedFilesMixin:\n"
+        "     def post_process(self, paths, dry_run=False, **options):\n"
+        "-        yield name, hashed_name, processed\n"
+        "+        yield name, hashed_name, processed\n",
+    )
+    staticfiles.record_terminal_call(
+        "python3 tests/runtests.py staticfiles_tests.test_storage -v 2",
+        "OK",
+    )
+    staticfiles.sync_turn(
+        "HashedFilesMixin post_process yields duplicate filenames collectstatic",
+        "done",
+        accepted_targets=["django/contrib/staticfiles/storage.py"],
+    )
+
+    second = _make_provider(session_id="session-2", hermes_home=tmp_path)
+    block = second._prefetch_from_local_store(
+        "HashedFilesMixin post_process yields duplicate filenames collectstatic"
+    )
+
+    assert "django/contrib/staticfiles/storage.py" in block
+    assert "django/contrib/auth/validators.py" not in block
+    assert second.get_context_hints()["memory_query_hints"] == [
+        "django/contrib/staticfiles/storage.py"
+    ]
+
+
+def test_sync_turn_drops_incoherent_coding_summary():
+    provider = _make_provider()
+    provider.record_terminal_call(
+        "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt",
+        "diff --git a/django/contrib/staticfiles/storage.py b/django/contrib/staticfiles/storage.py\n"
+        "-                yield name, hashed_name, processed\n",
+    )
+
+    provider.sync_turn(
+        "fix username validators",
+        "done",
+        accepted_targets=["django/contrib/auth/validators.py"],
+    )
+
+    cs = provider._memory_client.sync_calls[0]["coding_summary"]
+    assert cs is None
 
 
 def test_sync_turn_coding_summary_confidence_clamped():
