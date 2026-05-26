@@ -909,7 +909,7 @@ class FormsyContextEngine(ContextEngine):
             self._memory_compile_revision = status_revision or revision
             return True
 
-        files = self._collect_memory_source_files(Path.cwd(), query=query)
+        files = self._collect_memory_source_files(Path.cwd())
         result = self._run_async(
             self._engine_client.compile_repo(
                 repo_id=repo_id,
@@ -1039,7 +1039,7 @@ class FormsyContextEngine(ContextEngine):
         return bool(previous_query and previous_query == current_query)
 
     @staticmethod
-    def _collect_memory_source_files(root: Path, query: str = "") -> list[dict[str, Any]]:
+    def _collect_memory_source_files(root: Path) -> list[dict[str, Any]]:
         allowed_suffixes = {
             ".py",
             ".js",
@@ -1068,60 +1068,9 @@ class FormsyContextEngine(ContextEngine):
             "__pycache__",
             ".pytest_cache",
             ".mypy_cache",
-            "dist",
-            "build",
-            "runs",
-            # Low-value directories for context search — skip to keep payload small
-            "docs",
-            "migrations",
-            "locale",
-            "fixtures",
         }
-        # Hard caps to prevent server overload on large repos.
-        # Keep room for tests so compile-time context_read can inspect the files
-        # returned in a test plan instead of only implementation modules.
-        MAX_COMPILE_FILES = 260
-        MAX_COMPILE_BYTES = 2 * 1024 * 1024  # 2 MB
-        RESERVED_TEST_FILES = 60
-        RESERVED_SOURCE_BYTE_RATIO = 0.8
 
-        def _is_test(rel: str) -> bool:
-            return (
-                rel.startswith("tests/")
-                or rel.startswith("test/")
-                or "/tests/" in f"/{rel}/"
-                or rel.endswith("_test.py")
-                or rel.endswith(".test.js")
-                or rel.endswith(".test.ts")
-            )
-
-        def _query_terms(value: str) -> list[str]:
-            terms: list[str] = []
-            for raw in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", value.lower()):
-                terms.append(raw)
-                for part in raw.split("_"):
-                    if len(part) >= 3:
-                        terms.append(part)
-            seen: set[str] = set()
-            return [term for term in terms if not (term in seen or seen.add(term))]
-
-        query_terms = _query_terms(query)
-
-        def _query_score(entry: dict[str, Any]) -> int:
-            if not query_terms:
-                return 0
-            path_text = str(entry.get("path") or "").lower()
-            content_text = str(entry.get("content") or "").lower()
-            score = 0
-            for term in query_terms:
-                if term in path_text:
-                    score += 10
-                if term in content_text:
-                    score += 1
-            return score
-
-        source_files: list[dict[str, Any]] = []
-        test_files: list[dict[str, Any]] = []
+        files: list[dict[str, Any]] = []
         try:
             paths = list(root.rglob("*"))
         except Exception:
@@ -1136,47 +1085,11 @@ class FormsyContextEngine(ContextEngine):
                 content = path.read_text(encoding="utf-8", errors="ignore")
             except Exception:
                 continue
-            entry = {
+            files.append({
                 "path": rel,
                 "content": content,
                 "language": path.suffix.lower().lstrip(".") or "text",
-                "is_test": _is_test(rel),
-            }
-            if entry["is_test"]:
-                test_files.append(entry)
-            else:
-                source_files.append(entry)
-
-        if query_terms:
-            source_files.sort(key=lambda entry: (-_query_score(entry), str(entry.get("path") or "")))
-            test_files.sort(key=lambda entry: (-_query_score(entry), str(entry.get("path") or "")))
-
-        files: list[dict[str, Any]] = []
-        total_bytes = 0
-        reserved_test_files = min(RESERVED_TEST_FILES, len(test_files))
-        source_file_limit = MAX_COMPILE_FILES - reserved_test_files
-        source_byte_limit = (
-            int(MAX_COMPILE_BYTES * RESERVED_SOURCE_BYTE_RATIO)
-            if reserved_test_files
-            else MAX_COMPILE_BYTES
-        )
-        source_index = 0
-        for entry in source_files:
-            if len(files) >= source_file_limit or total_bytes >= source_byte_limit:
-                break
-            files.append(entry)
-            total_bytes += len(entry["content"])
-            source_index += 1
-        for entry in test_files:
-            if len(files) >= MAX_COMPILE_FILES or total_bytes >= MAX_COMPILE_BYTES:
-                break
-            files.append(entry)
-            total_bytes += len(entry["content"])
-        for entry in source_files[source_index:]:
-            if len(files) >= MAX_COMPILE_FILES or total_bytes >= MAX_COMPILE_BYTES:
-                break
-            files.append(entry)
-            total_bytes += len(entry["content"])
+            })
         return files
 
     @staticmethod
