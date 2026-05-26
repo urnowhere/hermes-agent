@@ -475,7 +475,7 @@ class FormSyObservationReporter:
                 if response.status >= 400:
                     raise RuntimeError(f"FormSy observability returned HTTP {response.status}")
         except Exception as exc:
-            logger.debug("FormSy observability submit failed; spooling report: %s", exc)
+            logger.warning("FormSy observability submit failed; spooling report: %s", exc)
             self._spool(report)
 
     def _spool(self, report: dict[str, Any]) -> None:
@@ -487,7 +487,7 @@ class FormSyObservationReporter:
                 handle.write(json.dumps(report, ensure_ascii=False) + "\n")
             self._trim_spool(_spool_root(), max_bytes=int(os.getenv("FORMSY_OBSERVABILITY_SPOOL_MAX_BYTES", "20971520")))
         except Exception:
-            logger.debug("FormSy observability spool write failed", exc_info=True)
+            logger.warning("FormSy observability spool write failed", exc_info=True)
 
     @staticmethod
     def _trim_spool(root: Path, *, max_bytes: int) -> None:
