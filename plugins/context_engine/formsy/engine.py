@@ -1730,8 +1730,11 @@ class FormsyContextEngine(ContextEngine):
                 self._retrieval_trace.test_plan_files.append(path)
         previous_state = self._retrieval_state
         if previous_state == "degraded_recovery":
-            self._retrieval_state = "grounded"
-            self._set_accepted_targets([path])
+            # A degraded-recovery read is local evidence, not server grounding.
+            # Keep exploration open so the agent can inspect related files after
+            # FormSy returned poor/empty retrieval, while still remembering this
+            # path as evidence for a later targeted edit.
+            self._retrieval_state = "degraded_recovery"
             self._grounded_search_required = False
         elif previous_state == "grounded" and self._retrieval_trace.accepted_targets:
             self._retrieval_state = "grounded"

@@ -1467,7 +1467,7 @@ def test_formsy_engine_degrades_instead_of_full_block_after_failed_grounded_sear
     assert engine.get_tool_block_message("patch", {"path": "django/contrib/auth/validators.py"}) is not None
 
 
-def test_formsy_engine_promotes_degraded_recovery_read_of_target_to_grounded():
+def test_formsy_engine_keeps_degraded_recovery_exploration_open_after_target_read():
     engine = FormsyContextEngine()
 
     class FakeClient:
@@ -1539,10 +1539,45 @@ def test_formsy_engine_promotes_degraded_recovery_read_of_target_to_grounded():
     )
 
     status = engine.get_retrieval_status()
-    assert status["retrieval_state"] == "grounded"
-    assert status["accepted_targets"] == ["django/contrib/auth/validators.py"]
-    assert status["exploration_closed"] is True
-    assert engine.get_tool_block_message("patch", {"path": "django/contrib/auth/validators.py"}) is None
+    assert status["retrieval_state"] == "degraded_recovery"
+    assert status["grounded_files"] == ["django/contrib/auth/validators.py"]
+    assert status["accepted_targets"] == []
+    assert status["exploration_closed"] is False
+    assert engine.get_tool_block_message(
+        "read_file",
+        {"path": "django/contrib/auth/forms.py"},
+    ) is None
+    assert engine.get_tool_block_message(
+        "terminal",
+        {"command": "grep -rn UsernameValidator django/contrib/auth"},
+    ) is None
+    assert engine.get_tool_block_message("patch", {"path": "django/contrib/auth/validators.py"}) is not None
+    assert engine.get_tool_block_message("patch", {"path": "django/contrib/auth/forms.py"}) is not None
+
+
+def test_formsy_engine_degraded_recovery_read_file_does_not_close_exploration():
+    engine = FormsyContextEngine()
+    engine._sync_trace_state(state="degraded_recovery")
+
+    engine.observe_tool_result(
+        "read_file",
+        {"path": "lib/ansible/executor/play_iterator.py"},
+        json.dumps({"content": "class HostState: ..."}),
+    )
+
+    status = engine.get_retrieval_status()
+    assert status["retrieval_state"] == "degraded_recovery"
+    assert status["grounded_files"] == ["lib/ansible/executor/play_iterator.py"]
+    assert status["accepted_targets"] == []
+    assert status["exploration_closed"] is False
+    assert engine.get_tool_block_message(
+        "read_file",
+        {"path": "lib/ansible/plugins/strategy/linear.py"},
+    ) is None
+    assert engine.get_tool_block_message(
+        "terminal",
+        {"command": "grep -rn \"PlayIterator\\.\" lib/ansible/executor/ lib/ansible/plugins/strategy/"},
+    ) is None
 
 
 def test_formsy_engine_memory_read_tool_queries_runtime():
