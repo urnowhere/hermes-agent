@@ -1,6 +1,7 @@
 """Tests for FormSy memory provider shared identity snapshot behavior."""
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 from agent.runtime_identity import ResolvedIdentitySnapshot
@@ -262,6 +263,248 @@ def test_local_memory_store_recalls_across_provider_instances(tmp_path):
     assert "auth_tests.test_validators" in block
     assert second.get_context_hints()["memory_status"] == "hit"
     assert "python3 tests/runtests.py auth_tests.test_validators -v 2" in second.get_context_hints()["memory_test_hints"]
+    assert "memory_block" in second.get_context_hints()
+
+
+def test_local_memory_store_filters_non_path_changed_files_from_hints(tmp_path):
+    first = _make_provider(session_id="session-1", hermes_home=tmp_path)
+    first.sync_turn(
+        "Standardize PlayIterator states",
+        "done",
+        changed_files=["lib/ansible/executor/play_iterator.py", "else"],
+        patch_summary=(
+            "diff --git a/lib/ansible/executor/play_iterator.py b/lib/ansible/executor/play_iterator.py\n"
+            "+class PlayIteratorRunState(enum.IntEnum):\n"
+            "+class PlayIteratorFailedState(enum.IntFlag):\n"
+        ),
+    )
+
+    second = _make_provider(session_id="session-2", hermes_home=tmp_path)
+    block = second._prefetch_from_local_store("PlayIterator public state type")
+
+    hints = second.get_context_hints()
+    assert hints["memory_query_hints"] == ["lib/ansible/executor/play_iterator.py"]
+    assert "else" not in block
+
+
+def test_local_memory_store_canonicalizes_absolute_changed_files(tmp_path):
+    first = _make_provider(session_id="session-1", hermes_home=tmp_path)
+    first.sync_turn(
+        "Standardize PlayIterator states",
+        "done",
+        changed_files=[
+            "/Users/wayneliu/dev/ansible/lib/ansible/executor/play_iterator.py",
+            "lib/ansible/executor/play_iterator.py",
+        ],
+        patch_summary=(
+            "diff --git a/lib/ansible/executor/play_iterator.py b/lib/ansible/executor/play_iterator.py\n"
+            "+class PlayIteratorRunState(enum.IntEnum):\n"
+        ),
+    )
+
+    second = _make_provider(session_id="session-2", hermes_home=tmp_path)
+    block = second._prefetch_from_local_store("PlayIterator public state type")
+
+    hints = second.get_context_hints()
+    assert hints["memory_query_hints"] == ["lib/ansible/executor/play_iterator.py"]
+    assert "changed lib/ansible/executor/play_iterator.py" in block
+    assert "### Solution Digest" not in block
+    assert "/Users/wayneliu/dev/ansible" not in block
+
+
+def test_local_memory_store_renders_solution_digest_from_prior_patch(tmp_path):
+    first = _make_provider(session_id="session-1", hermes_home=tmp_path)
+    first.sync_turn(
+        "Standardize PlayIterator state representation",
+        "done",
+        changed_files=["lib/ansible/executor/play_iterator.py"],
+        patch_summary=(
+            "diff --git a/lib/ansible/executor/play_iterator.py b/lib/ansible/executor/play_iterator.py\n"
+            "+class PlayIteratorRunState(enum.IntEnum):\n"
+            "+class PlayIteratorFailedState(enum.IntFlag):\n"
+            "+class _DeprecatedStateAttribute:\n"
+        ),
+        completion_gate_decision="ACCEPT_DONE",
+        workspace_fingerprint="workspace-current",
+    )
+
+    second = _make_provider(session_id="session-2", hermes_home=tmp_path)
+    block = second._prefetch_from_local_store("PlayIterator state representation backward compatibility")
+
+    assert "### Solution Digest" in block
+    assert "Prior patch touched: lib/ansible/executor/play_iterator.py" in block
+    assert "PlayIteratorRunState" in block
+    assert "PlayIteratorFailedState" in block
+    assert "No test command was recorded" in block
+
+
+def test_local_memory_store_uses_completion_audit_for_solution_digest(tmp_path):
+    first = _make_provider(session_id="session-1", hermes_home=tmp_path)
+    first.sync_turn(
+        "Standardize PlayIterator state representation",
+        "done",
+        changed_files=["lib/ansible/executor/play_iterator.py"],
+        patch_summary=(
+            "diff --git a/lib/ansible/executor/play_iterator.py b/lib/ansible/executor/play_iterator.py\n"
+            "+class PlayIteratorRunState(enum.IntEnum):\n"
+        ),
+        completion_audit={
+            "audit_status": "verified",
+            "gate_decision": "ACCEPT_DONE",
+            "memory_write_allowed": True,
+            "memory_write_quality": "medium",
+            "evidence": {
+                "latest_diff_hash": "sha256:abc",
+                "latest_diff_event_id": "evt_diff",
+                "patch_check_event_id": "evt_patch",
+                "validation_event_id": "evt_test",
+                "validation_after_latest_diff": True,
+                "workspace_fingerprint": None,
+            },
+        },
+    )
+
+    second = _make_provider(session_id="session-2", hermes_home=tmp_path)
+    block = second._prefetch_from_local_store(
+        "PlayIterator state representation backward compatibility"
+    )
+
+    assert "### Solution Digest" in block
+    assert "Prior patch touched: lib/ansible/executor/play_iterator.py" in block
+
+
+def test_local_memory_store_does_not_render_solution_digest_without_accepted_completion(tmp_path):
+    first = _make_provider(session_id="session-1", hermes_home=tmp_path)
+    first.sync_turn(
+        "Standardize PlayIterator state representation",
+        "done",
+        changed_files=["lib/ansible/executor/play_iterator.py"],
+        patch_summary=(
+            "diff --git a/lib/ansible/executor/play_iterator.py b/lib/ansible/executor/play_iterator.py\n"
+            "+class PlayIteratorRunState(enum.IntEnum):\n"
+        ),
+    )
+
+    second = _make_provider(session_id="session-2", hermes_home=tmp_path)
+    block = second._prefetch_from_local_store("PlayIterator state representation backward compatibility")
+
+    assert "lib/ansible/executor/play_iterator.py" in block
+    assert "### Solution Digest" not in block
+    assert "Prior patch added/changed symbols" not in block
+
+
+def test_local_memory_store_renders_reusable_implementation_digest(tmp_path):
+    first = _make_provider(session_id="session-1", hermes_home=tmp_path)
+    patch_summary = """
+diff --git a/lib/ansible/executor/play_iterator.py b/lib/ansible/executor/play_iterator.py
+--- a/lib/ansible/executor/play_iterator.py
++++ b/lib/ansible/executor/play_iterator.py
+@@ -34,6 +34,40 @@
++class PlayIteratorRunState(enum.IntEnum):
++    SETUP = 0
++    TASKS = 1
++class PlayIteratorFailedState(enum.IntFlag):
++    SETUP = 1
++class _DeprecatedStateAttribute:
++    def __get__(self, obj, owner):
++        warnings.warn("Use PlayIterator.RunState", DeprecationWarning)
++PlayIterator.RunState = PlayIteratorRunState
++PlayIterator.FailedState = PlayIteratorFailedState
++def _state_name(value):
++    return value.name
++def __str__(self):
++    return "HostState run_state=%s" % _state_name(self.run_state)
+"""
+    first.record_terminal_call(
+        "python3 -m py_compile lib/ansible/executor/play_iterator.py && echo Syntax OK",
+        "Syntax OK",
+    )
+    first.sync_turn(
+        "Standardize PlayIterator state representation",
+        "done",
+        changed_files=["lib/ansible/executor/play_iterator.py"],
+        patch_summary=patch_summary,
+        completion_gate_decision="ACCEPT_DONE",
+        workspace_fingerprint="workspace-current",
+    )
+
+    second = _make_provider(session_id="session-2", hermes_home=tmp_path)
+    block = second._prefetch_from_local_store("PlayIterator state representation backward compatibility")
+
+    assert (
+        "Prior implementation pattern: define PlayIteratorRunState(IntEnum) and "
+        "PlayIteratorFailedState(IntFlag)"
+    ) in block
+    assert "expose namespaced state types on PlayIterator" in block
+    assert "keep legacy ITERATING_*/FAILED_* compatibility through descriptor aliases" in block
+    assert "render HostState state names readably" in block
+    assert (
+        "Prior tests recorded: python3 -m py_compile lib/ansible/executor/play_iterator.py && echo Syntax OK"
+        in block
+    )
+    assert "No test command was recorded" not in block
+
+
+def test_local_memory_store_renders_verified_solution_recipe(tmp_path):
+    first = _make_provider(session_id="session-verified", hermes_home=tmp_path)
+    patch_summary = """
+diff --git a/lib/ansible/executor/play_iterator.py b/lib/ansible/executor/play_iterator.py
+--- a/lib/ansible/executor/play_iterator.py
++++ b/lib/ansible/executor/play_iterator.py
+@@ -34,6 +34,40 @@
++class PlayIteratorRunState(enum.IntEnum):
++    SETUP = 0
++class PlayIteratorFailedState(enum.IntFlag):
++    SETUP = 1
++class _StateAlias:
++    def __get__(self, obj, owner):
++        warnings.warn("Use PlayIterator.RunState", DeprecationWarning)
++RunState = PlayIteratorRunState
++FailedState = PlayIteratorFailedState
++def __str__(self):
++    return "HostState run_state=%s" % self.run_state.name
+"""
+    first.record_terminal_call(
+        "python3 -m py_compile lib/ansible/executor/play_iterator.py && echo Syntax OK",
+        "Syntax OK",
+    )
+    first.sync_turn(
+        "Standardize PlayIterator state representation",
+        "done",
+        accepted_targets=["lib/ansible/executor/play_iterator.py"],
+        changed_files=["lib/ansible/executor/play_iterator.py"],
+        patch_summary=patch_summary,
+        failure_lessons=["Do not rewrite source through execute_code."],
+        completion_audit={
+            "audit_status": "verified",
+            "gate_decision": "ACCEPT_DONE",
+            "memory_write_allowed": True,
+            "memory_write_quality": "high",
+            "evidence": {
+                "latest_diff_hash": "sha256:abc",
+                "validation_after_latest_diff": True,
+            },
+        },
+    )
+
+    second = _make_provider(session_id="session-next", hermes_home=tmp_path)
+    block = second._prefetch_from_local_store(
+        "PlayIterator state representation backward compatibility"
+    )
+
+    assert block.index("### Verified Solution Recipe") < block.index("### Solution Digest")
+    recipe_text = block.split("```json\n", 1)[1].split("\n```", 1)[0]
+    recipe = json.loads(recipe_text)
+    assert recipe["schema"] == "formsy.verified_solution_recipe.v1"
+    assert recipe["source_session_id"] == "session-verified"
+    assert recipe["verification"]["gate_decision"] == "ACCEPT_DONE"
+    assert recipe["primary_edit_files"] == ["lib/ansible/executor/play_iterator.py"]
+    assert recipe["validation_commands"] == [
+        "python3 -m py_compile lib/ansible/executor/play_iterator.py && echo Syntax OK"
+    ]
+    assert any("PlayIteratorRunState(IntEnum)" in item for item in recipe["patch_plan"])
+    assert "Do not rewrite source through execute_code." in recipe["avoid"]
+    assert "Start from this verified recipe" in recipe["reuse_instruction"]
 
 
 def test_local_memory_store_skips_incoherent_stale_patch_records(tmp_path):

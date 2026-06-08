@@ -22,6 +22,7 @@ class EngineConfig:
     timeout_s: int = 120
     max_retries: int = 3
     default_scene: str = "auto"
+    retrieval_gate: str = "observe_only"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "EngineConfig":
@@ -55,6 +56,12 @@ class EngineConfigManager:
         if isinstance(source_config.get("formsy"), dict):
             config_data.update(source_config["formsy"])
 
+        policy = config_data.get("policy")
+        if isinstance(policy, dict):
+            for key in ("retrieval_gate",):
+                if key in policy:
+                    config_data[key] = policy[key]
+
         if self.config_file.exists():
             with open(self.config_file, "r") as f:
                 config_data.update(json.load(f))
@@ -68,6 +75,7 @@ class EngineConfigManager:
             "workspace_id": os.environ.get("FORMSY_WORKSPACE_ID"),
             "tenant_id": os.environ.get("FORMSY_TENANT_ID"),
             "timeout_s": os.environ.get("FORMSY_TIMEOUT"),
+            "retrieval_gate": os.environ.get("FORMSY_RETRIEVAL_GATE"),
         }
 
         for key, value in env_overrides.items():

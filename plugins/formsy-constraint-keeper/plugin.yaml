@@ -1,0 +1,13 @@
+name: formsy-constraint-keeper
+version: 0.1.0
+description: "FormSy Constraint Keeper adapter for Hermes. Reports execution evidence, injects recovery/verification protocol, and gates configured final-submit surfaces through plugin hooks only."
+author: FormSy
+kind: standalone
+hooks:
+  - on_session_start
+  - pre_llm_call
+  - pre_tool_call
+  - post_tool_call
+  - transform_tool_result
+  - on_session_end
+  - on_session_reset

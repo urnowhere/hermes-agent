@@ -51,6 +51,8 @@ class FormSyMemoryProvider(MemoryProvider):
         self._memory_test_hints: list[str] = []
         self._memory_status: str = ""
         self._memory_freshness: str = ""
+        self._memory_block: str = ""
+        self._verified_solution_recipes: list[dict[str, Any]] = []
         self._session_end_sent: set[str] = set()
         self._context_artifact_ids: list[str] = []
         self._terminal_calls: list[dict] = []
@@ -135,7 +137,9 @@ class FormSyMemoryProvider(MemoryProvider):
         self._record_prefetch_response(response)
         local_block = self._prefetch_from_local_store(query)
         if response.memory_block:
-            return self._merge_memory_blocks(local_block, response.memory_block)
+            merged = self._merge_memory_blocks(local_block, response.memory_block)
+            self._memory_block = merged
+            return merged
         return local_block
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "", **kwargs) -> None:
@@ -212,6 +216,10 @@ class FormSyMemoryProvider(MemoryProvider):
             hints["memory_status"] = self._memory_status
         if self._memory_freshness:
             hints["memory_freshness"] = self._memory_freshness
+        if self._memory_block:
+            hints["memory_block"] = self._memory_block
+        if self._verified_solution_recipes:
+            hints["verified_solution_recipes"] = list(self._verified_solution_recipes)
         return hints
 
     def record_context_artifacts(self, artifact_ids: list[str]) -> None:
@@ -316,6 +324,8 @@ class FormSyMemoryProvider(MemoryProvider):
         self._memory_test_hints = []
         self._memory_status = ""
         self._memory_freshness = ""
+        self._memory_block = ""
+        self._verified_solution_recipes = []
         self._context_artifact_ids = []
         self._terminal_calls = []
 
@@ -382,6 +392,7 @@ class FormSyMemoryProvider(MemoryProvider):
         artifacts = getattr(response, "artifacts", None)
         self._memory_artifact_ids = self._extract_artifact_ids(artifacts)
         memory_block = str(getattr(response, "memory_block", "") or "").strip()
+        self._memory_block = memory_block
         retrieved_facts = getattr(response, "retrieved_facts", None)
         self._memory_query_hints = self._coerce_string_list(
             advisory.get("query_hints")
@@ -461,8 +472,33 @@ class FormSyMemoryProvider(MemoryProvider):
             if repo_id:
                 parts.append(f"repo={repo_id}")
             lines.append(f"- [{'|'.join(parts)}] {self._local_memory_summary(summary, record)}")
+        digest_lines: list[str] = []
+        verified_recipes: list[dict[str, Any]] = []
+        for record, _score in matches[:3]:
+            summary = record.get("coding_summary") or {}
+            if self._coding_summary_has_accepted_completion(summary):
+                recipe = self._local_memory_verified_solution_recipe(summary, record)
+                if recipe:
+                    verified_recipes.append(recipe)
+                digest_lines.extend(self._local_memory_solution_digest(summary))
+        verified_recipes = self._dedupe_recipe_list(verified_recipes)
+        if verified_recipes:
+            lines.extend(["", "### Verified Solution Recipe"])
+            lines.append(
+                "Use this as a verified starting recipe for similar tasks; verify current source before patching."
+            )
+            lines.append("```json")
+            lines.append(json.dumps(verified_recipes[0], ensure_ascii=False, indent=2, sort_keys=True))
+            lines.append("```")
+        digest_lines = self._dedupe_string_list(digest_lines)
+        if digest_lines:
+            lines.extend(["", "### Solution Digest"])
+            lines.extend(f"- {line}" for line in digest_lines[:8])
         lines.append("- Treat memory as historical hints; verify current code if the working tree may have changed.")
-        return "\n".join(lines)
+        block = "\n".join(lines)
+        self._memory_block = block
+        self._verified_solution_recipes = verified_recipes[:3]
+        return block
 
     def _local_memory_matches(self, query: str) -> list[tuple[dict[str, Any], float]]:
         if self._hermes_home is None:
@@ -548,12 +584,20 @@ class FormSyMemoryProvider(MemoryProvider):
     @staticmethod
     def _local_memory_summary(summary: dict[str, Any], record: dict[str, Any]) -> str:
         chunks: list[str] = []
-        changed = summary.get("changed_files") or []
+        changed = [
+            path
+            for path in (FormSyMemoryProvider._normalize_repo_path(str(item or "")) for item in summary.get("changed_files") or [])
+            if FormSyMemoryProvider._is_repo_hint_path(path)
+        ]
         if changed:
             chunks.append("changed " + ", ".join(str(path) for path in changed[:3]))
         patch = str(summary.get("patch_summary") or "").strip()
         if patch:
-            chunks.append("patch " + " ".join(patch.split())[:500])
+            patch_paths = sorted(FormSyMemoryProvider._extract_patch_paths(patch))
+            if patch_paths:
+                chunks.append("patch touched " + ", ".join(patch_paths[:3]))
+            else:
+                chunks.append("patch recorded")
         tests = summary.get("tests_run") or []
         tests = [command for command in tests if FormSyMemoryProvider._is_test_or_verification_command(str(command))]
         if tests:
@@ -568,9 +612,17 @@ class FormSyMemoryProvider(MemoryProvider):
         summary = record.get("coding_summary") or {}
         changed = summary.get("changed_files") or []
         if changed:
-            return [str(path) for path in changed if str(path or "").strip()]
+            return [
+                path
+                for path in (FormSyMemoryProvider._normalize_repo_path(str(item or "")) for item in changed)
+                if FormSyMemoryProvider._is_repo_hint_path(path)
+            ]
         accepted = summary.get("accepted_targets") or []
-        return [str(path) for path in accepted if str(path or "").strip()]
+        return [
+            path
+            for path in (FormSyMemoryProvider._normalize_repo_path(str(item or "")) for item in accepted)
+            if FormSyMemoryProvider._is_repo_hint_path(path)
+        ]
 
     @staticmethod
     def _local_memory_test_commands(record: dict[str, Any]) -> list[str]:
@@ -604,6 +656,8 @@ class FormSyMemoryProvider(MemoryProvider):
         changed_files: list[str] = self._coerce_string_list(
             kwargs.get("changed_files") or self._extract_changed_files_from_terminal()
         )
+        accepted_targets = self._repo_hint_paths(accepted_targets)
+        changed_files = self._repo_hint_paths(changed_files)
         changed_symbols: list[str] = self._coerce_string_list(
             kwargs.get("changed_symbols") or []
         )
@@ -636,6 +690,17 @@ class FormSyMemoryProvider(MemoryProvider):
         test_result = str(kwargs.get("test_result") or "").strip() or None
         failure_lessons: list[str] = self._coerce_string_list(kwargs.get("failure_lessons") or [])
         context_query = str(kwargs.get("context_query") or "").strip() or None
+        completion_gate_decision = (
+            str(kwargs.get("completion_gate_decision") or "").strip() or None
+        )
+        completion_audit = (
+            kwargs.get("completion_audit")
+            if isinstance(kwargs.get("completion_audit"), dict)
+            else None
+        )
+        workspace_fingerprint = (
+            str(kwargs.get("workspace_fingerprint") or "").strip() or None
+        )
         confidence = kwargs.get("confidence")
         if confidence is not None:
             try:
@@ -647,7 +712,8 @@ class FormSyMemoryProvider(MemoryProvider):
         has_data = any([
             accepted_targets, changed_files, changed_symbols, tests_run, retrieval_state,
             task_type, problem_summary, root_cause, patch_summary, test_result,
-            failure_lessons, context_query, confidence is not None,
+            failure_lessons, context_query, completion_gate_decision,
+            completion_audit, workspace_fingerprint, confidence is not None,
         ])
         if not has_data:
             return None
@@ -666,6 +732,9 @@ class FormSyMemoryProvider(MemoryProvider):
             context_query=context_query,
             retrieval_state=retrieval_state,
             confidence=confidence,
+            completion_gate_decision=completion_gate_decision,
+            completion_audit=completion_audit,
+            workspace_fingerprint=workspace_fingerprint,
         )
 
     def _build_artifact_refs(self, artifact_ids: Any = None) -> list[ArtifactRef]:
@@ -890,6 +959,9 @@ class FormSyMemoryProvider(MemoryProvider):
             for part in re.split(r"[^A-Za-z0-9]+", raw):
                 if len(part) > 2 and part.lower() not in stopwords:
                     terms.add(part.lower())
+                for camel_part in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)|[0-9]+", part):
+                    if len(camel_part) > 2 and camel_part.lower() not in stopwords:
+                        terms.add(camel_part.lower())
         return terms
 
     @staticmethod
@@ -925,7 +997,9 @@ class FormSyMemoryProvider(MemoryProvider):
             if not result:
                 continue
             for match in re.finditer(r'^(?:\+\+\+|---)\s+(?:a/|b/)?([\w./\-]+)', result, re.MULTILINE):
-                path = match.group(1).strip()
+                path = self._normalize_repo_path(match.group(1).strip())
+                if not self._is_repo_hint_path(path):
+                    continue
                 if path and path not in seen:
                     seen.add(path)
                     files.append(path)
@@ -961,6 +1035,8 @@ class FormSyMemoryProvider(MemoryProvider):
             return True
         if lowered.startswith(("pytest ", "python -m pytest ", "python3 -m pytest ")):
             return True
+        if re.search(r"\bpython3?\s+-m\s+py_compile\s+[\w./@+\-]+\.py\b", lowered):
+            return True
         if re.match(r"^(?:python|python3)\s+reproduce(?:[_-].*)?\.py(?:\s|$)", lowered):
             return True
         if " manage.py test" in lowered or lowered.startswith(("python manage.py test", "python3 manage.py test")):
@@ -977,6 +1053,26 @@ class FormSyMemoryProvider(MemoryProvider):
             summary.get("changed_files") or [],
             summary.get("patch_summary") or "",
         )
+
+    @staticmethod
+    def _coding_summary_has_accepted_completion(summary: dict[str, Any]) -> bool:
+        if not isinstance(summary, dict):
+            return False
+        audit = summary.get("completion_audit")
+        if isinstance(audit, dict):
+            audit_status = str(audit.get("audit_status") or "").strip()
+            decision = str(audit.get("gate_decision") or "").strip().upper()
+            if (
+                audit_status == "verified"
+                and decision in {"ACCEPT_DONE", "ACCEPT_DONE_WITH_OVERRIDE"}
+                and audit.get("memory_write_allowed") is True
+            ):
+                return True
+            return False
+        decision = str(summary.get("completion_gate_decision") or "").strip().upper()
+        if decision not in {"ACCEPT_DONE", "ACCEPT_DONE_WITH_OVERRIDE"}:
+            return False
+        return bool(str(summary.get("workspace_fingerprint") or "").strip())
 
     @classmethod
     def _coding_summary_paths_coherent(
@@ -1013,7 +1109,58 @@ class FormSyMemoryProvider(MemoryProvider):
             text = text[2:]
         if text.startswith("a/") or text.startswith("b/"):
             text = text[2:]
+        text = text.lstrip("/")
+        source_markers = (
+            "lib/",
+            "src/",
+            "packages/",
+            "pkg/",
+            "app/",
+            "apps/",
+            "tests/",
+            "test/",
+            "django/",
+        )
+        marker_positions = [
+            (idx, marker)
+            for marker in source_markers
+            for idx in [text.find(marker)]
+            if idx > 0
+        ]
+        if marker_positions:
+            idx, _marker = min(marker_positions, key=lambda item: item[0])
+            text = text[idx:]
         return text
+
+    @classmethod
+    def _repo_hint_paths(cls, values: Any) -> list[str]:
+        if isinstance(values, str):
+            values = [values]
+        if not isinstance(values, list):
+            return []
+        paths: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            path = cls._normalize_repo_path(str(value or ""))
+            if not cls._is_repo_hint_path(path) or path in seen:
+                continue
+            seen.add(path)
+            paths.append(path)
+        return paths
+
+    @staticmethod
+    def _is_repo_hint_path(path: str) -> bool:
+        text = path.strip().replace("\\", "/")
+        if not text or text == "/dev/null" or any(ch.isspace() for ch in text):
+            return False
+        if text in {"else", "then", "fi", "done"}:
+            return False
+        if text.startswith(("-", "+")) or ".." in text.split("/"):
+            return False
+        filename = text.rsplit("/", 1)[-1]
+        if "." not in filename:
+            return False
+        return bool(re.fullmatch(r"[A-Za-z0-9_./@+\-]+", text))
 
     @classmethod
     def _extract_patch_paths(cls, patch_summary: str) -> set[str]:
@@ -1023,9 +1170,161 @@ class FormSyMemoryProvider(MemoryProvider):
             paths.add(cls._normalize_repo_path(match.group(2)))
         for match in re.finditer(r"^(?:---|\+\+\+)\s+(?:a/|b/)?(\S+)", patch_summary or "", re.MULTILINE):
             path = cls._normalize_repo_path(match.group(1))
-            if path != "/dev/null":
+            if cls._is_repo_hint_path(path):
                 paths.add(path)
-        return {path for path in paths if path}
+        return {path for path in paths if cls._is_repo_hint_path(path)}
+
+    @classmethod
+    def _local_memory_solution_digest(cls, summary: dict[str, Any]) -> list[str]:
+        changed = cls._repo_hint_paths(summary.get("changed_files") or [])
+        patch_summary = str(summary.get("patch_summary") or "")
+        patch_paths = sorted(cls._extract_patch_paths(patch_summary))
+        touched = cls._dedupe_string_list(changed + patch_paths)
+        lines: list[str] = []
+        if touched:
+            lines.append("Prior patch touched: " + ", ".join(touched[:3]))
+        added_symbols = cls._extract_added_symbols_from_patch(patch_summary)
+        if added_symbols:
+            lines.append("Prior patch added/changed symbols: " + ", ".join(added_symbols[:6]))
+        implementation_digest = cls._extract_implementation_digest_from_patch(patch_summary)
+        if implementation_digest:
+            lines.append(implementation_digest)
+        tests = [
+            str(command)
+            for command in summary.get("tests_run") or []
+            if cls._is_test_or_verification_command(str(command))
+        ]
+        if tests:
+            lines.append("Prior tests recorded: " + "; ".join(tests[:3]))
+        elif touched or added_symbols:
+            lines.append("No test command was recorded for the prior patch.")
+        return lines
+
+    @classmethod
+    def _local_memory_verified_solution_recipe(
+        cls,
+        summary: dict[str, Any],
+        record: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if not cls._coding_summary_has_accepted_completion(summary):
+            return None
+
+        patch_summary = str(summary.get("patch_summary") or "")
+        accepted = cls._repo_hint_paths(summary.get("accepted_targets") or [])
+        changed = cls._repo_hint_paths(summary.get("changed_files") or [])
+        patch_paths = sorted(cls._extract_patch_paths(patch_summary))
+        primary_files = cls._dedupe_string_list(accepted + changed + patch_paths)
+        if not primary_files:
+            return None
+
+        implementation_digest = cls._extract_implementation_digest_from_patch(patch_summary)
+        patch_plan: list[str] = []
+        if implementation_digest:
+            patch_plan.extend(
+                part.strip()
+                for part in implementation_digest.removeprefix("Prior implementation pattern: ").split(";")
+                if part.strip()
+            )
+        added_symbols = cls._extract_added_symbols_from_patch(patch_summary)
+        if added_symbols:
+            patch_plan.append("preserve or recreate symbols: " + ", ".join(added_symbols[:8]))
+        if not patch_plan:
+            patch_plan.append("reuse the prior accepted patch shape on the listed primary edit files")
+        patch_plan = cls._dedupe_string_list(patch_plan)
+
+        validation_commands = [
+            str(command)
+            for command in summary.get("tests_run") or []
+            if cls._is_test_or_verification_command(str(command))
+        ]
+        avoid = cls._coerce_string_list(summary.get("failure_lessons") or [])
+        if not avoid:
+            avoid = ["Do not blindly replay stale diffs; verify current source first."]
+
+        audit = summary.get("completion_audit") if isinstance(summary.get("completion_audit"), dict) else {}
+        evidence = audit.get("evidence") if isinstance(audit.get("evidence"), dict) else {}
+        gate_decision = (
+            str(audit.get("gate_decision") or "").strip()
+            or str(summary.get("completion_gate_decision") or "").strip()
+        )
+        verification: dict[str, Any] = {
+            "gate_decision": gate_decision,
+            "audit_status": str(audit.get("audit_status") or "").strip() or None,
+            "memory_write_quality": str(audit.get("memory_write_quality") or "").strip() or None,
+            "validation_after_latest_diff": evidence.get("validation_after_latest_diff"),
+            "latest_diff_hash": evidence.get("latest_diff_hash"),
+        }
+        verification = {
+            key: value
+            for key, value in verification.items()
+            if value not in (None, "", [])
+        }
+
+        recipe: dict[str, Any] = {
+            "schema": "formsy.verified_solution_recipe.v1",
+            "source_session_id": str(record.get("session_id") or "").strip(),
+            "source_turn_id": str(record.get("turn_id") or "").strip(),
+            "primary_edit_files": primary_files[:5],
+            "patch_plan": patch_plan[:8],
+            "validation_commands": cls._dedupe_string_list(validation_commands)[:5],
+            "avoid": cls._dedupe_string_list(avoid)[:5],
+            "verification": verification,
+            "reuse_instruction": (
+                "Start from this verified recipe for the same or highly similar task; "
+                "verify current source before patching and only re-derive if the source contradicts it."
+            ),
+        }
+        problem_summary = str(summary.get("problem_summary") or "").strip()
+        if problem_summary:
+            recipe["problem_summary"] = problem_summary[:500]
+        return {key: value for key, value in recipe.items() if value not in ("", [], {})}
+
+    @staticmethod
+    def _dedupe_recipe_list(recipes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        seen: set[str] = set()
+        result: list[dict[str, Any]] = []
+        for recipe in recipes:
+            if not isinstance(recipe, dict) or not recipe:
+                continue
+            fingerprint = json.dumps(recipe, sort_keys=True, ensure_ascii=False)
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            result.append(recipe)
+        return result
+
+    @staticmethod
+    def _extract_added_symbols_from_patch(patch_summary: str) -> list[str]:
+        symbols: list[str] = []
+        seen: set[str] = set()
+        for match in re.finditer(r"^\+\s*(?:class|def)\s+([A-Za-z_][A-Za-z0-9_]*)", patch_summary or "", re.MULTILINE):
+            symbol = match.group(1)
+            if symbol not in seen:
+                seen.add(symbol)
+                symbols.append(symbol)
+        return symbols
+
+    @staticmethod
+    def _extract_implementation_digest_from_patch(patch_summary: str) -> str:
+        text = str(patch_summary or "")
+        if not text:
+            return ""
+        notes: list[str] = []
+        if "PlayIteratorRunState" in text and "PlayIteratorFailedState" in text:
+            run_kind = "IntEnum" if "PlayIteratorRunState(enum.IntEnum)" in text else "public type"
+            failed_kind = "IntFlag" if "PlayIteratorFailedState(enum.IntFlag)" in text else "public type"
+            notes.append(
+                f"define PlayIteratorRunState({run_kind}) and PlayIteratorFailedState({failed_kind})"
+            )
+        if re.search(r"PlayIterator\.(?:RunState|FailedState)\s*=", text):
+            notes.append("expose namespaced state types on PlayIterator")
+        if "_DeprecatedStateAttribute" in text or "DeprecationWarning" in text:
+            notes.append("keep legacy ITERATING_*/FAILED_* compatibility through descriptor aliases")
+        if ("HostState" in text or "run_state" in text) and ("__str__" in text or "_state_name" in text):
+            notes.append("render HostState state names readably")
+        if not notes:
+            return ""
+        return "Prior implementation pattern: " + "; ".join(notes)
 
     @staticmethod
     def _merge_memory_blocks(local_block: str, server_block: str) -> str:

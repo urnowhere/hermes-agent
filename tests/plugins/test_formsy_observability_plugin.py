@@ -116,6 +116,29 @@ def test_reporter_redacts_readable_summaries(monkeypatch):
     assert "abcdefghijklmnopqrstuvwxyz123456" not in encoded
 
 
+def test_reporter_uses_shared_formsy_identity(monkeypatch):
+    module = _load_plugin_module()
+    reporter = module.FormSyObservationReporter()
+    reporter.enabled = True
+    submitted = []
+    monkeypatch.setenv("FORMSY_CASE_ID", "django__django-11099")
+    monkeypatch.setenv("FORMSY_RUN_ID", "run-visible")
+    monkeypatch.setattr(reporter, "_submit_async", lambda report: submitted.append(report))
+
+    reporter.on_session_start(session_id="sess-1", model="claude-test", platform="cli")
+    reporter.pre_llm_call(
+        session_id="sess-1",
+        user_message="fix django__django-11099",
+        is_first_turn=True,
+    )
+    reporter.on_session_finalize(session_id="sess-1")
+
+    final = submitted[-1]
+    assert final["task_id"] == "django__django-11099"
+    assert final["run_id"] == "run-visible"
+    assert final["task"]["case_id"] == "django__django-11099"
+
+
 def test_submit_failure_spools_metrics_only_report(tmp_path, monkeypatch):
     module = _load_plugin_module()
     reporter = module.FormSyObservationReporter()

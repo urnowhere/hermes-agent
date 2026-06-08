@@ -243,6 +243,9 @@ class CodingSummary(BaseModel):
     context_query: Optional[str] = None
     retrieval_state: Optional[str] = None
     confidence: Optional[float] = Field(default=None, ge=0, le=1)
+    completion_gate_decision: Optional[str] = None
+    completion_audit: Optional[Dict[str, Any]] = None
+    workspace_fingerprint: Optional[str] = None
 
 
 class MemorySyncTurnRequest(BaseModel):

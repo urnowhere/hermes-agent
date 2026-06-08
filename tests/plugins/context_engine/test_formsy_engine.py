@@ -7,10 +7,12 @@ from typing import cast
 
 import pytest
 
-from plugins.context_engine.formsy.config import EngineConfigManager
+from plugins.context_engine.formsy.config import EngineConfigManager, EngineConfig
 from plugins.context_engine.formsy.client import EngineClient
-from plugins.context_engine.formsy.engine import FormsyContextEngine
+from plugins.context_engine.formsy.engine import FormsyContextEngine, WriteScopePolicy
 from plugins.formsy import RuntimeClient
+from plugins.formsy.constraint_keeper.coordinator import ConstraintKeeperCoordinator
+from plugins.formsy.identity import derive_formsy_identity
 
 
 @pytest.fixture(autouse=True)
@@ -37,6 +39,99 @@ def test_formsy_engine_methods_match_context_engine_sync_contract():
         "current_tokens",
         "focus_topic",
     ]
+
+
+def test_formsy_engine_default_config_uses_observe_only_retrieval_gate():
+    assert EngineConfig().retrieval_gate == "observe_only"
+
+
+def test_formsy_engine_observe_only_does_not_block_retrieval_or_scope_after_grounding():
+    engine = FormsyContextEngine()
+    engine._config = EngineConfig()
+    engine._sync_trace_state(state="grounded")
+    engine._set_accepted_targets(["lib/ansible/executor/play_iterator.py"])
+
+    assert engine.get_tool_block_message("context_search", {"query": "more context"}) is None
+    assert engine.get_tool_block_message("search_files", {"query": "PlayIterator"}) is None
+    assert engine.get_tool_block_message(
+        "terminal",
+        {"command": "grep -R PlayIterator lib/ansible"},
+    ) is None
+    assert engine.get_tool_block_message(
+        "read_file",
+        {"path": "lib/ansible/plugins/strategy/linear.py"},
+    ) is None
+    assert engine.get_tool_block_message(
+        "patch",
+        {"path": "lib/ansible/plugins/strategy/linear.py"},
+    ) is None
+    assert engine.get_tool_block_message(
+        "terminal",
+        {"command": "cat > reproduce.py <<'PY'\nprint('repro')\nPY"},
+    ) is None
+
+
+def test_formsy_engine_observe_only_still_blocks_deterministic_forbidden_operations():
+    engine = FormsyContextEngine()
+    engine._config = EngineConfig()
+    engine._sync_trace_state(state="grounded")
+    engine._set_accepted_targets(["lib/ansible/executor/play_iterator.py"])
+
+    rm_git = engine.get_tool_block_message("terminal", {"command": "rm -rf .git"})
+    write_git = engine.get_tool_block_message("write_file", {"path": ".git/config", "content": "x"})
+
+    assert rm_git is not None
+    assert "forbidden" in rm_git.lower() or "destructive" in rm_git.lower()
+    assert write_git is not None
+    assert "forbidden" in write_git.lower()
+
+
+def test_formsy_engine_pre_seed_context_read_returns_synthetic_grounding_payload():
+    engine = FormsyContextEngine()
+    engine._config = EngineConfig()
+
+    result = engine.handle_tool_call(
+        "context_read",
+        {
+            "path": "lib/ansible/executor/play_iterator.py",
+            "start_line": 95,
+            "end_line": 100,
+        },
+    )
+
+    payload = json.loads(result)
+    assert payload["ok"] is True
+    assert payload["synthetic"] is True
+    assert payload["blocking"] is False
+    assert payload["grounding_required"] is True
+    assert payload["content"] == ""
+    assert payload["context_meta"]["source"] == "synthetic_pre_seed"
+    assert payload["context_meta"]["read_key"] == "lib/ansible/executor/play_iterator.py:95-100"
+
+
+def test_formsy_engine_projects_skill_uptake_status_when_available(monkeypatch):
+    engine = FormsyContextEngine()
+
+    class FakeCoordinator:
+        def get_skill_uptake_status(self):
+            return {
+                "skill_name": "formsy-context",
+                "skill_visibility": "skill_view_loaded",
+                "skill_body_loaded": True,
+            }
+
+    monkeypatch.setattr(
+        "plugins.context_engine.formsy.engine._get_constraint_keeper_coordinator",
+        lambda: FakeCoordinator(),
+    )
+
+    status = engine.get_retrieval_status()
+
+    assert status["skill_uptake"] == {
+        "skill_name": "formsy-context",
+        "skill_visibility": "skill_view_loaded",
+        "skill_body_loaded": True,
+    }
 
 
 def test_formsy_engine_tracks_usage_and_threshold():
@@ -161,10 +256,10 @@ def test_formsy_engine_memory_search_derives_repo_and_revision_from_git(monkeypa
 
     data = json.loads(result)
     assert data["ok"] is True
-    assert data["memory_recall"] is True
-    assert data["memory_status"] == "warm"
-    assert data["memory_query_hints"] == ["existing hint", "search auth tests"]
-    assert data["memory_test_hints"] == ["python -m pytest tests/auth"]
+    assert "memory_recall" not in data
+    assert "memory_status" not in data
+    assert "memory_query_hints" not in data
+    assert "memory_test_hints" not in data
     assert calls == [{
         "repo_id": "urnowhere__hermes-agent",
         "session_id": "session-123",
@@ -177,6 +272,8 @@ def test_formsy_engine_memory_search_derives_repo_and_revision_from_git(monkeypa
             "response_format": "bundle",
             "case_id": "urnowhere__hermes-agent",
             "trace_id": "session-123",
+            "query_timeout_s": 90,
+            "fanout_timeout_s": 90,
         },
     }]
 
@@ -308,6 +405,11 @@ def test_formsy_engine_memory_search_tool_queries_runtime():
                 "suggested_queries": ["tests for parser state handling"],
                 "coverage": "partial",
                 "missing_context": ["No test constraints were selected for this query."],
+                "guidance": {
+                    "summary": "Ranked repository evidence and next actions.",
+                    "useful_context": [{"path": "parser.py", "rank": 1}],
+                    "suggested_next_actions": ["context_read parser.py"],
+                },
                 "_latency_ms": 17,
             }
 
@@ -344,6 +446,8 @@ def test_formsy_engine_memory_search_tool_queries_runtime():
     assert data["suggested_queries"] == ["tests for parser state handling"]
     assert data["coverage"] == "partial"
     assert data["missing_context"] == ["No test constraints were selected for this query."]
+    assert data["guidance"]["useful_context"] == [{"path": "parser.py", "rank": 1}]
+    assert data["guidance"]["suggested_next_actions"] == ["context_read parser.py"]
     assert data["symbolic_prompt"] == (
         "Formal Semantics:\n"
         "Constraints:\n"
@@ -371,6 +475,8 @@ def test_formsy_engine_memory_search_tool_queries_runtime():
             "grounded_symbols": ["Parser.parse"],
             "grounded_files": ["parser.py"],
             "retrieval_feedback": "symbolic retrieval looked weak",
+            "query_timeout_s": 90,
+            "fanout_timeout_s": 90,
         },
     }]
 
@@ -424,6 +530,8 @@ def test_formsy_engine_memory_search_prefers_nested_metadata():
             "response_format": "bundle",
             "trace_id": "trace-nested",
             "case_id": "django__django-14053",
+            "query_timeout_s": 90,
+            "fanout_timeout_s": 90,
         },
     }]
 
@@ -495,6 +603,62 @@ def test_formsy_engine_memory_search_merges_memory_provider_hints():
     }]
 
 
+def test_formsy_engine_memory_search_appends_agent_visible_memory_block():
+    engine = FormsyContextEngine()
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            return {
+                "extra_context": "## FormSy Guidance\n- ONLY EDIT: lib/ansible/executor/play_iterator.py",
+                "matches": [],
+            }
+
+    class HintProvider:
+        def get_context_hints(self):
+            return {
+                "memory_status": "hit",
+                "memory_freshness": "local",
+                "verified_solution_recipes": [{
+                    "schema": "formsy.verified_solution_recipe.v1",
+                    "primary_edit_files": ["lib/ansible/executor/play_iterator.py"],
+                    "validation_commands": ["python3 -m py_compile lib/ansible/executor/play_iterator.py"],
+                }],
+                "memory_block": (
+                    "## Relevant Memory\n"
+                    "### Verified Solution Recipe\n"
+                    "### Solution Digest\n"
+                    "- Prior patch touched: lib/ansible/executor/play_iterator.py"
+                ),
+            }
+
+    class FakeMemoryManager:
+        providers = [HintProvider()]
+
+    engine._engine_client = FakeClient()
+    engine._memory_manager = FakeMemoryManager()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "latest",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+
+    result = json.loads(engine.handle_tool_call(
+        "context_search",
+        {"query": "PlayIterator state representation"},
+    ))
+
+    assert result["memory_status"] == "hit"
+    assert result["verified_solution_recipes"] == [{
+        "schema": "formsy.verified_solution_recipe.v1",
+        "primary_edit_files": ["lib/ansible/executor/play_iterator.py"],
+        "validation_commands": ["python3 -m py_compile lib/ansible/executor/play_iterator.py"],
+    }]
+    assert "## Relevant Memory" in result["extra_context"]
+    assert "Prior patch touched: lib/ansible/executor/play_iterator.py" in result["extra_context"]
+    assert "## FormSy Guidance" in result["extra_context"]
+
+
 def test_formsy_engine_memory_search_marks_poor_symbolic_results_for_retry():
     engine = FormsyContextEngine()
     calls = []
@@ -557,6 +721,8 @@ def test_formsy_engine_memory_search_marks_poor_symbolic_results_for_retry():
             "response_format": "bundle",
             "case_id": "django__django-14053",
             "trace_id": "session-123",
+            "query_timeout_s": 90,
+            "fanout_timeout_s": 90,
         },
     }]
 
@@ -601,6 +767,23 @@ def test_formsy_engine_compile_missing_goes_directly_to_degraded_recovery():
                 "missing_context": [
                     "\"Compiled repository not found for repo_id='django__django-14053' revision='latest'\"",
                 ],
+                "guidance": {
+                    "mode": "degraded_recovery",
+                    "target_candidates": ["django/contrib/auth/validators.py"],
+                    "likely_edit_files": ["django/contrib/auth/validators.py"],
+                    "recommended_first_reads": [
+                        {
+                            "path": "django/contrib/auth/validators.py",
+                            "reason": "Server degraded guidance target.",
+                        }
+                    ],
+                    "probe_budget": {
+                        "search_files": 1,
+                        "read_file": 2,
+                        "terminal_or_execute_code": 2,
+                    },
+                    "patch_now_threshold": {"grounded_source_reads": 1},
+                },
                 "test_plan": {},
             }
 
@@ -630,6 +813,676 @@ def test_formsy_engine_compile_missing_goes_directly_to_degraded_recovery():
     assert result["retrieval_state"] == "degraded_recovery"
     assert result["preferred_next_step"] == "bounded_shell_inspection"
     assert result["next_retrieval"]["recovery_mode"] == "degraded_recovery"
+    assert result["guidance_packet"]["mode"] == "degraded_recovery"
+    assert result["guidance_packet"]["target_candidates"] == [
+        "django/contrib/auth/validators.py"
+    ]
+    assert result["guidance_packet"]["recommended_first_reads"][0]["reason"] == (
+        "Server degraded guidance target."
+    )
+    assert result["guidance_packet"]["probe_budget"] == {
+        "search_files": 1,
+        "read_file": 2,
+        "terminal_or_execute_code": 2,
+    }
+    assert result["guidance_packet"]["patch_now_threshold"] == {
+        "grounded_source_reads": 1
+    }
+
+
+def test_formsy_engine_preserves_server_owned_degraded_edit_scope():
+    engine = FormsyContextEngine()
+
+    packet = engine._server_degraded_guidance_packet(
+        {
+            "guidance": {
+                "mode": "degraded_recovery",
+                "target_candidates": [
+                    "lib/ansible/executor/play_iterator.py",
+                    "lib/ansible/plugins/strategy/__init__.py",
+                    "lib/ansible/plugins/strategy/linear.py",
+                ],
+                "primary_edit_target": "lib/ansible/executor/play_iterator.py",
+                "accepted_edit_targets": ["lib/ansible/executor/play_iterator.py"],
+                "read_only_context_files": [
+                    "lib/ansible/plugins/strategy/__init__.py",
+                    "lib/ansible/plugins/strategy/linear.py",
+                ],
+                "non_goals": [
+                    "Do not migrate external strategy plugin consumers in the first patch.",
+                ],
+                "likely_edit_files": ["lib/ansible/executor/play_iterator.py"],
+                "recommended_first_reads": [
+                    {
+                        "path": "lib/ansible/executor/play_iterator.py",
+                        "reason": "Server primary edit target.",
+                    }
+                ],
+                "probe_budget": {
+                    "search_files": 1,
+                    "read_file": 2,
+                    "terminal_or_execute_code": 2,
+                },
+                "patch_now_threshold": {"grounded_source_reads": 1},
+            },
+        }
+    )
+
+    assert packet is not None
+    assert packet["primary_edit_target"] == "lib/ansible/executor/play_iterator.py"
+    assert packet["accepted_edit_targets"] == ["lib/ansible/executor/play_iterator.py"]
+    assert packet["read_only_context_files"] == [
+        "lib/ansible/plugins/strategy/__init__.py",
+        "lib/ansible/plugins/strategy/linear.py",
+    ]
+    assert packet["non_goals"] == [
+        "Do not migrate external strategy plugin consumers in the first patch.",
+    ]
+
+
+def test_formsy_engine_projects_nested_guidance_into_retrieval_status():
+    engine = FormsyContextEngine()
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            return {
+                "extra_context": (
+                    "## FormSy Guidance\n"
+                    "- ONLY EDIT: lib/ansible/executor/play_iterator.py\n"
+                    "- NEXT SUGGESTED TOOL: context_read path=lib/ansible/executor/play_iterator.py"
+                ),
+                "matches": [],
+                "coverage": "partial",
+                "guidance": {
+                    "retrieval_state": "inspect_candidates",
+                    "preferred_next_step": "context_read",
+                    "accepted_edit_targets": ["lib/ansible/executor/play_iterator.py"],
+                    "behavioral_contracts": [
+                        {
+                            "id": "public_state_aliases",
+                            "description": "Keep legacy aliases compatible.",
+                        }
+                    ],
+                },
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "latest",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+
+    result = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {
+                "query": "PlayIterator public state migration",
+                "repo_id": "ansible__ansible",
+                "metadata": {
+                    "retrieval_mode": "symbolic",
+                    "grounding_phase": "seed",
+                    "response_format": "bundle",
+                },
+            },
+        )
+    )
+
+    assert result["retrieval_state"] == "inspect_candidates"
+    assert result["preferred_next_step"] == "context_read"
+    assert result["accepted_targets"] == ["lib/ansible/executor/play_iterator.py"]
+    assert result["exploration_closed"] is True
+    assert result["guidance_contracts_present"] is True
+
+    status = engine.get_retrieval_status()
+    assert status["retrieval_state"] == "inspect_candidates"
+    assert status["retrieval_status"] == "good"
+    assert status["seed_calls"] == 1
+    assert status["accepted_targets"] == ["lib/ansible/executor/play_iterator.py"]
+    assert status["exploration_closed"] is True
+    assert status["constraints_present"] is False
+
+
+def test_formsy_engine_suppresses_duplicate_symbolic_seed_search_while_context_read_pending():
+    engine = FormsyContextEngine()
+    search_calls = []
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            search_calls.append(kwargs)
+            return {
+                "extra_context": "## FormSy Guidance\n- ONLY EDIT: lib/ansible/executor/play_iterator.py",
+                "matches": [
+                    {
+                        "path": "lib/ansible/executor/play_iterator.py",
+                        "score": 4.0,
+                    }
+                ],
+                "coverage": "partial",
+                "retrieval_state": "inspect_candidates",
+                "preferred_next_step": "context_read",
+                "accepted_targets": ["lib/ansible/executor/play_iterator.py"],
+                "exploration_closed": True,
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "latest",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+
+    first = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {"query": "PlayIterator state representation"},
+        )
+    )
+    duplicate = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {"query": "HostState __str__ state string representation"},
+        )
+    )
+
+    assert first.get("duplicate_seed_suppressed") is not True
+    assert duplicate["ok"] is True
+    assert duplicate["duplicate_seed_suppressed"] is True
+    assert duplicate["preferred_next_step"] == "context_read"
+    assert duplicate["next_tool_directive"] == {
+        "tool": "context_read",
+        "args": {"path": "lib/ansible/executor/play_iterator.py"},
+        "reason": "A seed context_search already selected this accepted target.",
+        "enforcement": "suggested",
+        "max_attempts": 1,
+    }
+    assert len(search_calls) == 1
+
+    status = engine.get_retrieval_status()
+    assert status["seed_calls"] == 1
+    assert status["retry_calls"] == 0
+    assert status["context_read_required"] is True
+    assert status["pending_followup_tool"] == "context_read"
+
+
+def test_formsy_engine_does_not_promote_nested_guidance_candidates_to_accepted_targets():
+    engine = FormsyContextEngine()
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            return {
+                "extra_context": "## FormSy Guidance\n- Candidate target exists.",
+                "matches": [],
+                "coverage": "partial",
+                "guidance": {
+                    "retrieval_state": "inspect_candidates",
+                    "preferred_next_step": "context_read",
+                    "target_candidates": ["lib/ansible/executor/play_iterator.py"],
+                    "likely_edit_files": ["lib/ansible/executor/play_iterator.py"],
+                    "recommended_first_reads": [
+                        {"path": "lib/ansible/executor/play_iterator.py"},
+                    ],
+                },
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "latest",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+
+    result = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {
+                "query": "PlayIterator public state migration",
+                "repo_id": "ansible__ansible",
+                "metadata": {
+                    "retrieval_mode": "symbolic",
+                    "grounding_phase": "seed",
+                    "response_format": "bundle",
+                },
+            },
+        )
+    )
+
+    assert result["retrieval_state"] == "inspect_candidates"
+    assert result["accepted_targets"] == []
+    assert result["exploration_closed"] is False
+
+    status = engine.get_retrieval_status()
+    assert status["preferred_edit_targets"] == ["lib/ansible/executor/play_iterator.py"]
+    assert status["accepted_targets"] == []
+    assert status["exploration_closed"] is False
+
+
+def test_formsy_engine_projects_guidance_packet_accepted_targets_into_retrieval_status():
+    engine = FormsyContextEngine()
+
+    payload = {
+        "retrieval_state": "inspect_candidates",
+        "preferred_next_step": "context_read",
+        "guidance_packet": {
+            "accepted_edit_targets": ["lib/ansible/executor/play_iterator.py"],
+            "primary_edit_target": "lib/ansible/executor/play_iterator.py",
+            "target_candidates": [
+                "lib/ansible/executor/play_iterator.py",
+                "lib/ansible/plugins/strategy/linear.py",
+            ],
+            "recommended_first_reads": [
+                {"path": "lib/ansible/executor/play_iterator.py"},
+            ],
+        },
+    }
+
+    engine._apply_nested_guidance_projection(payload)
+
+    assert payload["accepted_targets"] == ["lib/ansible/executor/play_iterator.py"]
+    assert payload["exploration_closed"] is True
+    assert payload["retrieval_targets"] == [
+        "lib/ansible/executor/play_iterator.py",
+        "lib/ansible/plugins/strategy/linear.py",
+    ]
+
+
+def test_formsy_engine_persists_guidance_packet_accepted_targets_when_server_top_level_is_empty():
+    engine = FormsyContextEngine()
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            return {
+                "extra_context": "## FormSy Guidance\n- ONLY EDIT: lib/ansible/executor/play_iterator.py",
+                "matches": [],
+                "coverage": "partial",
+                "retrieval_state": "inspect_candidates",
+                "preferred_next_step": "context_read",
+                "accepted_targets": [],
+                "exploration_closed": False,
+                "guidance_packet": {
+                    "accepted_edit_targets": ["lib/ansible/executor/play_iterator.py"],
+                    "primary_edit_target": "lib/ansible/executor/play_iterator.py",
+                    "target_candidates": ["lib/ansible/executor/play_iterator.py"],
+                    "recommended_first_reads": [
+                        {"path": "lib/ansible/executor/play_iterator.py"},
+                    ],
+                },
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "latest",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+
+    result = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {
+                "query": "PlayIterator public state migration",
+                "repo_id": "ansible__ansible",
+                "metadata": {
+                    "retrieval_mode": "symbolic",
+                    "grounding_phase": "seed",
+                    "response_format": "bundle",
+                },
+            },
+        )
+    )
+
+    assert result["accepted_targets"] == ["lib/ansible/executor/play_iterator.py"]
+    assert result["exploration_closed"] is True
+
+    status = engine.get_retrieval_status()
+    assert status["accepted_targets"] == ["lib/ansible/executor/play_iterator.py"]
+    assert status["exploration_closed"] is True
+
+
+def test_formsy_engine_does_not_promote_guidance_packet_candidates_to_accepted_targets():
+    engine = FormsyContextEngine()
+
+    payload = {
+        "retrieval_state": "inspect_candidates",
+        "preferred_next_step": "context_read",
+        "guidance_packet": {
+            "target_candidates": ["lib/ansible/executor/play_iterator.py"],
+            "likely_edit_files": ["lib/ansible/executor/play_iterator.py"],
+            "recommended_first_reads": [
+                {"path": "lib/ansible/executor/play_iterator.py"},
+            ],
+        },
+    }
+
+    engine._apply_nested_guidance_projection(payload)
+
+    assert payload.get("accepted_targets") is None
+    assert payload.get("exploration_closed") is None
+    assert payload["retrieval_targets"] == ["lib/ansible/executor/play_iterator.py"]
+
+
+def test_formsy_engine_projects_p0b_server_guidance_into_guidance_packet():
+    engine = FormsyContextEngine()
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            return {
+                "extra_context": "",
+                "matches": [
+                    {
+                        "path": "lib/ansible/executor/play_iterator.py",
+                        "score": 4.0,
+                    }
+                ],
+                "coverage": "partial",
+                "guidance": {
+                    "mode": "degraded_recovery",
+                    "run_id": "trace-p0b",
+                    "task_identity": {
+                        "repo_id": "ansible__ansible",
+                        "revision": "rev",
+                        "case_id": "ansible__ansible",
+                        "task_hash": "abc123def456",
+                    },
+                    "grounding_confidence": "low",
+                    "can_patch_now": False,
+                    "pre_seed_workspace_reads": [
+                        {"path": "lib/ansible/executor/play_iterator.py"}
+                    ],
+                    "target_candidates": ["lib/ansible/executor/play_iterator.py"],
+                    "likely_edit_files": ["lib/ansible/executor/play_iterator.py"],
+                    "recommended_first_reads": [
+                        {
+                            "path": "lib/ansible/executor/play_iterator.py",
+                            "reason": "Validate hinted target.",
+                        }
+                    ],
+                    "next_tool_directive": {
+                        "tool": "context_read",
+                        "args": {"path": "lib/ansible/executor/play_iterator.py"},
+                        "reason": (
+                            "Validate hinted target and collect source grounding before broad exploration."
+                        ),
+                        "enforcement": "suggested",
+                        "max_attempts": 1,
+                    },
+                    "probe_budget": {
+                        "search_files": 1,
+                        "read_file": 2,
+                        "terminal_or_execute_code": 2,
+                    },
+                    "patch_now_threshold": {"grounded_source_reads": 1},
+                },
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "rev",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+
+    result = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {"query": "PlayIterator public state type"},
+        )
+    )
+
+    assert result["preferred_next_step"] == "context_read"
+    assert result["guidance_packet"]["run_id"] == "trace-p0b"
+    assert result["guidance_packet"]["task_identity"]["task_hash"] == "abc123def456"
+    assert result["guidance_packet"]["grounding_confidence"] == "low"
+    assert result["guidance_packet"]["can_patch_now"] is False
+    assert result["guidance_packet"]["pre_seed_workspace_reads"] == [
+        {"path": "lib/ansible/executor/play_iterator.py"}
+    ]
+    assert "required_next_tool" not in result["guidance_packet"]
+    assert result["guidance_packet"]["next_tool_directive"] == {
+        "tool": "context_read",
+        "args": {"path": "lib/ansible/executor/play_iterator.py"},
+        "reason": (
+            "Validate hinted target and collect source grounding before broad exploration."
+        ),
+        "enforcement": "suggested",
+        "max_attempts": 1,
+    }
+    assert result["next_tool_directive"] == result["guidance_packet"]["next_tool_directive"]
+    assert result["guidance_packet"]["next_tool_directive"] == result["next_tool_directive"]
+    assert result["next_tool_directive_text"] == (
+        "NEXT SUGGESTED TOOL: context_read path=lib/ansible/executor/play_iterator.py"
+    )
+    assert "next_required_tool_text" not in result
+
+
+def test_formsy_engine_context_read_notifies_constraint_keeper_to_clear_next_tool(
+    monkeypatch,
+):
+    engine = FormsyContextEngine()
+
+    class FakeClient:
+        async def memory_read(self, **kwargs):
+            return {
+                "path": "lib/ansible/executor/play_iterator.py",
+                "start_line": 1,
+                "end_line": 3,
+                "content": "class PlayIterator:\n    pass\n",
+            }
+
+    class FakeCoordinator:
+        def __init__(self):
+            self.observed = []
+
+        def observe_tool_result(self, tool_name, args, result, *, session_id=""):
+            self.observed.append((tool_name, args, result, session_id))
+
+    coordinator = FakeCoordinator()
+    monkeypatch.setattr(
+        "plugins.context_engine.formsy.engine._get_constraint_keeper_coordinator",
+        lambda: coordinator,
+    )
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "rev",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+    engine._retrieval_trace.seed_calls = 1
+
+    result = engine.handle_tool_call(
+        "context_read",
+        {"path": "lib/ansible/executor/play_iterator.py"},
+    )
+
+    assert "ok: true" in result
+    assert coordinator.observed
+    observed_tool, observed_args, observed_result, observed_session = coordinator.observed[0]
+    assert observed_tool == "context_read"
+    assert observed_args == {"path": "lib/ansible/executor/play_iterator.py"}
+    assert "ok: true" in observed_result
+    assert observed_session == "session-123"
+
+
+def test_formsy_engine_context_read_clears_real_constraint_keeper_next_tool(
+    monkeypatch,
+    tmp_path,
+):
+    class ConstraintClient:
+        async def task_start(self, **kwargs):
+            return {"ok": True}
+
+        async def observe(self, payload, session_id=""):
+            return {"ok": True}
+
+    class MemoryClient:
+        async def memory_read(self, **kwargs):
+            return {
+                "path": "lib/ansible/executor/play_iterator.py",
+                "start_line": 1,
+                "end_line": 3,
+                "content": "class PlayIterator:\n    pass\n",
+            }
+
+    identity = derive_formsy_identity(
+        session_id="session-123",
+        task_id="task-123",
+        run_id="run-123",
+        repo_id="ansible__ansible",
+        revision="rev",
+        workspace_id="workspace-123",
+    )
+    coordinator = ConstraintKeeperCoordinator(
+        client=ConstraintClient(),
+        spool_root=tmp_path,
+        identity=identity,
+    )
+    monkeypatch.setattr(
+        "plugins.context_engine.formsy.engine._get_constraint_keeper_coordinator",
+        lambda: coordinator,
+    )
+
+    guidance_result = {
+        "ok": True,
+        "guidance_packet": {
+            "mode": "degraded_recovery",
+            "required_next_tool": {
+                "tool": "context_read",
+                "args": {"path": "lib/ansible/executor/play_iterator.py"},
+                "reason": "Validate hinted target.",
+            },
+        },
+    }
+    coordinator.observe_tool_result(
+        "context_search",
+        {"query": "PlayIterator states"},
+        guidance_result,
+        session_id="session-123",
+    )
+    assert coordinator.pre_tool_call_block_message(
+        "terminal",
+        {"command": "grep -R PlayIterator lib/ansible"},
+        session_id="session-123",
+    ) is None
+    suggested = coordinator.transform_tool_result(
+        "context_search",
+        {},
+        "original",
+        session_id="session-123",
+    )
+    assert suggested is not None
+    assert "NEXT SUGGESTED TOOL" in suggested
+
+    engine = FormsyContextEngine()
+    engine._engine_client = MemoryClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "rev",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+    engine._retrieval_trace.seed_calls = 1
+
+    result = engine.handle_tool_call(
+        "context_read",
+        {"path": "lib/ansible/executor/play_iterator.py"},
+    )
+
+    assert "ok: true" in result
+    assert coordinator.pre_tool_call_block_message(
+        "terminal",
+        {"command": "pytest test/units/executor/test_play_iterator.py"},
+        session_id="session-123",
+    ) is None
+
+
+def test_formsy_engine_compile_failure_returns_degraded_guidance_and_notifies_budget(
+    monkeypatch,
+):
+    engine = FormsyContextEngine()
+
+    class FakeClient:
+        last_error = "compile timeout"
+
+        async def compile_repo(self, **kwargs):
+            return None
+
+        async def memory_prefetch(self, **kwargs):
+            return {"memory_status": "miss"}
+
+    class FakeCoordinator:
+        def __init__(self):
+            self.observed = []
+
+        def observe_tool_result(self, tool_name, args, result, *, session_id=""):
+            self.observed.append((tool_name, args, json.loads(result), session_id))
+
+    coordinator = FakeCoordinator()
+    monkeypatch.setattr(
+        "plugins.context_engine.formsy.engine._get_constraint_keeper_coordinator",
+        lambda: coordinator,
+    )
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "rev",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+
+    result = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {
+                "query": (
+                    "Standardize PlayIterator state representation "
+                    "ITERATING_TASKS FAILED_SETUP HostState __str__"
+                ),
+            },
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["warning"] == "Formsy memory compile unavailable before context_search"
+    assert result["recovery_mode"] == "degraded_recovery"
+    assert result["guidance_packet"]["target_candidates"] == [
+        "lib/ansible/executor/play_iterator.py"
+    ]
+    assert coordinator.observed
+    observed_tool, _observed_args, observed_result, observed_session_id = coordinator.observed[0]
+    assert observed_tool == "context_search"
+    assert observed_session_id == "session-123"
+    assert observed_result["guidance_packet"]["probe_budget"]["terminal_or_execute_code"] == 2
+
+
+def test_formsy_engine_degraded_guidance_canonicalizes_absolute_memory_hints():
+    engine = FormsyContextEngine()
+
+    packet = engine._build_degraded_guidance_packet(
+        query="PlayIterator public state type",
+        payload={},
+        metadata={
+            "grounding_phase": "seed",
+            "memory_query_hints": [
+                "/Users/wayneliu/dev/ansible/lib/ansible/executor/play_iterator.py",
+                "lib/ansible/executor/play_iterator.py",
+            ],
+        },
+    )
+
+    assert packet["target_candidates"] == ["lib/ansible/executor/play_iterator.py"]
+    assert packet["next_tool_directive"]["args"]["path"] == (
+        "lib/ansible/executor/play_iterator.py"
+    )
+    assert packet["next_tool_directive"]["enforcement"] == "suggested"
+    assert "required_next_tool" not in packet
 
 
 def test_formsy_engine_enforces_seed_read_grounded_sequence():
@@ -673,6 +1526,10 @@ def test_formsy_engine_enforces_seed_read_grounded_sequence():
         "query_budget": 4000,
     })()
     engine._session_id = "session-123"
+    engine.on_user_turn(
+        "<pr_description>Fix username validator regex.</pr_description>"
+        "<instructions>Use context_search proactively.</instructions>"
+    )
 
     seed_result = json.loads(
         engine.handle_tool_call(
@@ -690,6 +1547,19 @@ def test_formsy_engine_enforces_seed_read_grounded_sequence():
     )
     assert seed_result["retrieval_state"] == "inspect_candidates"
     assert seed_result["preferred_next_step"] == "context_read"
+    assert seed_result["retrieval_decision"]["seed_required"] is False
+    assert seed_result["retrieval_decision"]["seed_followed"] is True
+    assert seed_result["retrieval_decision"]["first_nonseed_tool"] == "none"
+    assert seed_result["retrieval_decision"]["context_read_required"] is True
+    assert seed_result["retrieval_decision"]["context_read_followed"] is False
+    assert seed_result["retrieval_decision"]["pending_followup_tool"] == "context_read"
+    status_after_seed = engine.get_retrieval_status()
+    assert status_after_seed["seed_required"] is False
+    assert status_after_seed["seed_followed"] is True
+    assert status_after_seed["first_nonseed_tool"] == "none"
+    assert status_after_seed["context_read_required"] is True
+    assert status_after_seed["context_read_followed"] is False
+    assert status_after_seed["pending_followup_tool"] == "context_read"
     assert engine.get_tool_block_message("terminal", {"command": "ls"}) is not None
 
     read_result = engine.handle_tool_call(
@@ -704,6 +1574,11 @@ def test_formsy_engine_enforces_seed_read_grounded_sequence():
     assert "ok: true" in read_result
     status_after_read = engine.get_retrieval_status()
     assert status_after_read["retrieval_state"] == "context_read"
+    assert status_after_read["context_read_required"] is False
+    assert status_after_read["context_read_followed"] is True
+    assert status_after_read["pending_followup_tool"] == "grounded_search"
+    assert status_after_read["grounded_search_required"] is True
+    assert status_after_read["grounded_search_followed"] is False
     assert engine.get_tool_block_message("terminal", {"command": "ls"}) is not None
     assert engine.get_tool_block_message("terminal", {"command": "python tests/runtests.py staticfiles_tests.test_storage -v 2"}) is None
     assert engine.get_tool_block_message("terminal", {"command": "python -c \"print('inspect target')\""}) is not None
@@ -771,27 +1646,21 @@ def test_formsy_engine_enforces_seed_read_grounded_sequence():
     assert grounded_result["preferred_next_step"] == "edit"
     assert grounded_result["accepted_targets"] == ["django/contrib/auth/validators.py"]
     assert grounded_result["exploration_closed"] is True
+    assert grounded_result["retrieval_decision"]["context_read_required"] is False
+    assert grounded_result["retrieval_decision"]["context_read_followed"] is True
+    assert grounded_result["retrieval_decision"]["pending_followup_tool"] == "none"
+    assert grounded_result["retrieval_decision"]["grounded_search_required"] is False
+    assert grounded_result["retrieval_decision"]["grounded_search_followed"] is True
     assert grounded_result["retrieval_decision"]["contradiction_found"] is False
     assert grounded_result["retrieval_decision"]["target_conflict"] is False
-    assert engine.get_tool_block_message("terminal", {"command": "ls"}) is None
+    assert engine.get_tool_block_message("terminal", {"command": "ls"}) is not None
     assert engine.get_tool_block_message("context_search", {"query": "more"}) is not None
     assert engine.get_tool_block_message("terminal", {"command": "grep -R UsernameValidator django"}) is not None
     assert engine.get_tool_block_message("patch", {"path": "django/contrib/auth/validators.py"}) is None
     assert engine.get_tool_block_message("search_files", {"query": "validators"}) is not None
-    assert engine.get_tool_block_message("read_file", {"path": "django/contrib/auth/other.py"}) is not None
-    assert engine.get_tool_block_message("context_read", {"path": "django/contrib/auth/other.py"}) is not None
+    assert engine.get_tool_block_message("read_file", {"path": "django/contrib/auth/other.py"}) is None
+    assert engine.get_tool_block_message("context_read", {"path": "django/contrib/auth/other.py"}) is None
     assert engine.get_tool_block_message("context_read", {"path": "tests/staticfiles_tests/test_storage.py"}) is None
-    assert json.loads(
-        engine.handle_tool_call(
-            "context_read",
-            {
-                "path": "django/contrib/auth/other.py",
-                "repo_id": "django__django-14053",
-                "start_line": 1,
-                "end_line": 5,
-            },
-        )
-    )["ok"] is False
     assert search_calls[0]["metadata"]["trace_id"] == "session-123"
     assert search_calls[0]["metadata"]["case_id"] == "django__django-14053"
     assert search_calls[-1]["metadata"]["requirement_analysis"] == {"need": "anchor regex"}
@@ -803,10 +1672,85 @@ def test_formsy_engine_enforces_seed_read_grounded_sequence():
     assert status["retrieval_budget"] == 4000
     assert status["seed_calls"] == 1
     assert status["grounded_calls"] == 1
+    assert status["context_read_required"] is False
+    assert status["context_read_followed"] is True
+    assert status["pending_followup_tool"] == "none"
+    assert status["grounded_search_required"] is False
+    assert status["grounded_search_followed"] is True
     assert status["retry_calls"] == 0
     assert status["legacy_calls"] == 0
     assert status["accepted_targets"] == ["django/contrib/auth/validators.py"]
     assert status["blocked_tool_reason"]
+
+
+def test_formsy_engine_read_file_satisfies_pending_context_read_for_same_target():
+    engine = FormsyContextEngine()
+    engine._retrieval_state = "inspect_candidates"
+    engine._context_read_required = True
+    engine._context_read_followed = False
+    engine._retrieval_trace.accepted_targets = ["lib/ansible/executor/play_iterator.py"]
+    engine._retrieval_trace.exploration_closed = True
+
+    engine.observe_tool_result(
+        "read_file",
+        {"path": "/testbed/lib/ansible/executor/play_iterator.py"},
+        json.dumps({"content": "class PlayIterator: pass"}),
+    )
+
+    status = engine.get_retrieval_status()
+    assert status["context_read_required"] is False
+    assert status["context_read_followed"] is True
+    assert status["pending_followup_tool"] == "grounded_search"
+    assert "lib/ansible/executor/play_iterator.py" in status["grounded_files"]
+
+
+def test_formsy_engine_accept_done_clears_pending_retrieval_summary():
+    engine = FormsyContextEngine()
+    engine._retrieval_state = "inspect_candidates"
+    engine._context_read_required = True
+    engine._context_read_followed = False
+
+    engine.observe_tool_result(
+        "formsy_verify_completion",
+        {},
+        json.dumps({
+            "decision": "ACCEPT_DONE",
+            "completion_audit": {
+                "audit_status": "verified",
+                "gate_decision": "ACCEPT_DONE",
+            },
+        }) + "\n\n## FormSy Constraint Protocol\n- Decision: PATCH_ALLOWED_WITH_WARNINGS",
+    )
+
+    status = engine.get_retrieval_status()
+    assert status["coding_status"] == "verified"
+    assert status["context_read_required"] is False
+    assert status["pending_followup_tool"] == "none"
+
+
+def test_formsy_engine_records_ignored_seed_guidance_in_observe_only_mode():
+    engine = FormsyContextEngine()
+    engine._config = EngineConfig(retrieval_gate="observe_only")
+
+    engine.on_user_turn(
+        "<pr_description>Standardize PlayIterator state representation.</pr_description>"
+        "<instructions>Use context_search proactively.</instructions>"
+    )
+
+    before = engine.get_retrieval_status()
+    assert before["seed_required"] is True
+    assert before["seed_followed"] is False
+    assert before["first_nonseed_tool"] == "none"
+
+    assert engine.get_tool_block_message(
+        "read_file",
+        {"path": "lib/ansible/executor/play_iterator.py"},
+    ) is None
+
+    after = engine.get_retrieval_status()
+    assert after["seed_required"] is True
+    assert after["seed_followed"] is False
+    assert after["first_nonseed_tool"] == "read_file"
 
 
 def test_formsy_engine_context_read_falls_back_to_search_snippet():
@@ -1464,7 +2408,7 @@ def test_formsy_engine_degrades_instead_of_full_block_after_failed_grounded_sear
     assert grounded_result["retrieval_state"] == "degraded_recovery"
     assert grounded_result["preferred_next_step"] == "bounded_shell_inspection"
     assert engine.get_tool_block_message("terminal", {"command": "grep -R UsernameValidator django"}) is None
-    assert engine.get_tool_block_message("patch", {"path": "django/contrib/auth/validators.py"}) is not None
+    assert engine.get_tool_block_message("patch", {"path": "django/contrib/auth/validators.py"}) is None
 
 
 def test_formsy_engine_keeps_degraded_recovery_exploration_open_after_target_read():
@@ -1551,7 +2495,7 @@ def test_formsy_engine_keeps_degraded_recovery_exploration_open_after_target_rea
         "terminal",
         {"command": "grep -rn UsernameValidator django/contrib/auth"},
     ) is None
-    assert engine.get_tool_block_message("patch", {"path": "django/contrib/auth/validators.py"}) is not None
+    assert engine.get_tool_block_message("patch", {"path": "django/contrib/auth/validators.py"}) is None
     assert engine.get_tool_block_message("patch", {"path": "django/contrib/auth/forms.py"}) is not None
 
 
@@ -1574,10 +2518,133 @@ def test_formsy_engine_degraded_recovery_read_file_does_not_close_exploration():
         "read_file",
         {"path": "lib/ansible/plugins/strategy/linear.py"},
     ) is None
+
+
+def test_formsy_engine_degraded_recovery_enforces_probe_budget_and_patch_threshold():
+    engine = FormsyContextEngine()
+    engine._sync_trace_state(state="degraded_recovery")
+    engine._degraded_guidance_packet = {
+        "mode": "degraded_recovery",
+        "target_candidates": ["lib/ansible/executor/play_iterator.py"],
+        "likely_edit_files": ["lib/ansible/executor/play_iterator.py"],
+        "recommended_first_reads": ["lib/ansible/executor/play_iterator.py"],
+        "probe_budget": {
+            "search_files": 1,
+            "read_file": 2,
+            "terminal_or_execute_code": 2,
+        },
+        "patch_now_threshold": {"grounded_source_reads": 1},
+    }
+
+    assert engine.get_tool_block_message(
+        "search_files",
+        {"pattern": "PlayIterator", "path": "lib/ansible"},
+    ) is None
+    engine.observe_tool_result(
+        "search_files",
+        {"pattern": "PlayIterator", "path": "lib/ansible"},
+        json.dumps({"total_count": 1}),
+    )
+    blocked_search = engine.get_tool_block_message(
+        "search_files",
+        {"pattern": "FAILED_", "path": "lib/ansible"},
+    )
+
+    assert engine.get_tool_block_message(
+        "execute_code",
+        {"code": "print('probe 1')"},
+    ) is None
+    engine.observe_tool_result(
+        "execute_code",
+        {"code": "print('probe 1')"},
+        json.dumps({"status": "success"}),
+    )
+    assert engine.get_tool_block_message(
+        "terminal",
+        {"command": "python3 - <<'PY'\nprint('probe 2')\nPY"},
+    ) is None
+    engine.observe_tool_result(
+        "terminal",
+        {"command": "python3 - <<'PY'\nprint('probe 2')\nPY"},
+        json.dumps({"output": "ok", "exit_code": 0}),
+    )
+    blocked_probe = engine.get_tool_block_message(
+        "execute_code",
+        {"code": "print('probe 3')"},
+    )
+
+    assert engine.get_tool_block_message(
+        "read_file",
+        {"path": "lib/ansible/executor/play_iterator.py"},
+    ) is None
+    engine.observe_tool_result(
+        "read_file",
+        {"path": "lib/ansible/executor/play_iterator.py"},
+        json.dumps({"content": "class PlayIterator: ..."}),
+    )
+    edit_target = engine.get_tool_block_message(
+        "patch",
+        {"path": "lib/ansible/executor/play_iterator.py"},
+    )
+    edit_other = engine.get_tool_block_message(
+        "patch",
+        {"path": "lib/ansible/plugins/strategy/linear.py"},
+    )
+
+    assert blocked_search is not None
+    assert "degraded recovery search_files budget is exhausted" in blocked_search
+    assert blocked_probe is not None
+    assert "degraded recovery probe budget is exhausted" in blocked_probe
+    assert edit_target is None
+    assert edit_other is not None
+    assert "patch the grounded target" in edit_other
     assert engine.get_tool_block_message(
         "terminal",
         {"command": "grep -rn \"PlayIterator\\.\" lib/ansible/executor/ lib/ansible/plugins/strategy/"},
-    ) is None
+    ) is not None
+
+
+def test_formsy_engine_degraded_patch_allowed_prefers_accepted_edit_targets():
+    engine = FormsyContextEngine()
+    engine._sync_trace_state(state="degraded_recovery")
+    engine._degraded_guidance_packet = {
+        "mode": "degraded_recovery",
+        "target_candidates": [
+            "lib/ansible/executor/play_iterator.py",
+            "lib/ansible/plugins/strategy/linear.py",
+        ],
+        "accepted_edit_targets": ["lib/ansible/executor/play_iterator.py"],
+        "likely_edit_files": ["lib/ansible/executor/play_iterator.py"],
+        "probe_budget": {
+            "search_files": 1,
+            "read_file": 2,
+            "terminal_or_execute_code": 2,
+        },
+        "patch_now_threshold": {"grounded_source_reads": 1},
+    }
+    engine.observe_tool_result(
+        "read_file",
+        {"path": "lib/ansible/executor/play_iterator.py"},
+        json.dumps({"content": "class PlayIterator: ..."}),
+    )
+    engine.observe_tool_result(
+        "read_file",
+        {"path": "lib/ansible/plugins/strategy/linear.py"},
+        json.dumps({"content": "class StrategyModule: ..."}),
+    )
+
+    edit_primary = engine.get_tool_block_message(
+        "patch",
+        {"path": "lib/ansible/executor/play_iterator.py"},
+    )
+    edit_context_file = engine.get_tool_block_message(
+        "patch",
+        {"path": "lib/ansible/plugins/strategy/linear.py"},
+    )
+
+    assert edit_primary is None
+    assert edit_context_file is not None
+    assert "unrelated editing remains blocked" in edit_context_file
 
 
 def test_formsy_engine_memory_read_tool_queries_runtime():
@@ -1601,6 +2668,7 @@ def test_formsy_engine_memory_read_tool_queries_runtime():
         "query_budget": 4000,
     })()
     engine._session_id = "session-123"
+    engine._retrieval_trace.seed_calls = 1
 
     result = engine.handle_tool_call(
         "context_read",
@@ -1624,6 +2692,53 @@ def test_formsy_engine_memory_read_tool_queries_runtime():
         "start_line": 10,
         "end_line": 12,
     }]
+
+
+def test_formsy_engine_memory_read_renders_context_meta_source_header():
+    engine = FormsyContextEngine()
+
+    class FakeClient:
+        async def memory_read(self, **kwargs):
+            return {
+                "path": "parser.py",
+                "start_line": 10,
+                "end_line": 12,
+                "total_lines": 30,
+                "content": "def parse():\n    return state",
+                "context_meta": {
+                    "source": "compiled_repo",
+                    "source_freshness": "compiled",
+                    "working_tree_alignment": "unknown",
+                    "read_key": "parser.py:10-12",
+                },
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "django__django-14053",
+        "revision": "latest",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+    engine._retrieval_trace.seed_calls = 1
+
+    result = engine.handle_tool_call(
+        "context_read",
+        {
+            "path": "parser.py",
+            "repo_id": "django__django-14053",
+            "start_line": 10,
+            "end_line": 12,
+        },
+    )
+
+    assert result.startswith("## FormSy Context Source")
+    assert "source: compiled_repo" in result
+    assert "source_freshness: compiled" in result
+    assert "working_tree_alignment: unknown" in result
+    assert "read_key: parser.py:10-12" in result
+    assert "verify current workspace before patching" in result
+    assert "ok: true" in result
 
 
 def test_formsy_engine_client_forwards_memory_read():
@@ -1689,7 +2804,7 @@ def test_formsy_config_loads_global_formsy_config_when_session_kwargs_do_not_inc
     assert config.timeout_s == 45
 
 
-def test_formsy_engine_blocks_terminal_file_read_bypass_after_grounding():
+def test_formsy_engine_allows_explicit_terminal_supplemental_read_after_grounding():
     engine = FormsyContextEngine()
     engine._sync_trace_state(state="grounded")
     engine._set_accepted_targets(
@@ -1710,13 +2825,14 @@ def test_formsy_engine_blocks_terminal_file_read_bypass_after_grounding():
         {"command": "cat patch.txt"},
     ) is None
 
-    blocked = engine.get_tool_block_message(
+    supplemental_path = "django/contrib/staticfiles/management/commands/collectstatic.py"
+    allowed = engine.get_tool_block_message(
         "terminal",
-        {"command": "cat django/contrib/staticfiles/management/commands/collectstatic.py"},
+        {"command": f"cat {supplemental_path}"},
     )
 
-    assert blocked is not None
-    assert "terminal file reads are limited" in blocked
+    assert allowed is None
+    assert supplemental_path in engine._retrieval_trace.supplemental_read_files
 
 
 def test_formsy_engine_blocks_terminal_write_bypass_after_grounding():
@@ -1734,6 +2850,308 @@ def test_formsy_engine_blocks_terminal_write_bypass_after_grounding():
 
     assert blocked is not None
     assert "terminal writes are blocked" in blocked
+
+
+def test_formsy_engine_allows_safe_patch_artifact_git_diff_after_grounding_without_unsafe_redirect():
+    engine = FormsyContextEngine()
+    engine._sync_trace_state(state="grounded")
+    engine._set_accepted_targets(["lib/ansible/executor/play_iterator.py"])
+    accepted_patch = (
+        "diff --git a/lib/ansible/executor/play_iterator.py b/lib/ansible/executor/play_iterator.py\n"
+        "--- a/lib/ansible/executor/play_iterator.py\n"
+        "+++ b/lib/ansible/executor/play_iterator.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+    unrelated_patch = (
+        "diff --git a/lib/ansible/plugins/strategy/free.py b/lib/ansible/plugins/strategy/free.py\n"
+        "--- a/lib/ansible/plugins/strategy/free.py\n"
+        "+++ b/lib/ansible/plugins/strategy/free.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+    patch_artifact_command = (
+        "cd /Users/wayneliu/dev/ansible && "
+        "git diff -- lib/ansible/executor/play_iterator.py > patch.txt && cat patch.txt"
+    )
+
+    allowed = engine.get_tool_block_message(
+        "terminal",
+        {
+            "command": (
+                "cd /Users/wayneliu/dev/ansible && "
+                "git diff -- lib/ansible/executor/play_iterator.py"
+            )
+        },
+    )
+    patch_artifact = engine.get_tool_block_message(
+        "terminal",
+        {"command": patch_artifact_command},
+    )
+    tee_artifact = engine.get_tool_block_message(
+        "terminal",
+        {
+            "command": (
+                "cd /Users/wayneliu/dev/ansible && "
+                "git diff -- lib/ansible/executor/play_iterator.py | tee patch.txt"
+            )
+        },
+    )
+    unsafe_redirect = engine.get_tool_block_message(
+        "terminal",
+        {
+            "command": (
+                "cd /Users/wayneliu/dev/ansible && "
+                "git diff -- lib/ansible/executor/play_iterator.py > "
+                "lib/ansible/executor/play_iterator.py"
+            )
+        },
+    )
+    unsafe_pathspec = engine.get_tool_block_message(
+        "terminal",
+        {
+            "command": (
+                "cd /Users/wayneliu/dev/ansible && "
+                "git diff -- lib/ansible/plugins/strategy/free.py > patch.txt"
+            )
+        },
+    )
+    write_patch_artifact = engine.get_tool_block_message(
+        "write_file",
+        {"path": "patch.txt", "content": accepted_patch},
+    )
+    unsafe_write_patch_artifact = engine.get_tool_block_message(
+        "write_file",
+        {"path": "patch.txt", "content": unrelated_patch},
+    )
+    arbitrary_patch_txt = engine.get_tool_block_message(
+        "write_file",
+        {"path": "patch.txt", "content": "not a diff"},
+    )
+
+    assert allowed is None
+    assert patch_artifact is None
+    assert tee_artifact is None
+    assert write_patch_artifact is None
+    assert unsafe_redirect is not None
+    assert "terminal writes are blocked" in unsafe_redirect
+    assert unsafe_pathspec is not None
+    assert "terminal writes are blocked" in unsafe_pathspec
+    assert unsafe_write_patch_artifact is not None
+    assert "editing is limited to accepted targets" in unsafe_write_patch_artifact
+    assert arbitrary_patch_txt is not None
+    assert "editing is limited to accepted targets" in arbitrary_patch_txt
+
+    for _ in range(2):
+        engine.observe_tool_result(
+            "terminal",
+            {"command": patch_artifact_command},
+            json.dumps({"output": "diff", "exit_code": 0, "error": None}),
+        )
+    assert engine.get_tool_block_message(
+        "terminal",
+        {"command": patch_artifact_command},
+    ) is None
+
+
+def test_formsy_engine_write_scope_policy_allows_delivery_artifact_locations():
+    engine = FormsyContextEngine()
+    engine._sync_trace_state(state="grounded")
+    engine._set_accepted_targets(["lib/ansible/executor/play_iterator.py"])
+    accepted_patch = (
+        "diff --git a/lib/ansible/executor/play_iterator.py b/lib/ansible/executor/play_iterator.py\n"
+        "--- a/lib/ansible/executor/play_iterator.py\n"
+        "+++ b/lib/ansible/executor/play_iterator.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+    unrelated_patch = (
+        "diff --git a/lib/ansible/plugins/strategy/free.py b/lib/ansible/plugins/strategy/free.py\n"
+        "--- a/lib/ansible/plugins/strategy/free.py\n"
+        "+++ b/lib/ansible/plugins/strategy/free.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    write_artifact = engine.get_tool_block_message(
+        "write_file",
+        {
+            "path": ".formsy/artifacts/task-1/submission.patch",
+            "content": accepted_patch,
+        },
+    )
+    terminal_artifact = engine.get_tool_block_message(
+        "terminal",
+        {
+            "command": (
+                "git diff -- lib/ansible/executor/play_iterator.py "
+                "> .formsy/artifacts/task-1/submission.patch"
+            )
+        },
+    )
+    unsafe_content = engine.get_tool_block_message(
+        "write_file",
+        {
+            "path": ".formsy/artifacts/task-1/submission.patch",
+            "content": unrelated_patch,
+        },
+    )
+
+    assert write_artifact is None
+    assert terminal_artifact is None
+    assert unsafe_content is not None
+    assert "editing is limited to accepted targets" in unsafe_content
+
+
+def test_formsy_engine_write_scope_policy_allows_scratch_writes_only_in_formsy_tmp():
+    engine = FormsyContextEngine()
+    engine._sync_trace_state(state="grounded")
+    engine._set_accepted_targets(["lib/ansible/executor/play_iterator.py"])
+
+    scratch_write = engine.get_tool_block_message(
+        "write_file",
+        {"path": ".formsy/tmp/task-1/repro.py", "content": "print('repro')\n"},
+    )
+    root_write = engine.get_tool_block_message(
+        "write_file",
+        {"path": "repro.py", "content": "print('repro')\n"},
+    )
+    escaping_scratch_write = engine.get_tool_block_message(
+        "write_file",
+        {"path": ".formsy/tmp/task-1/../../repro.py", "content": "print('repro')\n"},
+    )
+
+    assert scratch_write is None
+    assert root_write is not None
+    assert "editing is limited to accepted targets" in root_write
+    assert escaping_scratch_write is not None
+    assert "editing is limited to accepted targets" in escaping_scratch_write
+
+
+def test_formsy_engine_treats_testbed_absolute_paths_as_workspace_relative():
+    engine = FormsyContextEngine()
+    engine._config = EngineConfig(retrieval_gate="observe_only")
+
+    scratch_script = engine.get_tool_block_message(
+        "write_file",
+        {"path": "/testbed/test_patch.py", "content": "print('ok')\n"},
+    )
+
+    assert scratch_script is None
+    assert WriteScopePolicy.normalize_repo_path("/testbed/lib/ansible/executor/play_iterator.py") == (
+        "lib/ansible/executor/play_iterator.py"
+    )
+
+
+def test_formsy_engine_treats_absolute_paths_under_cwd_as_workspace_relative(tmp_path, monkeypatch):
+    workspace = tmp_path / "repo"
+    target = workspace / "lib/ansible/executor/play_iterator.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("# source\n")
+    monkeypatch.chdir(workspace)
+
+    assert WriteScopePolicy.normalize_repo_path(str(target)) == (
+        "lib/ansible/executor/play_iterator.py"
+    )
+
+    engine = FormsyContextEngine()
+    engine._config = EngineConfig(retrieval_gate="observe_only")
+
+    allowed = engine.get_tool_block_message(
+        "patch",
+        {"path": str(target), "old_string": "# source\n", "new_string": "# changed\n"},
+    )
+
+    assert allowed is None
+
+
+def test_formsy_engine_allows_cd_prefixed_python3_pytest_after_grounding():
+    engine = FormsyContextEngine()
+    engine._sync_trace_state(state="grounded")
+    engine._set_accepted_targets(["lib/ansible/executor/play_iterator.py"])
+
+    allowed = engine.get_tool_block_message(
+        "terminal",
+        {
+            "command": (
+                "cd /testbed && python3 -m pytest "
+                "test/units/executor/test_play_iterator.py -x -q --tb=short"
+            )
+        },
+    )
+    blocked = engine.get_tool_block_message(
+        "terminal",
+        {"command": "cd /testbed && python3 -c \"print('probe')\""},
+    )
+
+    assert allowed is None
+    assert blocked is not None
+    assert "runtime probes are limited to accepted target modules" in blocked
+
+
+def test_formsy_engine_allows_bounded_runtime_probe_for_accepted_target_module_after_grounding():
+    engine = FormsyContextEngine()
+    engine._sync_trace_state(state="grounded")
+    engine._set_accepted_targets(["lib/ansible/executor/play_iterator.py"])
+
+    command = (
+        "python3 -c \"import os; os.chdir('/testbed'); "
+        "from ansible.executor.play_iterator import PlayIterator; "
+        "print(PlayIterator.ITERATING_SETUP); print(PlayIterator.FAILED_SETUP)\""
+    )
+
+    assert engine.get_tool_block_message("terminal", {"command": command}) is None
+    assert engine._retrieval_trace.runtime_probe_commands == [command]
+
+
+def test_formsy_engine_blocks_runtime_probe_for_unaccepted_module_after_grounding():
+    engine = FormsyContextEngine()
+    engine._sync_trace_state(state="grounded")
+    engine._set_accepted_targets(["lib/ansible/executor/play_iterator.py"])
+
+    blocked = engine.get_tool_block_message(
+        "terminal",
+        {
+            "command": (
+                "python3 -c \"from ansible.plugins.strategy.linear import StrategyModule; "
+                "print(StrategyModule)\""
+            )
+        },
+    )
+
+    assert blocked is not None
+    assert "runtime probes are limited to accepted target modules" in blocked
+
+
+def test_formsy_engine_enforces_runtime_probe_budget_after_grounding():
+    engine = FormsyContextEngine()
+    engine._sync_trace_state(state="grounded")
+    engine._set_accepted_targets(["lib/ansible/executor/play_iterator.py"])
+    engine._retrieval_trace.runtime_probe_limit = 2
+
+    first = (
+        "python3 -c \"from ansible.executor.play_iterator import PlayIterator; "
+        "print(PlayIterator.ITERATING_SETUP)\""
+    )
+    second = (
+        "python3 -c \"from ansible.executor.play_iterator import PlayIterator; "
+        "print(PlayIterator.FAILED_SETUP)\""
+    )
+    third = (
+        "python3 -c \"from ansible.executor.play_iterator import PlayIterator; "
+        "print(PlayIterator.ITERATING_TASKS)\""
+    )
+
+    assert engine.get_tool_block_message("terminal", {"command": first}) is None
+    assert engine.get_tool_block_message("terminal", {"command": second}) is None
+    blocked = engine.get_tool_block_message("terminal", {"command": third})
+
+    assert blocked is not None
+    assert "runtime probe budget is exhausted" in blocked
 
 
 def test_formsy_engine_blocks_terminal_source_introspection_after_grounding():
@@ -1791,7 +3209,7 @@ def test_formsy_engine_keeps_grounded_after_reading_accepted_target():
         {"command": "python3 -c \"print('hello')\""},
     )
     assert blocked is not None
-    assert "ad-hoc python -c probes are blocked" in blocked
+    assert "runtime probes are limited to accepted target modules" in blocked
 
 
 def test_formsy_engine_blocks_repeated_passed_test_until_next_edit():
@@ -1836,6 +3254,410 @@ def test_formsy_engine_blocks_generic_terminal_after_grounding():
 
     assert blocked is not None
     assert "terminal commands after grounding are limited" in blocked
+
+
+def test_formsy_engine_allows_grounded_read_only_context_but_not_edits():
+    engine = FormsyContextEngine()
+
+    class FakeClient:
+        async def compile_status(self, **kwargs):
+            return {"parsed_file_count": 1000, "metadata": {}}
+
+        async def memory_search(self, **kwargs):
+            return {
+                "coverage": "partial",
+                "matches": [
+                    {"path": "lib/ansible/executor/play_iterator.py"},
+                    {"path": "lib/ansible/plugins/strategy/linear.py"},
+                ],
+                "accepted_targets": ["lib/ansible/executor/play_iterator.py"],
+                "exploration_closed": True,
+                "retrieval_state": "grounded",
+                "preferred_next_step": "edit",
+                "bundle": {
+                    "primary_files": [
+                        {
+                            "path": "lib/ansible/executor/play_iterator.py",
+                            "priority": "must_edit",
+                        }
+                    ],
+                },
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "cd64e0b070f8630e1dcc021e594ed42ea7afe304",
+        "query_budget": 4000,
+    })()
+
+    result = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {
+                "query": "PlayIterator strategy state usage",
+                "metadata": {
+                    "retrieval_mode": "symbolic",
+                    "grounding_phase": "grounded",
+                    "grounded_files": ["lib/ansible/executor/play_iterator.py"],
+                },
+            },
+        )
+    )
+
+    assert result["retrieval_state"] == "grounded"
+    assert engine.get_tool_block_message(
+        "context_read",
+        {"path": "lib/ansible/plugins/strategy/linear.py"},
+    ) is None
+    assert engine.get_tool_block_message(
+        "read_file",
+        {"path": "lib/ansible/plugins/strategy/linear.py"},
+    ) is None
+    assert engine.get_tool_block_message(
+        "terminal",
+        {
+            "command": (
+                "cd /testbed && grep -n \"ITERATING_\\|FAILED_\" "
+                "lib/ansible/plugins/strategy/linear.py | head -n 40"
+            )
+        },
+    ) is None
+
+    blocked = engine.get_tool_block_message(
+        "write_file",
+        {"path": "lib/ansible/plugins/strategy/linear.py"},
+    )
+
+    assert blocked is not None
+    assert "editing is limited to accepted targets" in blocked
+
+    supplemental_grep = engine.get_tool_block_message(
+        "terminal",
+        {
+            "command": (
+                "cd /testbed && grep -n \"ITERATING_\\|FAILED_\" "
+                "lib/ansible/plugins/strategy/__init__.py | head -n 40"
+            )
+        },
+    )
+
+    assert supplemental_grep is None
+    assert "lib/ansible/plugins/strategy/__init__.py" in engine._retrieval_trace.supplemental_read_files
+
+
+def test_formsy_engine_allows_limited_supplemental_read_after_grounding_but_not_edits():
+    engine = FormsyContextEngine()
+
+    class FakeClient:
+        async def compile_status(self, **kwargs):
+            return {"parsed_file_count": 1000, "metadata": {}}
+
+        async def memory_search(self, **kwargs):
+            return {
+                "coverage": "partial",
+                "matches": [
+                    {"path": "lib/ansible/executor/play_iterator.py"},
+                    {"path": "lib/ansible/plugins/strategy/linear.py"},
+                ],
+                "accepted_targets": ["lib/ansible/executor/play_iterator.py"],
+                "exploration_closed": True,
+                "retrieval_state": "grounded",
+                "preferred_next_step": "edit",
+                "bundle": {
+                    "primary_files": [
+                        {
+                            "path": "lib/ansible/executor/play_iterator.py",
+                            "priority": "must_edit",
+                        }
+                    ],
+                },
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "cd64e0b070f8630e1dcc021e594ed42ea7afe304",
+        "query_budget": 4000,
+    })()
+
+    engine.handle_tool_call(
+        "context_search",
+        {
+            "query": "PlayIterator public state constants",
+            "metadata": {
+                "retrieval_mode": "symbolic",
+                "grounding_phase": "grounded",
+                "grounded_files": ["lib/ansible/executor/play_iterator.py"],
+            },
+        },
+    )
+
+    supplemental_path = "lib/ansible/plugins/strategy/free.py"
+    assert engine.get_tool_block_message("read_file", {"path": supplemental_path}) is None
+    assert supplemental_path in engine._retrieval_trace.supplemental_read_files
+    assert engine.get_tool_block_message("context_read", {"path": supplemental_path}) is None
+    assert engine.get_tool_block_message(
+        "terminal",
+        {"command": f"grep -n \"PlayIterator\\.\" {supplemental_path}"},
+    ) is None
+    assert engine.get_tool_block_message(
+        "terminal",
+        {"command": f"python -m py_compile {supplemental_path} && echo ok"},
+    ) is None
+
+    edit_blocked = engine.get_tool_block_message("patch", {"path": supplemental_path})
+    unrelated_compile_blocked = engine.get_tool_block_message(
+        "terminal",
+        {"command": "python -m py_compile lib/ansible/plugins/connection/ssh.py"},
+    )
+
+    assert edit_blocked is not None
+    assert "editing is limited to accepted targets" in edit_blocked
+    assert unrelated_compile_blocked is not None
+    assert "terminal commands after grounding are limited" in unrelated_compile_blocked
+
+
+def test_formsy_engine_enforces_supplemental_read_budget_after_grounding():
+    engine = FormsyContextEngine()
+    engine._sync_trace_state(state="grounded")
+    engine._set_accepted_targets(["lib/ansible/executor/play_iterator.py"])
+
+    supplemental_paths = [
+        "lib/ansible/plugins/strategy/free.py",
+        "lib/ansible/plugins/strategy/debug.py",
+        "lib/ansible/plugins/strategy/linear.py",
+        "lib/ansible/plugins/strategy/host_pinned.py",
+        "lib/ansible/plugins/strategy/mitogen_linear.py",
+    ]
+    for path in supplemental_paths:
+        assert engine.get_tool_block_message("read_file", {"path": path}) is None
+
+    blocked = engine.get_tool_block_message(
+        "read_file",
+        {"path": "lib/ansible/plugins/strategy/extra.py"},
+    )
+
+    assert blocked is not None
+    assert "supplemental read budget is exhausted" in blocked
+    assert engine._retrieval_trace.supplemental_read_files == supplemental_paths
+
+
+def test_formsy_engine_blocks_unsafe_supplemental_read_paths_after_grounding():
+    engine = FormsyContextEngine()
+    engine._sync_trace_state(state="grounded")
+    engine._set_accepted_targets(["lib/ansible/executor/play_iterator.py"])
+
+    unsafe_paths = [
+        "/tmp/free.py",
+        "../free.py",
+        "lib/ansible/plugins/strategy",
+        "lib/ansible/plugins/strategy/*.py",
+        "lib/ansible/plugins/strategy/free.py other.py",
+    ]
+
+    for path in unsafe_paths:
+        blocked = engine.get_tool_block_message("read_file", {"path": path})
+        assert blocked is not None
+        assert "supplemental read requires one explicit repo-relative file path" in blocked
+
+    recursive_grep = engine.get_tool_block_message(
+        "terminal",
+        {"command": "grep -R \"PlayIterator\" lib/ansible/plugins/strategy"},
+    )
+    multi_file_cat = engine.get_tool_block_message(
+        "terminal",
+        {
+            "command": (
+                "cat lib/ansible/plugins/strategy/free.py "
+                "lib/ansible/plugins/strategy/linear.py"
+            )
+        },
+    )
+    multi_file_grep = engine.get_tool_block_message(
+        "terminal",
+        {
+            "command": (
+                "grep -n \"PlayIterator\" lib/ansible/plugins/strategy/free.py "
+                "lib/ansible/plugins/strategy/linear.py"
+            )
+        },
+    )
+
+    assert recursive_grep is not None
+    assert "broad grep/find/search commands are blocked" in recursive_grep
+    assert multi_file_cat is not None
+    assert "terminal commands after grounding are limited" in multi_file_cat
+    assert multi_file_grep is not None
+    assert "broad grep/find/search commands are blocked" in multi_file_grep
+
+
+def test_formsy_engine_does_not_replace_accepted_target_with_later_context_search():
+    engine = FormsyContextEngine()
+
+    class FakeClient:
+        async def compile_status(self, **kwargs):
+            return {"parsed_file_count": 1000, "metadata": {}}
+
+        async def memory_search(self, **kwargs):
+            query = kwargs["query"]
+            if "display.deprecated" in query:
+                return {
+                    "coverage": "partial",
+                    "matches": [
+                        {"path": "lib/ansible/utils/display.py"},
+                    ],
+                    "accepted_targets": ["lib/ansible/utils/display.py"],
+                    "exploration_closed": True,
+                    "retrieval_state": "grounded",
+                    "preferred_next_step": "edit",
+                    "bundle": {
+                        "primary_files": [
+                            {
+                                "path": "lib/ansible/utils/display.py",
+                                "priority": "must_edit",
+                            }
+                        ],
+                    },
+                }
+            return {
+                "coverage": "partial",
+                "matches": [
+                    {"path": "lib/ansible/executor/play_iterator.py"},
+                    {"path": "lib/ansible/plugins/strategy/linear.py"},
+                ],
+                "accepted_targets": ["lib/ansible/executor/play_iterator.py"],
+                "exploration_closed": True,
+                "retrieval_state": "grounded",
+                "preferred_next_step": "edit",
+                "bundle": {
+                    "primary_files": [
+                        {
+                            "path": "lib/ansible/executor/play_iterator.py",
+                            "priority": "must_edit",
+                        }
+                    ],
+                },
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "cd64e0b070f8630e1dcc021e594ed42ea7afe304",
+        "query_budget": 4000,
+    })()
+
+    first = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {
+                "query": "PlayIterator states",
+                "metadata": {
+                    "retrieval_mode": "symbolic",
+                    "grounding_phase": "grounded",
+                    "grounded_files": ["lib/ansible/executor/play_iterator.py"],
+                },
+            },
+        )
+    )
+    assert first["accepted_targets"] == ["lib/ansible/executor/play_iterator.py"]
+
+    second = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {
+                "query": "display.deprecated ansible utils display",
+                "metadata": {
+                    "retrieval_mode": "symbolic",
+                    "grounding_phase": "grounded",
+                    "grounded_files": ["lib/ansible/utils/display.py"],
+                },
+            },
+        )
+    )
+
+    assert second["accepted_targets"] == ["lib/ansible/executor/play_iterator.py"]
+    assert engine.get_tool_block_message(
+        "read_file",
+        {"path": "lib/ansible/executor/play_iterator.py"},
+    ) is None
+    assert engine.get_tool_block_message(
+        "patch",
+        {"path": "lib/ansible/executor/play_iterator.py"},
+    ) is None
+    assert engine.get_tool_block_message(
+        "read_file",
+        {"path": "lib/ansible/utils/display.py"},
+    ) is None
+
+    blocked = engine.get_tool_block_message(
+        "patch",
+        {"path": "lib/ansible/utils/display.py"},
+    )
+
+    assert blocked is not None
+    assert "editing is limited to accepted targets" in blocked
+
+
+def test_formsy_engine_blocks_execute_code_tool_bypass_after_grounding():
+    engine = FormsyContextEngine()
+    engine._sync_trace_state(state="grounded")
+    engine._set_accepted_targets(
+        ["lib/ansible/executor/play_iterator.py"],
+        test_plan_files=["test/units/executor/test_play_iterator.py"],
+    )
+
+    search_blocked = engine.get_tool_block_message(
+        "execute_code",
+        {
+            "code": (
+                "from hermes_tools import search_files\n"
+                "search_files(pattern='PlayIterator', path='lib/ansible')\n"
+            )
+        },
+    )
+    write_blocked = engine.get_tool_block_message(
+        "execute_code",
+        {
+            "code": (
+                "with open('lib/ansible/executor/play_iterator.py', 'w') as f:\n"
+                "    f.write('new source')\n"
+            )
+        },
+    )
+    walk_blocked = engine.get_tool_block_message(
+        "execute_code",
+        {
+            "code": (
+                "import os\n"
+                "for root, dirs, files in os.walk('lib/ansible'):\n"
+                "    print(root)\n"
+            )
+        },
+    )
+    read_blocked = engine.get_tool_block_message(
+        "execute_code",
+        {
+            "code": (
+                "with open('lib/ansible/plugins/strategy/linear.py') as f:\n"
+                "    print(f.read())\n"
+            )
+        },
+    )
+    sanity_allowed = engine.get_tool_block_message(
+        "execute_code",
+        {"code": "import os\nprint(os.getcwd())\n"},
+    )
+
+    assert search_blocked is not None
+    assert "execute_code cannot use hermes_tools" in search_blocked
+    assert write_blocked is not None
+    assert "execute_code file writes are blocked" in write_blocked
+    assert walk_blocked is not None
+    assert "execute_code filesystem reads are blocked" in walk_blocked
+    assert read_blocked is not None
+    assert "execute_code filesystem reads are blocked" in read_blocked
+    assert sanity_allowed is None
 
 
 def test_formsy_engine_allows_one_grounded_recovery_search_after_test_failure():

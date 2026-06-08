@@ -165,5 +165,7 @@ exclude = ["tinker-atropos"]
 exclude = ["tinker-atropos"]
 select = [] # disable all lints for now, until we've wrangled typechecks a bit more :3
 
-[tool.uv]
-exclude-newer = "7 days"
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true

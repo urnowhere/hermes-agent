@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from plugins.formsy.identity import derive_formsy_identity
+
 logger = logging.getLogger(__name__)
 
 _TEST_COMMAND_RE = re.compile(
@@ -171,6 +173,8 @@ class TaskState:
     session_id: str
     run_id: str
     task_id: str
+    case_id: str = ""
+    case_id_source: str = ""
     started_at_ms: int = field(default_factory=_now_ms)
     ended_at_ms: int | None = None
     model: str = ""
@@ -214,7 +218,12 @@ class FormSyObservationReporter:
         if not self.enabled:
             return
         with self._lock:
-            state = self._ensure_state(session_id=session_id, model=model, platform=platform)
+            state = self._ensure_state(
+                session_id=session_id,
+                user_message=user_message,
+                model=model,
+                platform=platform,
+            )
             state.counters.turn_count += 1
             if is_first_turn and not state.first_task_label:
                 state.first_task_label = self._task_label(user_message)
@@ -326,23 +335,51 @@ class FormSyObservationReporter:
         *,
         session_id: str = "",
         task_id: str = "",
+        user_message: Any = None,
         model: str = "",
         platform: str = "",
     ) -> TaskState:
         sid = session_id or "default"
+        identity = derive_formsy_identity(
+            session_id=sid,
+            task_id=task_id,
+            user_message=user_message,
+            workspace_id=_workspace_id(),
+            repo_id=_repo_id(),
+            revision=_revision(),
+        )
         state = self._states.get(sid)
         if state is None:
-            stable_task = task_id or sid
             state = TaskState(
                 session_id=sid,
-                run_id=f"hermes_{sid}",
-                task_id=stable_task,
+                run_id=identity.run_id,
+                task_id=identity.task_id,
+                case_id=identity.case_id,
+                case_id_source=identity.case_id_source,
                 model=model or "",
                 platform=platform or "",
             )
             self._states[sid] = state
-        if task_id and state.task_id == state.session_id:
+        if task_id and task_id != state.task_id:
             state.task_id = task_id
+            if not state.case_id or state.case_id_source in {"", "fallback_hash"}:
+                state.case_id = task_id
+                state.case_id_source = "task_id_param"
+        if (
+            user_message is not None
+            and state.counters.turn_count == 0
+            and state.case_id_source in {"", "fallback_hash"}
+            and identity.case_id_source == "fallback_hash"
+        ):
+            state.task_id = identity.task_id
+            state.case_id = identity.case_id
+            state.case_id_source = identity.case_id_source
+            state.run_id = identity.run_id
+        if identity.case_id_source in {"case_id_param", "case_id_env", "parsed_case_id"}:
+            state.task_id = identity.task_id
+            state.case_id = identity.case_id
+            state.case_id_source = identity.case_id_source
+            state.run_id = identity.run_id
         if model:
             state.model = model
         if platform:
@@ -403,7 +440,7 @@ class FormSyObservationReporter:
             },
             "task": {
                 "task_kind": "coding",
-                "case_id": state.first_task_label or state.task_id,
+                "case_id": self._report_case_id(state),
                 "status": status,
                 "report_phase": report_phase,
             },
@@ -439,6 +476,12 @@ class FormSyObservationReporter:
                 "contains_shell_output": False,
             },
         }
+
+    @staticmethod
+    def _report_case_id(state: TaskState) -> str:
+        if state.case_id_source in {"case_id_param", "case_id_env", "parsed_case_id"}:
+            return state.case_id or state.task_id
+        return state.first_task_label or state.case_id or state.task_id
 
     def _submit_async(self, report: dict[str, Any]) -> None:
         thread = threading.Thread(
