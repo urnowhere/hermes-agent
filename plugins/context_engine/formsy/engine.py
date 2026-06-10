@@ -4148,8 +4148,14 @@ class FormsyContextEngine(ContextEngine):
             str(protocol.get("gate_decision") or "") if isinstance(protocol, dict) else "",
         ]
         audit_status = str(audit.get("audit_status") or "") if isinstance(audit, dict) else ""
-        if "ACCEPT_DONE" not in gate_decisions and audit_status != "verified":
+        accepted_decisions = {"ACCEPT_DONE", "ACCEPT_DONE_WITH_OVERRIDE"}
+        accepted = any(
+            item.strip().upper() in accepted_decisions
+            for item in gate_decisions
+        )
+        if not accepted and audit_status != "verified":
             return
+        self._notify_memory_providers_completion_verifier_result(payload)
         self._completion_accepted = True
         self._context_read_required = False
         self._grounded_search_required = False
@@ -4162,6 +4168,22 @@ class FormsyContextEngine(ContextEngine):
                 "completion_accepted": True,
             }
         )
+
+    def _notify_memory_providers_completion_verifier_result(
+        self,
+        payload: dict[str, Any],
+    ) -> None:
+        manager = self._memory_manager or self._context.get("memory_manager")
+        if manager is None or not hasattr(manager, "providers"):
+            return
+        for provider in manager.providers:
+            recorder = getattr(provider, "record_completion_verifier_result", None)
+            if not callable(recorder):
+                continue
+            try:
+                recorder(payload)
+            except Exception:
+                logger.debug("memory provider completion verifier recording failed", exc_info=True)
 
     @staticmethod
     def _parse_json_tool_result(result: Any) -> dict[str, Any] | None:

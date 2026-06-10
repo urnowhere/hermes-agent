@@ -116,6 +116,7 @@ class ConstraintKeeperCoordinator:
         self._code_probe_guidance_injected = False
         self._pending_guidance_text = ""
         self._pending_completion_projection_text = ""
+        self._completion_revalidation_pending = False
         self._task_closed = False
         self._active_context_directive: dict[str, Any] | None = None
         self._active_probe_budget_directive: dict[str, Any] | None = None
@@ -259,6 +260,8 @@ class ConstraintKeeperCoordinator:
         self._observe_skill_uptake(tool_name, args or {}, result)
         self._observe_guidance_signal(tool_name, args or {}, result)
         self._capture_guidance_packet(tool_name, result)
+        if tool_name == "formsy_verify_completion" and self._is_accepted(_result_dict(result)):
+            self._mark_completion_accepted_for_revalidation()
         self._record_probe_budget_event(tool_name, args or {})
         observed = self._tool_observed_event(tool_name, args or {}, result)
         if observed:
@@ -303,12 +306,12 @@ class ConstraintKeeperCoordinator:
             return replacement
         prefix_additions: list[str] = []
         suffix_additions: list[str] = []
-        if self.latest_protocol_text and self.latest_protocol_text != self._last_injected_protocol_text:
-            self._last_injected_protocol_text = self.latest_protocol_text
-            suffix_additions.append(self.latest_protocol_text)
         if self._pending_guidance_text:
             prefix_additions.append(self._pending_guidance_text)
             self._pending_guidance_text = ""
+        if self.latest_protocol_text and self.latest_protocol_text != self._last_injected_protocol_text:
+            self._last_injected_protocol_text = self.latest_protocol_text
+            suffix_additions.append(self.latest_protocol_text)
         if self._pending_completion_projection_text:
             suffix_additions.append(self._pending_completion_projection_text)
             self._pending_completion_projection_text = ""
@@ -333,10 +336,11 @@ class ConstraintKeeperCoordinator:
                 directive = self._materialize_grounding_next_action(query)
                 self._grounding_state = _GroundingState.GROUNDING_ADVISED
                 self._next_tool_visible_delivery_count = 1
-                context = self._with_formsy_context_skill_capsule(
-                    self._recommended_next_action_card(directive),
-                    session_id=session_id,
-                )
+                action_card = self._recommended_next_action_card(directive)
+                if self._completion_revalidation_pending:
+                    action_card = f"{self._workspace_revalidation_card()}\n\n{action_card}"
+                    self._completion_revalidation_pending = False
+                context = self._with_formsy_context_skill_capsule(action_card, session_id=session_id)
                 self._log_pre_llm_projection_delivered(
                     action_id=str(directive.get("action_id") or ""),
                     context=context,
@@ -657,6 +661,15 @@ class ConstraintKeeperCoordinator:
             self._last_injected_protocol_text = ""
             self.latest_diff_hash = ""
             self.recovery_open = False
+
+    @staticmethod
+    def _workspace_revalidation_card() -> str:
+        return (
+            "FormSy workspace revalidation required\n"
+            "- Do not claim this task is already completed from session history alone.\n"
+            "- First check the current working tree, e.g. git status --short or equivalent.\n"
+            "- Then call context_search to compare memory/verified recipes with current source before finalizing."
+        )
 
     def _mark_context_retrieval_seen(self) -> None:
         self._context_search_seen = True
@@ -1646,6 +1659,18 @@ class ConstraintKeeperCoordinator:
         # completion projection available until transform_tool_result injects it.
         self.latest_protocol_text = ""
         self._last_injected_protocol_text = ""
+        self.recovery_open = False
+
+    def _mark_completion_accepted_for_revalidation(self) -> None:
+        self._task_closed = True
+        self._grounding_state = _GroundingState.CLOSED
+        self._completion_revalidation_pending = True
+        self._active_context_directive = None
+        self._active_probe_budget_directive = None
+        self._active_next_tool_directive = None
+        self._next_tool_deviation_count = 0
+        self._next_tool_visible_delivery_count = 0
+        self._next_tool_failed = False
         self.recovery_open = False
 
     @staticmethod

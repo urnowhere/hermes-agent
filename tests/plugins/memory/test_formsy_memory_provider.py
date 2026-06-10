@@ -373,6 +373,56 @@ def test_local_memory_store_uses_completion_audit_for_solution_digest(tmp_path):
     assert "Prior patch touched: lib/ansible/executor/play_iterator.py" in block
 
 
+def test_sync_turn_consumes_recorded_completion_verifier_evidence():
+    provider = _make_provider()
+
+    provider.record_completion_verifier_result({
+        "decision": "ACCEPT_DONE",
+        "completion_audit": {
+            "audit_status": "verified",
+            "gate_decision": "ACCEPT_DONE",
+            "memory_write_allowed": True,
+            "memory_write_quality": "high",
+            "evidence": {"latest_diff_hash": "sha256:abc"},
+        },
+    })
+    provider.sync_turn(
+        "Standardize PlayIterator state representation",
+        "done",
+        accepted_targets=["lib/ansible/executor/play_iterator.py"],
+        changed_files=["lib/ansible/executor/play_iterator.py"],
+        patch_summary="diff --git a/lib/ansible/executor/play_iterator.py b/lib/ansible/executor/play_iterator.py\n",
+    )
+
+    summary = provider._memory_client.sync_calls[0]["coding_summary"]
+    assert summary is not None
+    assert summary.completion_gate_decision == "ACCEPT_DONE"
+    assert summary.completion_audit["audit_status"] == "verified"
+    assert summary.completion_audit["evidence"]["latest_diff_hash"] == "sha256:abc"
+
+
+def test_record_completion_verifier_result_synthesizes_minimal_audit():
+    provider = _make_provider()
+
+    provider.record_completion_verifier_result({"decision": "ACCEPT_DONE"})
+    provider.sync_turn(
+        "Standardize PlayIterator state representation",
+        "done",
+        accepted_targets=["lib/ansible/executor/play_iterator.py"],
+        changed_files=["lib/ansible/executor/play_iterator.py"],
+        patch_summary="diff --git a/lib/ansible/executor/play_iterator.py b/lib/ansible/executor/play_iterator.py\n",
+    )
+
+    summary = provider._memory_client.sync_calls[0]["coding_summary"]
+    assert summary.completion_gate_decision == "ACCEPT_DONE"
+    assert summary.completion_audit == {
+        "audit_status": "verified",
+        "gate_decision": "ACCEPT_DONE",
+        "memory_write_allowed": True,
+        "memory_write_quality": "medium",
+    }
+
+
 def test_local_memory_store_does_not_render_solution_digest_without_accepted_completion(tmp_path):
     first = _make_provider(session_id="session-1", hermes_home=tmp_path)
     first.sync_turn(

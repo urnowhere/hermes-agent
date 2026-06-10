@@ -2086,6 +2086,53 @@ def test_final_submit_block_message_includes_verifier_protocol_details(tmp_path)
     assert "Run blocking tests after the latest diff" in message
 
 
+def test_formsy_verify_completion_accepted_revalidates_next_user_task(tmp_path):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(),
+        spool_root=tmp_path,
+        identity=_identity(),
+        fail_closed_on_submit=True,
+    )
+    accepted = {
+        "decision": "ACCEPT_DONE",
+        "protocol": {
+            "state": "DONE_ACCEPTED",
+            "gate_decision": "ACCEPT_DONE",
+            "summary": "Completion proof satisfies P0 contracts.",
+        },
+        "completion_audit": {
+            "audit_status": "verified",
+            "gate_decision": "ACCEPT_DONE",
+            "memory_write_allowed": True,
+        },
+    }
+
+    coordinator.observe_tool_result(
+        "context_search",
+        {"query": "Fix PlayIterator public states"},
+        '{"ok": true}',
+        session_id="sess-1",
+    )
+    coordinator.observe_tool_result(
+        "formsy_verify_completion",
+        {},
+        accepted,
+        session_id="sess-1",
+    )
+
+    coordinator.on_user_turn(
+        user_message="<pr_description>Fix PlayIterator public states</pr_description>",
+        session_id="sess-1",
+    )
+    next_context = coordinator.pre_llm_call_context(session_id="sess-1")
+
+    assert next_context is not None
+    assert "FormSy workspace revalidation required" in next_context["context"]
+    assert "Do not claim this task is already completed from session history alone." in next_context["context"]
+    assert "git status --short" in next_context["context"]
+    assert "context_search" in next_context["context"]
+
+
 def test_final_submit_semantic_violation_adds_in_place_recovery_guidance(tmp_path):
     client = FakeClient()
     client.verify_response = {

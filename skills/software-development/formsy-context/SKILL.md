@@ -1,7 +1,7 @@
 ---
 name: formsy-context
 description: Use when solving non-trivial coding tasks in a workspace where FormSy context tools, context_search, context_read, or Completion Verifier are available or mentioned.
-version: 1.1.0
+version: 1.1.1
 author: Hermes Agent
 license: MIT
 compatibility: hermes
@@ -101,6 +101,15 @@ as permission for broad native exploration.
   - `git diff --check`
 - Avoid repeated full diff output or broad repository scans unless a validation
   failure makes them necessary.
+- **After a verifier rejection (e.g. `NEED_MORE_VALIDATION`)**: do not repeat
+  unchanged final output. Instead, inspect the diff for the specific contract
+  violation, fix it, and re-verify. Common FormSy semantic contract violations
+  include:
+  - Internal code still using legacy aliases after a backward-compat migration.
+  - Missing `__all__` updates, missing exports, or broken imports.
+  - Incomplete test coverage for new public types.
+  - `HostState.__init__` or similar constructors using deprecated constants
+    instead of new types.
 
 ## Completion Verifier
 

@@ -8,6 +8,7 @@ tool history that was lost when the TUI switched to a single-line spinner.
 import os
 import sys
 import importlib
+import json
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -187,3 +188,137 @@ class TestToolProgressScrollback:
         # First entry consumed, second remains
         assert len(cli._pending_tool_info.get("terminal", [])) == 1
         assert cli._pending_tool_info["terminal"][0] == {"command": "pwd"}
+
+    def test_cli_flush_prints_formsy_context_status(self):
+        """FormSy context_search completion is printed from the CLI thread flush."""
+        cli = _make_cli(tool_progress="all")
+        result = json.dumps({
+            "ok": True,
+            "query": "PlayIterator public states",
+            "coverage": "partial",
+            "memory_status": "hit",
+            "accepted_targets": ["lib/ansible/executor/play_iterator.py"],
+        })
+
+        with patch.object(_cli_mod, "_cprint_inline") as mock_print:
+            cli._on_tool_complete(
+                "tool-1",
+                "context_search",
+                {"query": "PlayIterator public states"},
+                result,
+            )
+            cli._flush_formsy_status_projection()
+
+        printed = "\n".join(str(call.args[0]) for call in mock_print.call_args_list)
+        assert "╭─ ◆ FormSy Context" in printed
+        assert "[FormSy] Context Pack ready" in printed
+        assert "Primary target: lib/ansible/executor/play_iterator.py" in printed
+        assert "╰" in printed
+
+    def test_cli_flush_prints_formsy_status_synchronously(self):
+        """FormSy status flush must not use the async cross-thread print helper."""
+        cli = _make_cli(tool_progress="all")
+        result = json.dumps({
+            "ok": True,
+            "query": "PlayIterator public states",
+            "coverage": "partial",
+            "memory_status": "hit",
+            "accepted_targets": ["lib/ansible/executor/play_iterator.py"],
+        })
+
+        with patch.object(_cli_mod, "_cprint") as mock_cprint, \
+             patch.object(_cli_mod, "_pt_print") as mock_pt_print:
+            cli._on_tool_complete(
+                "tool-1",
+                "context_search",
+                {"query": "PlayIterator public states"},
+                result,
+            )
+            cli._flush_formsy_status_projection()
+
+        mock_cprint.assert_not_called()
+        assert mock_pt_print.call_count >= 1
+
+    def test_cli_flush_merges_context_and_verified_recipe_in_one_card(self):
+        """A context_search recipe hit is rendered as one FormSy Context card."""
+        cli = _make_cli(tool_progress="all")
+        result = json.dumps({
+            "ok": True,
+            "query": "PlayIterator public states",
+            "coverage": "partial",
+            "memory_status": "hit",
+            "accepted_targets": ["lib/ansible/executor/play_iterator.py"],
+            "verified_solution_recipes": [{
+                "primary_edit_files": ["lib/ansible/executor/play_iterator.py"],
+            }],
+        })
+
+        with patch.object(_cli_mod, "_cprint_inline") as mock_print:
+            cli._on_tool_complete(
+                "tool-1",
+                "context_search",
+                {"query": "PlayIterator public states"},
+                result,
+            )
+            cli._flush_formsy_status_projection()
+
+        assert mock_print.call_count == 1
+        printed = str(mock_print.call_args.args[0])
+        assert printed.count("╭─ ◆ FormSy Context") == 1
+        assert "[FormSy] Context Pack ready" in printed
+        assert "[FormSy] Verified recipe available" in printed
+
+    def test_cli_tool_complete_logs_formsy_projection_count(self):
+        """FormSy status projection is observable even if terminal rendering hides it."""
+        cli = _make_cli(tool_progress="all")
+        result = json.dumps({
+            "ok": True,
+            "query": "PlayIterator public states",
+            "coverage": "partial",
+            "memory_status": "hit",
+            "accepted_targets": ["lib/ansible/executor/play_iterator.py"],
+        })
+
+        with patch.object(_cli_mod, "_cprint_inline"), \
+             patch.object(_cli_mod.logger, "info") as mock_info:
+            cli._on_tool_complete(
+                "tool-1",
+                "context_search",
+                {"query": "PlayIterator public states"},
+                result,
+            )
+
+        assert any(
+            call.args[:3] == (
+                "FormSy CLI status projection: tool=%s statuses=%d",
+                "context_search",
+                1,
+            )
+            for call in mock_info.call_args_list
+        )
+
+    def test_cli_flush_prints_formsy_finish_gate_status(self):
+        """Completion Verifier completion is printed from the CLI thread flush."""
+        cli = _make_cli(tool_progress="all")
+        result = json.dumps({
+            "decision": "ACCEPT_DONE",
+            "protocol": {
+                "summary": "Completion proof satisfies P0 contracts.",
+                "gate_decision": "ACCEPT_DONE",
+            },
+        })
+
+        with patch.object(_cli_mod, "_cprint_inline") as mock_print:
+            cli._on_tool_complete(
+                "tool-2",
+                "formsy_verify_completion",
+                {},
+                result,
+            )
+            cli._flush_formsy_status_projection()
+
+        printed = "\n".join(str(call.args[0]) for call in mock_print.call_args_list)
+        assert "╭─ ◆ FormSy Finish Gate" in printed
+        assert "[FormSy Finish Gate] Accepted" in printed
+        assert "Evidence: Completion proof satisfies P0 contracts." in printed
+        assert "╰" in printed

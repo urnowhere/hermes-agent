@@ -600,6 +600,103 @@ def test_status_callback_accepts_single_message_argument():
     )
 
 
+def test_context_search_tool_completion_emits_formsy_context_status():
+    result = json.dumps({
+        "ok": True,
+        "query": "PlayIterator public states",
+        "coverage": "partial",
+        "memory_status": "hit",
+        "accepted_targets": ["lib/ansible/executor/play_iterator.py"],
+        "verified_solution_recipes": [{
+            "schema": "formsy.verified_solution_recipe.v1",
+            "primary_edit_files": ["lib/ansible/executor/play_iterator.py"],
+        }],
+    })
+
+    with patch("tui_gateway.server._emit") as emit:
+        server._on_tool_complete(
+            "sid",
+            "tool-1",
+            "context_search",
+            {"query": "PlayIterator public states"},
+            result,
+        )
+
+    emit.assert_any_call(
+        "status.update",
+        "sid",
+        {
+            "kind": "formsy.context_ready",
+            "text": (
+                "[FormSy] Context Pack ready\n"
+                "Task: PlayIterator public states\n"
+                "Primary target: lib/ansible/executor/play_iterator.py\n"
+                "Memory: hit"
+            ),
+        },
+    )
+    emit.assert_any_call(
+        "status.update",
+        "sid",
+        {
+            "kind": "formsy.verified_recipe",
+            "text": (
+                "[FormSy] Verified recipe available\n"
+                "Primary target: lib/ansible/executor/play_iterator.py"
+            ),
+        },
+    )
+
+
+def test_formsy_verify_completion_tool_completion_emits_finish_gate_status():
+    result = json.dumps({
+        "decision": "ACCEPT_DONE",
+        "protocol": {
+            "summary": "Completion proof satisfies P0 contracts.",
+            "gate_decision": "ACCEPT_DONE",
+        },
+    })
+
+    with patch("tui_gateway.server._emit") as emit:
+        server._on_tool_complete(
+            "sid",
+            "tool-2",
+            "formsy_verify_completion",
+            {},
+            result,
+        )
+
+    emit.assert_any_call(
+        "status.update",
+        "sid",
+        {
+            "kind": "formsy.finish_gate",
+            "text": (
+                "[FormSy Finish Gate] Accepted\n"
+                "Decision: ACCEPT_DONE\n"
+                "Evidence: Completion proof satisfies P0 contracts."
+            ),
+        },
+    )
+
+
+def test_malformed_formsy_tool_completion_does_not_emit_status():
+    with patch("tui_gateway.server._emit") as emit:
+        server._on_tool_complete(
+            "sid",
+            "tool-3",
+            "context_search",
+            {"query": "PlayIterator public states"},
+            "not-json",
+        )
+
+    assert not any(
+        call.args[:2] == ("status.update", "sid")
+        and call.args[2].get("kind", "").startswith("formsy.")
+        for call in emit.call_args_list
+    )
+
+
 def test_resolve_model_uses_inference_model_env(monkeypatch):
     monkeypatch.delenv("HERMES_MODEL", raising=False)
     monkeypatch.setenv("HERMES_INFERENCE_MODEL", " anthropic/claude-sonnet-4.6\n")

@@ -1728,6 +1728,35 @@ def test_formsy_engine_accept_done_clears_pending_retrieval_summary():
     assert status["pending_followup_tool"] == "none"
 
 
+def test_formsy_engine_forwards_accept_done_to_memory_provider():
+    engine = FormsyContextEngine()
+    observed_payloads = []
+
+    class FakeProvider:
+        def record_completion_verifier_result(self, payload):
+            observed_payloads.append(payload)
+
+    engine._memory_manager = type("Manager", (), {"providers": [FakeProvider()]})()
+
+    engine.observe_tool_result(
+        "formsy_verify_completion",
+        {},
+        json.dumps({
+            "decision": "ACCEPT_DONE",
+            "completion_audit": {
+                "audit_status": "verified",
+                "gate_decision": "ACCEPT_DONE",
+                "memory_write_allowed": True,
+                "evidence": {"latest_diff_hash": "sha256:abc"},
+            },
+        }) + "\n\n## FormSy Constraint Protocol\n- Decision: PATCH_ALLOWED_WITH_WARNINGS",
+    )
+
+    assert len(observed_payloads) == 1
+    assert observed_payloads[0]["decision"] == "ACCEPT_DONE"
+    assert observed_payloads[0]["completion_audit"]["gate_decision"] == "ACCEPT_DONE"
+
+
 def test_formsy_engine_records_ignored_seed_guidance_in_observe_only_mode():
     engine = FormsyContextEngine()
     engine._config = EngineConfig(retrieval_gate="observe_only")

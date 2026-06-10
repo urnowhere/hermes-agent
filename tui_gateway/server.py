@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 from hermes_constants import get_hermes_home
 from hermes_cli.env_loader import load_hermes_dotenv
+from hermes_cli.formsy_status import formsy_statuses_from_tool_result
 from utils import is_truthy_value
 from tui_gateway.transport import (
     StdioTransport,
@@ -1485,6 +1486,27 @@ def _tool_summary(name: str, result: str, duration_s: float | None) -> str | Non
     return f"{text}{suffix}" if text else None
 
 
+def _emit_formsy_status_from_tool_result(
+    sid: str,
+    tool_call_id: str,
+    name: str,
+    args: dict,
+    result: str,
+) -> None:
+    statuses = formsy_statuses_from_tool_result(name, args, result)
+    if not statuses:
+        return
+
+    session = _sessions.get(sid)
+    seen = session.setdefault("formsy_status_seen", set()) if session is not None else set()
+    for kind, text in statuses:
+        dedupe_key = f"{tool_call_id}:{kind}:{text}"
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        _status_update(sid, kind, text)
+
+
 def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
     session = _sessions.get(sid)
     if session is not None:
@@ -1521,6 +1543,7 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
     summary = _tool_summary(name, result, duration_s)
     if summary:
         payload["summary"] = summary
+    _emit_formsy_status_from_tool_result(sid, tool_call_id, name, args or {}, result)
     if name == "todo":
         try:
             data = json.loads(result)

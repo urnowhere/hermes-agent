@@ -329,6 +329,11 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
           return
         }
 
+        if (String(p.kind).startsWith('formsy.')) {
+          sys(p.text)
+          return
+        }
+
         if (!p.kind || p.kind === 'status') {
           return
         }

@@ -132,6 +132,24 @@ describe('createGatewayEventHandler', () => {
     expect(ctx.system.sys).toHaveBeenCalledWith('compressing 968 messages (~123,400 tok)…')
   })
 
+  it('prints FormSy status updates into the transcript', () => {
+    const appended: Msg[] = []
+    const ctx = buildCtx(appended)
+    const onEvent = createGatewayEventHandler(ctx)
+
+    onEvent({
+      payload: {
+        kind: 'formsy.finish_gate',
+        text: '[FormSy Finish Gate] Accepted\nDecision: ACCEPT_DONE'
+      },
+      type: 'status.update'
+    } as any)
+
+    expect(ctx.system.sys).toHaveBeenCalledWith(
+      '[FormSy Finish Gate] Accepted\nDecision: ACCEPT_DONE'
+    )
+  })
+
   it('surfaces self-improvement review summaries as a persistent system line', () => {
     const appended: Msg[] = []
     const ctx = buildCtx(appended)

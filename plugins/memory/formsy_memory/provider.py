@@ -53,6 +53,8 @@ class FormSyMemoryProvider(MemoryProvider):
         self._memory_freshness: str = ""
         self._memory_block: str = ""
         self._verified_solution_recipes: list[dict[str, Any]] = []
+        self._completion_gate_decision: str = ""
+        self._completion_audit: dict[str, Any] = {}
         self._session_end_sent: set[str] = set()
         self._context_artifact_ids: list[str] = []
         self._terminal_calls: list[dict] = []
@@ -168,6 +170,7 @@ class FormSyMemoryProvider(MemoryProvider):
         self._flush_pending_sync_queue()
         self._dispatch_sync_event(event)
         self._append_local_memory_event(event)
+        self._clear_completion_verifier_trace()
 
     def on_session_end(self, messages: list[dict[str, Any]]) -> None:
         if not self._runtime_client or not self._config:
@@ -235,6 +238,34 @@ class FormSyMemoryProvider(MemoryProvider):
             "command": str(command or "").strip(),
             "result": str(result or "").strip(),
         })
+
+    def record_completion_verifier_result(self, payload: Any) -> None:
+        """Record accepted Completion Verifier evidence for the next memory sync."""
+        parsed = self._parse_json_payload(payload)
+        if not isinstance(parsed, dict):
+            return
+
+        decision = self._completion_gate_decision_from_payload(parsed)
+        if not decision:
+            return
+
+        audit = parsed.get("completion_audit")
+        if isinstance(audit, dict):
+            completion_audit = dict(audit)
+            completion_audit.setdefault("audit_status", "verified")
+            completion_audit.setdefault("gate_decision", decision)
+            completion_audit.setdefault("memory_write_allowed", True)
+            completion_audit.setdefault("memory_write_quality", "medium")
+        else:
+            completion_audit = {
+                "audit_status": "verified",
+                "gate_decision": decision,
+                "memory_write_allowed": True,
+                "memory_write_quality": "medium",
+            }
+
+        self._completion_gate_decision = decision
+        self._completion_audit = completion_audit
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
         if self._config is not None and not self._config.enable_memory_tools:
@@ -326,8 +357,13 @@ class FormSyMemoryProvider(MemoryProvider):
         self._memory_freshness = ""
         self._memory_block = ""
         self._verified_solution_recipes = []
+        self._clear_completion_verifier_trace()
         self._context_artifact_ids = []
         self._terminal_calls = []
+
+    def _clear_completion_verifier_trace(self) -> None:
+        self._completion_gate_decision = ""
+        self._completion_audit = {}
 
     def _dispatch_sync_event(self, event: dict) -> None:
         """Send one sync event; enqueue it on failure for later retry."""
@@ -691,12 +727,14 @@ class FormSyMemoryProvider(MemoryProvider):
         failure_lessons: list[str] = self._coerce_string_list(kwargs.get("failure_lessons") or [])
         context_query = str(kwargs.get("context_query") or "").strip() or None
         completion_gate_decision = (
-            str(kwargs.get("completion_gate_decision") or "").strip() or None
+            str(kwargs.get("completion_gate_decision") or "").strip()
+            or self._completion_gate_decision
+            or None
         )
         completion_audit = (
             kwargs.get("completion_audit")
             if isinstance(kwargs.get("completion_audit"), dict)
-            else None
+            else self._completion_audit or None
         )
         workspace_fingerprint = (
             str(kwargs.get("workspace_fingerprint") or "").strip() or None
@@ -987,6 +1025,42 @@ class FormSyMemoryProvider(MemoryProvider):
                 return None
             current = current.get(key)
         return current
+
+    @staticmethod
+    def _parse_json_payload(payload: Any) -> dict[str, Any] | None:
+        if isinstance(payload, dict):
+            return payload
+        text = str(payload or "").strip()
+        if not text:
+            return None
+        json_text = text.split("\n\n## FormSy Constraint Protocol", 1)[0].strip()
+        try:
+            parsed = json.loads(json_text)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    @staticmethod
+    def _completion_gate_decision_from_payload(payload: dict[str, Any]) -> str:
+        accepted = {"ACCEPT_DONE", "ACCEPT_DONE_WITH_OVERRIDE"}
+        audit = payload.get("completion_audit")
+        verifier = payload.get("verifier")
+        protocol = payload.get("protocol")
+        candidates = [
+            payload.get("decision"),
+            audit.get("gate_decision") if isinstance(audit, dict) else None,
+            verifier.get("gate_decision") if isinstance(verifier, dict) else None,
+            protocol.get("gate_decision") if isinstance(protocol, dict) else None,
+        ]
+        for candidate in candidates:
+            decision = str(candidate or "").strip().upper()
+            if decision in accepted:
+                return decision
+        if isinstance(audit, dict):
+            audit_status = str(audit.get("audit_status") or "").strip()
+            if audit_status == "verified":
+                return "ACCEPT_DONE"
+        return ""
 
     def _extract_changed_files_from_terminal(self) -> list[str]:
         """Mine recorded terminal calls for files mentioned in git diff output."""
