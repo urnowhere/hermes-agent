@@ -37,6 +37,7 @@ def test_register_adds_expected_hooks_and_tools():
     assert [name for name, _callback in ctx.hooks] == [
         "on_session_start",
         "pre_llm_call",
+        "post_llm_call",
         "pre_tool_call",
         "post_tool_call",
         "transform_tool_result",
@@ -64,6 +65,27 @@ def test_pre_tool_call_wraps_block_message_as_hermes_directive(monkeypatch):
     assert module._on_pre_tool_call(tool_name="terminal", args={}, session_id="s") == {
         "action": "block",
         "message": "blocked by verifier",
+    }
+
+
+def test_post_llm_call_returns_final_response_directive(monkeypatch):
+    module = _load_plugin_module()
+
+    class Coordinator:
+        def post_llm_call_final_response_directive(self, *args, **kwargs):
+            return {
+                "action": "replace_final_response",
+                "final_response": "Finish Gate was not called.",
+            }
+
+    monkeypatch.setattr(module, "_coordinator", Coordinator())
+
+    assert module._on_post_llm_call(
+        session_id="s",
+        assistant_response="Completion Verifier: ACCEPT_DONE",
+    ) == {
+        "action": "replace_final_response",
+        "final_response": "Finish Gate was not called.",
     }
 
 

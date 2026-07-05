@@ -24,6 +24,7 @@ _TERMINAL_MUTATION_RE = re.compile(
     r"("
     r"\bsed\s+-i\b|"
     r"\bcat\s+>|"
+    r">\s*(?:\.?/)?(?:lib|src|test|tests|plugins|docs)/|"
     r"\btee\s+|"
     r"\bmv\s+|"
     r"\bcp\s+|"
@@ -55,7 +56,26 @@ def is_validation_command(command: str, contract_commands: tuple[str, ...] | lis
     for contract_command in contract_commands:
         if _normalize_command(contract_command) and _normalize_command(contract_command) in normalized:
             return True
-    return bool(_VALIDATION_RE.search(normalized))
+    return bool(_VALIDATION_RE.search(normalized)) or _runs_focused_validation_script(normalized)
+
+
+def _runs_focused_validation_script(command: str) -> bool:
+    if re.search(r"\bpython(?:\d+(?:\.\d+)?)?\s+-(?:c|m)\b", command):
+        return False
+    match = re.search(
+        r"\bpython(?:\d+(?:\.\d+)?)?\s+([^\s;&|]+\.py)\b",
+        command,
+        re.IGNORECASE,
+    )
+    if not match:
+        return False
+    script = match.group(1).rsplit("/", 1)[-1].lower()
+    return (
+        script.startswith("test_")
+        or script.endswith("_test.py")
+        or "validation" in script
+        or "check" in script
+    )
 
 
 def is_edit_surface(tool_name: str, args: dict[str, Any] | None) -> bool:
@@ -90,6 +110,21 @@ def classify_terminal_result(
         "output_truncated": output_info["truncated"],
     }
 
+    if is_validation_command(command, contract_commands) and _looks_like_failed_validation_output(output):
+        return {
+            "event_kind": "failure",
+            "trust": "plugin_observed",
+            "payload": {
+                **payload,
+                "passed": False,
+                "failure_kind": (
+                    "masked_validation_failure"
+                    if exit_code in (None, 0)
+                    else "validation_failure_output"
+                ),
+                "fingerprint": failure_fingerprint(command, exit_code, output),
+            },
+        }
     if exit_code == 0 and is_validation_command(command, contract_commands):
         return {
             "event_kind": "test_result",
@@ -215,6 +250,22 @@ def _result_text(result: Any) -> str:
 
 def _normalize_command(command: str) -> str:
     return re.sub(r"\s+", " ", str(command or "").strip())
+
+
+def _looks_like_failed_validation_output(output: str) -> bool:
+    text = str(output or "")
+    if not text.strip():
+        return False
+    if re.search(r"\bFAILED\s+\S+", text):
+        return True
+    for pattern in (r"\b(\d+)\s+failed\b", r"\b(\d+)\s+errors?\b"):
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            if int(match.group(1)) > 0:
+                return True
+    return bool(
+        re.search(r"=+\s*(?:FAILURES|ERRORS)\s*=+", text, re.IGNORECASE)
+        or re.search(r"\bFAILED\b.*\bpassed\b", text, re.IGNORECASE | re.DOTALL)
+    )
 
 
 def _normalize_volatile(text: str) -> str:

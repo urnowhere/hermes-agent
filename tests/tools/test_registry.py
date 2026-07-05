@@ -209,6 +209,45 @@ class TestToolsetAvailability:
         assert "error" in result
         assert "RuntimeError" in result["error"]
 
+    def test_handler_exception_returns_response_data_summary_when_available(self):
+        reg = ToolRegistry()
+
+        class ApiError(RuntimeError):
+            def __init__(self):
+                super().__init__("Constraint Keeper API error: 422")
+                self.response_data = {
+                    "detail": [
+                        {
+                            "type": "literal_error",
+                            "loc": ["body", "event", "event_kind"],
+                            "msg": "Input should be an allowed event kind",
+                            "input": "completion_bootstrap_observed",
+                        }
+                    ]
+                }
+
+        def bad_handler(args, **kw):
+            raise ApiError()
+
+        reg.register(
+            name="bad_api", toolset="s", schema=_make_schema(), handler=bad_handler
+        )
+        result = json.loads(reg.dispatch("bad_api", {}))
+
+        assert result["error"] == (
+            "Tool execution failed: ApiError: Constraint Keeper API error: 422"
+        )
+        assert result["error_response"] == {
+            "detail": [
+                {
+                    "type": "literal_error",
+                    "loc": ["body", "event", "event_kind"],
+                    "msg": "Input should be an allowed event kind",
+                    "input": "completion_bootstrap_observed",
+                }
+            ]
+        }
+
 
 class TestCheckFnExceptionHandling:
     """Verify that a raising check_fn is caught rather than crashing."""

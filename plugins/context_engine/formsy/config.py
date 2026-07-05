@@ -23,6 +23,7 @@ class EngineConfig:
     max_retries: int = 3
     default_scene: str = "auto"
     retrieval_gate: str = "observe_only"
+    tocs_lookup_identity: Optional[dict[str, Any]] = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "EngineConfig":
@@ -77,6 +78,14 @@ class EngineConfigManager:
             "timeout_s": os.environ.get("FORMSY_TIMEOUT"),
             "retrieval_gate": os.environ.get("FORMSY_RETRIEVAL_GATE"),
         }
+        lookup_identity_env = os.environ.get("FORMSY_TOCS_LOOKUP_IDENTITY")
+        if lookup_identity_env:
+            try:
+                lookup_identity = json.loads(lookup_identity_env)
+            except json.JSONDecodeError:
+                lookup_identity = None
+            if isinstance(lookup_identity, dict):
+                config_data["tocs_lookup_identity"] = lookup_identity
 
         for key, value in env_overrides.items():
             if value is not None:

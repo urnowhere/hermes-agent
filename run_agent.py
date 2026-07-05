@@ -376,6 +376,29 @@ def _is_destructive_command(cmd: str) -> bool:
     return False
 
 
+def _apply_post_llm_call_final_response_directives(
+    final_response: str | None,
+    hook_results,
+) -> str | None:
+    """Apply explicit final-response directives returned by post_llm_call hooks.
+
+    Legacy post_llm_call hooks are observers and their arbitrary return values
+    stay ignored. Only a narrowly named directive can replace final text.
+    """
+    if not hook_results:
+        return final_response
+    updated = final_response
+    for result in hook_results:
+        if not isinstance(result, dict):
+            continue
+        if result.get("action") != "replace_final_response":
+            continue
+        replacement = result.get("final_response")
+        if isinstance(replacement, str) and replacement:
+            updated = replacement
+    return updated
+
+
 def _should_parallelize_tool_batch(tool_calls) -> bool:
     """Return True when a tool-call batch is safe to run concurrently."""
     if len(tool_calls) <= 1:
@@ -14406,11 +14429,12 @@ class AIAgent:
         # Plugin hook: post_llm_call
         # Fired once per turn after the tool-calling loop completes.
         # Plugins can use this to persist conversation data (e.g. sync
-        # to an external memory system).
+        # to an external memory system). Explicit final-response directives are
+        # also supported for plugin-owned completion guards.
         if final_response and not interrupted:
             try:
                 from hermes_cli.plugins import invoke_hook as _invoke_hook
-                _invoke_hook(
+                _post_llm_results = _invoke_hook(
                     "post_llm_call",
                     session_id=self.session_id,
                     user_message=original_user_message,
@@ -14418,6 +14442,10 @@ class AIAgent:
                     conversation_history=list(messages),
                     model=self.model,
                     platform=getattr(self, "platform", None) or "",
+                )
+                final_response = _apply_post_llm_call_final_response_directives(
+                    final_response,
+                    _post_llm_results,
                 )
             except Exception as exc:
                 logger.warning("post_llm_call hook failed: %s", exc)

@@ -165,3 +165,45 @@ def test_context_search_uses_task_instruction_for_constraint_compile(monkeypatch
     data = json.loads(result)
     assert data["ok"] is True
     assert "public and namespaced way" in captured["instruction"]
+
+
+def test_context_search_injects_user_task_description_without_system_prompt():
+    captured = {}
+
+    class CapturingSearchClient:
+        async def memory_search(self, **kwargs):
+            captured.update(kwargs)
+            return {
+                "matches": [{"path": "lib/ansible/modules/iptables.py", "score": 0.9}],
+                "coverage": "partial",
+            }
+
+    engine = _engine()
+    engine._engine_client = CapturingSearchClient()
+    engine._context["system_prompt"] = "SYSTEM PROMPT MUST NOT LEAK"
+    engine.on_user_turn(
+        "In ansible, iptables chain management should handle chain creation and deletion.\n"
+        "Expected behavior:\n"
+        "- chain creation and deletion should use the correct chain-management commands.\n"
+        "- check mode should report intended changes without performing destructive operations.\n"
+        "- existing rule append/remove behavior should keep working."
+    )
+
+    result = engine.handle_tool_call(
+        "context_search",
+        {
+            "query": "Ansible iptables module chain creation deletion check mode",
+            "metadata": {
+                "full_task_description": "SYSTEM PROMPT MUST NOT LEAK",
+                "system_prompt": "SYSTEM PROMPT MUST NOT LEAK",
+            },
+        },
+    )
+
+    data = json.loads(result)
+    metadata = captured["metadata"]
+    assert data["ok"] is True
+    assert "existing rule append/remove behavior" in metadata["full_task_description"]
+    assert metadata["task_description_source"] == "hermes_user_turn"
+    assert "SYSTEM PROMPT MUST NOT LEAK" not in metadata["full_task_description"]
+    assert "system_prompt" not in metadata

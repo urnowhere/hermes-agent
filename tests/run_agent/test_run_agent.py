@@ -52,6 +52,23 @@ def test_is_destructive_command_treats_install_as_mutating():
     assert run_agent._is_destructive_command("install template.env .env") is True
 
 
+def test_apply_post_llm_call_final_response_directives_replaces_response():
+    assert run_agent._apply_post_llm_call_final_response_directives(
+        "old response",
+        [
+            None,
+            {"action": "replace_final_response", "final_response": "new response"},
+        ],
+    ) == "new response"
+
+
+def test_apply_post_llm_call_final_response_directives_ignores_legacy_returns():
+    assert run_agent._apply_post_llm_call_final_response_directives(
+        "old response",
+        ["ignored", {"context": "not a final-response directive"}],
+    ) == "old response"
+
+
 @pytest.fixture()
 def agent():
     """Minimal AIAgent with mocked OpenAI client and tool loading."""

@@ -109,6 +109,58 @@ def test_formsy_engine_pre_seed_context_read_returns_synthetic_grounding_payload
     assert payload["context_meta"]["read_key"] == "lib/ansible/executor/play_iterator.py:95-100"
 
 
+def test_formsy_engine_context_read_normalizes_workspace_absolute_path(monkeypatch):
+    engine = FormsyContextEngine()
+    calls = []
+
+    class FakeClient:
+        async def memory_read(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "path": "lib/ansible/modules/iptables.py",
+                "content": "DOCUMENTATION = ''\n",
+                "start_line": 1,
+                "end_line": 1,
+                "total_lines": 1,
+                "context_meta": {
+                    "source": "compiled_repo",
+                    "source_freshness": "compiled",
+                    "working_tree_alignment": "unknown",
+                    "read_key": "lib/ansible/modules/iptables.py:1-1",
+                },
+            }
+
+    monkeypatch.setattr(
+        engine,
+        "_resolve_repository_identity",
+        lambda: ("ansible__ansible", "abc123"),
+    )
+    monkeypatch.setattr(
+        engine,
+        "_context_read_revision",
+        lambda *, repo_id, fallback_revision: fallback_revision,
+    )
+    engine._engine_client = FakeClient()
+    engine._config = EngineConfig()
+    engine._session_id = "session-123"
+    engine._retrieval_state = "grounded"
+    engine._set_accepted_targets(["lib/ansible/modules/iptables.py"])
+
+    result = engine.handle_tool_call(
+        "context_read",
+        {
+            "path": "/Users/wayneliu/dev/ansible/lib/ansible/modules/iptables.py",
+            "start_line": 1,
+            "end_line": 1,
+        },
+    )
+
+    assert "context_read is limited" not in result
+    assert "ok: true" in result
+    assert "path: lib/ansible/modules/iptables.py" in result
+    assert calls[0]["path"] == "lib/ansible/modules/iptables.py"
+
+
 def test_formsy_engine_projects_skill_uptake_status_when_available(monkeypatch):
     engine = FormsyContextEngine()
 
@@ -194,6 +246,10 @@ def test_formsy_engine_exposes_memory_search_tool():
     assert "grounded_symbols" in metadata["properties"]
     assert "grounded_files" in metadata["properties"]
     assert "retrieval_feedback" in metadata["properties"]
+    assert "tocs_lookup_identity" in metadata["properties"]
+    tocs_lookup_identity = metadata["properties"]["tocs_lookup_identity"]
+    assert tocs_lookup_identity["type"] == "object"
+    assert "runtime/plugin-provided" in tocs_lookup_identity["description"]
     assert "fallback" in metadata["properties"]["grounding_phase"]["enum"]
     assert "proactively" in schemas[0]["description"]
     assert "current git remote URL and commit" in schemas[0]["description"]
@@ -276,6 +332,286 @@ def test_formsy_engine_memory_search_derives_repo_and_revision_from_git(monkeypa
             "fanout_timeout_s": 90,
         },
     }]
+
+
+def test_formsy_engine_injects_runtime_tocs_lookup_identity(monkeypatch):
+    engine = FormsyContextEngine()
+    calls = []
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            calls.append(kwargs)
+            return {"matches": []}
+
+    class RuntimeIdentity:
+        repo_id = "ansible__ansible"
+        revision = "abc123"
+
+        def to_runtime_identity(self):
+            return {
+                "repo_id": "ansible__ansible",
+                "revision": "abc123",
+                "tocs_lookup_identity": {
+                    "tocs_case_id": "ansible_gzip_response_decompress",
+                    "tocs_run_profile": "p0a-real-lane-a",
+                    "repo_id": "ansible__ansible",
+                    "base_revision": "abc123",
+                },
+            }
+
+    def fake_run(cmd, **kwargs):
+        raise AssertionError(f"unexpected git command: {cmd}")
+
+    monkeypatch.setattr("plugins.context_engine.formsy.engine.subprocess.run", fake_run)
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "",
+        "revision": "latest",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+    engine._identity_snapshot = RuntimeIdentity()
+
+    result = engine.handle_tool_call("context_search", {"query": "gzip response"})
+
+    assert json.loads(result)["ok"] is True
+    assert calls[0]["metadata"]["tocs_lookup_identity"] == {
+        "tocs_case_id": "ansible_gzip_response_decompress",
+        "tocs_run_profile": "p0a-real-lane-a",
+        "repo_id": "ansible__ansible",
+        "base_revision": "abc123",
+    }
+
+
+def test_formsy_engine_injects_config_tocs_lookup_identity_without_runtime_snapshot(
+    monkeypatch,
+):
+    engine = FormsyContextEngine()
+    calls = []
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            calls.append(kwargs)
+            return {"matches": []}
+
+    def fake_run(cmd, **kwargs):
+        raise AssertionError(f"unexpected git command: {cmd}")
+
+    lookup_identity = {
+        "tocs_case_id": "ansible_iptables_chain_management",
+        "tocs_run_profile": "tocs-p0-local",
+        "repo_id": "ansible__ansible",
+        "base_revision": "abc123",
+    }
+    monkeypatch.setattr("plugins.context_engine.formsy.engine.subprocess.run", fake_run)
+    engine._engine_client = FakeClient()
+    engine._config = EngineConfig(
+        repo_id="ansible__ansible",
+        revision="abc123",
+        tocs_lookup_identity=lookup_identity,
+    )
+    engine._session_id = "session-123"
+    engine._identity_snapshot = None
+
+    result = engine.handle_tool_call(
+        "context_search",
+        {"query": "iptables chain management"},
+    )
+
+    assert json.loads(result)["ok"] is True
+    assert calls[0]["metadata"]["tocs_lookup_identity"] == lookup_identity
+
+
+def test_formsy_engine_uses_runtime_tocs_identity_when_compile_fails(monkeypatch):
+    engine = FormsyContextEngine()
+    calls = []
+
+    class FakeClient:
+        last_error = "compile timeout"
+
+        async def compile_repo(self, **kwargs):
+            calls.append(("compile", kwargs))
+            return None
+
+        async def memory_search(self, **kwargs):
+            calls.append(("memory_search", kwargs))
+            return {
+                "coverage": "partial",
+                "matches": [{"path": "lib/ansible/utils/display.py"}],
+                "accepted_targets": ["lib/ansible/utils/display.py"],
+                "exploration_closed": True,
+                "guidance": {
+                    "tocs_delivery": {
+                        "requested": True,
+                        "resolved": True,
+                        "artifact_resolution_mode": "latest_gated_case_profile",
+                    },
+                    "tocs": {
+                        "lane_b_mode": "repair_ready_exact",
+                        "must_read_files": [
+                            {"path": "lib/ansible/modules/iptables.py"},
+                        ],
+                    },
+                },
+            }
+
+    class RuntimeIdentity:
+        repo_id = "ansible__ansible"
+        revision = "abc123"
+
+        def to_runtime_identity(self):
+            return {
+                "repo_id": "ansible__ansible",
+                "revision": "abc123",
+                "tocs_lookup_identity": {
+                    "tocs_case_id": "ansible_iptables_chain_management",
+                    "tocs_run_profile": "tocs-p0-local",
+                    "repo_id": "ansible__ansible",
+                    "base_revision": "abc123",
+                },
+            }
+
+    class FakeCoordinator:
+        def compile_context_bundle(self, **kwargs):
+            return ""
+
+        def observe_tool_result(self, *args, **kwargs):
+            return None
+
+    monkeypatch.setattr(
+        "plugins.context_engine.formsy.engine._get_constraint_keeper_coordinator",
+        lambda: FakeCoordinator(),
+    )
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "",
+        "revision": "latest",
+        "query_budget": 4000,
+        "workspace_id": "local",
+    })()
+    engine._session_id = "session-123"
+    engine._identity_snapshot = RuntimeIdentity()
+
+    result = json.loads(
+        engine.handle_tool_call("context_search", {"query": "iptables chain management"})
+    )
+
+    assert result["ok"] is True
+    assert result["tocs_repair_targets"] == ["lib/ansible/modules/iptables.py"]
+    assert result["accepted_targets"] == ["lib/ansible/modules/iptables.py"]
+    assert result["tocs_contract_projection"]["source"] == "resolved_tocs"
+    assert "### TOCS Priority" in result["extra_context"]
+    assert [name for name, _ in calls] == ["compile", "memory_search"]
+    assert calls[1][1]["metadata"]["tocs_lookup_identity"]["tocs_case_id"] == (
+        "ansible_iptables_chain_management"
+    )
+    assert calls[1][1]["metadata"]["compile_status"] == "failed"
+    assert calls[1][1]["metadata"]["compile_error"] == "compile timeout"
+
+
+def test_formsy_engine_compile_failure_without_resolved_tocs_stays_degraded():
+    engine = FormsyContextEngine()
+    calls = []
+
+    class FakeClient:
+        last_error = "compile timeout"
+
+        async def compile_repo(self, **kwargs):
+            calls.append(("compile", kwargs))
+            return None
+
+        async def memory_search(self, **kwargs):
+            calls.append(("memory_search", kwargs))
+            return {
+                "coverage": "poor",
+                "matches": [],
+                "guidance": {
+                    "tocs_delivery": {"requested": True, "resolved": False},
+                },
+            }
+
+    class RuntimeIdentity:
+        repo_id = "ansible__ansible"
+        revision = "abc123"
+
+        def to_runtime_identity(self):
+            return {
+                "repo_id": "ansible__ansible",
+                "revision": "abc123",
+                "tocs_lookup_identity": {
+                    "tocs_case_id": "unknown_case",
+                    "tocs_run_profile": "tocs-p0-local",
+                },
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "latest",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+    engine._identity_snapshot = RuntimeIdentity()
+
+    result = json.loads(
+        engine.handle_tool_call("context_search", {"query": "unknown task"})
+    )
+
+    assert result["recovery_mode"] == "degraded_recovery"
+    assert result["warning"] == "Formsy memory compile unavailable before context_search"
+    assert "tocs_repair_targets" not in result
+    assert [name for name, _ in calls] == ["compile", "memory_search"]
+
+
+def test_formsy_engine_preserves_supplied_tocs_lookup_identity(monkeypatch):
+    engine = FormsyContextEngine()
+    calls = []
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            calls.append(kwargs)
+            return {"matches": []}
+
+    class RuntimeIdentity:
+        repo_id = "ansible__ansible"
+        revision = "abc123"
+
+        def to_runtime_identity(self):
+            return {
+                "repo_id": "ansible__ansible",
+                "revision": "abc123",
+                "tocs_lookup_identity": {
+                    "tocs_case_id": "runtime_case",
+                },
+            }
+
+    def fake_run(cmd, **kwargs):
+        raise AssertionError(f"unexpected git command: {cmd}")
+
+    supplied = {
+        "tocs_case_id": "agent_supplied_case",
+        "source": "agent_metadata",
+    }
+    monkeypatch.setattr("plugins.context_engine.formsy.engine.subprocess.run", fake_run)
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "",
+        "revision": "latest",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+    engine._identity_snapshot = RuntimeIdentity()
+
+    result = engine.handle_tool_call(
+        "context_search",
+        {
+            "query": "gzip response",
+            "metadata": {"tocs_lookup_identity": supplied},
+        },
+    )
+
+    assert json.loads(result)["ok"] is True
+    assert calls[0]["metadata"]["tocs_lookup_identity"] == supplied
 
 
 def test_formsy_engine_memory_search_compiles_before_query(monkeypatch):
@@ -1451,6 +1787,10 @@ def test_formsy_engine_compile_failure_returns_degraded_guidance_and_notifies_bu
 
     assert result["ok"] is True
     assert result["warning"] == "Formsy memory compile unavailable before context_search"
+    assert result["tocs_identity_status"] == "missing"
+    assert result["diagnostic_reason"] == (
+        "missing_tocs_lookup_identity_or_compile_unavailable"
+    )
     assert result["recovery_mode"] == "degraded_recovery"
     assert result["guidance_packet"]["target_candidates"] == [
         "lib/ansible/executor/play_iterator.py"
@@ -1755,6 +2095,138 @@ def test_formsy_engine_forwards_accept_done_to_memory_provider():
     assert len(observed_payloads) == 1
     assert observed_payloads[0]["decision"] == "ACCEPT_DONE"
     assert observed_payloads[0]["completion_audit"]["gate_decision"] == "ACCEPT_DONE"
+
+
+def test_formsy_engine_promotes_resolved_tocs_over_stale_suggested_actions():
+    engine = FormsyContextEngine()
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            return {
+                "extra_context": (
+                    "## FormSy Guidance\n\n"
+                    "### Suggested Actions\n"
+                    "- Inspect primary context file: lib/ansible/utils/display.py.\n"
+                    "- Patch strategy: Inspect and fix lib/ansible/utils/display.py.\n"
+                ),
+                "matches": [{"path": "lib/ansible/utils/display.py"}],
+                "coverage": "partial",
+                "guidance": {
+                    "tocs_delivery": {"resolved": True},
+                    "tocs": {
+                        "mode": "repair_ready_exact",
+                        "must_read_files": [
+                            "lib/ansible/module_utils/urls.py",
+                            "lib/ansible/modules/uri.py",
+                        ],
+                        "candidate_tests": [
+                            {
+                                "path": "test/units/module_utils/urls/test_gzip.py",
+                                "selector": (
+                                    "test/units/module_utils/urls/test_gzip.py::"
+                                    "test_Request_open_gzip"
+                                ),
+                            }
+                        ],
+                    },
+                },
+            }
+
+        async def memory_read(self, **kwargs):
+            return {"content": ""}
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "latest",
+        "query_budget": 4000,
+        "timeout_s": 120,
+        "workspace_id": "ws_test",
+    })()
+    engine._session_id = "session-123"
+
+    payload = json.loads(engine.handle_tool_call("context_search", {"query": "gzip response"}))
+
+    assert payload["tocs_repair_targets"] == ["lib/ansible/module_utils/urls.py"]
+    assert payload["accepted_targets"] == ["lib/ansible/module_utils/urls.py"]
+    assert "### TOCS Priority" in payload["extra_context"]
+    assert "Resolved TOCS supersedes stale suggested actions" in payload["extra_context"]
+    assert payload["extra_context"].index("### TOCS Priority") < payload["extra_context"].index("### Suggested Actions")
+
+
+def test_formsy_engine_tocs_fallback_with_poor_coverage_suggests_local_read_file():
+    engine = FormsyContextEngine()
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            return {
+                "extra_context": (
+                    "## FormSy Guidance\n\n"
+                    "- Target conflict\n"
+                    "- Resolved TOCS target is not yet backed by current context evidence; "
+                    "read `lib/ansible/module_utils/urls.py` before patching.\n"
+                    "- NEXT SUGGESTED TOOL: context_read path=lib/ansible/module_utils/urls.py\n"
+                ),
+                "matches": [],
+                "coverage": "poor",
+                "missing_context": ["No structured file or symbol matches were selected."],
+                "guidance": {
+                    "freshness": "stale",
+                    "retrieval_state": "inspect_seed_result",
+                    "preferred_next_step": "context_search",
+                    "target_conflict": True,
+                    "tocs_delivery": {"resolved": True},
+                    "tocs": {
+                        "lane_b_mode": "diagnostic_source_fallback",
+                        "source_resolution_status": "fallback",
+                        "repair_targets": [
+                            "lib/ansible/module_utils/urls.py",
+                            "lib/ansible/modules/uri.py",
+                            "lib/ansible/modules/get_url.py",
+                        ],
+                        "must_read_files": [
+                            {"path": "lib/ansible/module_utils/urls.py"},
+                            {"path": "lib/ansible/modules/uri.py"},
+                            {"path": "lib/ansible/modules/get_url.py"},
+                        ],
+                        "candidate_tests": [
+                            {
+                                "test_id": (
+                                    "test/units/module_utils/urls/test_gzip.py::"
+                                    "test_Request_open_gzip"
+                                ),
+                                "test_source_mode": "history_basename_fallback",
+                            }
+                        ],
+                    },
+                },
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "latest",
+        "query_budget": 4000,
+        "timeout_s": 120,
+        "workspace_id": "ws_test",
+    })()
+    engine._session_id = "session-123"
+
+    payload = json.loads(engine.handle_tool_call("context_search", {"query": "gzip response"}))
+
+    assert payload["accepted_targets"] == [
+        "lib/ansible/module_utils/urls.py",
+        "lib/ansible/modules/uri.py",
+        "lib/ansible/modules/get_url.py",
+    ]
+    assert payload["preferred_next_step"] == "read_file"
+    assert payload["next_tool_directive"]["tool"] == "read_file"
+    assert payload["next_tool_directive"]["args"] == {
+        "path": "lib/ansible/module_utils/urls.py"
+    }
+    assert "NEXT SUGGESTED TOOL: context_read" not in payload["extra_context"]
+    assert "NEXT SUGGESTED TOOL: read_file path=lib/ansible/module_utils/urls.py" in payload["extra_context"]
+    assert payload["retrieval_decision"]["context_read_required"] is False
 
 
 def test_formsy_engine_records_ignored_seed_guidance_in_observe_only_mode():
@@ -2285,6 +2757,311 @@ def test_formsy_engine_prefers_grounded_targets_over_bundle_must_edit():
     assert engine.get_retrieval_status()["exploration_closed"] is True
 
 
+def test_formsy_engine_does_not_lock_non_patchable_seed_primary_target():
+    engine = FormsyContextEngine()
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            if kwargs["metadata"].get("grounding_phase") == "grounded":
+                return {
+                    "extra_context": "Grounded iptables notes",
+                    "symbolic_prompt": (
+                        "Formal Semantics:\niptables chain management should update iptables.py\n"
+                        "Constraints:\npreserve existing module argument behavior\n"
+                        "Retrieval Strategy:\ninspect iptables module\n"
+                        "Retrieved Facts:\niptables.py contains chain handling"
+                    ),
+                    "matches": [{"path": "lib/ansible/modules/iptables.py"}],
+                    "coverage": "good",
+                    "retrieval_state": "grounded",
+                    "preferred_next_step": "edit",
+                    "accepted_targets": ["lib/ansible/modules/iptables.py"],
+                    "exploration_closed": True,
+                    "guidance": {
+                        "can_patch_now": True,
+                        "accepted_edit_targets": ["lib/ansible/modules/iptables.py"],
+                        "primary_edit_target": "lib/ansible/modules/iptables.py",
+                    },
+                    "bundle": {
+                        "primary_files": [
+                            {"path": "lib/ansible/modules/iptables.py", "priority": "must_edit"}
+                        ],
+                        "must_edit": ["lib/ansible/modules/iptables.py"],
+                    },
+                }
+            return {
+                "extra_context": "Weak seed notes",
+                "symbolic_prompt": (
+                    "Formal Semantics:\nseed result is not patch-ready\n"
+                    "Retrieval Strategy:\nretry with grounded evidence"
+                ),
+                "matches": [{"path": "lib/ansible/utils/hashing.py"}],
+                "coverage": "partial",
+                "retrieval_state": "retry_symbolic_search",
+                "preferred_next_step": "context_search",
+                "guidance": {
+                    "can_patch_now": False,
+                    "accepted_edit_targets": [],
+                    "primary_edit_target": "lib/ansible/utils/hashing.py",
+                },
+                "bundle": {
+                    "primary_files": [
+                        {"path": "lib/ansible/utils/hashing.py", "priority": "must_edit"}
+                    ],
+                    "must_edit": ["lib/ansible/utils/hashing.py"],
+                },
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "latest",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+
+    seed_result = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {
+                "query": "iptables chain management check mode creation deletion append remove ansible module",
+                "repo_id": "ansible__ansible",
+                "metadata": {
+                    "retrieval_mode": "symbolic",
+                    "grounding_phase": "seed",
+                    "response_format": "bundle",
+                },
+            },
+        )
+    )
+
+    assert seed_result["accepted_targets"] == []
+    assert seed_result["exploration_closed"] is False
+
+    grounded_result = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {
+                "query": "confirm iptables chain management edit target",
+                "repo_id": "ansible__ansible",
+                "metadata": {
+                    "retrieval_mode": "symbolic",
+                    "grounding_phase": "grounded",
+                    "response_format": "bundle",
+                    "grounded_files": ["lib/ansible/modules/iptables.py"],
+                },
+            },
+        )
+    )
+
+    assert grounded_result["retrieval_state"] == "grounded"
+    assert grounded_result["preferred_next_step"] == "edit"
+    assert grounded_result["accepted_targets"] == ["lib/ansible/modules/iptables.py"]
+    assert grounded_result["exploration_closed"] is True
+    assert grounded_result["retrieval_decision"]["accepted_targets"] == [
+        "lib/ansible/modules/iptables.py"
+    ]
+    assert engine.get_retrieval_status()["accepted_targets"] == [
+        "lib/ansible/modules/iptables.py"
+    ]
+
+
+def test_formsy_engine_clears_stale_locked_target_when_grounded_candidate_conflicts():
+    engine = FormsyContextEngine()
+    engine._sync_trace_state(state="grounded")
+    engine._set_accepted_targets(["lib/ansible/utils/hashing.py"])
+    engine._grounded_files = ["lib/ansible/utils/hashing.py"]
+    engine._context_read_followed = True
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            return {
+                "extra_context": "Grounded candidate points at the iptables module.",
+                "symbolic_prompt": (
+                    "Formal Semantics:\niptables chain management should update iptables.py\n"
+                    "Constraints:\ndo not invent unrelated helper APIs\n"
+                    "Retrieval Strategy:\nread the direct module candidate before patching\n"
+                    "Retrieved Facts:\niptables.py contains the module argument spec"
+                ),
+                "matches": [{"path": "lib/ansible/modules/iptables.py"}],
+                "coverage": "partial",
+                "retrieval_state": "inspect_candidates",
+                "preferred_next_step": "context_read",
+                "accepted_targets": [],
+                "exploration_closed": False,
+                "guidance": {
+                    "target_conflict": True,
+                    "stale_bundle_targets": ["lib/ansible/utils/hashing.py"],
+                    "candidate_targets": ["lib/ansible/modules/iptables.py"],
+                    "accepted_edit_targets": [],
+                },
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "latest",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+
+    result = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {
+                "query": "confirm iptables chain management edit target",
+                "repo_id": "ansible__ansible",
+                "metadata": {
+                    "retrieval_mode": "symbolic",
+                    "grounding_phase": "grounded",
+                    "response_format": "bundle",
+                },
+            },
+        )
+    )
+
+    assert result["retrieval_state"] == "inspect_candidates"
+    assert result["preferred_next_step"] == "context_read"
+    assert result["accepted_targets"] == []
+    assert result["exploration_closed"] is False
+    assert result["stale_accepted_targets"] == ["lib/ansible/utils/hashing.py"]
+    assert result["candidate_targets"] == ["lib/ansible/modules/iptables.py"]
+    assert result["retrieval_decision"]["accepted_targets"] == []
+    assert result["retrieval_decision"]["context_read_required"] is True
+    assert result["retrieval_decision"]["context_read_followed"] is False
+    assert result["retrieval_decision"]["direct_match_files"] == [
+        "lib/ansible/modules/iptables.py"
+    ]
+
+    status = engine.get_retrieval_status()
+    assert status["accepted_targets"] == []
+    assert status["retrieval_state"] == "inspect_candidates"
+    assert engine.get_tool_block_message(
+        "context_read",
+        {"path": "lib/ansible/modules/iptables.py"},
+    ) is None
+    blocked = engine.get_tool_block_message(
+        "patch",
+        {"path": "lib/ansible/utils/hashing.py"},
+    )
+    assert blocked is not None
+    assert "use context_read on a candidate" in blocked
+
+
+def test_formsy_engine_does_not_lock_weak_seed_bundle_must_edit_as_accepted_target():
+    engine = FormsyContextEngine()
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            if kwargs["metadata"].get("grounding_phase") == "grounded":
+                return {
+                    "extra_context": "Grounded iptables notes",
+                    "symbolic_prompt": (
+                        "Formal Semantics:\niptables chain management should update iptables.py\n"
+                        "Constraints:\npreserve existing module argument behavior\n"
+                        "Retrieval Strategy:\ninspect iptables module\n"
+                        "Retrieved Facts:\niptables.py contains chain handling"
+                    ),
+                    "matches": [{"path": "lib/ansible/modules/iptables.py"}],
+                    "coverage": "good",
+                    "retrieval_state": "grounded",
+                    "preferred_next_step": "edit",
+                    "accepted_targets": ["lib/ansible/modules/iptables.py"],
+                    "exploration_closed": True,
+                    "guidance": {
+                        "can_patch_now": True,
+                        "accepted_edit_targets": ["lib/ansible/modules/iptables.py"],
+                    },
+                    "bundle": {
+                        "primary_files": [
+                            {"path": "lib/ansible/modules/iptables.py", "priority": "must_edit"}
+                        ],
+                        "must_edit": ["lib/ansible/modules/iptables.py"],
+                    },
+                }
+            return {
+                "extra_context": "Weak seed notes",
+                "symbolic_prompt": (
+                    "Formal Semantics:\nseed result is not patch-ready\n"
+                    "Retrieval Strategy:\nread candidates before patching"
+                ),
+                "matches": [{"path": "lib/ansible/utils/hashing.py"}],
+                "coverage": "partial",
+                "retrieval_state": "inspect_candidates",
+                "preferred_next_step": "context_read",
+                "accepted_targets": ["lib/ansible/utils/hashing.py"],
+                "exploration_closed": True,
+                "guidance": {
+                    "can_patch_now": False,
+                    "accepted_edit_targets": [],
+                },
+                "bundle": {
+                    "primary_files": [
+                        {"path": "lib/ansible/utils/hashing.py", "priority": "must_edit"}
+                    ],
+                    "must_edit": ["lib/ansible/utils/hashing.py"],
+                },
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "latest",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+
+    seed_result = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {
+                "query": "iptables chain management check mode creation deletion append remove ansible module",
+                "repo_id": "ansible__ansible",
+                "metadata": {
+                    "retrieval_mode": "symbolic",
+                    "grounding_phase": "seed",
+                    "response_format": "bundle",
+                },
+            },
+        )
+    )
+
+    assert seed_result["accepted_targets"] == []
+    assert seed_result["exploration_closed"] is False
+    assert seed_result["retrieval_decision"]["bundle_must_edit"] == [
+        "lib/ansible/utils/hashing.py"
+    ]
+    assert engine.get_tool_block_message(
+        "patch",
+        {"path": "lib/ansible/utils/hashing.py"},
+    ) is not None
+
+    grounded_result = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {
+                "query": "confirm iptables chain management edit target",
+                "repo_id": "ansible__ansible",
+                "metadata": {
+                    "retrieval_mode": "symbolic",
+                    "grounding_phase": "grounded",
+                    "response_format": "bundle",
+                    "grounded_files": ["lib/ansible/modules/iptables.py"],
+                },
+            },
+        )
+    )
+
+    assert grounded_result["retrieval_state"] == "grounded"
+    assert grounded_result["preferred_next_step"] == "edit"
+    assert grounded_result["accepted_targets"] == ["lib/ansible/modules/iptables.py"]
+    assert grounded_result["exploration_closed"] is True
+    assert engine.get_tool_block_message(
+        "patch",
+        {"path": "lib/ansible/modules/iptables.py"},
+    ) is None
+
+
 def test_formsy_engine_enters_degraded_recovery_after_weak_legacy_fallback():
     engine = FormsyContextEngine()
     calls = []
@@ -2723,6 +3500,139 @@ def test_formsy_engine_memory_read_tool_queries_runtime():
     }]
 
 
+def test_formsy_engine_context_read_reuses_resolved_query_bounded_compile_revision():
+    engine = FormsyContextEngine()
+    calls = []
+
+    class FakeClient:
+        async def compile_status(self, **kwargs):
+            return None
+
+        async def compile_repo(self, **kwargs):
+            return {
+                "repo_id": kwargs["repo_id"],
+                "revision": "abc123__query_bounded__searchsig",
+                "parsed_file_count": len(kwargs["files"]),
+            }
+
+        async def memory_search(self, **kwargs):
+            calls.append(("search", kwargs))
+            return {
+                "extra_context": "## FormSy Guidance\n- ONLY EDIT: parser.py",
+                "matches": [{"path": "parser.py", "score": 1.0}],
+                "coverage": "partial",
+                "retrieval_state": "inspect_candidates",
+                "preferred_next_step": "context_read",
+                "accepted_targets": ["parser.py"],
+                "exploration_closed": True,
+            }
+
+        async def memory_read(self, **kwargs):
+            calls.append(("read", kwargs))
+            return {
+                "path": "parser.py",
+                "start_line": 1,
+                "end_line": 1,
+                "content": "def parse(): pass",
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "django__django",
+        "revision": "latest",
+        "query_budget": 4000,
+        "timeout_s": 120,
+    })()
+    engine._session_id = "session-123"
+
+    search_payload = json.loads(
+        engine.handle_tool_call("context_search", {"query": "parser state"})
+    )
+    assert search_payload["preferred_next_step"] == "context_read"
+
+    read_result = engine.handle_tool_call("context_read", {"path": "parser.py"})
+
+    assert "ok: true" in read_result
+    read_call = [kwargs for name, kwargs in calls if name == "read"][0]
+    assert read_call["revision"] == "abc123__query_bounded__searchsig"
+
+
+def test_formsy_engine_sends_confirmed_source_reads_after_context_read():
+    engine = FormsyContextEngine()
+    calls = []
+
+    class FakeClient:
+        async def compile_status(self, **kwargs):
+            return {"parsed_file_count": 1000, "metadata": {}}
+
+        async def memory_search(self, **kwargs):
+            calls.append(("search", kwargs))
+            return {
+                "coverage": "partial",
+                "matches": [{"path": "lib/ansible/modules/iptables.py"}],
+                "accepted_targets": ["lib/ansible/modules/iptables.py"],
+                "exploration_closed": True,
+                "retrieval_state": "inspect_candidates",
+                "preferred_next_step": "context_read",
+            }
+
+        async def memory_read(self, **kwargs):
+            calls.append(("read", kwargs))
+            return {
+                "path": "lib/ansible/modules/iptables.py",
+                "start_line": 1,
+                "end_line": 20,
+                "content": "DOCUMENTATION = '---'\nargument_spec = dict(state=dict(type='str'))",
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "latest",
+        "query_budget": 4000,
+        "timeout_s": 120,
+    })()
+    engine._session_id = "session-123"
+
+    engine.handle_tool_call(
+        "context_search",
+        {
+            "query": "iptables chain management",
+            "metadata": {
+                "retrieval_mode": "symbolic",
+                "grounding_phase": "seed",
+            },
+        },
+    )
+    engine.handle_tool_call(
+        "context_read",
+        {"path": "lib/ansible/modules/iptables.py"},
+    )
+    engine.handle_tool_call(
+        "context_search",
+        {
+            "query": "confirm iptables interface shape",
+            "metadata": {
+                "retrieval_mode": "symbolic",
+                "grounding_phase": "grounded",
+                "grounded_files": ["lib/ansible/modules/iptables.py"],
+            },
+        },
+    )
+
+    second_search = [kwargs for name, kwargs in calls if name == "search"][1]
+    confirmed_reads = second_search["metadata"]["confirmed_source_reads"]
+    assert confirmed_reads == [
+        {
+            "path": "lib/ansible/modules/iptables.py",
+            "start_line": 1,
+            "end_line": 20,
+            "content": "DOCUMENTATION = '---'\nargument_spec = dict(state=dict(type='str'))",
+            "source": "context_read",
+        }
+    ]
+
+
 def test_formsy_engine_memory_read_renders_context_meta_source_header():
     engine = FormsyContextEngine()
 
@@ -2831,6 +3741,20 @@ def test_formsy_config_loads_global_formsy_config_when_session_kwargs_do_not_inc
     assert config.query_budget == 4000
     assert config.workspace_id == "ws_local"
     assert config.timeout_s == 45
+
+
+def test_formsy_config_loads_tocs_lookup_identity_from_env(tmp_path, monkeypatch):
+    lookup_identity = {
+        "tocs_case_id": "ansible_gzip_response_decompress",
+        "tocs_run_profile": "tocs-p0-local",
+        "repo_id": "ansible__ansible",
+        "base_revision": "abc123",
+    }
+    monkeypatch.setenv("FORMSY_TOCS_LOOKUP_IDENTITY", json.dumps(lookup_identity))
+
+    config = EngineConfigManager(tmp_path).load_config({"formsy": {}})
+
+    assert config.tocs_lookup_identity == lookup_identity
 
 
 def test_formsy_engine_allows_explicit_terminal_supplemental_read_after_grounding():
@@ -3375,6 +4299,348 @@ def test_formsy_engine_allows_grounded_read_only_context_but_not_edits():
     assert "lib/ansible/plugins/strategy/__init__.py" in engine._retrieval_trace.supplemental_read_files
 
 
+def test_formsy_engine_allows_resolved_tocs_must_read_and_candidate_tests():
+    engine = FormsyContextEngine()
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            return {
+                "coverage": "partial",
+                "matches": [
+                    {"path": "lib/ansible/utils/display.py"},
+                ],
+                "accepted_targets": ["lib/ansible/utils/display.py"],
+                "exploration_closed": True,
+                "retrieval_state": "retry_symbolic_search",
+                "preferred_next_step": "context_read",
+                "guidance": {
+                    "tocs_delivery": {
+                        "requested": True,
+                        "resolved": True,
+                        "artifact_resolution_mode": "latest_gated_case_profile",
+                    },
+                    "tocs": {
+                        "must_read_files": [
+                            {"path": "lib/ansible/module_utils/urls.py"},
+                            {"path": "lib/ansible/modules/uri.py"},
+                            {"path": "test/units/module_utils/urls/test_gzip.py"},
+                        ],
+                        "candidate_tests": [
+                            {
+                                "test_id": (
+                                    "test/units/module_utils/urls/test_gzip.py"
+                                    "::test_Request_open_gzip"
+                                ),
+                                "command": (
+                                    "pytest test/units/module_utils/urls/test_gzip.py"
+                                    "::test_Request_open_gzip"
+                                ),
+                                "semantic_coverage_hints": [
+                                    "covers opt-out/raw encoded payload behavior",
+                                    "covers incremental read(size) reader semantics",
+                                ],
+                            }
+                        ],
+                    },
+                },
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "v173091e2e36d38c978002990795f66cfc0af30ad",
+        "query_budget": 4000,
+    })()
+
+    result = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {
+                "query": "Request.open gzip Content-Encoding decompress=False",
+                "metadata": {
+                    "retrieval_mode": "symbolic",
+                    "grounding_phase": "seed",
+                    "response_format": "bundle",
+                },
+            },
+        )
+    )
+
+    assert result["accepted_targets"] == ["lib/ansible/utils/display.py"]
+    assert engine.get_tool_block_message(
+        "context_read",
+        {"path": "lib/ansible/module_utils/urls.py"},
+    ) is None
+    assert engine.get_tool_block_message(
+        "context_read",
+        {"path": "test/units/module_utils/urls/test_gzip.py"},
+    ) is None
+    status = engine.get_retrieval_status()
+    assert "lib/ansible/module_utils/urls.py" in status["retrieval_trace"]["read_only_context_files"]
+    assert "test/units/module_utils/urls/test_gzip.py" in status["test_plan_files"]
+    blocked = engine.get_tool_block_message(
+        "write_file",
+        {"path": "lib/ansible/module_utils/urls.py"},
+    )
+    assert blocked is not None
+    assert "editing is limited to accepted targets" in blocked
+
+
+def test_formsy_engine_projects_resolved_tocs_repair_target_over_stale_contract_target(
+    monkeypatch,
+):
+    engine = FormsyContextEngine()
+    captured = {}
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            return {
+                "coverage": "partial",
+                "matches": [{"path": "lib/ansible/utils/display.py"}],
+                "accepted_targets": ["lib/ansible/utils/display.py"],
+                "exploration_closed": True,
+                "retrieval_state": "retry_symbolic_search",
+                "preferred_next_step": "context_read",
+                "guidance": {
+                    "tocs_delivery": {
+                        "requested": True,
+                        "resolved": True,
+                        "artifact_resolution_mode": "latest_gated_case_profile",
+                    },
+                    "tocs": {
+                        "lane_b_mode": "repair_ready_exact",
+                        "must_read_files": [
+                            {"path": "lib/ansible/module_utils/urls.py"},
+                            {"path": "lib/ansible/modules/uri.py"},
+                            {"path": "lib/ansible/modules/get_url.py"},
+                            {"path": "test/units/module_utils/urls/test_gzip.py"},
+                        ],
+                        "candidate_tests": [
+                            {
+                                "test_id": (
+                                    "test/units/module_utils/urls/test_gzip.py"
+                                    "::test_Request_open_gzip"
+                                ),
+                                "command": (
+                                    "pytest test/units/module_utils/urls/test_gzip.py"
+                                    "::test_Request_open_gzip"
+                                ),
+                                "semantic_coverage_hints": [
+                                    "covers opt-out/raw encoded payload behavior",
+                                    "covers incremental read(size) reader semantics",
+                                ],
+                            }
+                        ],
+                    },
+                },
+            }
+
+    class FakeCoordinator:
+        def compile_context_bundle(self, **kwargs):
+            captured.update(kwargs)
+            return "## FormSy Constraint Protocol\n- State: PATCH_ALLOWED_WITH_WARNINGS"
+
+        def observe_tool_result(self, *args, **kwargs):
+            return None
+
+    monkeypatch.setattr(
+        "plugins.context_engine.formsy.engine._get_constraint_keeper_coordinator",
+        lambda: FakeCoordinator(),
+    )
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "v173091e2e36d38c978002990795f66cfc0af30ad",
+        "query_budget": 4000,
+        "workspace_id": "local",
+    })()
+
+    result = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {
+                "query": "Request.open gzip Content-Encoding decompress=False",
+                "metadata": {
+                    "retrieval_mode": "symbolic",
+                    "grounding_phase": "seed",
+                    "response_format": "bundle",
+                },
+            },
+        )
+    )
+
+    assert result["accepted_targets"] == ["lib/ansible/module_utils/urls.py"]
+    assert result["tocs_repair_targets"] == ["lib/ansible/module_utils/urls.py"]
+    assert result["tocs_contract_projection"] == {
+        "source": "resolved_tocs",
+        "reason": "repair_ready_exact",
+        "replaced_accepted_targets": ["lib/ansible/utils/display.py"],
+    }
+    assert "Coverage hints:" in result["extra_context"]
+    assert "incremental read(size) reader semantics" in result["extra_context"]
+    assert captured["search_payload"]["accepted_targets"] == [
+        "lib/ansible/module_utils/urls.py"
+    ]
+    assert captured["context_bundle"]["primary_files"] == [
+        {"path": "lib/ansible/module_utils/urls.py", "priority": "must_edit"}
+    ]
+    assert engine.get_tool_block_message(
+        "patch",
+        {"path": "lib/ansible/module_utils/urls.py"},
+    ) is None
+    assert engine.get_tool_block_message(
+        "patch",
+        {"path": "lib/ansible/modules/uri.py"},
+    ) is not None
+
+
+def test_formsy_engine_promotes_single_resolved_tocs_must_read_without_candidate_tests(
+    monkeypatch,
+):
+    engine = FormsyContextEngine()
+    captured = {}
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            return {
+                "coverage": "partial",
+                "matches": [{"path": "lib/ansible/utils/display.py"}],
+                "accepted_targets": ["lib/ansible/utils/display.py"],
+                "exploration_closed": True,
+                "retrieval_state": "retry_symbolic_search",
+                "preferred_next_step": "context_read",
+                "guidance": {
+                    "tocs_delivery": {
+                        "requested": True,
+                        "resolved": True,
+                    },
+                    "tocs": {
+                        "lane_b_mode": "repair_ready_exact",
+                        "must_read_files": [
+                            {"path": "lib/ansible/modules/iptables.py"},
+                        ],
+                    },
+                },
+            }
+
+    class FakeCoordinator:
+        def compile_context_bundle(self, **kwargs):
+            captured.update(kwargs)
+            return ""
+
+        def observe_tool_result(self, *args, **kwargs):
+            return None
+
+    monkeypatch.setattr(
+        "plugins.context_engine.formsy.engine._get_constraint_keeper_coordinator",
+        lambda: FakeCoordinator(),
+    )
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "latest",
+        "query_budget": 4000,
+        "workspace_id": "local",
+    })()
+
+    result = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {
+                "query": "iptables chain management",
+                "metadata": {
+                    "retrieval_mode": "symbolic",
+                    "grounding_phase": "seed",
+                    "response_format": "bundle",
+                },
+            },
+        )
+    )
+
+    assert result["accepted_targets"] == ["lib/ansible/modules/iptables.py"]
+    assert result["tocs_repair_targets"] == ["lib/ansible/modules/iptables.py"]
+    assert result["tocs_contract_projection"] == {
+        "source": "resolved_tocs",
+        "reason": "repair_ready_exact",
+        "replaced_accepted_targets": ["lib/ansible/utils/display.py"],
+    }
+    assert captured["search_payload"]["accepted_targets"] == [
+        "lib/ansible/modules/iptables.py"
+    ]
+
+
+def test_formsy_engine_projects_edit_next_step_when_resolved_tocs_closes_exploration(
+    monkeypatch,
+):
+    engine = FormsyContextEngine()
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            return {
+                "coverage": "partial",
+                "matches": [{"path": "lib/ansible/utils/display.py"}],
+                "accepted_targets": ["lib/ansible/utils/display.py"],
+                "exploration_closed": True,
+                "retrieval_state": "retry_symbolic_search",
+                "preferred_next_step": "context_search",
+                "guidance": {
+                    "tocs_delivery": {"resolved": True},
+                    "tocs": {
+                        "lane_b_mode": "repair_ready_exact",
+                        "must_read_files": [
+                            {"path": "lib/ansible/module_utils/urls.py"},
+                            {"path": "test/units/module_utils/urls/test_gzip.py"},
+                        ],
+                        "candidate_tests": [
+                            {"path": "test/units/module_utils/urls/test_gzip.py"}
+                        ],
+                    },
+                },
+            }
+
+    class FakeCoordinator:
+        def compile_context_bundle(self, **kwargs):
+            return ""
+
+        def observe_tool_result(self, *args, **kwargs):
+            return None
+
+    monkeypatch.setattr(
+        "plugins.context_engine.formsy.engine._get_constraint_keeper_coordinator",
+        lambda: FakeCoordinator(),
+    )
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "latest",
+        "query_budget": 4000,
+        "workspace_id": "local",
+    })()
+
+    result = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {
+                "query": "Request.open gzip response decompress",
+                "metadata": {
+                    "retrieval_mode": "symbolic",
+                    "grounding_phase": "seed",
+                    "response_format": "bundle",
+                },
+            },
+        )
+    )
+
+    assert result["accepted_targets"] == ["lib/ansible/module_utils/urls.py"]
+    assert result["exploration_closed"] is True
+    assert result["retrieval_state"] == "grounded"
+    assert result["preferred_next_step"] == "edit"
+    assert result["retrieval_decision"]["decision"] == "grounded"
+
+
 def test_formsy_engine_allows_limited_supplemental_read_after_grounding_but_not_edits():
     engine = FormsyContextEngine()
 
@@ -3628,6 +4894,97 @@ def test_formsy_engine_does_not_replace_accepted_target_with_later_context_searc
     assert "editing is limited to accepted targets" in blocked
 
 
+def test_formsy_engine_replaces_seed_accepted_target_with_later_effective_target():
+    engine = FormsyContextEngine()
+
+    class FakeClient:
+        async def compile_status(self, **kwargs):
+            return {"parsed_file_count": 1000, "metadata": {}}
+
+        async def memory_search(self, **kwargs):
+            query = kwargs["query"]
+            if "gzip response" in query:
+                return {
+                    "coverage": "partial",
+                    "matches": [
+                        {"path": "lib/ansible/utils/display.py"},
+                    ],
+                    "accepted_targets": ["lib/ansible/utils/display.py"],
+                    "exploration_closed": True,
+                    "retrieval_state": "inspect_candidates",
+                    "preferred_next_step": "context_read",
+                    "bundle": {
+                        "primary_files": [
+                            {
+                                "path": "lib/ansible/utils/display.py",
+                                "priority": "must_edit",
+                            }
+                        ],
+                    },
+                }
+            return {
+                "coverage": "partial",
+                "matches": [
+                    {"path": "lib/ansible/module_utils/urls.py"},
+                ],
+                "accepted_targets": ["lib/ansible/module_utils/urls.py"],
+                "exploration_closed": True,
+                "retrieval_state": "inspect_candidates",
+                "preferred_next_step": "context_read",
+                "bundle": {
+                    "primary_files": [
+                        {
+                            "path": "lib/ansible/module_utils/urls.py",
+                            "priority": "must_edit",
+                        }
+                    ],
+                },
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "cd64e0b070f8630e1dcc021e594ed42ea7afe304",
+        "query_budget": 4000,
+    })()
+
+    first = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {
+                "query": "gzip response should decompress response body",
+                "metadata": {
+                    "retrieval_mode": "symbolic",
+                    "grounding_phase": "seed",
+                },
+            },
+        )
+    )
+    assert first["accepted_targets"] == ["lib/ansible/utils/display.py"]
+
+    second = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {
+                "query": "urls Request.open gzip decompress module_utils",
+                "metadata": {
+                    "retrieval_mode": "symbolic",
+                    "grounding_phase": "seed",
+                },
+            },
+        )
+    )
+
+    assert second["accepted_targets"] == ["lib/ansible/module_utils/urls.py"]
+    assert second["retrieval_decision"]["accepted_targets"] == [
+        "lib/ansible/module_utils/urls.py"
+    ]
+    assert engine.get_tool_block_message(
+        "patch",
+        {"path": "lib/ansible/module_utils/urls.py"},
+    ) is None
+
+
 def test_formsy_engine_blocks_execute_code_tool_bypass_after_grounding():
     engine = FormsyContextEngine()
     engine._sync_trace_state(state="grounded")
@@ -3792,6 +5149,24 @@ def test_formsy_engine_blocks_repeated_non_test_terminal_probe():
 
     engine.observe_tool_result("patch", {"path": "django/contrib/staticfiles/storage.py"}, "")
     assert engine.get_tool_block_message("terminal", {"command": command}) is None
+
+
+def test_formsy_engine_blocks_repeated_non_test_terminal_probe_without_observed_results():
+    engine = FormsyContextEngine()
+    engine._sync_trace_state(state="grounded")
+    engine._set_accepted_targets(["lib/ansible/module_utils/urls.py"])
+    command = (
+        'cd /Users/wayneliu/dev/ansible && grep -n "Gzip\\|gzip\\|decompress\\|'
+        'Content-Encoding" lib/ansible/module_utils/urls.py | head -n 40'
+    )
+
+    assert engine.get_tool_block_message("terminal", {"command": command}) is None
+    assert engine.get_tool_block_message("terminal", {"command": command}) is None
+    blocked = engine.get_tool_block_message("terminal", {"command": command})
+
+    assert blocked is not None
+    assert "already ran twice" in blocked
+    assert "patch the accepted target" in blocked
 
 
 def test_formsy_engine_reuses_existing_compile_for_same_query():

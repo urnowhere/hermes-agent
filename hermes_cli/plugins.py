@@ -1101,6 +1101,10 @@ class PluginManager:
         system prompt stays identical across turns so cached tokens
         are reused.  All injected context is ephemeral — never
         persisted to session DB.
+
+        ``post_llm_call`` is observer-only by default. The agent loop ignores
+        arbitrary return values and only handles narrowly named directives such
+        as ``{"action": "replace_final_response", "final_response": "..."}``.
         """
         callbacks = self._hooks.get(hook_name, [])
         results: List[Any] = []

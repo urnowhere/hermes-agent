@@ -366,6 +366,7 @@ class FormsyContextEngine(ContextEngine):
         self._memory_compile_revision: str = ""
         self._context_read_cache: dict[str, list[dict[str, Any]]] = {}
         self._last_async_error: str = ""
+        self._terminal_preflight_command_counts: dict[str, int] = {}
         self._terminal_command_counts: dict[str, int] = {}
         self._last_terminal_test_failed: bool = False
         self._failed_test_recovery_search_used: bool = False
@@ -508,6 +509,9 @@ class FormsyContextEngine(ContextEngine):
         """
         if not user_message:
             return
+        task_instruction = self._extract_task_instruction(user_message)
+        if not task_instruction:
+            return
         # Only reset when the message looks like a fresh task injection.
         # Regular conversational follow-ups should not reset grounding.
         msg_lower = user_message[:2000].lower()
@@ -515,8 +519,11 @@ class FormsyContextEngine(ContextEngine):
             logger.debug("on_user_turn: task injection detected, flushing session then resetting retrieval state")
             self._flush_session_for_task_boundary()
             self._reset_retrieval_state()
-            self._task_instruction_text = self._extract_task_instruction(user_message)
+            self._task_instruction_text = task_instruction
             self._seed_required = True
+            return
+        if not self._task_instruction_text:
+            self._task_instruction_text = task_instruction
 
     @staticmethod
     def _extract_task_instruction(user_message: str, *, limit: int = 12000) -> str:
@@ -719,6 +726,14 @@ class FormsyContextEngine(ContextEngine):
                                     "type": "string",
                                     "description": "Optional feedback about retrieval quality or contradictions to carry into the next query.",
                                 },
+                                "tocs_lookup_identity": {
+                                    "type": "object",
+                                    "description": (
+                                        "Optional runtime/plugin-provided TOCS lookup identity. "
+                                        "Preserve this value when present; do not infer or invent "
+                                        "TOCS identifiers from the natural-language prompt."
+                                    ),
+                                },
                             },
                         },
                     },
@@ -784,54 +799,6 @@ class FormsyContextEngine(ContextEngine):
                 "query": query,
                 "error": "context_search could not infer repo_id from the current git remote.",
             })
-        if not self._ensure_memory_compiled(repo_id=repo_id, revision=revision, query=query, session_id=session_id):
-            # Source compile failed — attempt a memory-only prefetch before falling back to
-            # degraded_recovery. This surfaces episodes/facts from previous runs without
-            # requiring compiled source, enabling a memory hit on repeated tasks.
-            memory_hit = self._try_memory_prefetch_fallback(
-                query=query, repo_id=repo_id, session_id=session_id
-            )
-            if memory_hit is not None:
-                return memory_hit
-            self._retrieval_state = "degraded_recovery"
-            self._sync_trace_state(state=self._retrieval_state)
-            guidance_packet = self._build_degraded_guidance_packet(
-                query=query,
-                payload={},
-                metadata=args.get("metadata") if isinstance(args.get("metadata"), dict) else {},
-            )
-            self._degraded_guidance_packet = guidance_packet
-            payload = {
-                "ok": True,
-                "query": query,
-                "repo_id": repo_id,
-                "revision": revision,
-                "warning": "Formsy memory compile unavailable before context_search",
-                "error_code": "MEMORY_COMPILE_UNAVAILABLE",
-                "compile_error": self._last_async_error,
-                "retrieval_status": "failed",
-                "recovery_mode": "degraded_recovery",
-                "preferred_next_step": "context_read"
-                if guidance_packet.get("next_tool_directive")
-                else "bounded_shell_inspection",
-                "allowed_tools": ["terminal", "read_file", "search_files"],
-                "guidance_packet": guidance_packet,
-                "retrieval_feedback": (
-                    "Memory compile failed. Falling back to bounded shell inspection. "
-                    "Use at most one targeted search_files call, then read_file the likely "
-                    "target. Do not repeat identical terminal repro commands; patch or rerun "
-                    "context_search after the server compile issue is fixed."
-                ),
-            }
-            self._apply_next_tool_directive_fields(payload)
-            self._notify_constraint_keeper_tool_result(
-                "context_search",
-                args=args,
-                result=json.dumps(payload),
-                session_id=session_id,
-            )
-            return json.dumps(payload)
-        revision = self._memory_compile_revision or revision
         budget = self._coerce_positive_int(args.get("budget"), self._config.query_budget if self._config else 4000)
         self._retrieval_trace.retrieval_budget = budget
         metadata = self._build_query_metadata(args, repo_id=repo_id, session_id=session_id)
@@ -840,6 +807,7 @@ class FormsyContextEngine(ContextEngine):
             server_wait_budget = max(10, min(timeout_s - 10, 90))
             metadata.setdefault("query_timeout_s", server_wait_budget)
             metadata.setdefault("fanout_timeout_s", server_wait_budget)
+        self._merge_tocs_lookup_identity(metadata, identity)
         self._merge_memory_hints(metadata)
         if (
             self._last_terminal_test_failed
@@ -864,6 +832,101 @@ class FormsyContextEngine(ContextEngine):
             ):
                 if value is not None and not metadata.get(key):
                     metadata[key] = value
+        if not self._ensure_memory_compiled(repo_id=repo_id, revision=revision, query=query, session_id=session_id):
+            if isinstance(metadata.get("tocs_lookup_identity"), dict):
+                failed_metadata = dict(metadata)
+                failed_metadata["compile_status"] = "failed"
+                failed_metadata["compile_error"] = self._last_async_error
+                failed_metadata.setdefault("recovery_mode", "compile_failed_tocs_delivery")
+                delivery_result = self._run_async(
+                    self._engine_client.memory_search(
+                        repo_id=repo_id,
+                        session_id=session_id,
+                        query=query,
+                        revision=revision,
+                        budget=budget,
+                        metadata=failed_metadata,
+                        **({"identity": identity} if identity else {}),
+                    )
+                )
+                if (
+                    isinstance(delivery_result, dict)
+                    and self._resolved_tocs_guidance(delivery_result.get("guidance"))
+                ):
+                    return self._memory_search_payload_json(
+                        args=args,
+                        query=query,
+                        repo_id=repo_id,
+                        revision=revision,
+                        session_id=session_id,
+                        budget=budget,
+                        metadata=failed_metadata,
+                        result=delivery_result,
+                    )
+            # Source compile failed — attempt a memory-only prefetch before falling back to
+            # degraded_recovery. This surfaces episodes/facts from previous runs without
+            # requiring compiled source, enabling a memory hit on repeated tasks.
+            memory_hit = self._try_memory_prefetch_fallback(
+                query=query, repo_id=repo_id, session_id=session_id
+            )
+            if memory_hit is not None:
+                return memory_hit
+            self._retrieval_state = "degraded_recovery"
+            self._sync_trace_state(state=self._retrieval_state)
+            tocs_identity_status = (
+                "present"
+                if isinstance(metadata.get("tocs_lookup_identity"), dict)
+                else "missing"
+            )
+            guidance_packet = self._build_degraded_guidance_packet(
+                query=query,
+                payload={},
+                metadata=args.get("metadata") if isinstance(args.get("metadata"), dict) else {},
+            )
+            self._degraded_guidance_packet = guidance_packet
+            payload = {
+                "ok": True,
+                "query": query,
+                "repo_id": repo_id,
+                "revision": revision,
+                "warning": "Formsy memory compile unavailable before context_search",
+                "error_code": "MEMORY_COMPILE_UNAVAILABLE",
+                "compile_error": self._last_async_error,
+                "tocs_identity_status": tocs_identity_status,
+                "diagnostic_reason": (
+                    "missing_tocs_lookup_identity_or_compile_unavailable"
+                    if tocs_identity_status == "missing"
+                    else "compile_unavailable_without_resolved_tocs"
+                ),
+                "retrieval_status": "failed",
+                "recovery_mode": "degraded_recovery",
+                "preferred_next_step": "context_read"
+                if guidance_packet.get("next_tool_directive")
+                else "bounded_shell_inspection",
+                "allowed_tools": ["terminal", "read_file", "search_files"],
+                "guidance_packet": guidance_packet,
+                "retrieval_feedback": (
+                    "Memory compile failed. Falling back to bounded shell inspection. "
+                    "Use at most one targeted search_files call, then read_file the likely "
+                    "target. Do not repeat identical terminal repro commands; patch or rerun "
+                    "context_search after the server compile issue is fixed."
+                    + (
+                        " No tocs_lookup_identity was available, so FormSy could not "
+                        "resolve TOCS guidance for this degraded run."
+                        if tocs_identity_status == "missing"
+                        else ""
+                    )
+                ),
+            }
+            self._apply_next_tool_directive_fields(payload)
+            self._notify_constraint_keeper_tool_result(
+                "context_search",
+                args=args,
+                result=json.dumps(payload),
+                session_id=session_id,
+            )
+            return json.dumps(payload)
+        revision = self._memory_compile_revision or revision
         result = self._run_async(
             self._engine_client.memory_search(
                 repo_id=repo_id,
@@ -878,6 +941,29 @@ class FormsyContextEngine(ContextEngine):
         if result is None:
             return json.dumps({"ok": False, "query": query, "error": "Formsy context search failed"})
 
+        return self._memory_search_payload_json(
+            args=args,
+            query=query,
+            repo_id=repo_id,
+            revision=revision,
+            session_id=session_id,
+            budget=budget,
+            metadata=metadata,
+            result=result,
+        )
+
+    def _memory_search_payload_json(
+        self,
+        *,
+        args: dict[str, Any],
+        query: str,
+        repo_id: str,
+        revision: str,
+        session_id: str,
+        budget: int,
+        metadata: dict[str, Any],
+        result: dict[str, Any],
+    ) -> str:
         payload: dict[str, Any] = {
             "ok": True,
             "query": query,
@@ -942,6 +1028,7 @@ class FormsyContextEngine(ContextEngine):
             matches=matches,
             payload=payload,
         )
+        self._apply_resolved_tocs_priority_context(payload)
         payload = self._maybe_compile_constraint_protocol(
             payload=payload,
             query=query,
@@ -971,6 +1058,10 @@ class FormsyContextEngine(ContextEngine):
         if mode == "legacy" or phase == "grounded":
             return False
         if metadata.get("test_failure_recovery"):
+            return False
+        current_query = str(args.get("query") or "").strip()
+        previous_query = str(self._last_retrieval_decision.get("query") or "").strip()
+        if metadata and current_query and current_query != previous_query:
             return False
         return True
 
@@ -1104,11 +1195,16 @@ class FormsyContextEngine(ContextEngine):
         return bool(matches) and coverage != "poor"
 
     def _handle_memory_read(self, args: dict[str, Any]) -> str:
-        path = str(args.get("path") or "").strip()
+        requested_path = str(args.get("path") or "").strip()
+        path = self._normalize_repo_path(requested_path)
         if not path:
             return json.dumps({"ok": False, "error": "context_read requires a non-empty path"})
         start_line = self._optional_positive_int(args.get("start_line"))
         end_line = self._optional_positive_int(args.get("end_line"))
+        notify_args = dict(args)
+        notify_args["path"] = path
+        if requested_path != path:
+            notify_args["original_path"] = requested_path
         if self._retrieval_state == "not_started" and self._retrieval_trace.seed_calls == 0:
             line_label = self._line_label(path, start_line=start_line, end_line=end_line)
             return json.dumps({
@@ -1125,6 +1221,11 @@ class FormsyContextEngine(ContextEngine):
                     "source_freshness": "none",
                     "working_tree_alignment": "unknown",
                     "read_key": line_label,
+                    **(
+                        {"original_path": requested_path, "path_normalized": True}
+                        if requested_path != path
+                        else {}
+                    ),
                 },
                 "advisory": [
                     "This context_read happened before a seed context_search.",
@@ -1147,6 +1248,7 @@ class FormsyContextEngine(ContextEngine):
 
         session_id = self._session_id or self._context.get("session_id") or "unknown"
         repo_id, revision = self._resolve_repository_identity()
+        revision = self._context_read_revision(repo_id=repo_id, fallback_revision=revision)
         identity = self._current_runtime_identity()
         if not repo_id:
             return json.dumps({
@@ -1172,7 +1274,7 @@ class FormsyContextEngine(ContextEngine):
                 formatted = self._format_memory_read_result(path, cached)
                 self._notify_constraint_keeper_tool_result(
                     "context_read",
-                    args=args,
+                    args=notify_args,
                     result=formatted,
                     session_id=session_id,
                 )
@@ -1184,7 +1286,7 @@ class FormsyContextEngine(ContextEngine):
         formatted = self._format_memory_read_result(path, result)
         self._notify_constraint_keeper_tool_result(
             "context_read",
-            args=args,
+            args=notify_args,
             result=formatted,
             session_id=session_id,
         )
@@ -1420,6 +1522,16 @@ class FormsyContextEngine(ContextEngine):
             if callable(identity_fn):
                 return dict(identity_fn())
         return {}
+
+    def _context_read_revision(self, *, repo_id: str, fallback_revision: str) -> str:
+        compiled_revision = str(self._memory_compile_revision or "").strip()
+        if not compiled_revision or self._retrieval_trace.seed_calls <= 0:
+            return fallback_revision
+        if self._memory_compiled_identity is not None:
+            compiled_repo_id = str(self._memory_compiled_identity[0] or "").strip()
+            if compiled_repo_id and compiled_repo_id != repo_id:
+                return fallback_revision
+        return compiled_revision
 
     def _ensure_memory_compiled(self, *, repo_id: str, revision: str, query: str, session_id: str) -> bool:
         query_signature = self._query_signature(query)
@@ -1730,8 +1842,8 @@ class FormsyContextEngine(ContextEngine):
             return memory_block
         return ""
 
-    @staticmethod
     def _build_query_metadata(
+        self,
         args: dict[str, Any],
         *,
         repo_id: str = "",
@@ -1754,6 +1866,13 @@ class FormsyContextEngine(ContextEngine):
         supplied = args.get("metadata")
         if isinstance(supplied, dict):
             metadata.update(supplied)
+        for unsafe_key in (
+            "system_prompt",
+            "system_message",
+            "system_instruction",
+            "messages",
+        ):
+            metadata.pop(unsafe_key, None)
         metadata.setdefault("retrieval_mode", "symbolic")
         metadata.setdefault("grounding_phase", "seed")
         metadata.setdefault("response_format", "bundle")
@@ -1761,7 +1880,51 @@ class FormsyContextEngine(ContextEngine):
             metadata.setdefault("case_id", repo_id)
         if session_id and session_id != "unknown":
             metadata.setdefault("trace_id", session_id)
+        if self._task_instruction_text:
+            metadata["full_task_description"] = self._task_instruction_text
+            metadata["task_description_source"] = "hermes_user_turn"
+        confirmed_reads = self._confirmed_source_reads_metadata()
+        if confirmed_reads and not isinstance(metadata.get("confirmed_source_reads"), list):
+            metadata["confirmed_source_reads"] = confirmed_reads
         return metadata
+
+    def _confirmed_source_reads_metadata(self) -> list[dict[str, Any]]:
+        reads: list[dict[str, Any]] = []
+        for entries in self._context_read_cache.values():
+            for entry in entries:
+                content = str(entry.get("content") or "")
+                path = str(entry.get("path") or "").strip()
+                if not path or not content:
+                    continue
+                read = {
+                    "path": path,
+                    "content": content[:12000],
+                    "source": str(entry.get("source") or "context_read"),
+                }
+                if entry.get("start_line") is not None:
+                    read["start_line"] = entry.get("start_line")
+                if entry.get("end_line") is not None:
+                    read["end_line"] = entry.get("end_line")
+                reads.append(read)
+                break
+            if len(reads) >= 3:
+                break
+        return reads
+
+    def _merge_tocs_lookup_identity(
+        self,
+        metadata: dict[str, Any],
+        runtime_identity: dict[str, Any],
+    ) -> None:
+        if isinstance(metadata.get("tocs_lookup_identity"), dict):
+            return
+        lookup_identity = runtime_identity.get("tocs_lookup_identity")
+        if isinstance(lookup_identity, dict):
+            metadata["tocs_lookup_identity"] = dict(lookup_identity)
+            return
+        config_identity = getattr(self._config, "tocs_lookup_identity", None)
+        if isinstance(config_identity, dict):
+            metadata["tocs_lookup_identity"] = dict(config_identity)
 
     def _merge_memory_hints(self, metadata: dict[str, Any]) -> None:
         manager = self._memory_manager or self._context.get("memory_manager")
@@ -1841,6 +2004,8 @@ class FormsyContextEngine(ContextEngine):
         accepted_targets: list[str] = []
         for source in sources:
             accepted_targets.extend(self._guidance_path_list(source.get("accepted_edit_targets")))
+            if source.get("can_patch_now") is False:
+                continue
             accepted_targets.extend(self._guidance_path_list(source.get("primary_edit_target")))
             implementation_pattern = source.get("implementation_pattern")
             if isinstance(implementation_pattern, dict):
@@ -1958,6 +2123,7 @@ class FormsyContextEngine(ContextEngine):
         self._test_plan_commands = []
         self._context_read_cache = {}
         self._last_async_error = ""
+        self._terminal_preflight_command_counts = {}
         self._terminal_command_counts = {}
         self._last_terminal_test_failed = False
         self._failed_test_recovery_search_used = False
@@ -2008,6 +2174,14 @@ class FormsyContextEngine(ContextEngine):
         server_exploration_closed = bool(payload.get("exploration_closed"))
         was_exploration_closed = self._retrieval_trace.exploration_closed
         server_blocked_reason = str(payload.get("blocked_tool_reason") or "").strip()
+        guidance_sources = [
+            source
+            for source in (payload.get("guidance"), payload.get("guidance_packet"))
+            if isinstance(source, dict)
+        ]
+        guidance_can_patch_now_false = any(
+            source.get("can_patch_now") is False for source in guidance_sources
+        )
         suggested_queries = payload.get("suggested_queries")
         if isinstance(suggested_queries, list):
             self._last_suggested_queries = [str(query) for query in suggested_queries if str(query).strip()]
@@ -2034,6 +2208,16 @@ class FormsyContextEngine(ContextEngine):
             self._coerce_string_list(payload.get("grounded_files"))
             or self._coerce_string_list(metadata.get("grounded_files"))
         )
+        tocs_repair_targets = self._extract_tocs_repair_targets(payload.get("guidance"))
+        resolved_tocs_repair = bool(tocs_repair_targets)
+        if guidance_can_patch_now_false and not resolved_tocs_repair:
+            ignored_targets = list(server_accepted_targets)
+            if ignored_targets or server_exploration_closed:
+                payload["weak_seed_accepted_targets_ignored"] = ignored_targets
+            server_accepted_targets = []
+            server_exploration_closed = False
+            payload["accepted_targets"] = []
+            payload["exploration_closed"] = False
         has_grounded_evidence = bool(
             grounded_symbols
             or grounded_files
@@ -2046,6 +2230,29 @@ class FormsyContextEngine(ContextEngine):
         )
         previous_targets = list(self._preferred_edit_targets or self._grounded_files or [])
         test_plan_files = self._extract_test_plan_files(payload.get("test_plan") or self._test_plan)
+        tocs_read_only_files = self._extract_tocs_must_read_files(payload.get("guidance"))
+        tocs_test_files = self._extract_tocs_candidate_test_files(payload.get("guidance"))
+        if tocs_repair_targets:
+            original_accepted_targets = list(server_accepted_targets)
+            payload["tocs_repair_targets"] = list(tocs_repair_targets)
+            payload["tocs_contract_projection"] = {
+                "source": "resolved_tocs",
+                "reason": "repair_ready_exact",
+                "replaced_accepted_targets": original_accepted_targets,
+            }
+            server_accepted_targets = list(tocs_repair_targets)
+            server_exploration_closed = True
+            payload["accepted_targets"] = list(tocs_repair_targets)
+            payload["exploration_closed"] = True
+            bundle = dict(payload.get("bundle")) if isinstance(payload.get("bundle"), dict) else {}
+            bundle["primary_files"] = [
+                {"path": path, "priority": "must_edit"}
+                for path in tocs_repair_targets
+            ]
+            bundle["must_edit"] = list(tocs_repair_targets)
+            payload["bundle"] = bundle
+        if tocs_test_files:
+            test_plan_files = self._dedupe_string_list(list(test_plan_files) + list(tocs_test_files))
         if test_plan_files:
             self._retrieval_trace.test_plan_files = list(test_plan_files)
         self._direct_match_files = self._extract_match_files(matches)
@@ -2054,12 +2261,89 @@ class FormsyContextEngine(ContextEngine):
         self._bundle_read_only_files = self._extract_bundle_read_only_files(payload.get("bundle"))
         if self._bundle_read_only_files:
             self._append_read_only_context_files(self._bundle_read_only_files)
+        if tocs_read_only_files:
+            self._append_read_only_context_files(tocs_read_only_files)
+        guidance_target_conflict = bool(payload.get("target_conflict")) or any(
+            bool(source.get("target_conflict")) for source in guidance_sources
+        )
+        guidance_candidate_targets: list[str] = []
+        for source in guidance_sources:
+            guidance_candidate_targets.extend(
+                self._guidance_path_list(source.get("candidate_targets"))
+            )
+            guidance_candidate_targets.extend(
+                self._guidance_path_list(source.get("target_candidates"))
+            )
+            guidance_candidate_targets.extend(
+                self._guidance_path_list(source.get("recommended_first_reads"))
+            )
+        latest_candidate_targets = self._dedupe_string_list([
+            self._normalize_repo_path(path)
+            for path in (
+                list(self._direct_match_files)
+                + list(guidance_candidate_targets)
+                + self._guidance_path_list(payload.get("candidate_targets"))
+                + self._guidance_path_list(payload.get("retrieval_targets"))
+            )
+            if self._normalize_repo_path(path)
+            and not self._is_test_path(self._normalize_repo_path(path))
+        ])
         locked_accepted_targets = (
             list(self._retrieval_trace.accepted_targets)
             if was_exploration_closed and self._retrieval_trace.accepted_targets
             else []
         )
-        if locked_accepted_targets:
+        locked_norm = {
+            self._normalize_repo_path(path)
+            for path in locked_accepted_targets
+            if self._normalize_repo_path(path)
+        }
+        latest_norm = {
+            self._normalize_repo_path(path)
+            for path in latest_candidate_targets
+            if self._normalize_repo_path(path)
+        }
+        stale_locked_target_conflict = bool(
+            phase == "grounded"
+            and locked_norm
+            and latest_norm
+            and not (locked_norm & latest_norm)
+            and not server_accepted_targets
+            and not resolved_tocs_repair
+            and guidance_target_conflict
+        )
+        if stale_locked_target_conflict:
+            stale_targets = list(locked_accepted_targets)
+            payload["stale_accepted_targets"] = stale_targets
+            payload["superseded_targets"] = stale_targets
+            payload["candidate_targets"] = list(latest_candidate_targets)
+            payload["target_conflict"] = True
+            payload["accepted_targets"] = []
+            payload["exploration_closed"] = False
+            self._append_read_only_context_files(stale_targets)
+            self._set_accepted_targets(
+                [],
+                test_plan_files=list(test_plan_files),
+            )
+            self._grounded_files = []
+            self._context_read_followed = False
+            grounded_files = []
+        previous_trace_state = str(self._retrieval_trace.state or self._retrieval_state or "").strip().lower()
+        replace_locked_seed_targets = bool(
+            locked_accepted_targets
+            and server_exploration_closed
+            and server_accepted_targets
+            and set(server_accepted_targets) != set(locked_accepted_targets)
+            and (
+                resolved_tocs_repair
+                or previous_trace_state not in {"grounded", "legacy_fallback"}
+            )
+        )
+        if (
+            locked_accepted_targets
+            and not replace_locked_seed_targets
+            and not stale_locked_target_conflict
+        ):
             self._append_read_only_context_files(
                 (
                     list(server_accepted_targets)
@@ -2108,6 +2392,9 @@ class FormsyContextEngine(ContextEngine):
         if server_exploration_closed and server_accepted_targets:
             candidate_target_conflict = False
             candidate_target_changed = False
+        if stale_locked_target_conflict:
+            candidate_target_conflict = True
+            candidate_target_changed = False
         contradiction_found = (
             candidate_target_conflict
             or candidate_target_changed
@@ -2141,7 +2428,11 @@ class FormsyContextEngine(ContextEngine):
             self._retrieval_trace.grounded_calls += 1
             self._context_read_required = False
             self._grounded_search_required = False
-            if grounded_useful and not contradiction_found:
+            if stale_locked_target_conflict:
+                self._retrieval_state = "inspect_candidates"
+                preferred_next = "context_read"
+                self._context_read_required = True
+            elif grounded_useful and not contradiction_found:
                 self._grounded_symbols = grounded_symbols or list(self._grounded_symbols)
                 self._grounded_files = grounded_files or list(self._grounded_files)
                 self._retrieval_state = "grounded"
@@ -2207,9 +2498,14 @@ class FormsyContextEngine(ContextEngine):
             if not was_exploration_closed:
                 self._append_read_only_context_files(self._direct_match_files)
             self._grounded_files = list(server_accepted_targets)
-            if server_state:
+            if resolved_tocs_repair:
+                self._retrieval_state = "grounded"
+                preferred_next = "edit"
+            elif server_state:
                 self._retrieval_state = server_state
-            if server_preferred_next:
+            if resolved_tocs_repair:
+                preferred_next = "edit"
+            elif server_preferred_next:
                 preferred_next = server_preferred_next
             elif self._retrieval_state == "grounded":
                 preferred_next = "edit"
@@ -2252,6 +2548,7 @@ class FormsyContextEngine(ContextEngine):
                 self._degraded_guidance_packet = server_guidance_packet
                 payload["guidance_packet"] = server_guidance_packet
         self._apply_next_tool_directive_fields(payload)
+        preferred_next = self._prefer_local_read_for_tocs_fallback_source(payload, preferred_next)
         next_tool = payload.get("next_tool_directive") or payload.get("next_required_tool")
         if isinstance(next_tool, dict) and next_tool.get("tool"):
             preferred_next = str(next_tool.get("tool") or preferred_next)
@@ -2308,6 +2605,110 @@ class FormsyContextEngine(ContextEngine):
         if next_retrieval:
             payload["retrieval_decision"]["next_retrieval"] = next_retrieval
         self._last_retrieval_decision = dict(payload["retrieval_decision"])
+
+    def _apply_resolved_tocs_priority_context(self, payload: dict[str, Any]) -> None:
+        projection = payload.get("tocs_contract_projection")
+        repair_targets = self._coerce_string_list(payload.get("tocs_repair_targets"))
+        if not isinstance(projection, dict) or not repair_targets:
+            return
+        guidance = payload.get("guidance")
+        tocs = self._resolved_tocs_guidance(guidance)
+        if not tocs:
+            return
+
+        lines = [
+            "### TOCS Priority",
+            "- Resolved TOCS supersedes stale suggested actions for edit target selection.",
+            f"- Mode: {str(tocs.get('lane_b_mode') or tocs.get('mode') or 'resolved').strip()}",
+            "- Must edit: " + ", ".join(repair_targets),
+        ]
+        candidate_tests = self._extract_tocs_candidate_test_files(guidance)
+        if candidate_tests:
+            lines.append("- Candidate tests: " + ", ".join(candidate_tests))
+        coverage_hints = self._extract_tocs_candidate_coverage_hints(guidance)
+        if coverage_hints:
+            lines.append("- Coverage hints: " + "; ".join(coverage_hints))
+        replaced = self._coerce_string_list(projection.get("replaced_accepted_targets"))
+        if replaced:
+            lines.append("- Superseded targets: " + ", ".join(replaced))
+        block = "\n".join(lines)
+        existing = str(payload.get("extra_context") or "").strip()
+        if "### TOCS Priority" in existing:
+            return
+        payload["extra_context"] = f"{block}\n\n{existing}" if existing else block
+
+    def _prefer_local_read_for_tocs_fallback_source(
+        self,
+        payload: dict[str, Any],
+        preferred_next: str,
+    ) -> str:
+        if not self._tocs_needs_local_source_fallback(payload):
+            return preferred_next
+
+        targets = (
+            self._coerce_string_list(payload.get("tocs_repair_targets"))
+            or list(self._retrieval_trace.accepted_targets)
+        )
+        target = next((path for path in targets if path and not self._is_test_path(path)), "")
+        if not target:
+            return preferred_next
+
+        directive = {
+            "tool": "read_file",
+            "args": {"path": target},
+            "reason": (
+                "TOCS resolved the edit target, but compiled source context is unavailable "
+                "or stale; verify the current workspace source with a same-target local read "
+                "before patching."
+            ),
+            "enforcement": "suggested",
+            "max_attempts": 1,
+        }
+        payload["next_tool_directive"] = directive
+        payload["next_tool_directive_text"] = self._next_tool_directive_text(directive)
+        payload["preferred_next_step"] = "read_file"
+        payload["compiled_source_context_status"] = "unavailable_or_stale"
+        payload["extra_context"] = self._rewrite_context_read_directive_to_read_file(
+            payload.get("extra_context"),
+            target,
+        )
+        self._context_read_required = False
+        return "read_file"
+
+    def _tocs_needs_local_source_fallback(self, payload: dict[str, Any]) -> bool:
+        guidance = payload.get("guidance")
+        tocs = self._resolved_tocs_guidance(guidance)
+        if not tocs:
+            return False
+        targets = self._coerce_string_list(payload.get("tocs_repair_targets"))
+        if not targets:
+            return False
+
+        coverage = str(payload.get("coverage") or "").strip().lower()
+        matches = payload.get("matches")
+        freshness = ""
+        if isinstance(guidance, dict):
+            freshness = str(guidance.get("freshness") or "").strip().lower()
+        lane_b_mode = str(tocs.get("lane_b_mode") or tocs.get("mode") or "").strip().lower()
+        source_status = str(tocs.get("source_resolution_status") or "").strip().lower()
+        fallback_source = lane_b_mode == "diagnostic_source_fallback" or source_status == "fallback"
+        weak_or_stale_context = (
+            coverage == "poor"
+            or matches == []
+            or freshness in {"stale", "missing", "none", "unknown"}
+        )
+        return fallback_source and weak_or_stale_context
+
+    def _rewrite_context_read_directive_to_read_file(self, text: Any, target: str) -> str:
+        existing = str(text or "")
+        replacement = f"- NEXT SUGGESTED TOOL: read_file path={target}"
+        pattern = re.compile(
+            r"(?m)^\s*-?\s*NEXT\s+(?:SUGGESTED|REQUIRED)\s+TOOL:\s+context_read\s+path=[^\n]+"
+        )
+        rewritten = pattern.sub(replacement, existing)
+        if rewritten == existing and replacement not in rewritten:
+            return f"{replacement}\n\n{existing}".strip()
+        return rewritten
 
     def _next_retrieval_hint(self, *, metadata: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any] | None:
         if self._retrieval_state == "retry":
@@ -2403,8 +2804,8 @@ class FormsyContextEngine(ContextEngine):
             if str(directive.get("enforcement") or "suggested") == "lifecycle_required"
             else "NEXT SUGGESTED TOOL"
         )
-        if tool == "context_read" and path:
-            return f"{prefix}: context_read path={path}"
+        if tool in {"context_read", "read_file"} and path:
+            return f"{prefix}: {tool} path={path}"
         if tool:
             return f"{prefix}: {tool}"
         return ""
@@ -2451,6 +2852,25 @@ class FormsyContextEngine(ContextEngine):
     def _record_context_read(self, requested_path: str, result: Any) -> None:
         if isinstance(result, dict):
             path = str(result.get("path") or requested_path)
+            content = str(result.get("content") or "")
+            if path and content:
+                context_meta = result.get("context_meta")
+                if not isinstance(context_meta, dict):
+                    context_meta = {}
+                entry = {
+                    "path": path,
+                    "start_line": result.get("start_line"),
+                    "end_line": result.get("end_line"),
+                    "content": content,
+                    "source": str(
+                        result.get("source")
+                        or context_meta.get("source")
+                        or "context_read"
+                    ),
+                }
+                cached_entries = self._context_read_cache.setdefault(path, [])
+                if entry not in cached_entries:
+                    cached_entries.append(entry)
         else:
             path = requested_path
         norm = path.lstrip("./") if path.startswith("./") else path
@@ -2676,6 +3096,165 @@ class FormsyContextEngine(ContextEngine):
                     path = str(path)
                     if path not in paths:
                         paths.append(path)
+        return paths
+
+    def _extract_tocs_must_read_files(self, guidance: Any) -> list[str]:
+        tocs = self._resolved_tocs_guidance(guidance)
+        if not tocs:
+            return []
+        return self._dedupe_string_list([
+            self._normalize_repo_path(path)
+            for path in self._guidance_path_list(tocs.get("must_read_files"))
+            if self._normalize_repo_path(path)
+        ])
+
+    def _extract_tocs_candidate_test_files(self, guidance: Any) -> list[str]:
+        tocs = self._resolved_tocs_guidance(guidance)
+        if not tocs:
+            return []
+        candidates = tocs.get("candidate_tests")
+        if not isinstance(candidates, list):
+            return []
+        paths: list[str] = []
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            paths.extend(self._guidance_path_list(candidate))
+            for key in ("normalized_selector", "source_selector", "test_id", "command"):
+                paths.extend(self._extract_test_file_paths_from_text(candidate.get(key)))
+        return self._dedupe_string_list([
+            self._normalize_repo_path(path)
+            for path in paths
+            if self._normalize_repo_path(path)
+        ])
+
+    def _extract_tocs_candidate_coverage_hints(self, guidance: Any) -> list[str]:
+        tocs = self._resolved_tocs_guidance(guidance)
+        if not tocs:
+            return []
+        candidates = tocs.get("candidate_tests")
+        if not isinstance(candidates, list):
+            return []
+        hints: list[str] = []
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            raw_hints = candidate.get("semantic_coverage_hints")
+            if not isinstance(raw_hints, list):
+                continue
+            for raw_hint in raw_hints:
+                hint = str(raw_hint or "").strip()
+                if hint and hint not in hints:
+                    hints.append(hint)
+        return hints[:4]
+
+    def _extract_tocs_repair_targets(self, guidance: Any) -> list[str]:
+        tocs = self._resolved_tocs_guidance(guidance)
+        if not tocs:
+            return []
+
+        explicit_targets: list[str] = []
+        for key in (
+            "repair_targets",
+            "repair_target",
+            "accepted_edit_targets",
+            "primary_edit_target",
+            "edit_targets",
+            "likely_edit_files",
+        ):
+            explicit_targets.extend(self._guidance_path_list(tocs.get(key)))
+        explicit_targets = self._dedupe_string_list([
+            self._normalize_repo_path(path)
+            for path in explicit_targets
+            if self._normalize_repo_path(path) and not self._is_test_path(path)
+        ])
+        if explicit_targets:
+            return explicit_targets
+
+        lane_b_mode = str(tocs.get("lane_b_mode") or tocs.get("mode") or "").strip().lower()
+        if lane_b_mode != "repair_ready_exact":
+            return []
+
+        source_paths = [
+            path
+            for path in self._extract_tocs_must_read_files(guidance)
+            if path and not self._is_test_path(path)
+        ]
+        if len(source_paths) == 1:
+            return source_paths
+
+        test_paths = self._extract_tocs_candidate_test_files(guidance)
+        if not source_paths or not test_paths:
+            return []
+
+        scored: list[tuple[int, int, str]] = []
+        for index, source_path in enumerate(source_paths):
+            source_tokens = self._path_semantic_tokens(source_path)
+            score = 0
+            for test_path in test_paths:
+                test_tokens = self._path_semantic_tokens(test_path)
+                score = max(score, len(source_tokens & test_tokens))
+            if score > 0:
+                scored.append((score, -index, source_path))
+        if not scored:
+            return []
+        best_score = max(score for score, _index, _path in scored)
+        return [
+            path
+            for score, _index, path in scored
+            if score == best_score
+        ]
+
+    @staticmethod
+    def _resolved_tocs_guidance(guidance: Any) -> dict[str, Any]:
+        if not isinstance(guidance, dict):
+            return {}
+        tocs = guidance.get("tocs")
+        delivery = guidance.get("tocs_delivery")
+        if not isinstance(tocs, dict) or not isinstance(delivery, dict):
+            return {}
+        if delivery.get("resolved") is not True:
+            return {}
+        return tocs
+
+    @classmethod
+    def _path_semantic_tokens(cls, path: str) -> set[str]:
+        generic = {
+            "lib",
+            "src",
+            "source",
+            "test",
+            "tests",
+            "unit",
+            "units",
+            "integration",
+            "functional",
+            "__init__",
+        }
+        tokens: set[str] = set()
+        normalized = cls._normalize_repo_path(path)
+        for part in re.split(r"[/._\\-]+", normalized):
+            text = part.strip().lower()
+            if not text or text in generic or text == "py":
+                continue
+            tokens.add(text)
+        return tokens
+
+    @classmethod
+    def _is_test_path(cls, path: str) -> bool:
+        normalized = cls._normalize_repo_path(path)
+        return normalized.startswith(("test/", "tests/")) or "/test/" in normalized or "/tests/" in normalized
+
+    @staticmethod
+    def _extract_test_file_paths_from_text(value: Any) -> list[str]:
+        text = str(value or "").strip()
+        if not text:
+            return []
+        paths: list[str] = []
+        for match in re.finditer(r"(?P<path>(?:\./)?(?:tests?|test)/[^\s:'\"]+?\.py)(?:::|\s|$)", text):
+            path = match.group("path").lstrip("./")
+            if path and path not in paths:
+                paths.append(path)
         return paths
 
     def _collect_context_artifact_ids(self, artifacts: Any) -> None:
@@ -3341,13 +3920,31 @@ class FormsyContextEngine(ContextEngine):
             return None
         if self._is_terminal_bookkeeping_or_test_command(command) or self._is_safe_patch_artifact_command(command):
             return None
-        if self._terminal_command_counts.get(normalized, 0) < 2:
-            return None
-        return (
-            "Retrieval gate active: this terminal command already ran twice. "
-            "Change strategy, patch the accepted target, or use the server test plan "
-            "instead of repeating the same shell probe."
+        observed_count = self._terminal_command_counts.get(normalized, 0)
+        preflight_count = self._terminal_preflight_command_counts.get(normalized, 0)
+        if max(observed_count, preflight_count) >= 2:
+            return (
+                "Retrieval gate active: this terminal command already ran twice. "
+                "Change strategy, patch the accepted target, or use the server test plan "
+                "instead of repeating the same shell probe."
+            )
+        self._terminal_preflight_command_counts[normalized] = preflight_count + 1
+        return None
+
+    def _record_terminal_probe_completed(self, command: str) -> None:
+        normalized = self._normalize_terminal_command(command)
+        if not normalized:
+            return
+        if self._is_terminal_bookkeeping_or_test_command(command) or self._is_safe_patch_artifact_command(command):
+            return
+        self._terminal_command_counts[normalized] = (
+            self._terminal_command_counts.get(normalized, 0) + 1
         )
+
+    def _reset_terminal_probe_counts(self) -> None:
+        self._terminal_preflight_command_counts = {}
+        self._terminal_command_counts = {}
+        self._terminal_test_outcomes = {}
 
     def _select_preferred_edit_targets(self) -> list[str]:
         if self._retrieval_trace.accepted_targets:
@@ -4062,20 +4659,11 @@ class FormsyContextEngine(ContextEngine):
                 if self._last_terminal_test_failed:
                     self._failed_test_recovery_search_used = False
                 return
-            normalized = self._normalize_terminal_command(command)
-            if (
-                normalized
-                and not self._is_terminal_bookkeeping_or_test_command(command)
-                and not self._is_safe_patch_artifact_command(command)
-            ):
-                self._terminal_command_counts[normalized] = (
-                    self._terminal_command_counts.get(normalized, 0) + 1
-                )
+            self._record_terminal_probe_completed(command)
             return
         self._record_degraded_probe(tool_name, args)
         if tool_name in {"patch", "write_file"}:
-            self._terminal_command_counts = {}
-            self._terminal_test_outcomes = {}
+            self._reset_terminal_probe_counts()
             self._degraded_probe_counts = {
                 "search_files": 0,
                 "read_file": 0,

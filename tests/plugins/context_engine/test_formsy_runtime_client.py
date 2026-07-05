@@ -44,6 +44,36 @@ async def test_runtime_client_logs_http_error_context(caplog, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_runtime_client_404_preserves_response_payload(monkeypatch):
+    monkeypatch.setenv("FORMSY_API_KEY", "fsy_test_secret_token")
+    client = RuntimeClient(base_url="https://runtime.example", api_key_env="FORMSY_API_KEY")
+
+    class FakeAsyncClient:
+        async def request(self, method, url, json=None, headers=None):
+            return httpx.Response(
+                404,
+                json={"detail": "Compiled repository not found"},
+                request=httpx.Request(method, url, json=json, headers=headers),
+            )
+
+    client._client = FakeAsyncClient()
+
+    with pytest.raises(RuntimeAPIError) as exc_info:
+        await client.memory_read(
+            repo_id="ansible__ansible",
+            session_id="session-1",
+            path="lib/ansible/module_utils/urls.py",
+            revision="latest",
+        )
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.response_data == {
+        "detail": "Compiled repository not found"
+    }
+    assert "Compiled repository not found" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
 async def test_runtime_client_memory_search_uses_configured_endpoint(monkeypatch):
     monkeypatch.setenv("FORMSY_API_KEY", "fsy_test_secret_token")
     client = RuntimeClient(

@@ -23,7 +23,9 @@ class FakeClient:
         self.calls.append(("compile", {"payload": payload, "session_id": session_id}))
         if self.compile_error:
             raise self.compile_error
-        return {"protocol_text": "## FormSy Constraint Protocol\n- State: PATCH_ALLOWED_WITH_WARNINGS"}
+        return {
+            "protocol_text": "## FormSy Constraint Protocol\n- State: PATCH_ALLOWED_WITH_WARNINGS"
+        }
 
     async def observe(self, payload, session_id=""):
         self.calls.append(("observe", {"payload": payload, "session_id": session_id}))
@@ -40,7 +42,9 @@ class FakeClient:
         return {"protocol_text": "recover now"}
 
     async def status(self, task_id, run_id, session_id=""):
-        self.calls.append(("status", {"task_id": task_id, "run_id": run_id, "session_id": session_id}))
+        self.calls.append(
+            ("status", {"task_id": task_id, "run_id": run_id, "session_id": session_id})
+        )
         return {"task_id": task_id, "run_id": run_id}
 
 
@@ -57,7 +61,9 @@ def _identity():
 
 def test_coordinator_lazy_starts_task_once(tmp_path):
     client = FakeClient()
-    coordinator = ConstraintKeeperCoordinator(client=client, spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=client, spool_root=tmp_path, identity=_identity()
+    )
 
     coordinator.ensure_task_started()
     coordinator.ensure_task_started()
@@ -66,7 +72,9 @@ def test_coordinator_lazy_starts_task_once(tmp_path):
 
 
 def test_compile_context_bundle_returns_protocol_text(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
 
     text = coordinator.compile_context_bundle(
         query="forms model save",
@@ -83,7 +91,9 @@ def test_compile_context_bundle_returns_protocol_text(tmp_path):
 def test_compile_context_bundle_renders_server_protocol_bundle(tmp_path):
     class ServerShapeClient(FakeClient):
         async def compile_constraints(self, payload, session_id=""):
-            self.calls.append(("compile", {"payload": payload, "session_id": session_id}))
+            self.calls.append(
+                ("compile", {"payload": payload, "session_id": session_id})
+            )
             return {
                 "task_id": "task-1",
                 "run_id": "run-1",
@@ -93,12 +103,16 @@ def test_compile_context_bundle_renders_server_protocol_bundle(tmp_path):
                     "gate_decision": "PATCH_ALLOWED_WITH_WARNINGS",
                     "summary": "Patch allowed on accepted target.",
                     "blocking_conditions": ["Do not edit unrelated files."],
-                    "required_next_actions": ["Edit lib/ansible/executor/play_iterator.py."],
+                    "required_next_actions": [
+                        "Edit lib/ansible/executor/play_iterator.py."
+                    ],
                     "suggested_queries": ["tests covering PlayIterator states"],
                 },
             }
 
-    coordinator = ConstraintKeeperCoordinator(client=ServerShapeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=ServerShapeClient(), spool_root=tmp_path, identity=_identity()
+    )
 
     text = coordinator.compile_context_bundle(
         query="PlayIterator states",
@@ -117,18 +131,28 @@ def test_compile_context_bundle_renders_server_protocol_bundle(tmp_path):
 
 
 def test_transform_tool_result_injects_new_protocol_once(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
-    coordinator.latest_protocol_text = "## FormSy Constraint Protocol\n- State: RECOVERY_OPEN"
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
+    coordinator.latest_protocol_text = (
+        "## FormSy Constraint Protocol\n- State: RECOVERY_OPEN"
+    )
 
-    first = coordinator.transform_tool_result("terminal", {}, "original", session_id="sess-1")
-    second = coordinator.transform_tool_result("terminal", {}, "original", session_id="sess-1")
+    first = coordinator.transform_tool_result(
+        "terminal", {}, "original", session_id="sess-1"
+    )
+    second = coordinator.transform_tool_result(
+        "terminal", {}, "original", session_id="sess-1"
+    )
 
     assert first == "original\n\n## FormSy Constraint Protocol\n- State: RECOVERY_OPEN"
     assert second is None
 
 
 def test_pre_llm_call_context_returns_short_recovery_reminder(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     coordinator.latest_protocol_text = "## FormSy Constraint Protocol\n- State: RECOVERY_OPEN\n- Required: rerun context_search"
     coordinator.recovery_open = True
 
@@ -143,7 +167,9 @@ def test_pre_llm_call_context_returns_short_recovery_reminder(tmp_path):
 
 
 def test_pre_llm_call_context_bootstraps_context_search_once(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     coordinator.on_user_turn(
         user_message=(
             "<pr_description>\n# Title\nFix PlayIterator public states\n</pr_description>"
@@ -157,13 +183,18 @@ def test_pre_llm_call_context_bootstraps_context_search_once(tmp_path):
     assert first is not None
     assert "FormSy recommended next action" in first["context"]
     assert "Action ID: grounding.seed.1" in first["context"]
-    assert 'Call: context_search({"query": "Fix PlayIterator public states"})' in first["context"]
+    assert (
+        'Call: context_search({"query": "Fix PlayIterator public states"})'
+        in first["context"]
+    )
     assert "advisory" in first["context"].lower()
     assert second is None
 
 
 def test_pre_llm_seed_logs_delivery_observability_once(tmp_path, caplog):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     coordinator.on_user_turn(
         user_message=(
             "<pr_description>\n# Title\nFix PlayIterator public states\n</pr_description>"
@@ -178,7 +209,8 @@ def test_pre_llm_seed_logs_delivery_observability_once(tmp_path, caplog):
     assert first is not None
     assert second is None
     delivery_records = [
-        record for record in caplog.records
+        record
+        for record in caplog.records
         if "event=pre_llm_projection_delivered" in record.getMessage()
     ]
     assert len(delivery_records) == 1
@@ -193,8 +225,12 @@ def test_pre_llm_seed_logs_delivery_observability_once(tmp_path, caplog):
     assert "context_hash=" in message
 
 
-def test_pre_llm_seed_logs_advisory_uptake_miss_on_first_effective_deviation(tmp_path, caplog):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+def test_pre_llm_seed_logs_advisory_uptake_miss_on_first_effective_deviation(
+    tmp_path, caplog
+):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     coordinator.on_user_turn(
         user_message=(
             "<pr_description>\n# Title\nFix PlayIterator public states\n</pr_description>"
@@ -219,7 +255,8 @@ def test_pre_llm_seed_logs_advisory_uptake_miss_on_first_effective_deviation(tmp
 
     assert seed is not None
     missed_records = [
-        record for record in caplog.records
+        record
+        for record in caplog.records
         if "event=advisory_uptake_missed" in record.getMessage()
     ]
     assert len(missed_records) == 1
@@ -234,8 +271,12 @@ def test_pre_llm_seed_logs_advisory_uptake_miss_on_first_effective_deviation(tmp
     assert "delivery_count=1" in message
 
 
-def test_server_next_tool_directive_logs_stable_fallback_action_id_on_uptake_miss(tmp_path, caplog):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+def test_server_next_tool_directive_logs_stable_fallback_action_id_on_uptake_miss(
+    tmp_path, caplog
+):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     guidance_result = {
         "ok": True,
         "guidance_packet": {
@@ -274,7 +315,8 @@ def test_server_next_tool_directive_logs_stable_fallback_action_id_on_uptake_mis
         )
 
     missed_records = [
-        record for record in caplog.records
+        record
+        for record in caplog.records
         if "event=advisory_uptake_missed" in record.getMessage()
     ]
     assert len(missed_records) == 1
@@ -284,8 +326,12 @@ def test_server_next_tool_directive_logs_stable_fallback_action_id_on_uptake_mis
     assert "actual_tool=read_file" in message
 
 
-def test_server_next_tool_directive_logs_same_target_read_file_fallback_satisfied(tmp_path, caplog):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+def test_server_next_tool_directive_logs_same_target_read_file_fallback_satisfied(
+    tmp_path, caplog
+):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     guidance_result = {
         "ok": True,
         "guidance_packet": {
@@ -318,13 +364,16 @@ def test_server_next_tool_directive_logs_same_target_read_file_fallback_satisfie
         )
         coordinator.observe_tool_result(
             "read_file",
-            {"path": "/Users/wayneliu/dev/ansible/lib/ansible/executor/play_iterator.py"},
+            {
+                "path": "/Users/wayneliu/dev/ansible/lib/ansible/executor/play_iterator.py"
+            },
             '{"content": "source"}',
             session_id="sess-1",
         )
 
     satisfied_records = [
-        record for record in caplog.records
+        record
+        for record in caplog.records
         if "event=advisory_uptake_satisfied_via_fallback" in record.getMessage()
     ]
     assert len(satisfied_records) == 1
@@ -338,14 +387,19 @@ def test_server_next_tool_directive_logs_same_target_read_file_fallback_satisfie
     assert "run_id=run-1" in message
 
     missed_records = [
-        record for record in caplog.records
+        record
+        for record in caplog.records
         if "event=advisory_uptake_missed" in record.getMessage()
     ]
     assert missed_records == []
 
 
-def test_pre_llm_seed_materializes_pending_action_and_prefixes_missed_reminder(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+def test_pre_llm_seed_materializes_pending_action_and_prefixes_missed_reminder(
+    tmp_path,
+):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     coordinator.on_user_turn(
         user_message=(
             "<pr_description>\n# Title\nStandardize `PlayIterator` state representation "
@@ -379,7 +433,9 @@ def test_pre_llm_seed_materializes_pending_action_and_prefixes_missed_reminder(t
 
 
 def test_context_search_satisfies_pre_llm_seed_pending_action(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     coordinator.on_user_turn(
         user_message="<pr_description>Fix PlayIterator public states</pr_description>",
         session_id="sess-1",
@@ -392,9 +448,12 @@ def test_context_search_satisfies_pre_llm_seed_pending_action(tmp_path):
         '{"ok": true}',
         session_id="sess-1",
     )
-    assert coordinator.transform_tool_result(
-        "context_search", {}, "context-search-result", session_id="sess-1"
-    ) is None
+    assert (
+        coordinator.transform_tool_result(
+            "context_search", {}, "context-search-result", session_id="sess-1"
+        )
+        is None
+    )
 
     coordinator.observe_tool_result(
         "read_file",
@@ -402,13 +461,18 @@ def test_context_search_satisfies_pre_llm_seed_pending_action(tmp_path):
         '{"content": "source"}',
         session_id="sess-1",
     )
-    assert coordinator.transform_tool_result(
-        "read_file", {}, "read-result", session_id="sess-1"
-    ) is None
+    assert (
+        coordinator.transform_tool_result(
+            "read_file", {}, "read-result", session_id="sess-1"
+        )
+        is None
+    )
 
 
 def test_skill_view_marks_formsy_context_skill_body_loaded(tmp_path, caplog):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
 
     with caplog.at_level(logging.INFO, logger="formsy.constraint_keeper"):
         coordinator.observe_tool_result(
@@ -428,7 +492,9 @@ def test_skill_view_marks_formsy_context_skill_body_loaded(tmp_path, caplog):
 
 
 def test_pre_llm_bootstrap_projects_formsy_context_skill_capsule(tmp_path, caplog):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     coordinator.on_user_turn(
         user_message="<pr_description>Fix PlayIterator public states</pr_description>",
         session_id="sess-1",
@@ -450,7 +516,9 @@ def test_pre_llm_bootstrap_projects_formsy_context_skill_capsule(tmp_path, caplo
 
 
 def test_context_search_observation_suppresses_bootstrap_guidance(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     coordinator.on_user_turn(
         user_message="<pr_description>Fix PlayIterator public states</pr_description>",
         session_id="sess-1",
@@ -465,14 +533,21 @@ def test_context_search_observation_suppresses_bootstrap_guidance(tmp_path):
     assert coordinator.pre_llm_call_context(session_id="sess-1") is None
 
 
-def test_bootstrap_gate_does_not_block_broad_exploration_without_context_search(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+def test_bootstrap_gate_does_not_block_broad_exploration_without_context_search(
+    tmp_path,
+):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
 
-    assert coordinator.pre_tool_call_block_message(
-        "terminal",
-        {"command": "pwd && ls"},
-        session_id="sess-1",
-    ) is None
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "terminal",
+            {"command": "pwd && ls"},
+            session_id="sess-1",
+        )
+        is None
+    )
     coordinator.observe_tool_result(
         "terminal",
         {"command": "pwd && ls"},
@@ -480,11 +555,14 @@ def test_bootstrap_gate_does_not_block_broad_exploration_without_context_search(
         session_id="sess-1",
     )
 
-    assert coordinator.pre_tool_call_block_message(
-        "read_file",
-        {"path": "lib/ansible/executor/play_iterator.py"},
-        session_id="sess-1",
-    ) is None
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "read_file",
+            {"path": "lib/ansible/executor/play_iterator.py"},
+            session_id="sess-1",
+        )
+        is None
+    )
     coordinator.observe_tool_result(
         "read_file",
         {"path": "lib/ansible/executor/play_iterator.py"},
@@ -502,7 +580,9 @@ def test_bootstrap_gate_does_not_block_broad_exploration_without_context_search(
 
 
 def test_bootstrap_gate_does_not_count_allowed_pre_calls_into_a_block(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
 
     first = coordinator.pre_tool_call_block_message(
         "read_file",
@@ -526,7 +606,9 @@ def test_bootstrap_gate_does_not_count_allowed_pre_calls_into_a_block(tmp_path):
 
 
 def test_bootstrap_gate_does_not_block_patch_until_context_search(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
 
     blocked = coordinator.pre_tool_call_block_message(
         "patch",
@@ -550,7 +632,9 @@ def test_bootstrap_gate_does_not_block_patch_until_context_search(tmp_path):
 
 
 def test_bootstrap_gate_does_not_block_context_read_until_seed_context_search(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
 
     message = coordinator.pre_tool_call_block_message(
         "context_read",
@@ -563,20 +647,27 @@ def test_bootstrap_gate_does_not_block_context_read_until_seed_context_search(tm
 
 def test_final_submit_closes_attempt_without_blocking_next_edit(tmp_path):
     client = FakeClient()
-    coordinator = ConstraintKeeperCoordinator(client=client, spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=client, spool_root=tmp_path, identity=_identity()
+    )
     coordinator.observe_tool_result(
         "context_search",
         {"query": "PlayIterator public states"},
         '{"ok": true}',
         session_id="sess-1",
     )
-    coordinator.latest_protocol_text = "## FormSy Constraint Protocol\n- State: PATCH_ALLOWED_WITH_WARNINGS"
+    coordinator.latest_protocol_text = (
+        "## FormSy Constraint Protocol\n- State: PATCH_ALLOWED_WITH_WARNINGS"
+    )
 
-    assert coordinator.pre_tool_call_block_message(
-        "terminal",
-        {"command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt"},
-        session_id="sess-1",
-    ) is None
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "terminal",
+            {"command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt"},
+            session_id="sess-1",
+        )
+        is None
+    )
     coordinator.observe_tool_result(
         "terminal",
         {"command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt"},
@@ -595,7 +686,9 @@ def test_final_submit_closes_attempt_without_blocking_next_edit(tmp_path):
 
 
 def test_final_submit_after_closed_attempt_does_not_block_bookkeeping_submit(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     coordinator.observe_tool_result(
         "context_search",
         {"query": "PlayIterator public states"},
@@ -619,7 +712,9 @@ def test_final_submit_after_closed_attempt_does_not_block_bookkeeping_submit(tmp
 
 
 def test_post_completion_patch_inspection_does_not_emit_grounding_card(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     coordinator.observe_tool_result(
         "context_search",
         {"query": "PlayIterator public states"},
@@ -633,11 +728,14 @@ def test_post_completion_patch_inspection_does_not_emit_grounding_card(tmp_path)
         session_id="sess-1",
     )
 
-    assert coordinator.pre_tool_call_block_message(
-        "terminal",
-        {"command": "cat /Users/wayneliu/dev/ansible/patch.txt"},
-        session_id="sess-1",
-    ) is None
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "terminal",
+            {"command": "cat /Users/wayneliu/dev/ansible/patch.txt"},
+            session_id="sess-1",
+        )
+        is None
+    )
     coordinator.observe_tool_result(
         "terminal",
         {"command": "cat /Users/wayneliu/dev/ansible/patch.txt"},
@@ -645,16 +743,21 @@ def test_post_completion_patch_inspection_does_not_emit_grounding_card(tmp_path)
         session_id="sess-1",
     )
 
-    assert coordinator.transform_tool_result(
-        "terminal",
-        {},
-        '{"output": "diff --git a/lib/ansible/executor/play_iterator.py"}',
-        session_id="sess-1",
-    ) is None
+    assert (
+        coordinator.transform_tool_result(
+            "terminal",
+            {},
+            '{"output": "diff --git a/lib/ansible/executor/play_iterator.py"}',
+            session_id="sess-1",
+        )
+        is None
+    )
 
 
 def test_context_read_after_closed_attempt_is_advisory_not_blocked(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     coordinator.observe_tool_result(
         "context_search",
         {"query": "PlayIterator public states"},
@@ -684,7 +787,9 @@ def test_context_read_after_closed_attempt_is_advisory_not_blocked(tmp_path):
 
 
 def test_pre_llm_after_closed_attempt_returns_bootstrap_guidance(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     coordinator.observe_tool_result(
         "context_search",
         {"query": "PlayIterator public states"},
@@ -704,8 +809,12 @@ def test_pre_llm_after_closed_attempt_returns_bootstrap_guidance(tmp_path):
     assert "context_search" in context["context"]
 
 
-def test_closed_attempt_source_read_does_not_emit_grounding_without_new_attempt(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+def test_closed_attempt_source_read_does_not_emit_grounding_without_new_attempt(
+    tmp_path,
+):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     coordinator.observe_tool_result(
         "context_search",
         {"query": "PlayIterator public states"},
@@ -719,20 +828,26 @@ def test_closed_attempt_source_read_does_not_emit_grounding_without_new_attempt(
         session_id="sess-1",
     )
 
-    assert coordinator.pre_tool_call_block_message(
-        "terminal",
-        {"command": "pwd && ls -la"},
-        session_id="sess-1",
-    ) is None
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "terminal",
+            {"command": "pwd && ls -la"},
+            session_id="sess-1",
+        )
+        is None
+    )
     coordinator.observe_tool_result(
         "terminal",
         {"command": "pwd && ls -la"},
         '{"exit_code": 0, "output": "/repo"}',
         session_id="sess-1",
     )
-    assert coordinator.transform_tool_result(
-        "terminal", {}, "terminal-result", session_id="sess-1"
-    ) is None
+    assert (
+        coordinator.transform_tool_result(
+            "terminal", {}, "terminal-result", session_id="sess-1"
+        )
+        is None
+    )
 
     coordinator.observe_tool_result(
         "read_file",
@@ -752,7 +867,9 @@ def test_closed_attempt_source_read_does_not_emit_grounding_without_new_attempt(
 
 
 def test_grounding_action_card_prefers_task_title_over_tool_noise(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     coordinator.on_user_turn(
         user_message=(
             "<pr_description>\n# Title\nStandardize `PlayIterator` state representation "
@@ -784,7 +901,9 @@ def test_grounding_action_card_prefers_task_title_over_tool_noise(tmp_path):
 
 
 def test_grounding_action_card_sanitizes_tool_query_when_task_text_missing(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     coordinator.observe_tool_result(
         "terminal",
         {
@@ -808,8 +927,12 @@ def test_grounding_action_card_sanitizes_tool_query_when_task_text_missing(tmp_p
     assert "grep -n" not in card
 
 
-def test_grounding_action_card_followup_source_read_gets_one_pending_next_action_reminder(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+def test_grounding_action_card_followup_source_read_gets_one_pending_next_action_reminder(
+    tmp_path,
+):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     coordinator.on_user_turn(
         user_message=(
             "<pr_description>\n# Title\nStandardize `PlayIterator` state representation "
@@ -857,13 +980,18 @@ def test_grounding_action_card_followup_source_read_gets_one_pending_next_action
         '{"matches": []}',
         session_id="sess-1",
     )
-    assert coordinator.transform_tool_result(
-        "search_files", {}, "search-result", session_id="sess-1"
-    ) is None
+    assert (
+        coordinator.transform_tool_result(
+            "search_files", {}, "search-result", session_id="sess-1"
+        )
+        is None
+    )
 
 
 def test_grounding_pending_next_action_is_satisfied_by_context_search(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     coordinator.on_user_turn(
         user_message=(
             "<pr_description>\n# Title\nStandardize `PlayIterator` state representation "
@@ -877,7 +1005,9 @@ def test_grounding_pending_next_action_is_satisfied_by_context_search(tmp_path):
         '{"content": "source"}',
         session_id="sess-1",
     )
-    assert coordinator.transform_tool_result("read_file", {}, "read-result", session_id="sess-1")
+    assert coordinator.transform_tool_result(
+        "read_file", {}, "read-result", session_id="sess-1"
+    )
 
     coordinator.observe_tool_result(
         "context_search",
@@ -885,9 +1015,12 @@ def test_grounding_pending_next_action_is_satisfied_by_context_search(tmp_path):
         '{"ok": true}',
         session_id="sess-1",
     )
-    assert coordinator.transform_tool_result(
-        "context_search", {}, "context-search-result", session_id="sess-1"
-    ) is None
+    assert (
+        coordinator.transform_tool_result(
+            "context_search", {}, "context-search-result", session_id="sess-1"
+        )
+        is None
+    )
 
     coordinator.observe_tool_result(
         "read_file",
@@ -895,13 +1028,18 @@ def test_grounding_pending_next_action_is_satisfied_by_context_search(tmp_path):
         '{"content": "source again"}',
         session_id="sess-1",
     )
-    assert coordinator.transform_tool_result(
-        "read_file", {}, "read-result-2", session_id="sess-1"
-    ) is None
+    assert (
+        coordinator.transform_tool_result(
+            "read_file", {}, "read-result-2", session_id="sess-1"
+        )
+        is None
+    )
 
 
 def test_unknown_terminal_does_not_consume_pending_next_action_reminder(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     coordinator.on_user_turn(
         user_message=(
             "<pr_description>\n# Title\nStandardize `PlayIterator` state representation "
@@ -915,7 +1053,9 @@ def test_unknown_terminal_does_not_consume_pending_next_action_reminder(tmp_path
         '{"content": "source"}',
         session_id="sess-1",
     )
-    assert coordinator.transform_tool_result("read_file", {}, "read-result", session_id="sess-1")
+    assert coordinator.transform_tool_result(
+        "read_file", {}, "read-result", session_id="sess-1"
+    )
 
     coordinator.observe_tool_result(
         "terminal",
@@ -923,9 +1063,12 @@ def test_unknown_terminal_does_not_consume_pending_next_action_reminder(tmp_path
         '{"exit_code": 0, "output": "matches"}',
         session_id="sess-1",
     )
-    assert coordinator.transform_tool_result(
-        "terminal", {}, "terminal-result", session_id="sess-1"
-    ) is None
+    assert (
+        coordinator.transform_tool_result(
+            "terminal", {}, "terminal-result", session_id="sess-1"
+        )
+        is None
+    )
 
     coordinator.observe_tool_result(
         "search_files",
@@ -941,7 +1084,9 @@ def test_unknown_terminal_does_not_consume_pending_next_action_reminder(tmp_path
 
 
 def test_compile_context_bundle_marks_retrieval_seen_for_guidance(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     coordinator.on_user_turn(
         user_message="<pr_description>Fix PlayIterator public states</pr_description>",
         session_id="sess-1",
@@ -960,20 +1105,43 @@ def test_compile_context_bundle_marks_retrieval_seen_for_guidance(tmp_path):
     assert coordinator.pre_llm_call_context(session_id="sess-1") is None
 
 
-def test_transform_tool_result_injects_guidance_after_exploration_without_context_search(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+def test_transform_tool_result_injects_guidance_after_exploration_without_context_search(
+    tmp_path,
+):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     coordinator.on_user_turn(
         user_message="<pr_description>Fix PlayIterator public states</pr_description>",
         session_id="sess-1",
     )
     # The initial bootstrap was not enough; the agent is exploring with shell/read tools.
     coordinator.pre_llm_call_context(session_id="sess-1")
-    coordinator.observe_tool_result("terminal", {"command": "grep -R PlayIterator lib/ansible"}, "matches", session_id="sess-1")
-    coordinator.observe_tool_result("read_file", {"path": "lib/ansible/executor/play_iterator.py"}, "source", session_id="sess-1")
-    coordinator.observe_tool_result("terminal", {"command": "grep -R FAILED_SETUP lib/ansible"}, "matches", session_id="sess-1")
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": "grep -R PlayIterator lib/ansible"},
+        "matches",
+        session_id="sess-1",
+    )
+    coordinator.observe_tool_result(
+        "read_file",
+        {"path": "lib/ansible/executor/play_iterator.py"},
+        "source",
+        session_id="sess-1",
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": "grep -R FAILED_SETUP lib/ansible"},
+        "matches",
+        session_id="sess-1",
+    )
 
-    first = coordinator.transform_tool_result("terminal", {}, "original", session_id="sess-1")
-    second = coordinator.transform_tool_result("terminal", {}, "original", session_id="sess-1")
+    first = coordinator.transform_tool_result(
+        "terminal", {}, "original", session_id="sess-1"
+    )
+    second = coordinator.transform_tool_result(
+        "terminal", {}, "original", session_id="sess-1"
+    )
 
     assert first is not None
     assert first.startswith("FormSy next action still pending")
@@ -985,9 +1153,13 @@ def test_transform_tool_result_injects_guidance_after_exploration_without_contex
     assert second is None
 
 
-def test_transform_tool_result_injects_guidance_after_repeated_terminal_failures(tmp_path):
+def test_transform_tool_result_injects_guidance_after_repeated_terminal_failures(
+    tmp_path,
+):
     client = FakeClient()
-    coordinator = ConstraintKeeperCoordinator(client=client, spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=client, spool_root=tmp_path, identity=_identity()
+    )
     coordinator.on_user_turn(
         user_message="<pr_description>Fix PlayIterator public states</pr_description>",
         session_id="sess-1",
@@ -996,12 +1168,16 @@ def test_transform_tool_result_injects_guidance_after_repeated_terminal_failures
     for _ in range(3):
         coordinator.observe_tool_result(
             "terminal",
-            {"command": "python3 -c 'from ansible.executor.play_iterator import PlayIterator'"},
+            {
+                "command": "python3 -c 'from ansible.executor.play_iterator import PlayIterator'"
+            },
             result,
             session_id="sess-1",
         )
 
-    transformed = coordinator.transform_tool_result("terminal", {}, "original", session_id="sess-1")
+    transformed = coordinator.transform_tool_result(
+        "terminal", {}, "original", session_id="sess-1"
+    )
 
     assert transformed is not None
     assert "Repeated terminal failures" in transformed
@@ -1010,8 +1186,74 @@ def test_transform_tool_result_injects_guidance_after_repeated_terminal_failures
     assert [name for name, _ in client.calls if name == "recover"] == []
 
 
-def test_transform_tool_result_injects_guidance_after_repeated_execute_code_probes(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+def test_pre_tool_call_blocks_repeated_identical_terminal_probe(tmp_path):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(),
+        spool_root=tmp_path,
+        identity=_identity(),
+    )
+    command = (
+        'python3 -c "import inspect; '
+        "from ansible.module_utils.urls import Request; "
+        'print(inspect.signature(Request.open))"'
+    )
+    result = {
+        "exit_code": 0,
+        "output": "sig (self, method, url, data=None)",
+        "error": None,
+    }
+
+    coordinator.observe_tool_result(
+        "terminal", {"command": command}, result, session_id="sess-1"
+    )
+    coordinator.observe_tool_result(
+        "terminal", {"command": command}, result, session_id="sess-1"
+    )
+
+    message = coordinator.pre_tool_call_block_message(
+        "terminal",
+        {"command": command},
+        session_id="sess-1",
+    )
+
+    assert message is not None
+    assert "Repeated identical terminal probe" in message
+    assert "Do not run the same probe again" in message
+    assert command in message
+
+
+def test_pre_tool_call_does_not_block_repeated_validation_command(tmp_path):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(),
+        spool_root=tmp_path,
+        identity=_identity(),
+    )
+    command = "python3 -m pytest test/units/module_utils/urls/test_Request.py -q"
+    result = {"exit_code": 0, "output": "10 passed", "error": None}
+
+    coordinator.observe_tool_result(
+        "terminal", {"command": command}, result, session_id="sess-1"
+    )
+    coordinator.observe_tool_result(
+        "terminal", {"command": command}, result, session_id="sess-1"
+    )
+
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "terminal",
+            {"command": command},
+            session_id="sess-1",
+        )
+        is None
+    )
+
+
+def test_transform_tool_result_injects_guidance_after_repeated_execute_code_probes(
+    tmp_path,
+):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     coordinator.on_user_turn(
         user_message="<pr_description>Fix PlayIterator public states</pr_description>",
         session_id="sess-1",
@@ -1031,8 +1273,12 @@ def test_transform_tool_result_injects_guidance_after_repeated_execute_code_prob
             session_id="sess-1",
         )
 
-    transformed = coordinator.transform_tool_result("execute_code", {}, "original", session_id="sess-1")
-    repeat = coordinator.transform_tool_result("execute_code", {}, "original", session_id="sess-1")
+    transformed = coordinator.transform_tool_result(
+        "execute_code", {}, "original", session_id="sess-1"
+    )
+    repeat = coordinator.transform_tool_result(
+        "execute_code", {}, "original", session_id="sess-1"
+    )
 
     assert transformed is not None
     assert "Repeated isolated code probes" in transformed
@@ -1044,7 +1290,9 @@ def test_transform_tool_result_injects_guidance_after_repeated_execute_code_prob
 def test_compile_context_bundle_failure_returns_warning(tmp_path):
     client = FakeClient()
     client.compile_error = RuntimeError("server down")
-    coordinator = ConstraintKeeperCoordinator(client=client, spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=client, spool_root=tmp_path, identity=_identity()
+    )
 
     text = coordinator.compile_context_bundle(
         query="forms model save",
@@ -1058,7 +1306,9 @@ def test_compile_context_bundle_failure_returns_warning(tmp_path):
 
 
 def test_observe_tool_result_queues_validation_success(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
 
     coordinator.observe_tool_result(
         "terminal",
@@ -1073,7 +1323,9 @@ def test_observe_tool_result_queues_validation_success(tmp_path):
 
 
 def test_observe_tool_result_queues_python_compile_validation_success(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
 
     coordinator.observe_tool_result(
         "terminal",
@@ -1099,7 +1351,9 @@ def test_observe_tool_result_captures_diff_after_edit_surface(tmp_path):
         client=FakeClient(),
         spool_root=tmp_path,
         identity=_identity(),
-        diff_provider=lambda: "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n",
+        diff_provider=lambda: (
+            "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n"
+        ),
     )
 
     coordinator.observe_tool_result(
@@ -1112,7 +1366,9 @@ def test_observe_tool_result_captures_diff_after_edit_surface(tmp_path):
     pending = coordinator.spool.pending("task-1", "run-1")
     assert [event["event_kind"] for event in pending] == ["diff_observed"]
     assert pending[0]["payload"]["changed_files"] == ["app.py"]
-    assert pending[0]["payload"]["unified_diff"].startswith("diff --git a/app.py b/app.py")
+    assert pending[0]["payload"]["unified_diff"].startswith(
+        "diff --git a/app.py b/app.py"
+    )
 
 
 def test_observe_tool_result_attaches_changed_file_source_snapshots(tmp_path):
@@ -1120,7 +1376,9 @@ def test_observe_tool_result_attaches_changed_file_source_snapshots(tmp_path):
         client=FakeClient(),
         spool_root=tmp_path,
         identity=_identity(),
-        diff_provider=lambda: "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n",
+        diff_provider=lambda: (
+            "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n"
+        ),
         source_provider=lambda paths: {"app.py": "print('current')\n"},
     )
 
@@ -1142,11 +1400,17 @@ def test_observe_tool_result_deduplicates_identical_edit_diffs(tmp_path):
         client=FakeClient(),
         spool_root=tmp_path,
         identity=_identity(),
-        diff_provider=lambda: "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n",
+        diff_provider=lambda: (
+            "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n"
+        ),
     )
 
-    coordinator.observe_tool_result("apply_patch", {"patch": "*** Begin Patch"}, "ok", session_id="sess-1")
-    coordinator.observe_tool_result("apply_patch", {"patch": "*** Begin Patch"}, "ok", session_id="sess-1")
+    coordinator.observe_tool_result(
+        "apply_patch", {"patch": "*** Begin Patch"}, "ok", session_id="sess-1"
+    )
+    coordinator.observe_tool_result(
+        "apply_patch", {"patch": "*** Begin Patch"}, "ok", session_id="sess-1"
+    )
 
     pending = coordinator.spool.pending("task-1", "run-1")
     assert [event["event_kind"] for event in pending] == ["diff_observed"]
@@ -1158,7 +1422,9 @@ def test_verify_completion_flushes_diff_done_claim_then_verifies(tmp_path):
         client=client,
         spool_root=tmp_path,
         identity=_identity(),
-        diff_provider=lambda: "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n",
+        diff_provider=lambda: (
+            "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n"
+        ),
     )
 
     coordinator.observe_tool_result(
@@ -1175,13 +1441,20 @@ def test_verify_completion_flushes_diff_done_claim_then_verifies(tmp_path):
         for call in client.calls
         if call[0] == "observe"
     ]
-    assert observed_kinds == ["test_result", "diff_observed", "done_claim"]
+    assert observed_kinds == [
+        "diff_observed",
+        "test_result",
+        "completion_bootstrap_observed",
+        "done_claim",
+    ]
     assert client.calls[-1][0] == "verify"
 
 
 def test_flush_pending_sends_server_compatible_observe_payload(tmp_path):
     client = FakeClient()
-    coordinator = ConstraintKeeperCoordinator(client=client, spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=client, spool_root=tmp_path, identity=_identity()
+    )
 
     coordinator.observe_tool_result(
         "terminal",
@@ -1191,7 +1464,9 @@ def test_flush_pending_sends_server_compatible_observe_payload(tmp_path):
     )
     coordinator.flush_pending()
 
-    observe_payload = [call[1]["payload"] for call in client.calls if call[0] == "observe"][0]
+    observe_payload = [
+        call[1]["payload"] for call in client.calls if call[0] == "observe"
+    ][0]
     assert set(observe_payload) == {"event"}
     assert observe_payload["event"]["task_id"] == "task-1"
     assert observe_payload["event"]["run_id"] == "run-1"
@@ -1200,7 +1475,9 @@ def test_flush_pending_sends_server_compatible_observe_payload(tmp_path):
 
 def test_observe_tool_result_reports_low_sensitive_tool_observed(tmp_path):
     client = FakeClient()
-    coordinator = ConstraintKeeperCoordinator(client=client, spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=client, spool_root=tmp_path, identity=_identity()
+    )
 
     coordinator.observe_tool_result(
         "read_file",
@@ -1209,7 +1486,9 @@ def test_observe_tool_result_reports_low_sensitive_tool_observed(tmp_path):
         session_id="sess-1",
     )
 
-    observe_payloads = [call[1]["payload"] for call in client.calls if call[0] == "observe"]
+    observe_payloads = [
+        call[1]["payload"] for call in client.calls if call[0] == "observe"
+    ]
     assert len(observe_payloads) == 1
     event = observe_payloads[0]["event"]
     assert event["event_kind"] == "tool_observed"
@@ -1225,7 +1504,9 @@ def test_observe_tool_result_reports_low_sensitive_tool_observed(tmp_path):
 def test_observe_response_protocol_is_injected_after_tool_result(tmp_path):
     class ProtocolClient(FakeClient):
         async def observe(self, payload, session_id=""):
-            self.calls.append(("observe", {"payload": payload, "session_id": session_id}))
+            self.calls.append(
+                ("observe", {"payload": payload, "session_id": session_id})
+            )
             return {
                 "decision": "PATCH_ALLOWED_WITH_WARNINGS",
                 "protocol": {
@@ -1238,7 +1519,9 @@ def test_observe_response_protocol_is_injected_after_tool_result(tmp_path):
                 },
             }
 
-    coordinator = ConstraintKeeperCoordinator(client=ProtocolClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=ProtocolClient(), spool_root=tmp_path, identity=_identity()
+    )
 
     coordinator.observe_tool_result(
         "search_files",
@@ -1261,7 +1544,9 @@ def test_observe_response_protocol_is_injected_after_tool_result(tmp_path):
 def test_server_need_context_directive_is_injected_without_blocking_tools(tmp_path):
     class NeedContextClient(FakeClient):
         async def observe(self, payload, session_id=""):
-            self.calls.append(("observe", {"payload": payload, "session_id": session_id}))
+            self.calls.append(
+                ("observe", {"payload": payload, "session_id": session_id})
+            )
             return {
                 "decision": "NEED_CONTEXT",
                 "protocol": {
@@ -1271,11 +1556,15 @@ def test_server_need_context_directive_is_injected_without_blocking_tools(tmp_pa
                     "required_next_actions": [
                         "Call context_search with PlayIterator public state type compatibility."
                     ],
-                    "suggested_queries": ["PlayIterator public state type compatibility"],
+                    "suggested_queries": [
+                        "PlayIterator public state type compatibility"
+                    ],
                 },
             }
 
-    coordinator = ConstraintKeeperCoordinator(client=NeedContextClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=NeedContextClient(), spool_root=tmp_path, identity=_identity()
+    )
 
     coordinator.observe_tool_result(
         "read_file",
@@ -1321,7 +1610,9 @@ def test_server_need_context_directive_is_injected_without_blocking_tools(tmp_pa
 
 
 def test_degraded_guidance_packet_records_probe_budget_without_blocking(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     guidance_result = {
         "ok": False,
         "recovery_mode": "degraded_recovery",
@@ -1343,22 +1634,28 @@ def test_degraded_guidance_packet_records_probe_budget_without_blocking(tmp_path
         guidance_result,
         session_id="sess-1",
     )
-    assert coordinator.pre_tool_call_block_message(
-        "execute_code",
-        {"code": "print('probe 1')"},
-        session_id="sess-1",
-    ) is None
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "execute_code",
+            {"code": "print('probe 1')"},
+            session_id="sess-1",
+        )
+        is None
+    )
     coordinator.observe_tool_result(
         "execute_code",
         {"code": "print('probe 1')"},
         '{"status": "success"}',
         session_id="sess-1",
     )
-    assert coordinator.pre_tool_call_block_message(
-        "terminal",
-        {"command": "python3 - <<'PY'\nprint('probe 2')\nPY"},
-        session_id="sess-1",
-    ) is None
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "terminal",
+            {"command": "python3 - <<'PY'\nprint('probe 2')\nPY"},
+            session_id="sess-1",
+        )
+        is None
+    )
     coordinator.observe_tool_result(
         "terminal",
         {"command": "python3 - <<'PY'\nprint('probe 2')\nPY"},
@@ -1376,7 +1673,9 @@ def test_degraded_guidance_packet_records_probe_budget_without_blocking(tmp_path
 
 
 def test_degraded_next_tool_directive_is_suggested_not_blocking(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     guidance_result = {
         "ok": False,
         "recovery_mode": "degraded_recovery",
@@ -1416,12 +1715,17 @@ def test_degraded_next_tool_directive_is_suggested_not_blocking(tmp_path):
 
     assert message is None
     assert transformed is not None
-    assert "NEXT SUGGESTED TOOL: context_read path=lib/ansible/executor/play_iterator.py" in transformed
+    assert (
+        "NEXT SUGGESTED TOOL: context_read path=lib/ansible/executor/play_iterator.py"
+        in transformed
+    )
     assert "NEXT REQUIRED TOOL" not in transformed
 
 
 def test_read_file_same_target_satisfies_suggested_context_read_directive(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     guidance_result = {
         "ok": False,
         "recovery_mode": "degraded_recovery",
@@ -1448,7 +1752,12 @@ def test_read_file_same_target_satisfies_suggested_context_read_directive(tmp_pa
         guidance_result,
         session_id="sess-1",
     )
-    assert coordinator.transform_tool_result("context_search", {}, "original", session_id="sess-1") is not None
+    assert (
+        coordinator.transform_tool_result(
+            "context_search", {}, "original", session_id="sess-1"
+        )
+        is not None
+    )
 
     coordinator.observe_tool_result(
         "read_file",
@@ -1458,16 +1767,21 @@ def test_read_file_same_target_satisfies_suggested_context_read_directive(tmp_pa
     )
 
     assert coordinator._active_next_tool_directive is None
-    assert coordinator.transform_tool_result(
-        "read_file",
-        {"path": "lib/ansible/executor/play_iterator.py"},
-        '{"ok": true, "content": "class HostState: pass"}',
-        session_id="sess-1",
-    ) is None
+    assert (
+        coordinator.transform_tool_result(
+            "read_file",
+            {"path": "lib/ansible/executor/play_iterator.py"},
+            '{"ok": true, "content": "class HostState: pass"}',
+            session_id="sess-1",
+        )
+        is None
+    )
 
 
 def test_context_read_satisfies_suggested_directive_and_clears_pending_card(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     guidance_result = {
         "ok": False,
         "recovery_mode": "degraded_recovery",
@@ -1513,7 +1827,9 @@ def test_context_read_satisfies_suggested_directive_and_clears_pending_card(tmp_
 
 
 def test_repeated_context_read_fuses_without_failed_read(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     coordinator.observe_tool_result(
         "context_search",
         {"query": "PlayIterator states"},
@@ -1528,22 +1844,36 @@ def test_repeated_context_read_fuses_without_failed_read(tmp_path):
     result = '{"ok": true, "path": "lib/ansible/executor/play_iterator.py", "content": "source"}'
 
     for _ in range(4):
-        coordinator.observe_tool_result("context_read", args, result, session_id="sess-1")
-        assert coordinator.transform_tool_result("context_read", args, result, session_id="sess-1") is None
+        coordinator.observe_tool_result(
+            "context_read", args, result, session_id="sess-1"
+        )
+        assert (
+            coordinator.transform_tool_result(
+                "context_read", args, result, session_id="sess-1"
+            )
+            is None
+        )
     coordinator.observe_tool_result("context_read", args, result, session_id="sess-1")
-    fused = coordinator.transform_tool_result("context_read", args, result, session_id="sess-1")
+    fused = coordinator.transform_tool_result(
+        "context_read", args, result, session_id="sess-1"
+    )
 
     assert fused is not None
     payload = json.loads(fused)
     assert payload["ok"] is True
     assert payload["fused"] is True
     assert payload["content"] == ""
-    assert payload["context_meta"]["read_key"] == "lib/ansible/executor/play_iterator.py:95-100"
+    assert (
+        payload["context_meta"]["read_key"]
+        == "lib/ansible/executor/play_iterator.py:95-100"
+    )
     assert "Do not call context_read" in " ".join(payload["advisory"])
 
 
 def test_degraded_probe_budget_does_not_block_before_or_after_patch_edit(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     guidance_result = {
         "ok": False,
         "recovery_mode": "degraded_recovery",
@@ -1570,11 +1900,14 @@ def test_degraded_probe_budget_does_not_block_before_or_after_patch_edit(tmp_pat
         '{"exit_code": 0, "output": "ok"}',
         session_id="sess-1",
     )
-    assert coordinator.pre_tool_call_block_message(
-        "terminal",
-        {"command": "python3 - <<'PY'\nprint('probe again')\nPY"},
-        session_id="sess-1",
-    ) is None
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "terminal",
+            {"command": "python3 - <<'PY'\nprint('probe again')\nPY"},
+            session_id="sess-1",
+        )
+        is None
+    )
 
     coordinator.observe_tool_result(
         "patch",
@@ -1583,15 +1916,20 @@ def test_degraded_probe_budget_does_not_block_before_or_after_patch_edit(tmp_pat
         session_id="sess-1",
     )
 
-    assert coordinator.pre_tool_call_block_message(
-        "terminal",
-        {"command": "python3 - <<'PY'\nprint('probe after edit')\nPY"},
-        session_id="sess-1",
-    ) is None
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "terminal",
+            {"command": "python3 - <<'PY'\nprint('probe after edit')\nPY"},
+            session_id="sess-1",
+        )
+        is None
+    )
 
 
 def test_degraded_probe_budget_does_not_block_after_failed_patch(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     guidance_result = {
         "ok": False,
         "recovery_mode": "degraded_recovery",
@@ -1635,7 +1973,9 @@ def test_degraded_probe_budget_does_not_block_after_failed_patch(tmp_path):
 
 
 def test_degraded_probe_budget_allows_terminal_validation_after_exhaustion(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     guidance_result = {
         "ok": False,
         "recovery_mode": "degraded_recovery",
@@ -1663,60 +2003,96 @@ def test_degraded_probe_budget_allows_terminal_validation_after_exhaustion(tmp_p
         session_id="sess-1",
     )
 
-    assert coordinator.pre_tool_call_block_message(
-        "terminal",
-        {"command": "pytest test/units/executor/test_play_iterator.py"},
-        session_id="sess-1",
-    ) is None
-    assert coordinator.pre_tool_call_block_message(
-        "terminal",
-        {"command": "git diff -- lib/ansible/plugins/strategy/__init__.py"},
-        session_id="sess-1",
-    ) is None
-    assert coordinator.pre_tool_call_block_message(
-        "terminal",
-        {"command": "python -m py_compile lib/ansible/plugins/strategy/__init__.py"},
-        session_id="sess-1",
-    ) is None
-    assert coordinator.pre_tool_call_block_message(
-        "terminal",
-        {"command": "git diff --stat"},
-        session_id="sess-1",
-    ) is None
-    assert coordinator.pre_tool_call_block_message(
-        "terminal",
-        {"command": "wc -l patch.txt"},
-        session_id="sess-1",
-    ) is None
-    assert coordinator.pre_tool_call_block_message(
-        "terminal",
-        {"command": "head -n 40 patch.txt"},
-        session_id="sess-1",
-    ) is None
-    assert coordinator.pre_tool_call_block_message(
-        "terminal",
-        {"command": "cd /Users/wayneliu/dev/ansible && wc -l patch.txt"},
-        session_id="sess-1",
-    ) is None
-    assert coordinator.pre_tool_call_block_message(
-        "terminal",
-        {"command": "cd /Users/wayneliu/dev/ansible && head -50 patch.txt"},
-        session_id="sess-1",
-    ) is None
-    assert coordinator.pre_tool_call_block_message(
-        "terminal",
-        {"command": "cd /Users/wayneliu/dev/ansible && grep -E '^[+-]{3}' patch.txt | sort -u"},
-        session_id="sess-1",
-    ) is None
-    assert coordinator.pre_tool_call_block_message(
-        "terminal",
-        {"command": "cd /Users/wayneliu/dev/ansible && cat patch.txt"},
-        session_id="sess-1",
-    ) is None
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "terminal",
+            {"command": "pytest test/units/executor/test_play_iterator.py"},
+            session_id="sess-1",
+        )
+        is None
+    )
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "terminal",
+            {"command": "git diff -- lib/ansible/plugins/strategy/__init__.py"},
+            session_id="sess-1",
+        )
+        is None
+    )
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "terminal",
+            {
+                "command": "python -m py_compile lib/ansible/plugins/strategy/__init__.py"
+            },
+            session_id="sess-1",
+        )
+        is None
+    )
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "terminal",
+            {"command": "git diff --stat"},
+            session_id="sess-1",
+        )
+        is None
+    )
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "terminal",
+            {"command": "wc -l patch.txt"},
+            session_id="sess-1",
+        )
+        is None
+    )
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "terminal",
+            {"command": "head -n 40 patch.txt"},
+            session_id="sess-1",
+        )
+        is None
+    )
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "terminal",
+            {"command": "cd /Users/wayneliu/dev/ansible && wc -l patch.txt"},
+            session_id="sess-1",
+        )
+        is None
+    )
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "terminal",
+            {"command": "cd /Users/wayneliu/dev/ansible && head -50 patch.txt"},
+            session_id="sess-1",
+        )
+        is None
+    )
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "terminal",
+            {
+                "command": "cd /Users/wayneliu/dev/ansible && grep -E '^[+-]{3}' patch.txt | sort -u"
+            },
+            session_id="sess-1",
+        )
+        is None
+    )
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "terminal",
+            {"command": "cd /Users/wayneliu/dev/ansible && cat patch.txt"},
+            session_id="sess-1",
+        )
+        is None
+    )
 
 
 def test_final_submit_bypasses_degraded_context_refresh_gate(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     coordinator.observe_tool_result(
         "context_search",
         {"query": "PlayIterator states"},
@@ -1737,7 +2113,9 @@ def test_final_submit_bypasses_degraded_context_refresh_gate(tmp_path):
     )
     coordinator._active_context_directive = {
         "summary": "Server requested fresh context guidance.",
-        "required_next_actions": ["Call context_search before more source exploration."],
+        "required_next_actions": [
+            "Call context_search before more source exploration."
+        ],
         "suggested_queries": ["PlayIterator public states"],
     }
 
@@ -1751,7 +2129,9 @@ def test_final_submit_bypasses_degraded_context_refresh_gate(tmp_path):
 
 
 def test_degraded_probe_budget_discourages_repeated_full_diff_output(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     guidance_result = {
         "ok": False,
         "recovery_mode": "degraded_recovery",
@@ -1774,11 +2154,14 @@ def test_degraded_probe_budget_discourages_repeated_full_diff_output(tmp_path):
         session_id="sess-1",
     )
 
-    assert coordinator.pre_tool_call_block_message(
-        "terminal",
-        {"command": "git diff"},
-        session_id="sess-1",
-    ) is None
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "terminal",
+            {"command": "git diff"},
+            session_id="sess-1",
+        )
+        is None
+    )
     coordinator.observe_tool_result(
         "terminal",
         {"command": "git diff"},
@@ -1795,15 +2178,22 @@ def test_degraded_probe_budget_discourages_repeated_full_diff_output(tmp_path):
     assert blocked is not None
     assert "git diff --stat" in blocked
     assert "git diff -- lib/ansible/executor/play_iterator.py" in blocked
-    assert coordinator.pre_tool_call_block_message(
-        "terminal",
-        {"command": "git diff -- lib/ansible/executor/play_iterator.py"},
-        session_id="sess-1",
-    ) is None
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "terminal",
+            {"command": "git diff -- lib/ansible/executor/play_iterator.py"},
+            session_id="sess-1",
+        )
+        is None
+    )
 
 
-def test_next_tool_directive_suggests_context_read_without_blocking_exploration(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+def test_next_tool_directive_suggests_context_read_without_blocking_exploration(
+    tmp_path,
+):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     guidance_result = {
         "ok": True,
         "guidance_packet": {
@@ -1845,11 +2235,14 @@ def test_next_tool_directive_suggests_context_read_without_blocking_exploration(
     assert "context_read" in transformed
     assert "lib/ansible/executor/play_iterator.py" in transformed
 
-    assert coordinator.pre_tool_call_block_message(
-        "context_read",
-        {"path": "lib/ansible/executor/play_iterator.py"},
-        session_id="sess-1",
-    ) is None
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "context_read",
+            {"path": "lib/ansible/executor/play_iterator.py"},
+            session_id="sess-1",
+        )
+        is None
+    )
     coordinator.observe_tool_result(
         "context_read",
         {"path": "lib/ansible/executor/play_iterator.py"},
@@ -1857,15 +2250,22 @@ def test_next_tool_directive_suggests_context_read_without_blocking_exploration(
         session_id="sess-1",
     )
 
-    assert coordinator.pre_tool_call_block_message(
-        "terminal",
-        {"command": "pytest test/units/executor/test_play_iterator.py"},
-        session_id="sess-1",
-    ) is None
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "terminal",
+            {"command": "pytest test/units/executor/test_play_iterator.py"},
+            session_id="sess-1",
+        )
+        is None
+    )
 
 
-def test_next_tool_directive_allows_same_target_fallback_after_context_read_failure(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+def test_next_tool_directive_allows_same_target_fallback_after_context_read_failure(
+    tmp_path,
+):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     guidance_result = {
         "ok": True,
         "guidance_packet": {
@@ -1896,11 +2296,14 @@ def test_next_tool_directive_allows_same_target_fallback_after_context_read_fail
         session_id="sess-1",
     )
 
-    assert coordinator.pre_tool_call_block_message(
-        "read_file",
-        {"path": "lib/ansible/executor/play_iterator.py"},
-        session_id="sess-1",
-    ) is None
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "read_file",
+            {"path": "lib/ansible/executor/play_iterator.py"},
+            session_id="sess-1",
+        )
+        is None
+    )
     other_read_message = coordinator.pre_tool_call_block_message(
         "read_file",
         {"path": "lib/ansible/plugins/strategy/linear.py"},
@@ -1914,15 +2317,20 @@ def test_next_tool_directive_allows_same_target_fallback_after_context_read_fail
         "class PlayIterator:\n    pass\n",
         session_id="sess-1",
     )
-    assert coordinator.pre_tool_call_block_message(
-        "terminal",
-        {"command": "pytest test/units/executor/test_play_iterator.py"},
-        session_id="sess-1",
-    ) is None
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "terminal",
+            {"command": "pytest test/units/executor/test_play_iterator.py"},
+            session_id="sess-1",
+        )
+        is None
+    )
 
 
 def test_failed_context_read_directive_fails_open_to_avoid_retry_deadlock(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
     guidance_result = {
         "ok": True,
         "guidance_packet": {
@@ -1930,7 +2338,9 @@ def test_failed_context_read_directive_fails_open_to_avoid_retry_deadlock(tmp_pa
             "target_candidates": ["lib/ansible/executor/play_iterator.py"],
             "required_next_tool": {
                 "tool": "context_read",
-                "args": {"path": "Users/wayneliu/dev/ansible/lib/ansible/executor/play_iterator.py"},
+                "args": {
+                    "path": "Users/wayneliu/dev/ansible/lib/ansible/executor/play_iterator.py"
+                },
                 "reason": "Validate hinted target.",
             },
             "probe_budget": {
@@ -1960,11 +2370,14 @@ def test_failed_context_read_directive_fails_open_to_avoid_retry_deadlock(tmp_pa
     )
     assert retry_blocked is None
 
-    assert coordinator.pre_tool_call_block_message(
-        "read_file",
-        {"path": "lib/ansible/executor/play_iterator.py"},
-        session_id="sess-1",
-    ) is None
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "read_file",
+            {"path": "lib/ansible/executor/play_iterator.py"},
+            session_id="sess-1",
+        )
+        is None
+    )
     coordinator.observe_tool_result(
         "read_file",
         {"path": "lib/ansible/executor/play_iterator.py"},
@@ -1972,23 +2385,36 @@ def test_failed_context_read_directive_fails_open_to_avoid_retry_deadlock(tmp_pa
         session_id="sess-1",
     )
 
-    assert coordinator.pre_tool_call_block_message(
-        "patch",
-        {"path": "lib/ansible/executor/play_iterator.py"},
-        session_id="sess-1",
-    ) is None
+    assert (
+        coordinator.pre_tool_call_block_message(
+            "patch",
+            {"path": "lib/ansible/executor/play_iterator.py"},
+            session_id="sess-1",
+        )
+        is None
+    )
 
 
 def test_recover_and_verify_send_server_compatible_payloads(tmp_path):
     client = FakeClient()
-    coordinator = ConstraintKeeperCoordinator(client=client, spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=client, spool_root=tmp_path, identity=_identity()
+    )
 
     coordinator.recover(reason="same failure", session_id="sess-1")
     coordinator.verify_completion(session_id="sess-1")
 
-    recover_payload = [call[1]["payload"] for call in client.calls if call[0] == "recover"][0]
-    verify_payload = [call[1]["payload"] for call in client.calls if call[0] == "verify"][0]
-    assert recover_payload == {"task_id": "task-1", "run_id": "run-1", "reason": "same failure"}
+    recover_payload = [
+        call[1]["payload"] for call in client.calls if call[0] == "recover"
+    ][0]
+    verify_payload = [
+        call[1]["payload"] for call in client.calls if call[0] == "verify"
+    ][0]
+    assert recover_payload == {
+        "task_id": "task-1",
+        "run_id": "run-1",
+        "reason": "same failure",
+    }
     assert verify_payload["task_id"] == "task-1"
     assert verify_payload["run_id"] == "run-1"
     assert verify_payload["completion_bootstrap"]["instruction_freshness"] == "unknown"
@@ -2012,15 +2438,1232 @@ def test_verify_completion_sends_completion_bootstrap_evidence(tmp_path):
 
     coordinator.verify_completion(session_id="sess-1")
 
-    verify_payload = [call[1]["payload"] for call in client.calls if call[0] == "verify"][-1]
+    verify_payload = [
+        call[1]["payload"] for call in client.calls if call[0] == "verify"
+    ][-1]
     bootstrap = verify_payload["completion_bootstrap"]
-    assert bootstrap["instruction"] == "<pr_description>Fix app behavior</pr_description>"
+    assert (
+        bootstrap["instruction"] == "<pr_description>Fix app behavior</pr_description>"
+    )
     assert bootstrap["instruction_freshness"] == "current_run"
     assert bootstrap["unified_diff"] == diff
     assert bootstrap["changed_files"] == ["app.py"]
     assert bootstrap["post_patch_sources"] == {"app.py": source}
     assert bootstrap["diff_hash"].startswith("sha256:")
     assert bootstrap["source_snapshot_hashes"]["app.py"].startswith("sha256:")
+
+
+def test_successful_validation_observes_current_diff_before_test_result(tmp_path):
+    client = FakeClient()
+    diff = """diff --git a/lib/ansible/module_utils/urls.py b/lib/ansible/module_utils/urls.py
+--- a/lib/ansible/module_utils/urls.py
++++ b/lib/ansible/module_utils/urls.py
+@@ -1,2 +1,3 @@
++HAS_GZIP = True
+ def open_url():
+     return None
+"""
+    coordinator = ConstraintKeeperCoordinator(
+        client=client,
+        spool_root=tmp_path,
+        identity=_identity(),
+        diff_provider=lambda: diff,
+    )
+
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": "cd /repo && python3 test_gzip_validation.py"},
+        {"exit_code": 0, "output": "All tests passed!"},
+        session_id="sess-1",
+    )
+    coordinator.flush_pending()
+
+    observed = [
+        call[1]["payload"]["event"] for call in client.calls if call[0] == "observe"
+    ]
+    event_kinds = [event["event_kind"] for event in observed]
+    assert event_kinds.index("diff_observed") < event_kinds.index("test_result")
+    test_event = next(
+        event for event in observed if event["event_kind"] == "test_result"
+    )
+    assert test_event["payload"]["diff_context_hash"].startswith("sha256:")
+
+
+def test_verify_completion_sends_resolved_tocs_context_hint(tmp_path):
+    class StaleCompileClient(FakeClient):
+        async def compile_constraints(self, payload, session_id=""):
+            self.calls.append(
+                ("compile", {"payload": payload, "session_id": session_id})
+            )
+            return {
+                "contracts": {
+                    "patch": {
+                        "accepted_targets": ["lib/ansible/utils/display.py"],
+                    }
+                },
+                "protocol": {
+                    "gate_decision": "PATCH_ALLOWED_WITH_WARNINGS",
+                    "summary": "stale ordinary target",
+                },
+            }
+
+    client = StaleCompileClient()
+    diff = """diff --git a/lib/ansible/modules/iptables.py b/lib/ansible/modules/iptables.py
+--- a/lib/ansible/modules/iptables.py
++++ b/lib/ansible/modules/iptables.py
+@@ -1,2 +1,3 @@
++CHAIN_STATE = "present"
+ def main():
+     pass
+"""
+    coordinator = ConstraintKeeperCoordinator(
+        client=client,
+        spool_root=tmp_path,
+        identity=_identity(),
+        diff_provider=lambda: diff,
+        source_provider=lambda paths: {
+            "lib/ansible/modules/iptables.py": "def main():\n    pass\n",
+        },
+    )
+    coordinator.on_user_turn(
+        user_message="<pr_description>Fix chain management behavior</pr_description>",
+        session_id="sess-1",
+    )
+    coordinator.compile_context_bundle(
+        query="chain management",
+        instruction="fix chain management behavior",
+        query_plan={},
+        context_bundle={
+            "primary_files": [
+                {
+                    "path": "lib/ansible/utils/display.py",
+                    "symbols": ["Display"],
+                    "priority": "must_edit",
+                }
+            ],
+        },
+        search_payload={
+            "accepted_targets": ["lib/ansible/utils/display.py"],
+            "guidance": {
+                "tocs": {
+                    "delivery": {"resolved": True},
+                    "must_read_files": [
+                        {
+                            "path": "lib/ansible/modules/iptables.py",
+                            "source_role": "implementation",
+                        }
+                    ],
+                }
+            },
+        },
+    )
+
+    coordinator.verify_completion(session_id="sess-1")
+
+    verify_payload = [
+        call[1]["payload"] for call in client.calls if call[0] == "verify"
+    ][-1]
+    hint = verify_payload["completion_bootstrap"]["context_bundle_hint"]
+    assert hint["guidance"]["tocs"]["delivery"]["resolved"] is True
+    assert hint["tocs_repair_targets"] == ["lib/ansible/modules/iptables.py"]
+    assert hint["accepted_targets"] == ["lib/ansible/modules/iptables.py"]
+
+
+def test_verify_completion_observes_bootstrap_summary_before_server_verify(tmp_path):
+    class StaleCompileClient(FakeClient):
+        async def compile_constraints(self, payload, session_id=""):
+            self.calls.append(
+                ("compile", {"payload": payload, "session_id": session_id})
+            )
+            return {
+                "contracts": {
+                    "patch": {
+                        "accepted_targets": ["lib/ansible/utils/display.py"],
+                    }
+                }
+            }
+
+    client = StaleCompileClient()
+    diff = """diff --git a/lib/ansible/modules/iptables.py b/lib/ansible/modules/iptables.py
+--- a/lib/ansible/modules/iptables.py
++++ b/lib/ansible/modules/iptables.py
+@@ -1,2 +1,3 @@
++CHAIN_STATE = "present"
+ def main():
+     pass
+"""
+    coordinator = ConstraintKeeperCoordinator(
+        client=client,
+        spool_root=tmp_path,
+        identity=_identity(),
+        diff_provider=lambda: diff,
+        source_provider=lambda paths: {
+            "lib/ansible/modules/iptables.py": "def main():\n    pass\n",
+        },
+    )
+    coordinator.on_user_turn(
+        user_message="<pr_description>Fix chain management behavior</pr_description>",
+        session_id="sess-1",
+    )
+    coordinator.compile_context_bundle(
+        query="chain management",
+        instruction="fix chain management behavior",
+        query_plan={},
+        context_bundle={},
+        search_payload={
+            "guidance": {
+                "tocs": {
+                    "delivery": {"resolved": True},
+                    "must_read_files": [
+                        {
+                            "path": "lib/ansible/modules/iptables.py",
+                            "source_role": "implementation",
+                        }
+                    ],
+                }
+            },
+        },
+    )
+
+    coordinator.verify_completion(session_id="sess-1")
+
+    observe_events = [
+        call[1]["payload"]["event"] for call in client.calls if call[0] == "observe"
+    ]
+    bootstrap_events = [
+        event
+        for event in observe_events
+        if event.get("event_kind") == "completion_bootstrap_observed"
+    ]
+    assert bootstrap_events
+    payload = bootstrap_events[-1]["payload"]
+    assert payload["completion_bootstrap_present"] is True
+    assert payload["context_bundle_hint_present"] is True
+    assert payload["tocs_repair_targets"] == ["lib/ansible/modules/iptables.py"]
+    assert payload["accepted_targets"] == ["lib/ansible/modules/iptables.py"]
+    assert payload["changed_files"] == ["lib/ansible/modules/iptables.py"]
+    assert payload["diff_hash"].startswith("sha256:")
+    assert "unified_diff" not in payload
+    assert "post_patch_sources" not in payload
+
+    observe_indices = [
+        index
+        for index, call in enumerate(client.calls)
+        if call[0] == "observe"
+        and call[1]["payload"]["event"].get("event_kind")
+        == "completion_bootstrap_observed"
+    ]
+    verify_indices = [
+        index for index, call in enumerate(client.calls) if call[0] == "verify"
+    ]
+    assert observe_indices[-1] < verify_indices[-1]
+
+
+def test_verify_completion_blocks_suspicious_module_assignment_deletion_before_server_accept(
+    tmp_path,
+):
+    client = FakeClient()
+    client.verify_response = {
+        "decision": "ACCEPT_DONE",
+        "protocol": {
+            "summary": "Server would accept.",
+            "blocking_conditions": [],
+            "required_next_actions": [],
+        },
+    }
+    diff = """diff --git a/lib/ansible/module_utils/urls.py b/lib/ansible/module_utils/urls.py
+--- a/lib/ansible/module_utils/urls.py
++++ b/lib/ansible/module_utils/urls.py
+@@ -187,7 +187,28 @@ try:
+ except ImportError:
+     HAS_GSSAPI = False
+
+-GSSAPI_IMP_ERR = None
++try:
++    import gzip
++    HAS_GZIP = True
++except ImportError:
++    HAS_GZIP = False
+
+ try:
+     import gssapi
+"""
+    coordinator = ConstraintKeeperCoordinator(
+        client=client,
+        spool_root=tmp_path,
+        identity=_identity(),
+        diff_provider=lambda: diff,
+    )
+
+    result = coordinator.verify_completion(session_id="sess-1")
+
+    assert result["decision"] == "NEED_MORE_VALIDATION"
+    assert result["protocol"]["blocking_conditions"] == [
+        "Patch semantic guard found suspicious module-level assignment deletion: "
+        "lib/ansible/module_utils/urls.py removes GSSAPI_IMP_ERR without replacement."
+    ]
+    assert result["protocol"]["required_next_actions"] == [
+        "Review the diff and restore or intentionally replace the removed module-level assignment."
+    ]
+    assert not [call for call in client.calls if call[0] == "verify"]
+
+
+def test_verify_completion_allows_module_assignment_replacement(tmp_path):
+    client = FakeClient()
+    diff = """diff --git a/app.py b/app.py
+--- a/app.py
++++ b/app.py
+@@ -1,4 +1,4 @@
+-FEATURE_FLAG = False
++FEATURE_FLAG = True
+ def run():
+     return FEATURE_FLAG
+"""
+    coordinator = ConstraintKeeperCoordinator(
+        client=client,
+        spool_root=tmp_path,
+        identity=_identity(),
+        diff_provider=lambda: diff,
+    )
+
+    result = coordinator.verify_completion(session_id="sess-1")
+
+    assert result == {"gate_decision": "accepted"}
+    assert [call for call in client.calls if call[0] == "verify"]
+
+
+def test_verify_completion_blocks_warning_bearing_validation_before_server_accept(
+    tmp_path,
+):
+    client = FakeClient()
+    client.verify_response = {"decision": "ACCEPT_DONE"}
+    diff = """diff --git a/lib/ansible/module_utils/urls.py b/lib/ansible/module_utils/urls.py
+--- a/lib/ansible/module_utils/urls.py
++++ b/lib/ansible/module_utils/urls.py
+@@ -1,3 +1,4 @@
+ def open_url():
++    return "gzip"
+     return "plain"
+"""
+    coordinator = ConstraintKeeperCoordinator(
+        client=client,
+        spool_root=tmp_path,
+        identity=_identity(),
+        diff_provider=lambda: diff,
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": "python3 -m pytest test/units/module_utils/urls/test_gzip.py -v"},
+        {
+            "exit_code": 0,
+            "output": (
+                "test_Request_open_gzip PASSED\n"
+                "PytestUnraisableExceptionWarning: Exception ignored in: <http.client.HTTPResponse object>\n"
+                "ValueError: I/O operation on closed file.\n"
+                "4 passed in 0.34s\n"
+            ),
+        },
+        session_id="sess-1",
+    )
+
+    result = coordinator.verify_completion(session_id="sess-1")
+
+    assert result["decision"] == "NEED_MORE_VALIDATION"
+    assert result["completion_audit"]["evidence"]["local_patch_semantic_guard"] == (
+        "warning_bearing_validation"
+    )
+    assert any(
+        "warning-bearing validation output" in item
+        for item in result["protocol"]["blocking_conditions"]
+    )
+    assert not [call for call in client.calls if call[0] == "verify"]
+
+
+def test_verify_completion_blocks_product_diff_outside_accepted_targets_before_server_accept(
+    tmp_path,
+):
+    client = FakeClient()
+    client.verify_response = {"decision": "ACCEPT_DONE"}
+    diff = """diff --git a/lib/ansible/module_utils/urls.py b/lib/ansible/module_utils/urls.py
+--- a/lib/ansible/module_utils/urls.py
++++ b/lib/ansible/module_utils/urls.py
+@@ -1,2 +1,3 @@
++HAS_GZIP = True
+ def open_url():
+     return None
+diff --git a/lib/ansible/module_utils/unrelated.py b/lib/ansible/module_utils/unrelated.py
+--- a/lib/ansible/module_utils/unrelated.py
++++ b/lib/ansible/module_utils/unrelated.py
+@@ -1,2 +1,3 @@
++SIDE_EFFECT = True
+ def unrelated():
+     pass
+"""
+    coordinator = ConstraintKeeperCoordinator(
+        client=client,
+        spool_root=tmp_path,
+        identity=_identity(),
+        diff_provider=lambda: diff,
+    )
+    coordinator.compile_context_bundle(
+        query="Request.open gzip",
+        instruction="fix gzip decoding",
+        query_plan={},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={
+            "accepted_targets": ["lib/ansible/module_utils/urls.py"],
+            "tocs_repair_targets": ["lib/ansible/module_utils/urls.py"],
+        },
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": "python3 -m pytest test/units/module_utils/urls/test_gzip.py -q"},
+        {"exit_code": 0, "output": "4 passed"},
+        session_id="sess-1",
+    )
+
+    result = coordinator.verify_completion(session_id="sess-1")
+
+    assert result["decision"] == "NEED_MORE_VALIDATION"
+    assert result["completion_audit"]["evidence"]["local_patch_semantic_guard"] == (
+        "changed_files_outside_accepted_targets"
+    )
+    assert result["completion_audit"]["evidence"]["outside_accepted_targets"] == [
+        "lib/ansible/module_utils/unrelated.py"
+    ]
+    assert result["protocol"]["required_next_actions"] == [
+        (
+            "Revert or remove changes outside accepted targets: "
+            "lib/ansible/module_utils/unrelated.py."
+        ),
+        "Keep patch edits limited to accepted targets: lib/ansible/module_utils/urls.py.",
+        (
+            "Do not modify tests to satisfy validation unless FormSy explicitly "
+            "updates accepted targets."
+        ),
+        (
+            "After the outside-target diff is gone, rerun the relevant validation "
+            "and call Completion Verifier again."
+        ),
+    ]
+    projection = ConstraintKeeperCoordinator._completion_audit_projection_text(result)
+    assert "- Local guard: changed_files_outside_accepted_targets" in projection
+    assert (
+        "- Outside accepted targets: lib/ansible/module_utils/unrelated.py"
+        in projection
+    )
+    assert "- Accepted targets: lib/ansible/module_utils/urls.py" in projection
+    assert not [call for call in client.calls if call[0] == "verify"]
+
+
+def test_verify_completion_allows_validation_collateral_outside_accepted_targets_to_server(
+    tmp_path,
+):
+    client = FakeClient()
+    client.verify_response = {
+        "decision": "NEED_MORE_VALIDATION",
+        "completion_audit": {
+            "audit_status": "needs_validation",
+            "gate_decision": "NEED_MORE_VALIDATION",
+            "evidence": {
+                "accepted_targets": ["lib/ansible/modules/iptables.py"],
+                "validation_collateral": ["test/units/modules/test_iptables.py"],
+            },
+        },
+    }
+    diff = """diff --git a/lib/ansible/modules/iptables.py b/lib/ansible/modules/iptables.py
+--- a/lib/ansible/modules/iptables.py
++++ b/lib/ansible/modules/iptables.py
+@@ -1,2 +1,3 @@
++CHAIN_MANAGEMENT = True
+ def main():
+     pass
+diff --git a/test/units/modules/test_iptables.py b/test/units/modules/test_iptables.py
+--- a/test/units/modules/test_iptables.py
++++ b/test/units/modules/test_iptables.py
+@@ -1,2 +1,3 @@
++def test_chain_management():
++    pass
+"""
+    coordinator = ConstraintKeeperCoordinator(
+        client=client,
+        spool_root=tmp_path,
+        identity=_identity(),
+        diff_provider=lambda: diff,
+    )
+    coordinator.compile_context_bundle(
+        query="iptables chain management",
+        instruction="add chain management support",
+        query_plan={},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={
+            "accepted_targets": ["lib/ansible/modules/iptables.py"],
+            "tocs_repair_targets": ["lib/ansible/modules/iptables.py"],
+        },
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": "python3 -m pytest test/units/modules/test_iptables.py -q"},
+        {"exit_code": 0, "output": "27 passed"},
+        session_id="sess-1",
+    )
+
+    result = coordinator.verify_completion(session_id="sess-1")
+
+    assert result["completion_audit"]["evidence"]["validation_collateral"] == [
+        "test/units/modules/test_iptables.py"
+    ]
+    assert (
+        result["completion_audit"]["evidence"].get("local_patch_semantic_guard") is None
+    )
+    assert [call for call in client.calls if call[0] == "verify"]
+
+
+def test_verify_completion_does_not_local_block_written_existing_test_collateral(
+    tmp_path,
+):
+    client = FakeClient()
+    client.verify_response = {
+        "decision": "ACCEPT_DONE",
+        "completion_audit": {
+            "audit_status": "verified",
+            "gate_decision": "ACCEPT_DONE",
+            "evidence": {
+                "accepted_targets": ["lib/ansible/module_utils/urls.py"],
+                "validation_collateral": [
+                    "test/units/module_utils/urls/test_Request.py"
+                ],
+            },
+        },
+    }
+    diff = """diff --git a/lib/ansible/module_utils/urls.py b/lib/ansible/module_utils/urls.py
+--- a/lib/ansible/module_utils/urls.py
++++ b/lib/ansible/module_utils/urls.py
+@@ -1,2 +1,3 @@
++HAS_GZIP = True
+ def open_url():
+     return None
+diff --git a/test/units/module_utils/urls/test_Request.py b/test/units/module_utils/urls/test_Request.py
+--- a/test/units/module_utils/urls/test_Request.py
++++ b/test/units/module_utils/urls/test_Request.py
+@@ -1,2 +1,3 @@
++def test_Request_open_gzip():
++    pass
+"""
+    coordinator = ConstraintKeeperCoordinator(
+        client=client,
+        spool_root=tmp_path,
+        identity=_identity(),
+        diff_provider=lambda: diff,
+    )
+    coordinator.compile_context_bundle(
+        query="Request.open gzip",
+        instruction="fix gzip decoding",
+        query_plan={},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={
+            "accepted_targets": ["lib/ansible/module_utils/urls.py"],
+            "tocs_repair_targets": ["lib/ansible/module_utils/urls.py"],
+        },
+    )
+    coordinator.observe_tool_result(
+        "patch",
+        {"path": "/repo/test/units/module_utils/urls/test_Request.py"},
+        {"success": True},
+        session_id="sess-1",
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {
+            "command": "python3 -m pytest test/units/module_utils/urls/test_Request.py -q"
+        },
+        {"exit_code": 0, "output": "35 passed"},
+        session_id="sess-1",
+    )
+
+    result = coordinator.verify_completion(session_id="sess-1")
+
+    assert result["decision"] == "ACCEPT_DONE"
+    assert [call for call in client.calls if call[0] == "verify"]
+
+
+def test_verify_completion_blocks_unreviewed_written_validation_script(tmp_path):
+    client = FakeClient()
+    client.verify_response = {"decision": "ACCEPT_DONE"}
+    diff = """diff --git a/lib/ansible/module_utils/urls.py b/lib/ansible/module_utils/urls.py
+--- a/lib/ansible/module_utils/urls.py
++++ b/lib/ansible/module_utils/urls.py
+@@ -1,2 +1,3 @@
++HAS_GZIP = True
+ def open_url():
+     return None
+"""
+    validation_script = tmp_path / "test_gzip_validation.py"
+    coordinator = ConstraintKeeperCoordinator(
+        client=client,
+        spool_root=tmp_path / "spool",
+        identity=_identity(),
+        diff_provider=lambda: diff,
+    )
+    coordinator.compile_context_bundle(
+        query="Request.open gzip",
+        instruction="fix gzip decoding",
+        query_plan={},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={"accepted_targets": ["lib/ansible/module_utils/urls.py"]},
+    )
+    coordinator.observe_tool_result(
+        "write_file",
+        {
+            "path": str(validation_script),
+            "content": "print('All tests passed!')\n",
+        },
+        {"ok": True},
+        session_id="sess-1",
+    )
+    validation_script.write_text("print('All tests passed!')\n", encoding="utf-8")
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": f"python3 {validation_script}"},
+        {"exit_code": 0, "output": "All tests passed!"},
+        session_id="sess-1",
+    )
+
+    result = coordinator.verify_completion(session_id="sess-1")
+
+    assert result["decision"] == "NEED_MORE_VALIDATION"
+    assert result["completion_audit"]["evidence"]["local_patch_semantic_guard"] == (
+        "unreviewed_validation_collateral"
+    )
+    assert result["completion_audit"]["evidence"]["validation_collateral"] == [
+        str(validation_script)
+    ]
+    assert result["completion_audit"]["projection"]["next_action_kind"] == (
+        "cleanup_or_review_validation_collateral"
+    )
+    assert result["completion_audit"]["projection"]["agent_loop_terminal"] is False
+    assert (
+        "Do not claim completion while still-existing ad-hoc validation files are unreviewed."
+        in result["completion_audit"]["projection"]["forbidden_actions"]
+    )
+    assert (
+        "Validation evidence exists, but this run also wrote validation collateral "
+        in result["protocol"]["blocking_conditions"][0]
+    )
+    assert not [call for call in client.calls if call[0] == "verify"]
+
+
+def test_verify_completion_ignores_deleted_temporary_validation_script(tmp_path):
+    client = FakeClient()
+    client.verify_response = {"decision": "ACCEPT_DONE"}
+    diff = """diff --git a/lib/ansible/module_utils/urls.py b/lib/ansible/module_utils/urls.py
+--- a/lib/ansible/module_utils/urls.py
++++ b/lib/ansible/module_utils/urls.py
+@@ -1,2 +1,3 @@
++HAS_GZIP = True
+ def open_url():
+     return None
+"""
+    validation_script = tmp_path / "test_gzip_validation.py"
+    coordinator = ConstraintKeeperCoordinator(
+        client=client,
+        spool_root=tmp_path / "spool",
+        identity=_identity(),
+        diff_provider=lambda: diff,
+    )
+    coordinator.compile_context_bundle(
+        query="Request.open gzip",
+        instruction="fix gzip decoding",
+        query_plan={},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={"accepted_targets": ["lib/ansible/module_utils/urls.py"]},
+    )
+    coordinator.observe_tool_result(
+        "write_file",
+        {
+            "path": str(validation_script),
+            "content": "print('All tests passed!')\n",
+        },
+        {"ok": True},
+        session_id="sess-1",
+    )
+    validation_script.write_text("print('All tests passed!')\n", encoding="utf-8")
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": f"python3 {validation_script}"},
+        {"exit_code": 0, "output": "All tests passed!"},
+        session_id="sess-1",
+    )
+    validation_script.unlink()
+
+    result = coordinator.verify_completion(session_id="sess-1")
+
+    assert result["decision"] == "ACCEPT_DONE"
+    assert [call for call in client.calls if call[0] == "verify"]
+
+
+def test_verify_completion_blocks_unresolved_failed_validation_after_narrow_pass(
+    tmp_path,
+):
+    client = FakeClient()
+    client.verify_response = {"decision": "ACCEPT_DONE"}
+    diff = """diff --git a/lib/ansible/module_utils/urls.py b/lib/ansible/module_utils/urls.py
+--- a/lib/ansible/module_utils/urls.py
++++ b/lib/ansible/module_utils/urls.py
+@@ -1,2 +1,3 @@
++HAS_GZIP = True
+ def open_url():
+     return None
+"""
+    coordinator = ConstraintKeeperCoordinator(
+        client=client,
+        spool_root=tmp_path,
+        identity=_identity(),
+        diff_provider=lambda: diff,
+    )
+    coordinator.compile_context_bundle(
+        query="Request.open gzip",
+        instruction="fix gzip decoding",
+        query_plan={},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={"accepted_targets": ["lib/ansible/module_utils/urls.py"]},
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": "python3 -m pytest test/units/module_utils/urls -q"},
+        {"exit_code": 1, "output": "7 failed, 76 passed"},
+        session_id="sess-1",
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": "python3 -m pytest test/units/module_utils/urls/test_gzip.py -q"},
+        {"exit_code": 0, "output": "4 passed"},
+        session_id="sess-1",
+    )
+
+    result = coordinator.verify_completion(session_id="sess-1")
+
+    assert result["decision"] == "NEED_MORE_VALIDATION"
+    assert result["completion_audit"]["evidence"]["local_patch_semantic_guard"] == (
+        "unresolved_failed_validation"
+    )
+    assert result["completion_audit"]["evidence"]["failed_validation_commands"] == [
+        "python3 -m pytest test/units/module_utils/urls -q"
+    ]
+    assert not [call for call in client.calls if call[0] == "verify"]
+
+
+def test_verify_completion_accepts_equivalent_venv_pytest_after_python3_failure(
+    tmp_path,
+):
+    client = FakeClient()
+    client.verify_response = {"decision": "ACCEPT_DONE"}
+    diff = """diff --git a/lib/ansible/module_utils/urls.py b/lib/ansible/module_utils/urls.py
+--- a/lib/ansible/module_utils/urls.py
++++ b/lib/ansible/module_utils/urls.py
+@@ -1,2 +1,3 @@
++HAS_GZIP = True
+ def open_url():
+     return None
+"""
+    coordinator = ConstraintKeeperCoordinator(
+        client=client,
+        spool_root=tmp_path,
+        identity=_identity(),
+        diff_provider=lambda: diff,
+    )
+    coordinator.compile_context_bundle(
+        query="Request.open gzip",
+        instruction="fix gzip decoding",
+        query_plan={},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={"accepted_targets": ["lib/ansible/module_utils/urls.py"]},
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {
+            "command": (
+                "PYTHONPATH=/Users/wayneliu/dev/ansible/lib python3 -m pytest "
+                "test/units/module_utils/urls/test_gzip.py "
+                "test/units/module_utils/urls/test_Request.py -v"
+            )
+        },
+        {
+            "exit_code": 4,
+            "output": "ModuleNotFoundError: No module named 'ansible.module_utils.six.moves'",
+        },
+        session_id="sess-1",
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {
+            "command": (
+                "PYTHONPATH=/Users/wayneliu/dev/ansible/lib "
+                "/Users/wayneliu/dev/ansible/.venv/bin/python -m pytest "
+                "test/units/module_utils/urls/test_gzip.py "
+                "test/units/module_utils/urls/test_Request.py -v"
+            )
+        },
+        {"exit_code": 0, "output": "38 passed"},
+        session_id="sess-1",
+    )
+
+    result = coordinator.verify_completion(session_id="sess-1")
+
+    assert result["decision"] == "ACCEPT_DONE"
+    assert [call for call in client.calls if call[0] == "verify"]
+
+
+def test_verify_completion_accepts_python_m_pytest_after_pytest_launcher_failures(
+    tmp_path,
+):
+    client = FakeClient()
+    client.verify_response = {"decision": "ACCEPT_DONE"}
+    diff = """diff --git a/lib/ansible/module_utils/urls.py b/lib/ansible/module_utils/urls.py
+--- a/lib/ansible/module_utils/urls.py
++++ b/lib/ansible/module_utils/urls.py
+@@ -1,2 +1,3 @@
++HAS_GZIP = True
+ def open_url():
+     return None
+"""
+    coordinator = ConstraintKeeperCoordinator(
+        client=client,
+        spool_root=tmp_path,
+        identity=_identity(),
+        diff_provider=lambda: diff,
+    )
+    coordinator.compile_context_bundle(
+        query="Request.open gzip",
+        instruction="fix gzip decoding",
+        query_plan={},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={"accepted_targets": ["lib/ansible/module_utils/urls.py"]},
+    )
+    selector = "test/units/module_utils/urls/test_Request.py"
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": f"pytest -v {selector}"},
+        {"exit_code": 127, "output": "pytest: command not found"},
+        session_id="sess-1",
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": f"/repo/.venv/bin/pytest -v {selector}"},
+        {"exit_code": 2, "output": "No such file or directory"},
+        session_id="sess-1",
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": f"python -m pytest -v {selector}"},
+        {"exit_code": 0, "output": "35 passed"},
+        session_id="sess-1",
+    )
+
+    result = coordinator.verify_completion(session_id="sess-1")
+
+    assert result["decision"] == "ACCEPT_DONE"
+    assert [call for call in client.calls if call[0] == "verify"]
+
+
+def test_pre_tool_call_blocks_writing_candidate_test_outside_accepted_targets(tmp_path):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(),
+        spool_root=tmp_path,
+        identity=_identity(),
+    )
+    coordinator.compile_context_bundle(
+        query="Request.open gzip",
+        instruction="fix gzip decoding",
+        query_plan={},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={
+            "accepted_targets": ["lib/ansible/module_utils/urls.py"],
+            "guidance": {
+                "tocs": {
+                    "candidate_tests": [
+                        {
+                            "test_id": (
+                                "test/units/module_utils/urls/test_gzip.py::"
+                                "test_Request_open_gzip"
+                            ),
+                        }
+                    ],
+                }
+            },
+        },
+    )
+
+    message = coordinator.pre_tool_call_block_message(
+        "write_file",
+        {
+            "path": "test/units/module_utils/urls/test_gzip.py",
+            "content": "reconstructed test",
+        },
+        session_id="sess-1",
+    )
+
+    assert message is not None
+    assert "Candidate tests are validation obligations, not edit permission" in message
+    assert "test/units/module_utils/urls/test_gzip.py" in message
+    assert "lib/ansible/module_utils/urls.py" in message
+
+
+def test_pre_tool_call_blocks_terminal_candidate_test_redirection_outside_accepted_targets(
+    tmp_path,
+):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(),
+        spool_root=tmp_path,
+        identity=_identity(),
+    )
+    coordinator.compile_context_bundle(
+        query="request response decoding",
+        instruction="fix response decoding",
+        query_plan={},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={
+            "accepted_targets": ["lib/package/client.py"],
+            "guidance": {
+                "tocs": {
+                    "candidate_tests": [
+                        {
+                            "test_id": "tests/package/test_client_response.py::test_decoding",
+                        }
+                    ],
+                }
+            },
+        },
+    )
+
+    message = coordinator.pre_tool_call_block_message(
+        "terminal",
+        {
+            "command": (
+                "cat > tests/package/test_client_response.py <<'EOF'\n"
+                "def test_decoding():\n"
+                "    pass\n"
+                "EOF"
+            ),
+        },
+        session_id="sess-1",
+    )
+
+    assert message is not None
+    assert "Candidate tests are validation obligations, not edit permission" in message
+    assert "tests/package/test_client_response.py" in message
+    assert "lib/package/client.py" in message
+
+
+def test_pre_tool_call_blocks_terminal_python_candidate_test_reconstruction(tmp_path):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(),
+        spool_root=tmp_path,
+        identity=_identity(),
+    )
+    coordinator.compile_context_bundle(
+        query="Request.open gzip",
+        instruction="fix gzip decoding",
+        query_plan={},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={
+            "accepted_targets": ["lib/ansible/module_utils/urls.py"],
+            "guidance": {
+                "tocs": {
+                    "candidate_tests": [
+                        {
+                            "test_id": (
+                                "test/units/module_utils/urls/test_gzip.py::"
+                                "test_Request_open_gzip"
+                            ),
+                        }
+                    ],
+                }
+            },
+        },
+    )
+
+    message = coordinator.pre_tool_call_block_message(
+        "terminal",
+        {
+            "command": (
+                'python3 -c "\n'
+                "import os\n"
+                "test_dir = 'test/units/module_utils/urls'\n"
+                "os.makedirs(test_dir, exist_ok=True)\n"
+                "with open(os.path.join(test_dir, 'test_gzip.py'), 'wb') as f:\n"
+                "    f.write(b'reconstructed test')\n"
+                '"'
+            ),
+        },
+        session_id="sess-1",
+    )
+
+    assert message is not None
+    assert "Candidate tests are validation obligations, not edit permission" in message
+    assert "test/units/module_utils/urls/test_gzip.py" in message
+    assert "lib/ansible/module_utils/urls.py" in message
+
+
+def test_pre_tool_call_allows_candidate_test_when_accepted_target(tmp_path):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(),
+        spool_root=tmp_path,
+        identity=_identity(),
+    )
+    coordinator.compile_context_bundle(
+        query="Request.open gzip",
+        instruction="fix gzip decoding",
+        query_plan={},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={
+            "accepted_targets": ["test/units/module_utils/urls/test_gzip.py"],
+            "guidance": {
+                "tocs": {
+                    "candidate_tests": [
+                        {
+                            "test_id": (
+                                "test/units/module_utils/urls/test_gzip.py::"
+                                "test_Request_open_gzip"
+                            ),
+                        }
+                    ],
+                }
+            },
+        },
+    )
+
+    message = coordinator.pre_tool_call_block_message(
+        "write_file",
+        {
+            "path": "test/units/module_utils/urls/test_gzip.py",
+            "content": "accepted test edit",
+        },
+        session_id="sess-1",
+    )
+
+    assert message is None
+
+
+def test_verify_completion_repeated_unresolved_failed_validation_enters_loop_guard(
+    tmp_path,
+):
+    client = FakeClient()
+    client.verify_response = {"decision": "ACCEPT_DONE"}
+    diff = """diff --git a/lib/ansible/module_utils/urls.py b/lib/ansible/module_utils/urls.py
+--- a/lib/ansible/module_utils/urls.py
++++ b/lib/ansible/module_utils/urls.py
+@@ -1,2 +1,3 @@
++HAS_GZIP = True
+ def open_url():
+     return None
+"""
+    coordinator = ConstraintKeeperCoordinator(
+        client=client,
+        spool_root=tmp_path,
+        identity=_identity(),
+        diff_provider=lambda: diff,
+    )
+    coordinator.compile_context_bundle(
+        query="Request.open gzip",
+        instruction="fix gzip decoding",
+        query_plan={},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={"accepted_targets": ["lib/ansible/module_utils/urls.py"]},
+    )
+    failed_command = "python3 -m pytest test/units/module_utils/urls/test_Request.py -q"
+    passed_candidate = "python3 -m pytest test/units/module_utils/urls/test_gzip.py -q"
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": failed_command},
+        {"exit_code": 1, "output": "FAILED test_Request.py"},
+        session_id="sess-1",
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": passed_candidate},
+        {"exit_code": 0, "output": "5 passed"},
+        session_id="sess-1",
+    )
+
+    first = coordinator.verify_completion(session_id="sess-1")
+    second = coordinator.verify_completion(session_id="sess-1")
+
+    assert first["completion_audit"]["evidence"]["local_patch_semantic_guard"] == (
+        "unresolved_failed_validation"
+    )
+    assert second["completion_audit"]["evidence"]["local_patch_semantic_guard"] == (
+        "repeated_unresolved_failed_validation"
+    )
+    assert second["completion_audit"]["audit_status"] == "blocked_repeated"
+    assert second["completion_audit"]["evidence"]["repeat_count"] == 2
+    assert second["completion_audit"]["evidence"]["failed_validation_commands"] == [
+        failed_command
+    ]
+    assert any(
+        "Do not rerun already passing candidate tests" in action
+        for action in second["protocol"]["required_next_actions"]
+    )
+    assert any(
+        failed_command in action
+        for action in second["protocol"]["required_next_actions"]
+    )
+    assert not [call for call in client.calls if call[0] == "verify"]
+
+
+def test_completion_projection_includes_failed_validation_recovery_commands():
+    result = {
+        "decision": "NEED_MORE_VALIDATION",
+        "completion_audit": {
+            "audit_status": "blocked",
+            "gate_decision": "NEED_MORE_VALIDATION",
+            "evidence": {
+                "latest_diff_hash": "sha256:abc",
+                "local_patch_semantic_guard": "repeated_unresolved_failed_validation",
+                "repeat_count": 3,
+                "failed_validation_commands": [
+                    "python3 -m pytest test/units/module_utils/urls/test_Request.py -q",
+                    "python3 -m pytest test/units/module_utils/urls/test_fetch_url.py -q",
+                ],
+            },
+        },
+    }
+
+    projection = ConstraintKeeperCoordinator._completion_audit_projection_text(result)
+
+    assert "- Local guard: repeated_unresolved_failed_validation" in projection
+    assert "- Repeat count: 3" in projection
+    assert "- Failed validation commands:" in projection
+    assert (
+        "python3 -m pytest test/units/module_utils/urls/test_Request.py -q"
+        in projection
+    )
+    assert (
+        "python3 -m pytest test/units/module_utils/urls/test_fetch_url.py -q"
+        in projection
+    )
+
+
+def test_verify_completion_prioritizes_failed_exact_candidate_test_feedback(tmp_path):
+    client = FakeClient()
+    client.verify_response = {"decision": "ACCEPT_DONE"}
+    diff = """diff --git a/lib/ansible/module_utils/urls.py b/lib/ansible/module_utils/urls.py
+--- a/lib/ansible/module_utils/urls.py
++++ b/lib/ansible/module_utils/urls.py
+@@ -1,2 +1,3 @@
++HAS_GZIP = True
+ def open_url():
+     return None
+"""
+    coordinator = ConstraintKeeperCoordinator(
+        client=client,
+        spool_root=tmp_path,
+        identity=_identity(),
+        diff_provider=lambda: diff,
+    )
+    coordinator.compile_context_bundle(
+        query="Request.open gzip",
+        instruction="fix gzip decoding",
+        query_plan={},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={
+            "accepted_targets": ["lib/ansible/module_utils/urls.py"],
+            "guidance": {
+                "tocs": {
+                    "delivery": {"resolved": True},
+                    "candidate_tests": [
+                        {
+                            "test_id": (
+                                "test/units/module_utils/urls/test_gzip.py::"
+                                "test_GzipDecodedReader_read_amt"
+                            ),
+                            "command": (
+                                "python3 -m pytest "
+                                "test/units/module_utils/urls/test_gzip.py::"
+                                "test_GzipDecodedReader_read_amt -q"
+                            ),
+                        }
+                    ],
+                }
+            },
+        },
+    )
+    exact_command = (
+        "python3 -m pytest "
+        "test/units/module_utils/urls/test_gzip.py::"
+        "test_GzipDecodedReader_read_amt -q"
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": exact_command},
+        {"exit_code": 1, "output": "FAILED test_GzipDecodedReader_read_amt"},
+        session_id="sess-1",
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": "python3 -m pytest test/units/module_utils/urls -q"},
+        {"exit_code": 1, "output": "7 failed, 76 passed"},
+        session_id="sess-1",
+    )
+
+    result = coordinator.verify_completion(session_id="sess-1")
+
+    assert result["decision"] == "NEED_MORE_VALIDATION"
+    assert result["completion_audit"]["evidence"]["local_patch_semantic_guard"] == (
+        "failed_exact_candidate_tests"
+    )
+    assert result["completion_audit"]["evidence"]["failed_candidate_test_commands"] == [
+        exact_command
+    ]
+    assert any(
+        "Repair the failing exact candidate test before broad validation" in action
+        for action in result["protocol"]["required_next_actions"]
+    )
+    assert not [call for call in client.calls if call[0] == "verify"]
+
+
+def test_verify_completion_allows_failed_validation_after_same_command_passes(tmp_path):
+    client = FakeClient()
+    client.verify_response = {"decision": "ACCEPT_DONE"}
+    diff = """diff --git a/lib/ansible/module_utils/urls.py b/lib/ansible/module_utils/urls.py
+--- a/lib/ansible/module_utils/urls.py
++++ b/lib/ansible/module_utils/urls.py
+@@ -1,2 +1,3 @@
++HAS_GZIP = True
+ def open_url():
+     return None
+"""
+    coordinator = ConstraintKeeperCoordinator(
+        client=client,
+        spool_root=tmp_path,
+        identity=_identity(),
+        diff_provider=lambda: diff,
+    )
+    coordinator.compile_context_bundle(
+        query="Request.open gzip",
+        instruction="fix gzip decoding",
+        query_plan={},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={"accepted_targets": ["lib/ansible/module_utils/urls.py"]},
+    )
+    command = "python3 -m pytest test/units/module_utils/urls -q"
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": command},
+        {"exit_code": 1, "output": "7 failed, 76 passed"},
+        session_id="sess-1",
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": command},
+        {"exit_code": 0, "output": "83 passed"},
+        session_id="sess-1",
+    )
+
+    result = coordinator.verify_completion(session_id="sess-1")
+
+    assert result == {"decision": "ACCEPT_DONE"}
+    assert [call for call in client.calls if call[0] == "verify"]
 
 
 def test_final_submit_blocks_when_server_rejects(tmp_path):
@@ -2128,7 +3771,10 @@ def test_formsy_verify_completion_accepted_revalidates_next_user_task(tmp_path):
 
     assert next_context is not None
     assert "FormSy workspace revalidation required" in next_context["context"]
-    assert "Do not claim this task is already completed from session history alone." in next_context["context"]
+    assert (
+        "Do not claim this task is already completed from session history alone."
+        in next_context["context"]
+    )
     assert "git status --short" in next_context["context"]
     assert "context_search" in next_context["context"]
 
@@ -2229,6 +3875,104 @@ def test_final_submit_projects_accepted_completion_once(tmp_path):
     assert "- Decision: ACCEPT_DONE" in first
     assert "Completion proof satisfies P0 contracts." in first
     assert second is None
+
+
+def test_accepted_completion_projection_does_not_default_missing_decision_to_accept():
+    text = ConstraintKeeperCoordinator._accepted_completion_projection_text(
+        {"protocol": {"summary": "Verifier returned no decision."}}
+    )
+
+    assert "ACCEPT_DONE" not in text
+    assert "- Decision: MISSING_VERIFIER_DECISION" in text
+    assert "Verifier returned no decision." in text
+
+
+def test_post_llm_call_replaces_fake_completion_verifier_accept_claim(tmp_path):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(),
+        spool_root=tmp_path,
+        identity=_identity(),
+        fail_closed_on_submit=True,
+    )
+
+    directive = coordinator.post_llm_call_final_response_directive(
+        assistant_response=(
+            "Done. Implemented the fix.\n\n"
+            "Completion Verifier: ACCEPT_DONE."
+        ),
+        session_id="sess-1",
+    )
+
+    assert directive == {
+        "action": "replace_final_response",
+        "final_response": (
+            "FormSy Finish Gate was not called. The patch may be implemented, "
+            "but completion is not verified yet. Call formsy_verify_completion "
+            "before reporting ACCEPT_DONE."
+        ),
+    }
+
+
+def test_post_llm_call_replaces_unverified_completion_claim_after_diff(tmp_path):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(),
+        spool_root=tmp_path,
+        identity=_identity(),
+        fail_closed_on_submit=True,
+        diff_provider=lambda: (
+            "diff --git a/lib/example.py b/lib/example.py\n"
+            "--- a/lib/example.py\n"
+            "+++ b/lib/example.py\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+new\n"
+        ),
+    )
+    coordinator.observe_tool_result(
+        "apply_patch",
+        {"patch": "*** Begin Patch\n*** Update File: lib/example.py"},
+        "ok",
+        session_id="sess-1",
+    )
+
+    directive = coordinator.post_llm_call_final_response_directive(
+        assistant_response="Implemented the fix and verified the focused tests pass.",
+        session_id="sess-1",
+    )
+
+    assert directive == {
+        "action": "replace_final_response",
+        "final_response": (
+            "FormSy Finish Gate was not called. The patch may be implemented, "
+            "but completion is not verified yet. Call formsy_verify_completion "
+            "before reporting done."
+        ),
+    }
+
+
+def test_pre_tool_call_blocks_repeated_empty_process_list_loop(tmp_path):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
+
+    for _ in range(3):
+        coordinator.observe_tool_result(
+            "process",
+            {"action": "list"},
+            {"processes": []},
+            session_id="sess-1",
+        )
+
+    message = coordinator.pre_tool_call_block_message(
+        "process",
+        {"action": "list"},
+        session_id="sess-1",
+    )
+
+    assert message is not None
+    assert "repeated empty process list" in message
+    assert "run focused validation" in message
+    assert "formsy_verify_completion" in message
 
 
 def test_final_submit_projects_completion_audit_when_present(tmp_path):
@@ -2406,7 +4150,9 @@ def test_repeated_validation_failure_triggers_recovery_once(tmp_path):
         client=client,
         spool_root=tmp_path,
         identity=_identity(),
-        diff_provider=lambda: "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n",
+        diff_provider=lambda: (
+            "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n"
+        ),
     )
     args = {"command": "python -m pytest tests/forms", "exit_code": 1}
     output = "Traceback\nAssertionError: same failure"
@@ -2423,7 +4169,9 @@ def test_repeated_validation_failure_triggers_recovery_once(tmp_path):
 
 def test_diagnostic_failure_does_not_trigger_automatic_recovery(tmp_path):
     client = FakeClient()
-    coordinator = ConstraintKeeperCoordinator(client=client, spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=client, spool_root=tmp_path, identity=_identity()
+    )
 
     coordinator.observe_tool_result(
         "terminal",
@@ -2446,10 +4194,14 @@ def test_failure_payload_includes_latest_diff_context_hash(tmp_path):
         client=FakeClient(),
         spool_root=tmp_path,
         identity=_identity(),
-        diff_provider=lambda: "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n",
+        diff_provider=lambda: (
+            "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n"
+        ),
     )
 
-    coordinator.observe_tool_result("apply_patch", {"patch": "*** Begin Patch"}, "ok", session_id="sess-1")
+    coordinator.observe_tool_result(
+        "apply_patch", {"patch": "*** Begin Patch"}, "ok", session_id="sess-1"
+    )
     coordinator.observe_tool_result(
         "terminal",
         {"command": "python -m pytest tests/forms", "exit_code": 1},
@@ -2458,14 +4210,17 @@ def test_failure_payload_includes_latest_diff_context_hash(tmp_path):
     )
 
     failure = [
-        event for event in coordinator.spool.pending("task-1", "run-1")
+        event
+        for event in coordinator.spool.pending("task-1", "run-1")
         if event["event_kind"] == "failure"
     ][0]
     assert failure["payload"]["diff_context_hash"] == coordinator.latest_diff_hash
 
 
 def test_pre_tool_call_blocks_execute_code_read_file_write_file_bridge(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
 
     message = coordinator.pre_tool_call_block_message(
         "execute_code",
@@ -2487,7 +4242,9 @@ write_file("lib/ansible/executor/play_iterator.py", content)
 
 
 def test_pre_tool_call_blocks_execute_code_direct_source_write(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
 
     message = coordinator.pre_tool_call_block_message(
         "execute_code",
@@ -2510,8 +4267,34 @@ with open(path, 'w') as f:
     assert "Use patch" in message
 
 
+def test_pre_tool_call_allows_execute_code_temp_file_write_for_validation(tmp_path):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
+
+    message = coordinator.pre_tool_call_block_message(
+        "execute_code",
+        {
+            "code": """
+from pathlib import Path
+import subprocess
+
+probe = Path('/tmp/formsy_validation_probe.py')
+probe.write_text("print('ok')\\n")
+res = subprocess.run(['/usr/bin/python3', str(probe)], capture_output=True, text=True)
+assert res.stdout.strip() == 'ok'
+"""
+        },
+        session_id="sess-1",
+    )
+
+    assert message is None
+
+
 def test_pre_tool_call_allows_execute_code_read_only_validation(tmp_path):
-    coordinator = ConstraintKeeperCoordinator(client=FakeClient(), spool_root=tmp_path, identity=_identity())
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
 
     message = coordinator.pre_tool_call_block_message(
         "execute_code",

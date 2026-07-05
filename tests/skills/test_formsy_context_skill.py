@@ -64,6 +64,17 @@ def test_formsy_context_skill_does_not_own_server_facts():
     assert "accepted targets" in body
 
 
+def test_formsy_context_skill_warns_against_reconstructing_tests_or_stashing_diff():
+    content = CANONICAL_SKILL_PATH.read_text(encoding="utf-8")
+    _, body = _parse_frontmatter(content)
+
+    assert "validation obligations, not edit permission" in body
+    assert "do not reconstruct or" in body
+    assert "bytecode caches" in body
+    assert "Do not use `git stash`" in body
+    assert "Do not rerun already passing candidate tests" in body
+
+
 def test_formsy_context_is_the_only_formsy_runtime_skill():
     data = json.loads(skills_list(category="software-development"))
     formsy_names = sorted(

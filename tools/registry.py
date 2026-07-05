@@ -361,7 +361,11 @@ class ToolRegistry:
             return entry.handler(args, **kwargs)
         except Exception as e:
             logger.exception("Tool %s dispatch error: %s", name, e)
-            return json.dumps({"error": f"Tool execution failed: {type(e).__name__}: {e}"})
+            error_result = {"error": f"Tool execution failed: {type(e).__name__}: {e}"}
+            response_data = getattr(e, "response_data", None)
+            if response_data:
+                error_result["error_response"] = response_data
+            return json.dumps(error_result)
 
     # ------------------------------------------------------------------
     # Query helpers  (replace redundant dicts in model_tools.py)

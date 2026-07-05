@@ -7,6 +7,7 @@ import json
 import inspect
 import logging
 import re
+import shlex
 import time
 import uuid
 from enum import Enum
@@ -117,6 +118,7 @@ class ConstraintKeeperCoordinator:
         self._pending_guidance_text = ""
         self._pending_completion_projection_text = ""
         self._completion_revalidation_pending = False
+        self._completion_verified = False
         self._task_closed = False
         self._active_context_directive: dict[str, Any] | None = None
         self._active_probe_budget_directive: dict[str, Any] | None = None
@@ -126,15 +128,25 @@ class ConstraintKeeperCoordinator:
         self._next_tool_failed = False
         self._context_read_counts: dict[str, int] = {}
         self._pending_tool_result_replacement = ""
+        self._last_successful_terminal_probe: dict[str, Any] = {}
         self._probe_budget_counts: dict[str, int] = {
             "search_files": 0,
             "read_file": 0,
             "terminal_or_execute_code": 0,
         }
+        self._empty_process_list_count = 0
         self._full_diff_stdout_count = 0
         self._latest_user_task_text = ""
         self._latest_grounding_query_text = ""
         self._latest_diff_payload: dict[str, Any] = {}
+        self._latest_warning_bearing_validation: dict[str, Any] = {}
+        self._latest_accepted_targets: list[str] = []
+        self._latest_context_bundle_hint: dict[str, Any] = {}
+        self._latest_candidate_test_commands: list[str] = []
+        self._latest_candidate_test_paths: list[str] = []
+        self._unresolved_failed_validations: dict[str, dict[str, Any]] = {}
+        self._completion_guard_repeat_counts: dict[str, int] = {}
+        self._written_paths: list[str] = []
         self._skill_name = "formsy-context"
         self._skill_visibility = "unknown"
         self._skill_body_loaded = False
@@ -142,7 +154,9 @@ class ConstraintKeeperCoordinator:
     def on_session_start(self, session_id: str = "", **_: Any) -> None:
         self._session_id = session_id or self._session_id
 
-    def on_user_turn(self, user_message: str = "", session_id: str = "", **_: Any) -> None:
+    def on_user_turn(
+        self, user_message: str = "", session_id: str = "", **_: Any
+    ) -> None:
         meta_maintenance_turn = self._is_meta_maintenance_task_text(user_message)
         if (
             isinstance(user_message, str)
@@ -156,6 +170,7 @@ class ConstraintKeeperCoordinator:
         )
         if self._task_closed:
             self._task_closed = False
+            self._completion_verified = False
             self._reset_guidance_state(clear_protocol=True)
         self._reset_guidance_state_if_task_changed()
 
@@ -176,7 +191,8 @@ class ConstraintKeeperCoordinator:
                 user_message=user_message,
                 repo_id=repo_id or (self.identity.repo_id if self.identity else ""),
                 revision=revision or (self.identity.revision if self.identity else ""),
-                workspace_id=workspace_id or (self.identity.workspace_id if self.identity else ""),
+                workspace_id=workspace_id
+                or (self.identity.workspace_id if self.identity else ""),
             )
             self._session_id = self.identity.session_id
         return self.identity
@@ -242,6 +258,13 @@ class ConstraintKeeperCoordinator:
                 f"Reason: {exc.__class__.__name__}: {exc}"
             )
 
+        self._record_context_bundle_hint(context_bundle, search_payload, response)
+        self._record_contract_accepted_targets(search_payload)
+        self._record_contract_accepted_targets(response)
+        self._record_contract_candidate_tests(search_payload)
+        self._record_contract_candidate_tests(response)
+        self._record_contract_candidate_test_paths(search_payload)
+        self._record_contract_candidate_test_paths(response)
         self._capture_server_directive(response)
         protocol_text = self._protocol_text(response)
         self._set_protocol_text(protocol_text)
@@ -260,9 +283,14 @@ class ConstraintKeeperCoordinator:
         self._observe_skill_uptake(tool_name, args or {}, result)
         self._observe_guidance_signal(tool_name, args or {}, result)
         self._capture_guidance_packet(tool_name, result)
-        if tool_name == "formsy_verify_completion" and self._is_accepted(_result_dict(result)):
+        if tool_name == "formsy_verify_completion" and self._is_accepted(
+            _result_dict(result)
+        ):
             self._mark_completion_accepted_for_revalidation()
         self._record_probe_budget_event(tool_name, args or {})
+        self._record_successful_terminal_probe(tool_name, args or {}, result)
+        self._record_empty_process_list_probe(tool_name, args or {}, result)
+        self._record_written_path(tool_name, args or {}, result)
         observed = self._tool_observed_event(tool_name, args or {}, result)
         if observed:
             self._append_event(observed)
@@ -274,8 +302,19 @@ class ConstraintKeeperCoordinator:
         if tool_name == "terminal":
             event = classify_terminal_result(args or {}, result)
             if event:
+                if event.get("event_kind") in {"failure", "test_result"}:
+                    self._append_fresh_diff_if_changed()
                 if event.get("event_kind") == "failure":
-                    event.setdefault("payload", {})["diff_context_hash"] = self.latest_diff_hash
+                    event.setdefault("payload", {})["diff_context_hash"] = (
+                        self.latest_diff_hash
+                    )
+                    self._record_failed_validation(event)
+                if event.get("event_kind") == "test_result":
+                    event.setdefault("payload", {})["diff_context_hash"] = (
+                        self.latest_diff_hash
+                    )
+                    self._record_warning_bearing_validation(event)
+                    self._clear_resolved_failed_validation(event)
                 self._append_event(event)
                 self._maybe_recover_from_failure(event)
         if is_final_submit(tool_name, args or {}) and _result_succeeded(result):
@@ -309,7 +348,10 @@ class ConstraintKeeperCoordinator:
         if self._pending_guidance_text:
             prefix_additions.append(self._pending_guidance_text)
             self._pending_guidance_text = ""
-        if self.latest_protocol_text and self.latest_protocol_text != self._last_injected_protocol_text:
+        if (
+            self.latest_protocol_text
+            and self.latest_protocol_text != self._last_injected_protocol_text
+        ):
             self._last_injected_protocol_text = self.latest_protocol_text
             suffix_additions.append(self.latest_protocol_text)
         if self._pending_completion_projection_text:
@@ -318,16 +360,21 @@ class ConstraintKeeperCoordinator:
         if prefix_additions or suffix_additions:
             transformed = result
             if prefix_additions:
-                transformed = "\n\n---\n\n".join(prefix_additions) + f"\n\n---\n\n{transformed}"
+                transformed = (
+                    "\n\n---\n\n".join(prefix_additions) + f"\n\n---\n\n{transformed}"
+                )
             if suffix_additions:
                 transformed = f"{transformed}\n\n" + "\n\n".join(suffix_additions)
             return transformed
         return None
 
-    def pre_llm_call_context(self, *, session_id: str = "", task_id: str = "") -> dict[str, str] | None:
+    def pre_llm_call_context(
+        self, *, session_id: str = "", task_id: str = ""
+    ) -> dict[str, str] | None:
         self.ensure_identity(session_id=session_id, task_id=task_id)
         if self._task_closed:
             self._task_closed = False
+            self._completion_verified = False
             self._reset_guidance_state(clear_protocol=True)
         if not self.recovery_open:
             if not self._context_search_seen and not self._bootstrap_guidance_injected:
@@ -338,9 +385,13 @@ class ConstraintKeeperCoordinator:
                 self._next_tool_visible_delivery_count = 1
                 action_card = self._recommended_next_action_card(directive)
                 if self._completion_revalidation_pending:
-                    action_card = f"{self._workspace_revalidation_card()}\n\n{action_card}"
+                    action_card = (
+                        f"{self._workspace_revalidation_card()}\n\n{action_card}"
+                    )
                     self._completion_revalidation_pending = False
-                context = self._with_formsy_context_skill_capsule(action_card, session_id=session_id)
+                context = self._with_formsy_context_skill_capsule(
+                    action_card, session_id=session_id
+                )
                 self._log_pre_llm_projection_delivered(
                     action_id=str(directive.get("action_id") or ""),
                     context=context,
@@ -369,13 +420,38 @@ class ConstraintKeeperCoordinator:
             return None
         final_submit = is_final_submit(tool_name, args or {})
         if not final_submit:
-            direct_source_write_message = self._execute_code_direct_source_write_block_message(tool_name, args or {})
+            direct_source_write_message = (
+                self._execute_code_direct_source_write_block_message(
+                    tool_name, args or {}
+                )
+            )
             if direct_source_write_message:
                 return direct_source_write_message
-            read_write_bridge_message = self._execute_code_read_write_bridge_block_message(tool_name, args or {})
+            read_write_bridge_message = (
+                self._execute_code_read_write_bridge_block_message(
+                    tool_name, args or {}
+                )
+            )
             if read_write_bridge_message:
                 return read_write_bridge_message
-            probe_budget_message = self._probe_budget_block_message(tool_name, args or {})
+            candidate_test_write_message = self._candidate_test_write_block_message(
+                tool_name, args or {}
+            )
+            if candidate_test_write_message:
+                return candidate_test_write_message
+            repeated_terminal_probe_message = (
+                self._repeated_terminal_probe_block_message(tool_name, args or {})
+            )
+            if repeated_terminal_probe_message:
+                return repeated_terminal_probe_message
+            process_probe_message = self._repeated_empty_process_list_block_message(
+                tool_name, args or {}
+            )
+            if process_probe_message:
+                return process_probe_message
+            probe_budget_message = self._probe_budget_block_message(
+                tool_name, args or {}
+            )
             if probe_budget_message:
                 return probe_budget_message
         if not self.fail_closed_on_submit or not final_submit:
@@ -383,7 +459,9 @@ class ConstraintKeeperCoordinator:
         try:
             result = self.verify_completion(session_id=session_id, task_id=task_id)
         except Exception as exc:
-            self._pending_completion_projection_text = self._completion_unavailable_projection_text(exc)
+            self._pending_completion_projection_text = (
+                self._completion_unavailable_projection_text(exc)
+            )
             self._append_policy_event(
                 action="allowed_with_warning",
                 reason=f"verify_completion unavailable: {exc.__class__.__name__}: {exc}",
@@ -391,12 +469,15 @@ class ConstraintKeeperCoordinator:
             )
             return None
         if self._is_accepted(result):
+            self._completion_verified = True
             projection_text = self._accepted_completion_projection_text(result)
             if projection_text:
                 self._pending_completion_projection_text = projection_text
             self._append_policy_event(
                 action="allowed",
-                reason=self._completion_summary(result) or self._completion_decision(result) or "Completion accepted.",
+                reason=self._completion_summary(result)
+                or self._completion_decision(result)
+                or "Completion accepted.",
                 category="completion_accepted",
             )
             return None
@@ -410,31 +491,944 @@ class ConstraintKeeperCoordinator:
             self._set_protocol_text(protocol_text)
         return self._rejection_message(result)
 
-    def verify_completion(self, *, session_id: str = "", task_id: str = "") -> dict[str, Any]:
+    def post_llm_call_final_response_directive(
+        self,
+        *,
+        assistant_response: str,
+        session_id: str = "",
+        task_id: str = "",
+    ) -> dict[str, str] | None:
+        self.ensure_identity(session_id=session_id, task_id=task_id)
+        if self._completion_verified:
+            return None
+        if self._assistant_response_claims_completion_accept(assistant_response):
+            return {
+                "action": "replace_final_response",
+                "final_response": (
+                    "FormSy Finish Gate was not called. The patch may be implemented, "
+                    "but completion is not verified yet. Call formsy_verify_completion "
+                    "before reporting ACCEPT_DONE."
+                ),
+            }
+        if self._assistant_response_claims_task_completion(
+            assistant_response
+        ) and self._has_unverified_current_diff():
+            return {
+                "action": "replace_final_response",
+                "final_response": (
+                    "FormSy Finish Gate was not called. The patch may be implemented, "
+                    "but completion is not verified yet. Call formsy_verify_completion "
+                    "before reporting done."
+                ),
+            }
+        return None
+
+    def verify_completion(
+        self, *, session_id: str = "", task_id: str = ""
+    ) -> dict[str, Any]:
         identity = self.ensure_identity(session_id=session_id, task_id=task_id)
         self.ensure_task_started(session_id=identity.session_id)
         self.flush_pending()
         diff_payload = self._append_fresh_diff_if_changed()
-        self._append_event({
-            "event_kind": "done_claim",
-            "trust": "agent_claimed",
-            "payload": {"claimed_at_ms": _now_ms()},
-        })
+        semantic_guard_result = self._local_patch_semantic_guard(diff_payload)
+        if semantic_guard_result is not None:
+            return semantic_guard_result
+        scope_guard_result = self._local_changed_files_scope_guard(diff_payload)
+        if scope_guard_result is not None:
+            return scope_guard_result
+        written_collateral_guard_result = (
+            self._local_unreviewed_written_validation_collateral_guard(diff_payload)
+        )
+        if written_collateral_guard_result is not None:
+            return written_collateral_guard_result
+        failed_candidate_guard_result = self._local_failed_candidate_test_guard(
+            diff_payload
+        )
+        if failed_candidate_guard_result is not None:
+            return failed_candidate_guard_result
+        failed_validation_guard_result = self._local_unresolved_failed_validation_guard(
+            diff_payload
+        )
+        if failed_validation_guard_result is not None:
+            return failed_validation_guard_result
+        validation_guard_result = self._local_validation_output_guard(diff_payload)
+        if validation_guard_result is not None:
+            return validation_guard_result
+        completion_bootstrap = self._completion_bootstrap_payload(diff_payload)
+        self._append_completion_bootstrap_observed(completion_bootstrap)
+        self._append_event(
+            {
+                "event_kind": "done_claim",
+                "trust": "agent_claimed",
+                "payload": {"claimed_at_ms": _now_ms()},
+            }
+        )
         self.flush_pending()
         return self._run_async(
             self.client.verify_completion(
                 {
                     "task_id": identity.task_id,
                     "run_id": identity.run_id,
-                    "completion_bootstrap": self._completion_bootstrap_payload(
-                        diff_payload
-                    ),
+                    "completion_bootstrap": completion_bootstrap,
                 },
                 session_id=identity.session_id,
             )
         )
 
-    def recover(self, *, reason: str = "", session_id: str = "", task_id: str = "") -> dict[str, Any]:
+    def _record_contract_accepted_targets(self, payload: Any) -> None:
+        tocs_targets = self._extract_resolved_tocs_repair_targets(payload)
+        if tocs_targets:
+            self._latest_accepted_targets = tocs_targets
+            return
+        if self._latest_context_bundle_hint.get("tocs_repair_targets"):
+            return
+        targets = self._extract_contract_accepted_targets(payload)
+        if targets:
+            self._latest_accepted_targets = targets
+
+    def _record_context_bundle_hint(
+        self,
+        context_bundle: dict[str, Any],
+        search_payload: dict[str, Any],
+        response: Any,
+    ) -> None:
+        hint: dict[str, Any] = {}
+        if isinstance(context_bundle, dict):
+            for key in (
+                "bundle_id",
+                "coverage",
+                "primary_files",
+                "must_edit",
+                "test_plan",
+            ):
+                if key in context_bundle:
+                    hint[key] = context_bundle[key]
+        if isinstance(search_payload, dict):
+            for key in (
+                "guidance",
+                "candidate_tests",
+                "tocs_contract_projection",
+                "tocs_delivery",
+            ):
+                if key in search_payload:
+                    hint[key] = search_payload[key]
+
+        tocs_targets = self._extract_resolved_tocs_repair_targets(
+            {"search_payload": search_payload, "response": response}
+        )
+        if tocs_targets:
+            hint["tocs_repair_targets"] = tocs_targets
+            hint["accepted_targets"] = tocs_targets
+        else:
+            accepted_targets = self._extract_contract_accepted_targets(
+                {"search_payload": search_payload, "response": response}
+            )
+            if accepted_targets:
+                hint["accepted_targets"] = accepted_targets
+
+        if hint:
+            self._latest_context_bundle_hint = hint
+
+    def _record_written_path(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        result: Any,
+    ) -> None:
+        if not _result_succeeded(result):
+            return
+        path = ""
+        if tool_name in {"write_file", "patch"}:
+            path = str(args.get("path") or "").strip()
+        if path and path not in self._written_paths:
+            self._written_paths.append(path)
+
+    def _record_contract_candidate_tests(self, payload: Any) -> None:
+        commands = self._extract_contract_candidate_test_commands(payload)
+        if commands:
+            self._latest_candidate_test_commands = commands
+
+    def _record_contract_candidate_test_paths(self, payload: Any) -> None:
+        paths = self._extract_contract_candidate_test_paths(payload)
+        if paths:
+            self._latest_candidate_test_paths = paths
+
+    @classmethod
+    def _extract_contract_accepted_targets(cls, payload: Any) -> list[str]:
+        if not isinstance(payload, dict):
+            return []
+        values: list[str] = []
+        for key in ("accepted_targets", "tocs_repair_targets"):
+            values.extend(_string_list(payload.get(key)))
+        patch = payload.get("patch")
+        if isinstance(patch, dict):
+            values.extend(_string_list(patch.get("accepted_targets")))
+        contracts = payload.get("contracts")
+        if isinstance(contracts, dict):
+            values.extend(cls._extract_contract_accepted_targets(contracts))
+        contract = payload.get("contract")
+        if isinstance(contract, dict):
+            values.extend(cls._extract_contract_accepted_targets(contract))
+        search_payload = payload.get("search_payload")
+        if isinstance(search_payload, dict):
+            values.extend(cls._extract_contract_accepted_targets(search_payload))
+        normalized: list[str] = []
+        for value in values:
+            path = _repo_relative_source_path(value)
+            if path and path not in normalized:
+                normalized.append(path)
+        return normalized
+
+    @classmethod
+    def _extract_resolved_tocs_repair_targets(cls, payload: Any) -> list[str]:
+        targets: list[str] = []
+
+        def add_path(value: Any) -> None:
+            path = _repo_relative_source_path(str(value or ""))
+            if not path:
+                return
+            lowered = path.lower()
+            filename = lowered.rsplit("/", 1)[-1]
+            if (
+                "/tests/" in f"/{lowered}/"
+                or lowered.startswith(("test/", "tests/"))
+                or filename.startswith("test_")
+                or filename.endswith("_test.py")
+                or filename == "tests.py"
+            ):
+                return
+            if path not in targets:
+                targets.append(path)
+
+        def add_paths(values: Any) -> None:
+            if isinstance(values, list):
+                for item in values:
+                    if isinstance(item, dict):
+                        add_path(
+                            item.get("path")
+                            or item.get("file")
+                            or item.get("source_path")
+                            or item.get("target")
+                        )
+                    else:
+                        add_path(item)
+            else:
+                add_path(values)
+
+        def visit(value: Any, resolved: bool = False) -> None:
+            if isinstance(value, dict):
+                projection = value.get("tocs_contract_projection")
+                projected_resolved = (
+                    isinstance(projection, dict)
+                    and str(projection.get("source") or "") == "resolved_tocs"
+                )
+                delivery = value.get("delivery") or value.get("tocs_delivery")
+                delivery_resolved = (
+                    isinstance(delivery, dict) and delivery.get("resolved") is True
+                )
+                current_resolved = resolved or projected_resolved or delivery_resolved
+
+                for key in ("tocs_repair_targets", "repair_targets"):
+                    add_paths(value.get(key))
+                if current_resolved:
+                    for key in ("accepted_targets", "must_edit", "must_read_files"):
+                        add_paths(value.get(key))
+
+                for nested_key in (
+                    "guidance",
+                    "tocs",
+                    "search_payload",
+                    "response",
+                    "contracts",
+                    "contract",
+                    "patch",
+                ):
+                    if nested_key in value:
+                        visit(value.get(nested_key), current_resolved)
+            elif isinstance(value, list):
+                for item in value:
+                    visit(item, resolved)
+
+        visit(payload)
+        return targets
+
+    def _record_warning_bearing_validation(self, event: dict[str, Any]) -> None:
+        payload = event.get("payload")
+        if not isinstance(payload, dict) or payload.get("passed") is not True:
+            return
+        output = str(payload.get("truncated_output") or "")
+        warnings = self._validation_warning_markers(output)
+        if not warnings:
+            self._latest_warning_bearing_validation = {}
+            return
+        self._latest_warning_bearing_validation = {
+            "command": str(payload.get("command") or ""),
+            "output_hash": str(payload.get("output_hash") or ""),
+            "warnings": warnings,
+        }
+
+    def _record_failed_validation(self, event: dict[str, Any]) -> None:
+        payload = event.get("payload")
+        if not isinstance(payload, dict) or payload.get("passed") is True:
+            return
+        command = str(payload.get("command") or "").strip()
+        if not command or not is_validation_command(command):
+            return
+        diff_hash = self._current_diff_hash_for_guard()
+        if not diff_hash:
+            return
+        self._unresolved_failed_validations[command] = {
+            "command": command,
+            "diff_hash": diff_hash,
+            "output_hash": str(payload.get("output_hash") or ""),
+            "resolution_key": self._validation_resolution_key(command),
+        }
+        self._completion_guard_repeat_counts.pop(
+            self._failed_validation_repeat_key(diff_hash, [command]),
+            None,
+        )
+
+    @classmethod
+    def _extract_contract_candidate_test_commands(cls, payload: Any) -> list[str]:
+        commands: list[str] = []
+
+        def visit(value: Any) -> None:
+            if isinstance(value, dict):
+                candidates = value.get("candidate_tests")
+                if isinstance(candidates, list):
+                    for candidate in candidates:
+                        if not isinstance(candidate, dict):
+                            continue
+                        command = str(candidate.get("command") or "").strip()
+                        test_id = str(candidate.get("test_id") or "").strip()
+                        if not command and test_id:
+                            command = f"pytest {test_id}"
+                        if command and command not in commands:
+                            commands.append(command)
+                for nested_key in (
+                    "guidance",
+                    "tocs",
+                    "tocs_delivery",
+                    "search_payload",
+                ):
+                    if nested_key in value:
+                        visit(value.get(nested_key))
+            elif isinstance(value, list):
+                for item in value:
+                    visit(item)
+
+        visit(payload)
+        return commands
+
+    @classmethod
+    def _extract_contract_candidate_test_paths(cls, payload: Any) -> list[str]:
+        paths: list[str] = []
+
+        def add_path(value: str) -> None:
+            path = _repo_relative_source_path(value.split("::", 1)[0])
+            if path and path not in paths:
+                paths.append(path)
+
+        def visit(value: Any) -> None:
+            if isinstance(value, dict):
+                candidates = value.get("candidate_tests")
+                if isinstance(candidates, list):
+                    for candidate in candidates:
+                        if not isinstance(candidate, dict):
+                            continue
+                        for key in (
+                            "path",
+                            "test_path",
+                            "file",
+                            "source_path",
+                            "test_id",
+                        ):
+                            raw = str(candidate.get(key) or "").strip()
+                            if raw:
+                                add_path(raw)
+                for nested_key in (
+                    "guidance",
+                    "tocs",
+                    "tocs_delivery",
+                    "search_payload",
+                ):
+                    if nested_key in value:
+                        visit(value.get(nested_key))
+            elif isinstance(value, list):
+                for item in value:
+                    visit(item)
+
+        visit(payload)
+        return paths
+
+    def _clear_resolved_failed_validation(self, event: dict[str, Any]) -> None:
+        payload = event.get("payload")
+        if not isinstance(payload, dict) or payload.get("passed") is not True:
+            return
+        command = str(payload.get("command") or "").strip()
+        if not command:
+            return
+        existing = self._unresolved_failed_validations.get(command)
+        current_diff_hash = self._current_diff_hash_for_guard()
+        if existing and existing.get("diff_hash") == current_diff_hash:
+            self._unresolved_failed_validations.pop(command, None)
+            self._completion_guard_repeat_counts.pop(
+                self._failed_validation_repeat_key(
+                    str(existing.get("diff_hash") or ""), [command]
+                ),
+                None,
+            )
+            return
+
+        resolution_key = self._validation_resolution_key(command)
+        resolved_commands: list[str] = []
+        for failed_command, failure in list(
+            self._unresolved_failed_validations.items()
+        ):
+            if failure.get("diff_hash") != current_diff_hash:
+                continue
+            if not resolution_key or failure.get("resolution_key") != resolution_key:
+                continue
+            resolved_commands.append(failed_command)
+            self._unresolved_failed_validations.pop(failed_command, None)
+        for failed_command in resolved_commands:
+            self._completion_guard_repeat_counts.pop(
+                self._failed_validation_repeat_key(current_diff_hash, [failed_command]),
+                None,
+            )
+
+    def _current_diff_hash_for_guard(self) -> str:
+        latest = self._latest_diff_payload
+        if isinstance(latest, dict) and latest.get("diff_hash"):
+            return str(latest.get("diff_hash") or "")
+        try:
+            diff_text = self.diff_provider() or ""
+        except Exception:
+            diff_text = ""
+        return hash_text(diff_text) if diff_text.strip() else ""
+
+    @classmethod
+    def _validation_resolution_key(cls, command: str) -> str:
+        effective = cls._effective_policy_command(str(command or ""))
+        pytest_selectors = _pytest_selectors_from_command(effective)
+        if pytest_selectors:
+            return "pytest " + " ".join(pytest_selectors)
+        try:
+            tokens = shlex.split(effective)
+        except ValueError:
+            tokens = effective.split()
+        while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
+            tokens.pop(0)
+        if tokens and tokens[0] == "env":
+            tokens.pop(0)
+            while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
+                tokens.pop(0)
+        if len(tokens) >= 3 and cls._is_python_executable_token(tokens[0]):
+            if tokens[1:3] == ["-m", "pytest"]:
+                tokens[0] = "python"
+        return " ".join(tokens)
+
+    @staticmethod
+    def _is_python_executable_token(value: str) -> bool:
+        token = str(value or "").strip().lower()
+        if not token:
+            return False
+        name = token.rsplit("/", 1)[-1]
+        return bool(re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", name))
+
+    @staticmethod
+    def _validation_warning_markers(output: str) -> list[str]:
+        text = str(output or "")
+        markers = [
+            "PytestUnraisableExceptionWarning",
+            "ResourceWarning",
+            "Exception ignored in:",
+        ]
+        return [marker for marker in markers if marker in text]
+
+    def _local_changed_files_scope_guard(
+        self,
+        diff_payload: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(diff_payload, dict):
+            return None
+        accepted_targets = list(self._latest_accepted_targets)
+        if not accepted_targets:
+            return None
+        changed_files = [
+            _repo_relative_source_path(path)
+            for path in diff_payload.get("changed_files") or []
+        ]
+        changed_files = [path for path in changed_files if path]
+        validation_collateral = [
+            path
+            for path in changed_files
+            if self._is_validation_collateral_path(path)
+            and not any(_paths_equivalent(path, target) for target in accepted_targets)
+        ]
+        outside = [
+            path
+            for path in changed_files
+            if not self._is_completion_auxiliary_path(path)
+            and path not in validation_collateral
+            and not any(_paths_equivalent(path, target) for target in accepted_targets)
+        ]
+        if not outside:
+            return None
+        outside_text = ", ".join(outside)
+        accepted_text = ", ".join(accepted_targets)
+        return {
+            "decision": "NEED_MORE_VALIDATION",
+            "protocol": {
+                "summary": "Local patch semantic guard requires diff scope review before completion.",
+                "blocking_conditions": [
+                    (
+                        "Latest diff changes files outside accepted targets: "
+                        + outside_text
+                    )
+                ],
+                "required_next_actions": [
+                    f"Revert or remove changes outside accepted targets: {outside_text}.",
+                    f"Keep patch edits limited to accepted targets: {accepted_text}.",
+                    (
+                        "Do not modify tests to satisfy validation unless FormSy "
+                        "explicitly updates accepted targets."
+                    ),
+                    (
+                        "After the outside-target diff is gone, rerun the relevant "
+                        "validation and call Completion Verifier again."
+                    ),
+                ],
+            },
+            "completion_audit": {
+                "audit_status": "blocked",
+                "gate_decision": "NEED_MORE_VALIDATION",
+                "evidence": {
+                    "latest_diff_hash": str(diff_payload.get("diff_hash") or ""),
+                    "changed_files": changed_files,
+                    "accepted_targets": accepted_targets,
+                    "outside_accepted_targets": outside,
+                    "local_patch_semantic_guard": "changed_files_outside_accepted_targets",
+                },
+            },
+        }
+
+    @staticmethod
+    def _is_completion_auxiliary_path(path: str) -> bool:
+        normalized = _normalize_path(path)
+        return normalized in {
+            "patch.txt",
+            "submission.patch",
+            "submission.diff",
+        } or normalized.startswith(".formsy/")
+
+    @staticmethod
+    def _is_validation_collateral_path(path: str) -> bool:
+        normalized = _normalize_path(path)
+        filename = normalized.rsplit("/", 1)[-1]
+        return (
+            "tests" in normalized.split("/")
+            or normalized.startswith(("test/", "tests/"))
+            or filename.startswith("test_")
+            or filename.endswith("_test.py")
+            or filename == "tests.py"
+            or filename.endswith(".snap")
+        )
+
+    def _local_unreviewed_written_validation_collateral_guard(
+        self,
+        diff_payload: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(diff_payload, dict):
+            return None
+        accepted_targets = list(self._latest_accepted_targets)
+        changed_files = list(diff_payload.get("changed_files") or [])
+        current_diff_paths = [
+            _repo_relative_source_path(path) for path in changed_files
+        ]
+        current_diff_paths = [path for path in current_diff_paths if path]
+        collateral = self._unreviewed_written_validation_collateral(
+            accepted_targets=accepted_targets,
+            current_diff_paths=current_diff_paths,
+        )
+        if not collateral:
+            return None
+        projection = {
+            "decision": "NEED_MORE_VALIDATION",
+            "agent_loop_terminal": False,
+            "next_action_kind": "cleanup_or_review_validation_collateral",
+            "next_action": (
+                "Remove still-existing ad-hoc validation files, or explicitly "
+                "report them as review-required validation collateral before "
+                "claiming completion."
+            ),
+            "forbidden_actions": [
+                "Do not claim completion while still-existing ad-hoc validation files are unreviewed.",
+                "Do not treat temporary validation scripts as accepted product edits.",
+                "Do not keep rerunning broad tests without resolving the collateral review blocker.",
+            ],
+            "evidence_to_report": [
+                "changed_files",
+                "accepted_targets",
+                "validation_collateral",
+                "latest focused validation command and result",
+            ],
+        }
+        return {
+            "decision": "NEED_MORE_VALIDATION",
+            "protocol": {
+                "summary": (
+                    "Local completion guard requires validation collateral review."
+                ),
+                "blocking_conditions": [
+                    (
+                        "Validation evidence exists, but this run also wrote "
+                        "validation collateral outside accepted targets: "
+                        + ", ".join(collateral)
+                    )
+                ],
+                "required_next_actions": [
+                    (
+                        "Remove temporary validation scripts or explicitly classify "
+                        "them as review-required validation collateral."
+                    ),
+                    (
+                        "Do not treat fallback candidate tests or ad-hoc validation "
+                        "files as accepted product edits."
+                    ),
+                    (
+                        "After cleanup or review, rerun focused validation and call "
+                        "Completion Verifier again."
+                    ),
+                ],
+            },
+            "completion_audit": {
+                "audit_status": "needs_review",
+                "gate_decision": "NEED_MORE_VALIDATION",
+                "evidence": {
+                    "latest_diff_hash": str(diff_payload.get("diff_hash") or ""),
+                    "changed_files": changed_files,
+                    "accepted_targets": accepted_targets,
+                    "validation_collateral": collateral,
+                    "local_patch_semantic_guard": "unreviewed_validation_collateral",
+                },
+                "projection": projection,
+            },
+        }
+
+    def _unreviewed_written_validation_collateral(
+        self,
+        *,
+        accepted_targets: list[str],
+        current_diff_paths: list[str],
+    ) -> list[str]:
+        collateral: list[str] = []
+        for path in self._written_paths:
+            if not self._is_validation_collateral_path(path):
+                continue
+            if any(_paths_equivalent(path, target) for target in accepted_targets):
+                continue
+            if any(_paths_equivalent(path, changed) for changed in current_diff_paths):
+                continue
+            if not self._written_path_still_exists(path):
+                continue
+            collateral.append(path)
+        return collateral
+
+    @staticmethod
+    def _written_path_still_exists(path: str) -> bool:
+        normalized = str(path or "").strip()
+        if not normalized:
+            return False
+        candidate = Path(normalized).expanduser()
+        if candidate.is_absolute():
+            return candidate.exists()
+        return True
+
+    def _local_unresolved_failed_validation_guard(
+        self,
+        diff_payload: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(diff_payload, dict):
+            return None
+        diff_hash = str(diff_payload.get("diff_hash") or "")
+        if not diff_hash:
+            return None
+        failures = [
+            failure
+            for failure in self._unresolved_failed_validations.values()
+            if failure.get("diff_hash") == diff_hash
+        ]
+        if not failures:
+            return None
+        commands = [
+            str(failure.get("command") or "")
+            for failure in failures
+            if str(failure.get("command") or "").strip()
+        ]
+        repeat_key = self._failed_validation_repeat_key(diff_hash, commands)
+        repeat_count = self._completion_guard_repeat_counts.get(repeat_key, 0) + 1
+        self._completion_guard_repeat_counts[repeat_key] = repeat_count
+        repeated = repeat_count > 1
+        guard = (
+            "repeated_unresolved_failed_validation"
+            if repeated
+            else "unresolved_failed_validation"
+        )
+        blocking = [
+            "A broader validation command failed after the latest diff and was not rerun successfully."
+        ]
+        if repeated:
+            blocking.append(
+                "Completion Verifier has already reported this same unresolved validation blocker for the current diff."
+            )
+        actions = [
+            "Rerun the failed validation command(s) successfully after the current diff.",
+            "Do not rerun already passing candidate tests as a substitute for the failed command(s).",
+            "Do not use git stash or otherwise hide the current diff when collecting completion evidence.",
+        ]
+        actions.extend(
+            f"Required failed validation command: {command}" for command in commands
+        )
+        if repeated:
+            actions.append(
+                "Stop calling Completion Verifier until one required failed validation command passes or the validation contract is explicitly narrowed."
+            )
+        return {
+            "decision": "NEED_MORE_VALIDATION",
+            "protocol": {
+                "summary": "Local patch semantic guard requires unresolved failed validation to be closed.",
+                "blocking_conditions": blocking,
+                "required_next_actions": actions,
+            },
+            "completion_audit": {
+                "audit_status": "blocked_repeated" if repeated else "blocked",
+                "gate_decision": "NEED_MORE_VALIDATION",
+                "evidence": {
+                    "latest_diff_hash": diff_hash,
+                    "changed_files": list(diff_payload.get("changed_files") or []),
+                    "failed_validation_commands": commands,
+                    "repeat_count": repeat_count,
+                    "preferred_next_step": "rerun_failed_validation_command",
+                    "local_patch_semantic_guard": guard,
+                },
+            },
+        }
+
+    @staticmethod
+    def _failed_validation_repeat_key(diff_hash: str, commands: list[str]) -> str:
+        normalized_commands = sorted(
+            command.strip() for command in commands if command.strip()
+        )
+        return json.dumps(
+            {"diff_hash": diff_hash, "commands": normalized_commands},
+            sort_keys=True,
+        )
+
+    def _local_failed_candidate_test_guard(
+        self,
+        diff_payload: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(diff_payload, dict):
+            return None
+        diff_hash = str(diff_payload.get("diff_hash") or "")
+        if not diff_hash or not self._latest_candidate_test_commands:
+            return None
+        failed_commands = [
+            str(failure.get("command") or "")
+            for failure in self._unresolved_failed_validations.values()
+            if failure.get("diff_hash") == diff_hash
+            and self._is_candidate_test_command(str(failure.get("command") or ""))
+        ]
+        failed_commands = [command for command in failed_commands if command.strip()]
+        if not failed_commands:
+            return None
+        return {
+            "decision": "NEED_MORE_VALIDATION",
+            "protocol": {
+                "summary": (
+                    "Local patch semantic guard requires failing exact candidate "
+                    "tests to be repaired before completion."
+                ),
+                "blocking_conditions": [
+                    (
+                        "An exact candidate test failed after the latest diff; "
+                        "this target-specific failure has priority over broad "
+                        "validation narrowing."
+                    )
+                ],
+                "required_next_actions": [
+                    (
+                        "Repair the failing exact candidate test before broad "
+                        "validation or baseline comparison."
+                    ),
+                    "Rerun the exact candidate test successfully after the patch.",
+                    "Call Completion Verifier again only after the candidate test passes.",
+                ],
+            },
+            "completion_audit": {
+                "audit_status": "blocked",
+                "gate_decision": "NEED_MORE_VALIDATION",
+                "evidence": {
+                    "latest_diff_hash": diff_hash,
+                    "changed_files": list(diff_payload.get("changed_files") or []),
+                    "failed_candidate_test_commands": failed_commands,
+                    "candidate_test_commands": list(
+                        self._latest_candidate_test_commands
+                    ),
+                    "local_patch_semantic_guard": "failed_exact_candidate_tests",
+                },
+            },
+        }
+
+    def _is_candidate_test_command(self, command: str) -> bool:
+        normalized = _normalize_command_for_match(command)
+        if not normalized:
+            return False
+        for candidate in self._latest_candidate_test_commands:
+            candidate_normalized = _normalize_command_for_match(candidate)
+            if not candidate_normalized:
+                continue
+            if normalized == candidate_normalized:
+                return True
+            selector = _pytest_selector_from_command(candidate_normalized)
+            if selector and selector in normalized:
+                return True
+        return False
+
+    def _local_validation_output_guard(
+        self,
+        diff_payload: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        warning = self._latest_warning_bearing_validation
+        if not warning:
+            return None
+        command = str(warning.get("command") or "validation")
+        markers = _string_list(warning.get("warnings"))
+        marker_text = ", ".join(markers) if markers else "warning"
+        return {
+            "decision": "NEED_MORE_VALIDATION",
+            "protocol": {
+                "summary": "Local patch semantic guard requires clean validation output before completion.",
+                "blocking_conditions": [
+                    (
+                        "Latest validation passed but produced warning-bearing validation output: "
+                        f"{marker_text} in `{command}`."
+                    )
+                ],
+                "required_next_actions": [
+                    "Fix the warning or rerun validation with clean output before calling Completion Verifier."
+                ],
+            },
+            "completion_audit": {
+                "audit_status": "blocked",
+                "gate_decision": "NEED_MORE_VALIDATION",
+                "evidence": {
+                    "latest_diff_hash": str(
+                        (diff_payload or {}).get("diff_hash") or ""
+                    ),
+                    "changed_files": list(
+                        (diff_payload or {}).get("changed_files") or []
+                    ),
+                    "validation_command": command,
+                    "validation_output_hash": str(warning.get("output_hash") or ""),
+                    "validation_warning_markers": markers,
+                    "local_patch_semantic_guard": "warning_bearing_validation",
+                },
+            },
+        }
+
+    def _local_patch_semantic_guard(
+        self,
+        diff_payload: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(diff_payload, dict):
+            return None
+        diff_text = str(
+            diff_payload.get("unified_diff") or diff_payload.get("diff") or ""
+        )
+        violations = self._suspicious_deleted_module_assignments(diff_text)
+        if not violations:
+            return None
+        blocking = [
+            (
+                "Patch semantic guard found suspicious module-level assignment deletion: "
+                f"{violation['path']} removes {violation['name']} without replacement."
+            )
+            for violation in violations
+        ]
+        return {
+            "decision": "NEED_MORE_VALIDATION",
+            "protocol": {
+                "summary": "Local patch semantic guard requires diff review before completion.",
+                "blocking_conditions": blocking,
+                "required_next_actions": [
+                    "Review the diff and restore or intentionally replace the removed module-level assignment."
+                ],
+            },
+            "completion_audit": {
+                "audit_status": "blocked",
+                "gate_decision": "NEED_MORE_VALIDATION",
+                "evidence": {
+                    "latest_diff_hash": str(diff_payload.get("diff_hash") or ""),
+                    "changed_files": list(diff_payload.get("changed_files") or []),
+                    "local_patch_semantic_guard": "suspicious_module_assignment_deletion",
+                },
+            },
+        }
+
+    @classmethod
+    def _suspicious_deleted_module_assignments(
+        cls, diff_text: str
+    ) -> list[dict[str, str]]:
+        violations: list[dict[str, str]] = []
+        current_path = ""
+        deleted_by_file: dict[str, set[str]] = {}
+        added_by_file: dict[str, set[str]] = {}
+        for line in str(diff_text or "").splitlines():
+            if line.startswith("diff --git "):
+                current_path = cls._diff_git_b_path(line)
+                continue
+            if not current_path or line.startswith(("--- ", "+++ ", "@@ ")):
+                continue
+            if line.startswith("-"):
+                name = cls._module_assignment_name(line[1:])
+                if name:
+                    deleted_by_file.setdefault(current_path, set()).add(name)
+            elif line.startswith("+"):
+                name = cls._module_assignment_name(line[1:])
+                if name:
+                    added_by_file.setdefault(current_path, set()).add(name)
+        for path, deleted_names in deleted_by_file.items():
+            added_names = added_by_file.get(path, set())
+            for name in sorted(deleted_names - added_names):
+                violations.append({"path": path, "name": name})
+        return violations
+
+    @staticmethod
+    def _diff_git_b_path(line: str) -> str:
+        parts = str(line or "").split()
+        if len(parts) < 4:
+            return ""
+        path = parts[3]
+        return path[2:] if path.startswith("b/") else path
+
+    @staticmethod
+    def _module_assignment_name(line: str) -> str:
+        text = str(line or "")
+        if not text or text[:1].isspace():
+            return ""
+        match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\s*=", text)
+        if not match:
+            return ""
+        name = match.group(1)
+        if name.startswith("__") and name.endswith("__"):
+            return ""
+        return name
+
+    def recover(
+        self, *, reason: str = "", session_id: str = "", task_id: str = ""
+    ) -> dict[str, Any]:
         identity = self.ensure_identity(session_id=session_id, task_id=task_id)
         self.ensure_task_started(session_id=identity.session_id)
         response = self._run_async(
@@ -453,7 +1447,9 @@ class ConstraintKeeperCoordinator:
     def status(self, *, session_id: str = "", task_id: str = "") -> dict[str, Any]:
         identity = self.ensure_identity(session_id=session_id, task_id=task_id)
         return self._run_async(
-            self.client.status(identity.task_id, identity.run_id, session_id=identity.session_id)
+            self.client.status(
+                identity.task_id, identity.run_id, session_id=identity.session_id
+            )
         )
 
     def flush_pending(self) -> None:
@@ -505,11 +1501,13 @@ class ConstraintKeeperCoordinator:
         if diff_hash == self.latest_diff_hash:
             return payload
         self.latest_diff_hash = diff_hash
-        self._append_event({
-            "event_kind": "diff_observed",
-            "trust": "plugin_observed",
-            "payload": payload,
-        })
+        self._append_event(
+            {
+                "event_kind": "diff_observed",
+                "trust": "plugin_observed",
+                "payload": payload,
+            }
+        )
         return payload
 
     def _completion_bootstrap_payload(
@@ -520,12 +1518,14 @@ class ConstraintKeeperCoordinator:
         freshness = "current_run" if instruction else "unknown"
         post_patch_sources = payload.get("post_patch_sources")
         source_snapshot_hashes = payload.get("source_snapshot_hashes")
-        return {
+        result = {
             "instruction": instruction,
             "instruction_freshness": freshness,
             "unified_diff": str(payload.get("unified_diff") or ""),
             "changed_files": list(payload.get("changed_files") or []),
-            "post_patch_sources": post_patch_sources if isinstance(post_patch_sources, dict) else {},
+            "post_patch_sources": post_patch_sources
+            if isinstance(post_patch_sources, dict)
+            else {},
             "diff_hash": str(payload.get("diff_hash") or ""),
             "source_snapshot_hashes": (
                 source_snapshot_hashes
@@ -533,6 +1533,37 @@ class ConstraintKeeperCoordinator:
                 else {}
             ),
         }
+        if self._latest_context_bundle_hint:
+            result["context_bundle_hint"] = dict(self._latest_context_bundle_hint)
+        return result
+
+    def _append_completion_bootstrap_observed(
+        self,
+        completion_bootstrap: dict[str, Any],
+    ) -> None:
+        context_bundle_hint = completion_bootstrap.get("context_bundle_hint")
+        hint_payload = (
+            context_bundle_hint if isinstance(context_bundle_hint, dict) else {}
+        )
+        payload = {
+            "completion_bootstrap_present": True,
+            "instruction_freshness": completion_bootstrap.get("instruction_freshness"),
+            "diff_hash": completion_bootstrap.get("diff_hash"),
+            "changed_files": _string_list(completion_bootstrap.get("changed_files")),
+            "context_bundle_hint_present": bool(hint_payload),
+            "context_bundle_hint_keys": sorted(str(key) for key in hint_payload.keys()),
+            "tocs_repair_targets": _string_list(
+                hint_payload.get("tocs_repair_targets")
+            ),
+            "accepted_targets": _string_list(hint_payload.get("accepted_targets")),
+        }
+        self._append_event(
+            {
+                "event_kind": "completion_bootstrap_observed",
+                "trust": "plugin_observed",
+                "payload": payload,
+            }
+        )
 
     def _append_event(self, event: dict[str, Any]) -> dict[str, Any]:
         identity = self.ensure_identity()
@@ -545,20 +1576,26 @@ class ConstraintKeeperCoordinator:
             "timestamp_ms": event.get("timestamp_ms") or _now_ms(),
             **event,
         }
-        self.spool.append(task_id=identity.task_id, run_id=identity.run_id, event=enriched)
+        self.spool.append(
+            task_id=identity.task_id, run_id=identity.run_id, event=enriched
+        )
         return enriched
 
-    def _append_policy_event(self, *, action: str, reason: str, category: str) -> dict[str, Any]:
-        return self._append_event({
-            "event_kind": "enforcement_decision",
-            "trust": "plugin_observed",
-            "payload": {
-                "policy_mode": "advisory",
-                "enforcement_action": action,
-                "category": category,
-                "reason": reason,
-            },
-        })
+    def _append_policy_event(
+        self, *, action: str, reason: str, category: str
+    ) -> dict[str, Any]:
+        return self._append_event(
+            {
+                "event_kind": "enforcement_decision",
+                "trust": "plugin_observed",
+                "payload": {
+                    "policy_mode": "advisory",
+                    "enforcement_action": action,
+                    "category": category,
+                    "reason": reason,
+                },
+            }
+        )
 
     def _tool_observed_event(
         self,
@@ -650,11 +1687,13 @@ class ConstraintKeeperCoordinator:
         self._next_tool_failed = False
         self._context_read_counts = {}
         self._pending_tool_result_replacement = ""
+        self._last_successful_terminal_probe = {}
         self._probe_budget_counts = {
             "search_files": 0,
             "read_file": 0,
             "terminal_or_execute_code": 0,
         }
+        self._empty_process_list_count = 0
         self._full_diff_stdout_count = 0
         if clear_protocol:
             self.latest_protocol_text = ""
@@ -681,14 +1720,13 @@ class ConstraintKeeperCoordinator:
         self._next_tool_visible_delivery_count = 0
         self._next_tool_failed = False
 
-    def _observe_skill_uptake(self, tool_name: str, args: dict[str, Any], result: Any) -> None:
+    def _observe_skill_uptake(
+        self, tool_name: str, args: dict[str, Any], result: Any
+    ) -> None:
         if tool_name != "skill_view":
             return
         requested = str(
-            args.get("name")
-            or args.get("skill")
-            or args.get("skill_name")
-            or ""
+            args.get("name") or args.get("skill") or args.get("skill_name") or ""
         ).strip()
         if requested != self._skill_name:
             return
@@ -697,7 +1735,9 @@ class ConstraintKeeperCoordinator:
             result_len=len(str(result or "")),
         )
 
-    def _with_formsy_context_skill_capsule(self, context: str, *, session_id: str = "") -> str:
+    def _with_formsy_context_skill_capsule(
+        self, context: str, *, session_id: str = ""
+    ) -> str:
         capsule = self._formsy_context_skill_capsule()
         self._mark_skill_body_loaded(
             visibility="plugin_projected",
@@ -741,14 +1781,25 @@ class ConstraintKeeperCoordinator:
 
     def _skill_is_installed(self) -> bool:
         candidates = [
-            Path.home() / ".hermes" / "skills" / "software-development" / self._skill_name / "SKILL.md",
+            Path.home()
+            / ".hermes"
+            / "skills"
+            / "software-development"
+            / self._skill_name
+            / "SKILL.md",
             Path.home() / ".hermes" / "skills" / self._skill_name / "SKILL.md",
-            Path.cwd() / "skills" / "software-development" / self._skill_name / "SKILL.md",
+            Path.cwd()
+            / "skills"
+            / "software-development"
+            / self._skill_name
+            / "SKILL.md",
             Path.cwd() / "skills" / self._skill_name / "SKILL.md",
         ]
         return any(path.exists() for path in candidates)
 
-    def _observe_guidance_signal(self, tool_name: str, args: dict[str, Any], result: Any) -> None:
+    def _observe_guidance_signal(
+        self, tool_name: str, args: dict[str, Any], result: Any
+    ) -> None:
         if tool_name == "context_search":
             query = str(args.get("query") or "").strip()
             if query:
@@ -760,7 +1811,9 @@ class ConstraintKeeperCoordinator:
             self._record_context_read_repeat(args, result)
             return
         if tool_name == "read_file":
-            self._maybe_satisfy_context_read_directive_from_same_target_read(args, result)
+            self._maybe_satisfy_context_read_directive_from_same_target_read(
+                args, result
+            )
             self._maybe_satisfy_failed_next_tool_from_same_target_read(args, result)
         self._maybe_emit_pending_next_action_reminder(tool_name, args)
         if self._context_search_seen:
@@ -812,7 +1865,10 @@ class ConstraintKeeperCoordinator:
         if is_edit_surface(tool_name, args):
             return _BOOTSTRAP_CONTEXT_SEARCH_BLOCK
         if self._is_bootstrap_source_exploration_tool(tool_name, args):
-            if self._bootstrap_source_exploration_reserved or self._exploration_without_context_count >= 1:
+            if (
+                self._bootstrap_source_exploration_reserved
+                or self._exploration_without_context_count >= 1
+            ):
                 return _BOOTSTRAP_CONTEXT_SEARCH_BLOCK
             self._bootstrap_source_exploration_reserved = True
         return None
@@ -822,7 +1878,9 @@ class ConstraintKeeperCoordinator:
         tool_name: str,
         args: dict[str, Any],
     ) -> bool:
-        return tool_name == "execute_code" or self._is_broad_source_exploration_tool(tool_name, args)
+        return tool_name == "execute_code" or self._is_broad_source_exploration_tool(
+            tool_name, args
+        )
 
     def _maybe_emit_grounding_advisory(
         self,
@@ -858,7 +1916,9 @@ class ConstraintKeeperCoordinator:
 
     @staticmethod
     def _recommended_next_action_card(directive: dict[str, Any]) -> str:
-        tool = str(directive.get("tool") or "context_search").strip() or "context_search"
+        tool = (
+            str(directive.get("tool") or "context_search").strip() or "context_search"
+        )
         directive_args = directive.get("args")
         query = ""
         if isinstance(directive_args, dict):
@@ -965,7 +2025,10 @@ class ConstraintKeeperCoordinator:
         previous_query = self._compact_task_query(self._latest_grounding_query_text)
         if previous_query:
             return _json_string_value(previous_query[:320])
-        query = self._tool_query_hint(tool_name, args) or "current task key symbols and accepted edit target"
+        query = (
+            self._tool_query_hint(tool_name, args)
+            or "current task key symbols and accepted edit target"
+        )
         return _json_string_value(query[:320])
 
     @staticmethod
@@ -1015,11 +2078,15 @@ class ConstraintKeeperCoordinator:
         packet = parsed.get("guidance_packet") if isinstance(parsed, dict) else None
         if isinstance(packet, dict) and packet.get("mode") == "degraded_recovery":
             self._active_probe_budget_directive = packet
-            directive = packet.get("next_tool_directive") or packet.get("required_next_tool")
+            directive = packet.get("next_tool_directive") or packet.get(
+                "required_next_tool"
+            )
             if isinstance(directive, dict):
                 captured = dict(directive)
                 tool = str(captured.get("tool") or "").strip() or "context_search"
-                captured["action_id"] = str(captured.get("action_id") or f"{tool}.next").strip()
+                captured["action_id"] = str(
+                    captured.get("action_id") or f"{tool}.next"
+                ).strip()
                 captured.setdefault("enforcement", "suggested")
                 self._active_next_tool_directive = captured
                 self._next_tool_visible_delivery_count = 1
@@ -1070,8 +2137,13 @@ class ConstraintKeeperCoordinator:
                 deviation_count=self._next_tool_deviation_count,
                 delivery_count=self._next_tool_visible_delivery_count,
             )
-        if self._next_tool_deviation_count == 1 and self._next_tool_visible_delivery_count < 2:
-            self._pending_guidance_text = self._pending_next_action_reminder_text(directive)
+        if (
+            self._next_tool_deviation_count == 1
+            and self._next_tool_visible_delivery_count < 2
+        ):
+            self._pending_guidance_text = self._pending_next_action_reminder_text(
+                directive
+            )
             self._next_tool_visible_delivery_count += 1
         self._active_next_tool_directive = None
         self._next_tool_failed = False
@@ -1096,11 +2168,15 @@ class ConstraintKeeperCoordinator:
             return False
         if required_tool in {"compact_diff", "compact_diff_review"}:
             command = str(args.get("command") or args.get("cmd") or "")
-            return tool_name == "terminal" and self._is_compact_diff_review_command(command)
+            return tool_name == "terminal" and self._is_compact_diff_review_command(
+                command
+            )
         return False
 
     @staticmethod
-    def _is_pending_next_action_effective_deviation(tool_name: str, args: dict[str, Any]) -> bool:
+    def _is_pending_next_action_effective_deviation(
+        tool_name: str, args: dict[str, Any]
+    ) -> bool:
         if tool_name == "read_file":
             path = str(args.get("path") or "")
             return bool(path and not path.endswith(".md"))
@@ -1133,16 +2209,22 @@ class ConstraintKeeperCoordinator:
             f"Recommended next tool call: {call}",
         ]
         if reason:
-            lines.append(f"Why now: prior guidance was not followed before another source/edit action. {reason}")
+            lines.append(
+                f"Why now: prior guidance was not followed before another source/edit action. {reason}"
+            )
         else:
-            lines.append("Why now: prior guidance was not followed before another source/edit action.")
+            lines.append(
+                "Why now: prior guidance was not followed before another source/edit action."
+            )
         lines.append(
             "Policy: advisory only; continuing is allowed. If you continue without this, "
             "Completion Gate will verify the final patch against FormSy contracts."
         )
         return "\n".join(lines)
 
-    def _maybe_satisfy_next_tool_directive(self, args: dict[str, Any], result: Any) -> None:
+    def _maybe_satisfy_next_tool_directive(
+        self, args: dict[str, Any], result: Any
+    ) -> None:
         directive = self._active_next_tool_directive
         if not directive or directive.get("tool") != "context_read":
             return
@@ -1173,7 +2255,9 @@ class ConstraintKeeperCoordinator:
         if isinstance(directive_args, dict):
             expected_path = _normalize_path(str(directive_args.get("path") or ""))
         actual_path = _normalize_path(str(args.get("path") or ""))
-        if _paths_equivalent(expected_path, actual_path) and _result_has_content(result):
+        if _paths_equivalent(expected_path, actual_path) and _result_has_content(
+            result
+        ):
             self._log_advisory_uptake_satisfied_via_fallback(
                 directive=directive,
                 actual_tool="read_file",
@@ -1200,7 +2284,9 @@ class ConstraintKeeperCoordinator:
         if isinstance(directive_args, dict):
             expected_path = _normalize_path(str(directive_args.get("path") or ""))
         actual_path = _normalize_path(str(args.get("path") or ""))
-        if _paths_equivalent(expected_path, actual_path) and _result_has_content(result):
+        if _paths_equivalent(expected_path, actual_path) and _result_has_content(
+            result
+        ):
             self._log_advisory_uptake_satisfied_via_fallback(
                 directive=directive,
                 actual_tool="read_file",
@@ -1232,7 +2318,13 @@ class ConstraintKeeperCoordinator:
         if self._next_tool_failed and directive.get("tool") == "context_read":
             if tool_name == "context_read":
                 return self._failed_context_read_directive_text(directive)
-            if tool_name in {"terminal", "search_files", "patch", "write_file", "execute_code"}:
+            if tool_name in {
+                "terminal",
+                "search_files",
+                "patch",
+                "write_file",
+                "execute_code",
+            }:
                 return self._failed_context_read_directive_text(directive)
         required_tool = str(directive.get("tool") or "").strip()
         directive_args = directive.get("args")
@@ -1318,13 +2410,17 @@ class ConstraintKeeperCoordinator:
             read_key = str(meta.get("read_key") or "").strip()
             if read_key:
                 return read_key
-        path, line_range = ConstraintKeeperCoordinator._context_read_path_and_range(args, result)
+        path, line_range = ConstraintKeeperCoordinator._context_read_path_and_range(
+            args, result
+        )
         if not path:
             return ""
         return f"{path}:{line_range[0]}-{line_range[1]}"
 
     @staticmethod
-    def _context_read_path_and_range(args: dict[str, Any], result: Any) -> tuple[str, list[int]]:
+    def _context_read_path_and_range(
+        args: dict[str, Any], result: Any
+    ) -> tuple[str, list[int]]:
         parsed = _result_dict(result)
         path = _normalize_path(str(parsed.get("path") or args.get("path") or ""))
         start = _positive_int(args.get("start_line")) or 1
@@ -1379,15 +2475,287 @@ class ConstraintKeeperCoordinator:
             if not self._is_terminal_validation_or_bookkeeping_command(command):
                 self._probe_budget_counts["terminal_or_execute_code"] += 1
 
-    def _probe_budget_block_message(self, tool_name: str, args: dict[str, Any]) -> str | None:
+    def _record_successful_terminal_probe(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        result: Any,
+    ) -> None:
+        if tool_name != "terminal":
+            return
+        command = str(args.get("command") or args.get("cmd") or "").strip()
+        if not command or self._is_terminal_validation_or_bookkeeping_command(command):
+            return
+        parsed = _result_dict(result)
+        if parsed:
+            exit_code = parsed.get("exit_code")
+            if exit_code not in (0, None):
+                self._last_successful_terminal_probe = {}
+                return
+            if parsed.get("error"):
+                self._last_successful_terminal_probe = {}
+                return
+            output = str(parsed.get("output") or parsed.get("stdout") or "")
+        else:
+            output = str(result or "")
+            if not output.strip():
+                return
+        key = self._terminal_probe_repeat_key(command, output)
+        previous = self._last_successful_terminal_probe
+        count = int(previous.get("count") or 0) + 1 if previous.get("key") == key else 1
+        self._last_successful_terminal_probe = {
+            "key": key,
+            "command": command,
+            "output_hash": hash_text(output),
+            "count": count,
+        }
+
+    def _record_empty_process_list_probe(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        result: Any,
+    ) -> None:
+        if not self._is_process_list_tool(tool_name, args):
+            return
+        if self._process_list_result_is_empty(result):
+            self._empty_process_list_count += 1
+        else:
+            self._empty_process_list_count = 0
+
+    def _repeated_empty_process_list_block_message(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> str | None:
+        if not self._is_process_list_tool(tool_name, args):
+            return None
+        if self._empty_process_list_count < 3:
+            return None
+        self._append_policy_event(
+            action="blocked",
+            reason="process tool attempted repeated empty process list polling",
+            category="repeated_empty_process_list",
+        )
+        return "\n".join(
+            [
+                "FormSy blocked a repeated empty process list probe.",
+                "Repeated empty process list polling does not add repair evidence.",
+                (
+                    "Stop polling background processes; run focused validation, "
+                    "review the current diff, or call formsy_verify_completion "
+                    "after a real patch/validation state change."
+                ),
+            ]
+        )
+
+    @staticmethod
+    def _is_process_list_tool(tool_name: str, args: dict[str, Any]) -> bool:
+        if tool_name != "process":
+            return False
+        action = str(
+            args.get("action")
+            or args.get("operation")
+            or args.get("cmd")
+            or args.get("command")
+            or ""
+        ).strip().lower()
+        return action in {"", "list", "ls", "status"}
+
+    @staticmethod
+    def _process_list_result_is_empty(result: Any) -> bool:
+        parsed = _result_dict(result)
+        if isinstance(parsed.get("processes"), list):
+            return len(parsed.get("processes") or []) == 0
+        if isinstance(parsed.get("items"), list):
+            return len(parsed.get("items") or []) == 0
+        if isinstance(parsed.get("data"), list):
+            return len(parsed.get("data") or []) == 0
+        if isinstance(result, list):
+            return len(result) == 0
+        text = str(result or "").strip()
+        return text in {"", "[]", "{}"}
+
+    @staticmethod
+    def _terminal_probe_repeat_key(command: str, output: str) -> str:
+        normalized_command = " ".join(str(command or "").split())
+        return json.dumps(
+            {
+                "command": normalized_command,
+                "output_hash": hash_text(str(output or "")),
+            },
+            sort_keys=True,
+        )
+
+    def _repeated_terminal_probe_block_message(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> str | None:
+        if tool_name != "terminal":
+            return None
+        command = str(args.get("command") or args.get("cmd") or "").strip()
+        if not command or self._is_terminal_validation_or_bookkeeping_command(command):
+            return None
+        previous = self._last_successful_terminal_probe
+        if previous.get("command") != command or int(previous.get("count") or 0) < 2:
+            return None
+        self._append_policy_event(
+            action="blocked",
+            reason=f"terminal attempted repeated identical probe: {command}",
+            category="repeated_identical_terminal_probe",
+        )
+        return "\n".join(
+            [
+                "FormSy blocked a repeated identical terminal probe.",
+                "Repeated identical terminal probe detected.",
+                f"Command: {command}",
+                "Do not run the same probe again.",
+                (
+                    "Summarize the observed invariant and switch strategy: patch the "
+                    "accepted target, run a different targeted read, or ask Completion "
+                    "Verifier only after a real patch/validation state change."
+                ),
+            ]
+        )
+
+    def _probe_budget_block_message(
+        self, tool_name: str, args: dict[str, Any]
+    ) -> str | None:
         directive = self._active_probe_budget_directive
         if not directive:
             return None
         if tool_name == "terminal":
             command = str(args.get("command") or args.get("cmd") or "")
-            if self._is_full_diff_stdout_command(command) and self._full_diff_stdout_count >= 1:
+            if (
+                self._is_full_diff_stdout_command(command)
+                and self._full_diff_stdout_count >= 1
+            ):
                 return self._compact_diff_guidance_text()
         return None
+
+    def _candidate_test_write_block_message(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> str | None:
+        if not self._latest_candidate_test_paths:
+            return None
+        paths = self._candidate_test_write_paths_from_tool(tool_name, args)
+        if tool_name == "terminal":
+            paths.extend(self._terminal_candidate_test_write_mentions(args))
+        if not paths:
+            return None
+        path = ""
+        for candidate_path in paths:
+            if not any(
+                _paths_equivalent(candidate_path, candidate)
+                for candidate in self._latest_candidate_test_paths
+            ):
+                continue
+            if any(
+                _paths_equivalent(candidate_path, target)
+                for target in self._latest_accepted_targets
+            ):
+                continue
+            path = candidate_path
+            break
+        if not path:
+            return None
+        accepted = ", ".join(self._latest_accepted_targets) or "<none>"
+        self._append_policy_event(
+            action="blocked",
+            reason=(
+                f"{tool_name} attempted to reconstruct candidate test outside "
+                f"accepted targets: {path}"
+            ),
+            category="candidate_test_write_outside_accepted_targets",
+        )
+        return "\n".join(
+            [
+                "FormSy blocked writing a candidate test outside accepted targets.",
+                "Candidate tests are validation obligations, not edit permission.",
+                f"Candidate test path: {path}",
+                f"Accepted targets: {accepted}",
+                (
+                    "Do not reconstruct missing candidate tests from compiled context, "
+                    "memory, bytecode caches, git history, or copied snippets unless "
+                    "FormSy explicitly lists that test path as an accepted edit target."
+                ),
+            ]
+        )
+
+    @staticmethod
+    def _candidate_test_write_paths_from_tool(
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> list[str]:
+        if tool_name == "write_file":
+            path = _repo_relative_source_path(
+                str(
+                    args.get("path")
+                    or args.get("file_path")
+                    or args.get("filename")
+                    or ""
+                )
+            )
+            return [path] if path else []
+        if tool_name != "terminal":
+            return []
+        command = str(args.get("command") or args.get("cmd") or "")
+        if not command:
+            return []
+        paths: list[str] = []
+        patterns = (
+            r"(?:^|[\s;&|])(?:cat|printf|echo)?[^\n;&|]*?>+\s*['\"]?"
+            r"((?:\.?/)?(?:lib|src|test|tests|plugins|docs)/[^'\"\s<>]+)",
+            r"(?:^|[\s;&|])tee(?:\s+-a)?\s+['\"]?"
+            r"((?:\.?/)?(?:lib|src|test|tests|plugins|docs)/[^'\"\s<>]+)",
+            r"\bopen\(\s*['\"]([^'\"]+)['\"]\s*,\s*['\"](?:w|a|x)",
+            r"\bPath\(\s*['\"]([^'\"]+)['\"]\s*\)\.write_text\(",
+        )
+        for pattern in patterns:
+            for match in re.finditer(pattern, command):
+                path = _repo_relative_source_path(match.group(1))
+                if path and path not in paths:
+                    paths.append(path)
+        return paths
+
+    def _terminal_candidate_test_write_mentions(
+        self, args: dict[str, Any]
+    ) -> list[str]:
+        command = str(args.get("command") or args.get("cmd") or "")
+        if not command or not self._terminal_command_has_write_intent(command):
+            return []
+        paths: list[str] = []
+        normalized_command = command.replace("\\", "/")
+        for candidate in self._latest_candidate_test_paths:
+            candidate_path = _repo_relative_source_path(candidate)
+            if not candidate_path:
+                continue
+            candidate_dir = str(Path(candidate_path).parent).replace("\\", "/")
+            candidate_name = Path(candidate_path).name
+            if candidate_path in normalized_command or (
+                candidate_dir in normalized_command
+                and candidate_name in normalized_command
+            ):
+                paths.append(candidate_path)
+        return paths
+
+    @staticmethod
+    def _terminal_command_has_write_intent(command: str) -> bool:
+        text = str(command or "")
+        if not text.strip():
+            return False
+        return bool(
+            re.search(r"(?:^|[\s;&|])(?:cat|printf|echo)[^\n;&|]*?>+", text)
+            or re.search(r"(?:^|[\s;&|])tee(?:\s+-a)?\s+", text)
+            or re.search(
+                r"\bopen\s*\([^)]*(?:,\s*|mode\s*=\s*)['\"][^'\"]*[wax+][^'\"]*['\"]",
+                text,
+            )
+            or re.search(r"\.\s*(write|write_text|write_bytes|writelines)\s*\(", text)
+        )
 
     def _execute_code_read_write_bridge_block_message(
         self,
@@ -1396,7 +2764,9 @@ class ConstraintKeeperCoordinator:
     ) -> str | None:
         if tool_name != "execute_code":
             return None
-        if not self._execute_code_uses_hermes_read_write_bridge(str(args.get("code") or "")):
+        if not self._execute_code_uses_hermes_read_write_bridge(
+            str(args.get("code") or "")
+        ):
             return None
         self._append_policy_event(
             action="blocked",
@@ -1441,14 +2811,19 @@ class ConstraintKeeperCoordinator:
         text = str(code or "")
         if not text.strip():
             return False
-        if re.search(
-            r"\bopen\s*\([^)]*(?:,\s*|mode\s*=\s*)['\"][^'\"]*[wax+][^'\"]*['\"]",
-            text,
-        ):
-            return True
-        return bool(
-            re.search(r"\.\s*(write_text|write_bytes|writelines)\s*\(", text)
+        has_write_call = bool(
+            re.search(
+                r"\bopen\s*\([^)]*(?:,\s*|mode\s*=\s*)['\"][^'\"]*[wax+][^'\"]*['\"]",
+                text,
+            )
+            or re.search(r"\.\s*(write_text|write_bytes|writelines)\s*\(", text)
         )
+        if not has_write_call:
+            return False
+        for literal in re.findall(r"['\"]([^'\"]+)['\"]", text):
+            if _looks_like_repo_source_path_literal(literal):
+                return True
+        return False
 
     def _reset_probe_budget_counts(self) -> None:
         self._probe_budget_counts = {
@@ -1456,6 +2831,7 @@ class ConstraintKeeperCoordinator:
             "read_file": 0,
             "terminal_or_execute_code": 0,
         }
+        self._empty_process_list_count = 0
         self._full_diff_stdout_count = 0
 
     @staticmethod
@@ -1486,7 +2862,10 @@ class ConstraintKeeperCoordinator:
         normalized = ConstraintKeeperCoordinator._effective_policy_command(command)
         if not re.search(r"\bgit\s+diff\b", normalized):
             return False
-        if re.search(r"\bgit\s+diff\b.*(--stat|--shortstat|--numstat|--name-only|--name-status|--check)", normalized):
+        if re.search(
+            r"\bgit\s+diff\b.*(--stat|--shortstat|--numstat|--name-only|--name-status|--check)",
+            normalized,
+        ):
             return True
         if " -- " in normalized:
             return True
@@ -1499,7 +2878,9 @@ class ConstraintKeeperCoordinator:
         normalized = ConstraintKeeperCoordinator._effective_policy_command(command)
         if not re.search(r"\bgit\s+diff\b", normalized):
             return False
-        return not ConstraintKeeperCoordinator._is_compact_diff_review_command(normalized)
+        return not ConstraintKeeperCoordinator._is_compact_diff_review_command(
+            normalized
+        )
 
     @staticmethod
     def _is_patch_file_bookkeeping_command(command: str) -> bool:
@@ -1575,11 +2956,15 @@ class ConstraintKeeperCoordinator:
             "suggested_queries": queries,
         }
 
-    def _context_directive_block_message(self, tool_name: str, args: dict[str, Any]) -> str | None:
+    def _context_directive_block_message(
+        self, tool_name: str, args: dict[str, Any]
+    ) -> str | None:
         directive = self._active_context_directive
         if not directive or not self._is_broad_source_exploration_tool(tool_name, args):
             return None
-        summary = str(directive.get("summary") or "Server requested fresh context guidance.").strip()
+        summary = str(
+            directive.get("summary") or "Server requested fresh context guidance."
+        ).strip()
         actions = _string_list(directive.get("required_next_actions"))
         queries = _string_list(directive.get("suggested_queries"))
         lines = [
@@ -1603,11 +2988,15 @@ class ConstraintKeeperCoordinator:
             return bool(path and not path.endswith(".md"))
         if tool_name != "terminal":
             return False
-        command = " ".join(str(args.get("command") or args.get("cmd") or "").lower().split())
+        command = " ".join(
+            str(args.get("command") or args.get("cmd") or "").lower().split()
+        )
         return bool(re.search(r"\b(rg|grep|find|ack|ag|cat|sed)\b", command))
 
     @staticmethod
-    def _server_event(event: dict[str, Any], *, identity: FormSyIdentity) -> dict[str, Any]:
+    def _server_event(
+        event: dict[str, Any], *, identity: FormSyIdentity
+    ) -> dict[str, Any]:
         return {
             **event,
             "task_id": identity.task_id,
@@ -1627,13 +3016,18 @@ class ConstraintKeeperCoordinator:
         if not fingerprint:
             return
         self._failure_counts[fingerprint] = self._failure_counts.get(fingerprint, 0) + 1
-        if self._failure_counts[fingerprint] < 2 or fingerprint in self._recovered_fingerprints:
+        if (
+            self._failure_counts[fingerprint] < 2
+            or fingerprint in self._recovered_fingerprints
+        ):
             return
         self._recovered_fingerprints.add(fingerprint)
         reason = self._recovery_reason(payload)
         self.recover(reason=reason)
 
-    def _set_protocol_text(self, protocol_text: str, *, recovery_open: bool | None = None) -> None:
+    def _set_protocol_text(
+        self, protocol_text: str, *, recovery_open: bool | None = None
+    ) -> None:
         if protocol_text and protocol_text != self.latest_protocol_text:
             self.latest_protocol_text = protocol_text
         if recovery_open is not None:
@@ -1663,6 +3057,7 @@ class ConstraintKeeperCoordinator:
 
     def _mark_completion_accepted_for_revalidation(self) -> None:
         self._task_closed = True
+        self._completion_verified = True
         self._grounding_state = _GroundingState.CLOSED
         self._completion_revalidation_pending = True
         self._active_context_directive = None
@@ -1672,6 +3067,39 @@ class ConstraintKeeperCoordinator:
         self._next_tool_visible_delivery_count = 0
         self._next_tool_failed = False
         self.recovery_open = False
+
+    @staticmethod
+    def _assistant_response_claims_completion_accept(text: str) -> bool:
+        lowered = str(text or "").lower()
+        mentions_verifier = (
+            "completion verifier" in lowered
+            or "finish gate" in lowered
+            or "formsy_verify_completion" in lowered
+        )
+        return mentions_verifier and "accept_done" in lowered
+
+    @staticmethod
+    def _assistant_response_claims_task_completion(text: str) -> bool:
+        lowered = " ".join(str(text or "").lower().split())
+        if not lowered:
+            return False
+        completion_markers = (
+            "done",
+            "implemented",
+            "fixed",
+            "completed",
+            "ready",
+            "verified",
+            "tests pass",
+            "test passed",
+            "all tests pass",
+        )
+        return any(marker in lowered for marker in completion_markers)
+
+    def _has_unverified_current_diff(self) -> bool:
+        if not self.latest_diff_hash:
+            self._append_fresh_diff_if_changed()
+        return bool(self.latest_diff_hash and not self._completion_verified)
 
     @staticmethod
     def _recovery_reason(payload: dict[str, Any]) -> str:
@@ -1685,7 +3113,6 @@ class ConstraintKeeperCoordinator:
         if meaningful:
             return f"Repeated validation failure for `{command}`: {meaningful}"
         return f"Repeated validation failure for `{command}`"
-
 
     @staticmethod
     def _protocol_text(response: Any) -> str:
@@ -1707,7 +3134,9 @@ class ConstraintKeeperCoordinator:
     @staticmethod
     def _render_protocol_bundle(protocol: dict[str, Any]) -> str:
         state = _protocol_scalar(protocol.get("state"))
-        decision = _protocol_scalar(protocol.get("gate_decision") or protocol.get("decision"))
+        decision = _protocol_scalar(
+            protocol.get("gate_decision") or protocol.get("decision")
+        )
         summary = str(protocol.get("summary") or "").strip()
         lines = ["## FormSy Constraint Protocol"]
         if state:
@@ -1735,7 +3164,7 @@ class ConstraintKeeperCoordinator:
         audit_text = cls._completion_audit_projection_text(result)
         if audit_text:
             return audit_text
-        decision = cls._completion_decision(result) or "ACCEPT_DONE"
+        decision = cls._completion_decision(result) or "MISSING_VERIFIER_DECISION"
         summary = cls._completion_summary(result)
         lines = [
             "## FormSy Completion Verifier",
@@ -1761,6 +3190,14 @@ class ConstraintKeeperCoordinator:
         latest_diff_hash = _protocol_scalar(evidence.get("latest_diff_hash"))
         patch_check_id = _protocol_scalar(evidence.get("patch_check_event_id"))
         validation_id = _protocol_scalar(evidence.get("validation_event_id"))
+        local_guard = _protocol_scalar(evidence.get("local_patch_semantic_guard"))
+        preferred_next = _protocol_scalar(evidence.get("preferred_next_step"))
+        repeat_count = _protocol_scalar(evidence.get("repeat_count"))
+        failed_validation_commands = _string_list(
+            evidence.get("failed_validation_commands")
+        )
+        outside_targets = _string_list(evidence.get("outside_accepted_targets"))
+        accepted_targets = _string_list(evidence.get("accepted_targets"))
         memory_allowed = audit.get("memory_write_allowed")
         memory_quality = _protocol_scalar(audit.get("memory_write_quality"))
         block_reason = _protocol_scalar(audit.get("memory_write_block_reason"))
@@ -1774,10 +3211,21 @@ class ConstraintKeeperCoordinator:
             lines.append(f"- Patch check: {patch_check_id}")
         if validation_id:
             lines.append(f"- Validation: {validation_id}")
+        if local_guard:
+            lines.append(f"- Local guard: {local_guard}")
+        if preferred_next:
+            lines.append(f"- Preferred next step: {preferred_next}")
+        if repeat_count:
+            lines.append(f"- Repeat count: {repeat_count}")
+        if failed_validation_commands:
+            lines.append("- Failed validation commands:")
+            lines.extend(f"  - `{command}`" for command in failed_validation_commands)
+        if outside_targets:
+            lines.append(f"- Outside accepted targets: {', '.join(outside_targets)}")
+        if accepted_targets:
+            lines.append(f"- Accepted targets: {', '.join(accepted_targets)}")
         if isinstance(memory_allowed, bool):
-            lines.append(
-                f"- Memory write allowed: {str(memory_allowed).lower()}"
-            )
+            lines.append(f"- Memory write allowed: {str(memory_allowed).lower()}")
         if memory_quality:
             lines.append(f"- Memory write quality: {memory_quality}")
         if block_reason:
@@ -1786,12 +3234,14 @@ class ConstraintKeeperCoordinator:
 
     @staticmethod
     def _completion_unavailable_projection_text(exc: Exception) -> str:
-        return "\n".join([
-            "## FormSy Completion Verifier",
-            "- Decision: completion_verification_unavailable",
-            "- Policy: final submit allowed by adapter policy; do not write successful implementation memory.",
-            f"- Reason: verify_completion unavailable: {exc.__class__.__name__}: {exc}",
-        ])
+        return "\n".join(
+            [
+                "## FormSy Completion Verifier",
+                "- Decision: completion_verification_unavailable",
+                "- Policy: final submit allowed by adapter policy; do not write successful implementation memory.",
+                f"- Reason: verify_completion unavailable: {exc.__class__.__name__}: {exc}",
+            ]
+        )
 
     @staticmethod
     def _completion_decision(result: Any) -> str:
@@ -1830,7 +3280,9 @@ class ConstraintKeeperCoordinator:
             return False
         if result.get("accepted") is True or result.get("allowed") is True:
             return True
-        decision = str(result.get("gate_decision") or result.get("decision") or "").lower()
+        decision = str(
+            result.get("gate_decision") or result.get("decision") or ""
+        ).lower()
         return decision in {
             "accepted",
             "accept",
@@ -1885,9 +3337,14 @@ class ConstraintKeeperCoordinator:
     @classmethod
     def _legacy_rejection_category(cls, result: Any) -> str:
         text = " ".join(cls._result_text_fragments(result)).lower()
-        if any(marker in text for marker in ("no diff", "missing diff", "diff evidence")):
+        if any(
+            marker in text for marker in ("no diff", "missing diff", "diff evidence")
+        ):
             return "missing_diff_evidence"
-        if any(marker in text for marker in ("no passing test", "missing test", "test_result")):
+        if any(
+            marker in text
+            for marker in ("no passing test", "missing test", "test_result")
+        ):
             return "missing_validation_evidence"
         if any(marker in text for marker in ("patch check", "patch_check")):
             return "missing_patch_check"
@@ -1949,12 +3406,19 @@ class ConstraintKeeperCoordinator:
                 lines.extend(f"- {item}" for item in actions)
         if cls._is_semantic_recovery_case(result):
             lines.append(cls._semantic_recovery_guidance_text())
-        return "\n".join(lines) if lines else "FormSy Constraint Keeper rejected final submit."
+        return (
+            "\n".join(lines)
+            if lines
+            else "FormSy Constraint Keeper rejected final submit."
+        )
 
     @classmethod
     def _is_semantic_recovery_case(cls, result: Any) -> bool:
         text = " ".join(cls._result_text_fragments(result)).lower()
-        return "semanticcontract violation" in text or "semantic contract violation" in text
+        return (
+            "semanticcontract violation" in text
+            or "semantic contract violation" in text
+        )
 
     @staticmethod
     def _semantic_recovery_guidance_text() -> str:
@@ -2047,9 +3511,18 @@ def _repo_relative_source_path(value: str) -> str:
     return text
 
 
+def _looks_like_repo_source_path_literal(value: str) -> bool:
+    text = _normalize_path(value)
+    return bool(
+        re.search(r"(?:^|/)(?:lib|src|test|tests|plugins|docs)/[^'\"\s]+", text)
+    )
+
+
 def _command_query_hint(command: str) -> str:
     paths: list[str] = []
-    for raw_path in re.findall(r"(?<![A-Za-z0-9_./-])((?:lib|src|test|tests|plugins|docs)/[^'\"\s]+)", command):
+    for raw_path in re.findall(
+        r"(?<![A-Za-z0-9_./-])((?:lib|src|test|tests|plugins|docs)/[^'\"\s]+)", command
+    ):
         path = _repo_relative_source_path(raw_path)
         if path and path not in paths:
             paths.append(path)
@@ -2060,6 +3533,51 @@ def _command_query_hint(command: str) -> str:
             symbols.append(symbol)
 
     return " ".join([*symbols[:4], *paths[:2]])
+
+
+def _normalize_command_for_match(command: str) -> str:
+    return re.sub(r"\s+", " ", str(command or "").strip())
+
+
+def _pytest_selector_from_command(command: str) -> str:
+    selectors = _pytest_selectors_from_command(command)
+    return selectors[0] if selectors else ""
+
+
+def _pytest_selectors_from_command(command: str) -> list[str]:
+    try:
+        tokens = shlex.split(_normalize_command_for_match(command))
+    except ValueError:
+        tokens = _normalize_command_for_match(command).split(" ")
+    while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
+        tokens.pop(0)
+    if tokens and tokens[0] == "env":
+        tokens.pop(0)
+        while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
+            tokens.pop(0)
+
+    start_index: int | None = None
+    for index, token in enumerate(tokens):
+        basename = token.rsplit("/", 1)[-1]
+        if basename == "pytest":
+            start_index = index + 1
+            break
+        if (
+            ConstraintKeeperCoordinator._is_python_executable_token(token)
+            and tokens[index + 1 : index + 3] == ["-m", "pytest"]
+        ):
+            start_index = index + 3
+            break
+    if start_index is None:
+        return []
+
+    selectors: list[str] = []
+    for token in tokens[start_index:]:
+        if token.startswith("-") or "=" in token:
+            continue
+        if ("::" in token or token.endswith(".py")) and token not in selectors:
+            selectors.append(token)
+    return selectors
 
 
 def _paths_equivalent(left: str, right: str) -> bool:

@@ -98,8 +98,16 @@ class RuntimeClient:
                 self._log_http_error(method, url, headers, data, response=response)
                 raise RuntimeAPIError("Authentication failed", status_code=401)
             elif response.status_code == 404:
+                response_data = self._response_body_for_error(response)
                 self._log_http_error(method, url, headers, data, response=response)
-                raise RuntimeAPIError("Endpoint not found", status_code=404)
+                raise RuntimeAPIError(
+                    self._error_message_from_response_data(
+                        response_data,
+                        default="Endpoint not found",
+                    ),
+                    status_code=404,
+                    response_data=response_data,
+                )
             elif response.status_code == 503:
                 self._log_http_error(method, url, headers, data, response=response)
                 raise RuntimeAPIError("Service unavailable", status_code=503)
@@ -166,6 +174,17 @@ class RuntimeClient:
             return response.json()
         except ValueError:
             return cls._truncate(response.text)
+
+    @staticmethod
+    def _error_message_from_response_data(response_data: Any, *, default: str) -> str:
+        if isinstance(response_data, dict):
+            for key in ("detail", "error", "message"):
+                value = response_data.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        if isinstance(response_data, str) and response_data.strip():
+            return response_data.strip()
+        return default
 
     @classmethod
     def _response_text_for_log(cls, response: httpx.Response) -> str:

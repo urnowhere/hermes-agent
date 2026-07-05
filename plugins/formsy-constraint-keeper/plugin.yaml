@@ -6,6 +6,7 @@ kind: standalone
 hooks:
   - on_session_start
   - pre_llm_call
+  - post_llm_call
   - pre_tool_call
   - post_tool_call
   - transform_tool_result

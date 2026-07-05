@@ -19,6 +19,7 @@ _coordinator: ConstraintKeeperCoordinator | None = None
 def register(ctx: Any) -> None:
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
+    ctx.register_hook("post_llm_call", _on_post_llm_call)
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
     ctx.register_hook("post_tool_call", _on_post_tool_call)
     ctx.register_hook("transform_tool_result", _on_transform_tool_result)
@@ -90,6 +91,19 @@ def _on_pre_llm_call(session_id: str = "", user_message: Any = None, **kwargs: A
     if user_message:
         coordinator.on_user_turn(user_message=str(user_message), session_id=session_id, **kwargs)
     return coordinator.pre_llm_call_context(session_id=session_id)
+
+
+def _on_post_llm_call(
+    session_id: str = "",
+    assistant_response: Any = None,
+    task_id: str = "",
+    **_: Any,
+) -> dict[str, str] | None:
+    return _get_coordinator().post_llm_call_final_response_directive(
+        assistant_response=str(assistant_response or ""),
+        session_id=session_id,
+        task_id=task_id,
+    )
 
 
 def _on_pre_tool_call(
