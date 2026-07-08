@@ -144,6 +144,7 @@ class ConstraintKeeperCoordinator:
         self._latest_context_bundle_hint: dict[str, Any] = {}
         self._latest_candidate_test_commands: list[str] = []
         self._latest_candidate_test_paths: list[str] = []
+        self._latest_passing_validations: list[dict[str, str]] = []
         self._unresolved_failed_validations: dict[str, dict[str, Any]] = {}
         self._completion_guard_repeat_counts: dict[str, int] = {}
         self._written_paths: list[str] = []
@@ -157,16 +158,16 @@ class ConstraintKeeperCoordinator:
     def on_user_turn(
         self, user_message: str = "", session_id: str = "", **_: Any
     ) -> None:
-        meta_maintenance_turn = self._is_meta_maintenance_task_text(user_message)
+        auxiliary_turn = self._is_auxiliary_task_text(user_message)
         if (
             isinstance(user_message, str)
             and user_message.strip()
-            and not meta_maintenance_turn
+            and not auxiliary_turn
         ):
             self._latest_user_task_text = user_message
         self.ensure_identity(
             session_id=session_id,
-            user_message=None if meta_maintenance_turn else user_message,
+            user_message=None if auxiliary_turn else user_message,
         )
         if self._task_closed:
             self._task_closed = False
@@ -225,6 +226,19 @@ class ConstraintKeeperCoordinator:
         revision: str = "",
         workspace_id: str = "",
     ) -> str:
+        promoted_task_text = self._promotable_task_text(query, instruction)
+        if promoted_task_text and (
+            not self._latest_user_task_text.strip()
+            or self._is_auxiliary_task_text(self._latest_user_task_text)
+        ):
+            self._latest_user_task_text = promoted_task_text
+            self.ensure_identity(
+                session_id=session_id,
+                user_message=promoted_task_text,
+                repo_id=repo_id,
+                revision=revision,
+                workspace_id=workspace_id,
+            )
         identity = self.ensure_identity(
             session_id=session_id,
             task_id=task_id,
@@ -605,6 +619,7 @@ class ConstraintKeeperCoordinator:
                     hint[key] = context_bundle[key]
         if isinstance(search_payload, dict):
             for key in (
+                "query",
                 "guidance",
                 "candidate_tests",
                 "tocs_contract_projection",
@@ -672,12 +687,81 @@ class ConstraintKeeperCoordinator:
         search_payload = payload.get("search_payload")
         if isinstance(search_payload, dict):
             values.extend(cls._extract_contract_accepted_targets(search_payload))
+        values.extend(
+            cls._extract_strong_direct_match_targets(
+                payload.get("matches"),
+                query=payload.get("query") or payload.get("instruction"),
+            )
+        )
         normalized: list[str] = []
         for value in values:
             path = _repo_relative_source_path(value)
             if path and path not in normalized:
                 normalized.append(path)
         return normalized
+
+    @classmethod
+    def _extract_strong_direct_match_targets(
+        cls, matches: Any, *, query: Any = None
+    ) -> list[str]:
+        if not isinstance(matches, list):
+            return []
+        query_text = " ".join(str(query or "").lower().split())
+        targets: list[str] = []
+        for match in matches:
+            if not isinstance(match, dict):
+                continue
+            if str(match.get("kind") or "").strip() != "direct_query_match":
+                continue
+            symbol = str(match.get("symbol") or "").strip()
+            why = str(match.get("why_relevant") or "").lower()
+            path = _repo_relative_source_path(str(match.get("path") or ""))
+            if not path or cls._is_validation_collateral_path(path):
+                continue
+            strong_symbol = bool(symbol) or "explicit symbol anchor" in why
+            strong_basename = (
+                "exact basename query anchor" in why
+                and cls._is_specific_basename_query_anchor(path, query_text)
+            )
+            if not strong_symbol and not strong_basename:
+                continue
+            if path not in targets:
+                targets.append(path)
+        return targets
+
+    @classmethod
+    def _is_specific_basename_query_anchor(cls, path: str, query_text: str) -> bool:
+        filename = _normalize_path(path).rsplit("/", 1)[-1]
+        stem = filename.rsplit(".", 1)[0].lower()
+        if not stem or stem not in query_text:
+            return False
+        if stem in {
+            "__init__",
+            "app",
+            "base",
+            "client",
+            "command",
+            "commands",
+            "common",
+            "config",
+            "core",
+            "handler",
+            "handlers",
+            "helper",
+            "helpers",
+            "main",
+            "manager",
+            "models",
+            "server",
+            "service",
+            "services",
+            "test",
+            "tests",
+            "utils",
+            "views",
+        }:
+            return False
+        return True
 
     @classmethod
     def _extract_resolved_tocs_repair_targets(cls, payload: Any) -> list[str]:
@@ -688,14 +772,7 @@ class ConstraintKeeperCoordinator:
             if not path:
                 return
             lowered = path.lower()
-            filename = lowered.rsplit("/", 1)[-1]
-            if (
-                "/tests/" in f"/{lowered}/"
-                or lowered.startswith(("test/", "tests/"))
-                or filename.startswith("test_")
-                or filename.endswith("_test.py")
-                or filename == "tests.py"
-            ):
+            if cls._is_validation_collateral_path(lowered):
                 return
             if path not in targets:
                 targets.append(path)
@@ -780,6 +857,13 @@ class ConstraintKeeperCoordinator:
         self._unresolved_failed_validations[command] = {
             "command": command,
             "diff_hash": diff_hash,
+            "output": str(
+                payload.get("output")
+                or payload.get("truncated_output")
+                or payload.get("stderr")
+                or payload.get("stdout")
+                or ""
+            ),
             "output_hash": str(payload.get("output_hash") or ""),
             "resolution_key": self._validation_resolution_key(command),
         }
@@ -870,6 +954,10 @@ class ConstraintKeeperCoordinator:
             return
         existing = self._unresolved_failed_validations.get(command)
         current_diff_hash = self._current_diff_hash_for_guard()
+        if current_diff_hash:
+            self._latest_passing_validations.append(
+                {"command": command, "diff_hash": current_diff_hash}
+            )
         if existing and existing.get("diff_hash") == current_diff_hash:
             self._unresolved_failed_validations.pop(command, None)
             self._completion_guard_repeat_counts.pop(
@@ -902,7 +990,9 @@ class ConstraintKeeperCoordinator:
         if isinstance(latest, dict) and latest.get("diff_hash"):
             return str(latest.get("diff_hash") or "")
         try:
-            diff_text = self.diff_provider() or ""
+            diff_text = self._diff_text_with_written_product_tests(
+                self.diff_provider() or ""
+            )
         except Exception:
             diff_text = ""
         return hash_text(diff_text) if diff_text.strip() else ""
@@ -1158,6 +1248,7 @@ class ConstraintKeeperCoordinator:
             failure
             for failure in self._unresolved_failed_validations.values()
             if failure.get("diff_hash") == diff_hash
+            and not self._is_broad_unrelated_validation_failure(failure, diff_hash)
         ]
         if not failures:
             return None
@@ -1223,6 +1314,81 @@ class ConstraintKeeperCoordinator:
         return json.dumps(
             {"diff_hash": diff_hash, "commands": normalized_commands},
             sort_keys=True,
+        )
+
+    def _is_broad_unrelated_validation_failure(
+        self, failure: dict[str, Any], diff_hash: str
+    ) -> bool:
+        failed_paths = self._explicit_failed_validation_paths(
+            str(failure.get("output") or "")
+        )
+        if not failed_paths:
+            return False
+        protected_paths = self._focused_validation_paths_for_diff(diff_hash)
+        if not protected_paths:
+            return False
+        changed_test_paths = {
+            _repo_relative_source_path(path)
+            for path in self._latest_diff_payload.get("changed_files", [])
+            if self._is_test_path(path)
+        }
+        protected_paths.update(path for path in changed_test_paths if path)
+        if not protected_paths:
+            return False
+        return all(
+            not any(_paths_equivalent(failed, protected) for protected in protected_paths)
+            for failed in failed_paths
+        )
+
+    def _focused_validation_paths_for_diff(self, diff_hash: str) -> set[str]:
+        paths: set[str] = {
+            _repo_relative_source_path(path)
+            for path in self._latest_candidate_test_paths
+            if path
+        }
+        candidate_selectors: list[str] = []
+        for command in self._latest_candidate_test_commands:
+            candidate_selectors.extend(_pytest_selectors_from_command(command))
+        for validation in self._latest_passing_validations:
+            if validation.get("diff_hash") != diff_hash:
+                continue
+            command = str(validation.get("command") or "")
+            selectors = _pytest_selectors_from_command(command)
+            if not selectors:
+                continue
+            if "::" not in command and all("::" not in selector for selector in selectors):
+                continue
+            for selector in selectors:
+                paths.add(_repo_relative_source_path(selector.split("::", 1)[0]))
+        for selector in candidate_selectors:
+            paths.add(_repo_relative_source_path(selector.split("::", 1)[0]))
+        return {path for path in paths if path}
+
+    @staticmethod
+    def _explicit_failed_validation_paths(output: str) -> set[str]:
+        paths: set[str] = set()
+        for line in str(output or "").splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("FAILED "):
+                continue
+            parts = stripped.split()
+            if len(parts) < 2:
+                continue
+            path = _repo_relative_source_path(parts[1].split("::", 1)[0])
+            if path:
+                paths.add(path)
+        return paths
+
+    @staticmethod
+    def _is_test_path(file_path: str) -> bool:
+        lowered = str(file_path or "").lower()
+        return (
+            lowered.startswith("test/")
+            or lowered.startswith("tests/")
+            or "/test/" in lowered
+            or "/tests/" in lowered
+            or lowered.endswith("_test.py")
+            or lowered.endswith("test.py")
         )
 
     def _local_failed_candidate_test_guard(
@@ -1472,7 +1638,9 @@ class ConstraintKeeperCoordinator:
             )
 
     def _append_fresh_diff_if_changed(self) -> dict[str, Any] | None:
-        diff_text = self.diff_provider() or ""
+        diff_text = self._diff_text_with_written_product_tests(
+            self.diff_provider() or ""
+        )
         if not diff_text.strip():
             return None
         diff_hash = hash_text(diff_text)
@@ -1509,6 +1677,76 @@ class ConstraintKeeperCoordinator:
             }
         )
         return payload
+
+    def _diff_text_with_written_product_tests(self, diff_text: str) -> str:
+        text = str(diff_text or "")
+        changed = set(changed_files_from_diff(text))
+        extra_diffs: list[str] = []
+        for written_path in self._written_paths:
+            path = _repo_relative_source_path(written_path)
+            if not path or path in changed:
+                continue
+            if not self._is_repo_test_suite_path(path):
+                continue
+            source = self._read_written_path_text(written_path, path)
+            if source is None:
+                continue
+            extra_diffs.append(self._new_file_diff(path, source))
+            changed.add(path)
+        if not extra_diffs:
+            return text
+        prefix = text.rstrip()
+        suffix = "\n".join(extra_diffs)
+        return f"{prefix}\n{suffix}\n" if prefix else f"{suffix}\n"
+
+    @staticmethod
+    def _is_repo_test_suite_path(path: str) -> bool:
+        normalized = _normalize_path(path)
+        filename = normalized.rsplit("/", 1)[-1]
+        return (
+            normalized.startswith(("test/", "tests/"))
+            and (
+                filename.startswith("test_")
+                or filename.endswith("_test.py")
+                or filename == "tests.py"
+            )
+        )
+
+    @staticmethod
+    def _read_written_path_text(written_path: str, repo_path: str) -> str | None:
+        candidates: list[Path] = []
+        raw_path = Path(str(written_path or "")).expanduser()
+        if raw_path.is_absolute():
+            candidates.append(raw_path)
+        candidates.append(Path(repo_path))
+        candidates.append(Path(str(written_path or "")))
+        for candidate in candidates:
+            try:
+                if not candidate.is_file():
+                    continue
+                data = candidate.read_bytes()
+            except Exception:
+                continue
+            if len(data) > 256 * 1024:
+                return None
+            return data.decode("utf-8", errors="replace")
+        return None
+
+    @staticmethod
+    def _new_file_diff(path: str, source: str) -> str:
+        lines = source.splitlines()
+        header = [
+            f"diff --git a/{path} b/{path}",
+            "new file mode 100644",
+            "index 0000000..0000000",
+            "--- /dev/null",
+            f"+++ b/{path}",
+            f"@@ -0,0 +1,{len(lines)} @@",
+        ]
+        body = [f"+{line}" for line in lines]
+        if source.endswith("\n"):
+            return "\n".join([*header, *body])
+        return "\n".join([*header, *body, "\\ No newline at end of file"])
 
     def _completion_bootstrap_payload(
         self, diff_payload: dict[str, Any] | None
@@ -2043,6 +2281,72 @@ class ConstraintKeeperCoordinator:
         cleaned = " ".join(cleaned.split())
         return cleaned[:180]
 
+    @classmethod
+    def _is_auxiliary_task_text(cls, task_text: Any) -> bool:
+        return cls._is_meta_maintenance_task_text(
+            task_text
+        ) or cls._is_validation_only_task_text(
+            task_text
+        ) or cls._is_execution_policy_only_text(task_text)
+
+    @staticmethod
+    def _is_execution_policy_only_text(task_text: Any) -> bool:
+        text = " ".join(str(task_text or "").lower().split())
+        if not text:
+            return False
+        policy_markers = (
+            "do not stop to ask design questions",
+            "make the best implementation decision",
+            "patch the code",
+            "add focused unit tests",
+            "run the tests",
+            "only then report uncertainty",
+        )
+        domain_markers = (
+            "expected behavior",
+            "actual behavior",
+            "traceback",
+            "error:",
+            "exception",
+            "<task_description>",
+            "<pr_description>",
+        )
+        marker_count = sum(1 for marker in policy_markers if marker in text)
+        if marker_count < 3:
+            return False
+        return not any(marker in text for marker in domain_markers)
+
+    @classmethod
+    def _promotable_task_text(cls, query: Any, instruction: Any) -> str:
+        for value in (instruction, query):
+            text = str(value or "").strip()
+            if not text:
+                continue
+            if cls._is_auxiliary_task_text(text):
+                continue
+            lowered = " ".join(text.lower().split())
+            if lowered.startswith("/"):
+                continue
+            if len(text) < 24:
+                continue
+            if any(
+                marker in lowered
+                for marker in (
+                    "expected behavior",
+                    "actual behavior",
+                    "should ",
+                    "fix ",
+                    "bug",
+                    "error",
+                    "exception",
+                    "regression",
+                    "handle ",
+                    "respecting ",
+                )
+            ):
+                return text
+        return ""
+
     @staticmethod
     def _is_meta_maintenance_task_text(task_text: Any) -> bool:
         text = " ".join(str(task_text or "").lower().split())
@@ -2052,6 +2356,44 @@ class ConstraintKeeperCoordinator:
             "review the conversation above" in text
             and "skill" in text
             and "update" in text
+        )
+
+    @staticmethod
+    def _is_validation_only_task_text(task_text: Any) -> bool:
+        text = " ".join(str(task_text or "").lower().split())
+        if not text:
+            return False
+        validation_terms = (
+            "test",
+            "tests",
+            "pytest",
+            "unit test",
+            "unit tests",
+            "validation",
+            "validate",
+        )
+        report_terms = ("report", "summarize", "result", "results")
+        modification_terms = (
+            "do not modify",
+            "do not edit",
+            "no files were created or modified",
+            "only run",
+        )
+        repair_terms = (
+            "fix",
+            "implement",
+            "patch",
+            "change the code",
+            "modify the code",
+        )
+        if any(term in text for term in repair_terms):
+            return False
+        if not any(term in text for term in validation_terms):
+            return False
+        if any(term in text for term in modification_terms):
+            return True
+        return text.startswith(("run ", "rerun ", "execute ")) and any(
+            term in text for term in report_terms
         )
 
     @staticmethod

@@ -364,6 +364,9 @@ class FormsyContextEngine(ContextEngine):
         self._test_plan_commands: list[str] = []
         self._memory_compiled_identity: tuple[str, str, str] | None = None
         self._memory_compile_revision: str = ""
+        self._last_memory_compile_status: str = ""
+        self._last_memory_compile_error: str = ""
+        self._last_compile_status_error: str = ""
         self._context_read_cache: dict[str, list[dict[str, Any]]] = {}
         self._last_async_error: str = ""
         self._terminal_preflight_command_counts: dict[str, int] = {}
@@ -432,8 +435,39 @@ class FormsyContextEngine(ContextEngine):
         """Return messages unchanged; Formsy memory is accessed through tools."""
         if current_tokens is not None:
             self.last_prompt_tokens = current_tokens
+        self._sync_task_instruction_from_messages(messages)
 
         return messages
+
+    def _sync_task_instruction_from_messages(self, messages: list[dict]) -> None:
+        """Capture the current user task before the first context_search call."""
+        if self._task_instruction_text or not isinstance(messages, list):
+            return
+        for message in reversed(messages):
+            if not isinstance(message, dict):
+                continue
+            if str(message.get("role") or "").lower() != "user":
+                continue
+            content = self._message_content_text(message.get("content"))
+            if content:
+                self.on_user_turn(content)
+                return
+
+    @classmethod
+    def _message_content_text(cls, content: Any) -> str:
+        if isinstance(content, str):
+            return cls._extract_task_instruction(content)
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    text = item.get("text") or item.get("content")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return cls._extract_task_instruction("\n".join(parts))
+        return ""
 
     def on_session_start(self, session_id: str, **kwargs) -> None:
         """Initialize runtime state when a Hermes session starts."""
@@ -660,10 +694,13 @@ class FormsyContextEngine(ContextEngine):
                     "retrieval: after a seed search, continue only if matches is non-empty "
                     "and coverage is not poor, or rerun with grounded/legacy metadata. When "
                     "context_search returns a candidate file or span, use context_read next "
-                    "instead of shell grep/find or direct file reads. The memory compile step "
-                    "has already completed before the task starts, so this tool is ready to "
-                    "use immediately. Repository identity is derived from the current git "
-                    "remote URL and commit; do not provide repo_id or revision."
+                    "instead of shell grep/find or direct file reads. context_search will "
+                    "try to compile the current repository memory when needed. If it returns "
+                    "MEMORY_COMPILE_UNAVAILABLE or MEMORY_COMPILE_TIMEOUT, call "
+                    "formsy_compile_repo once, then retry context_search; if that still "
+                    "fails, fall back to bounded shell inspection. Repository identity is "
+                    "derived from the current git remote URL and commit; do not provide "
+                    "repo_id or revision."
                 ),
                 "parameters": {
                     "type": "object",
@@ -741,6 +778,28 @@ class FormsyContextEngine(ContextEngine):
                 },
             },
             {
+                "name": "formsy_compile_repo",
+                "description": (
+                    "Repair Formsy compiled repository memory for context_search/context_read. "
+                    "Use this only after context_search reports MEMORY_COMPILE_UNAVAILABLE "
+                    "or MEMORY_COMPILE_TIMEOUT, then retry context_search. Repository identity "
+                    "is derived from the current git remote URL and commit; do not provide "
+                    "repo_id or revision."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": (
+                                "Optional task query to build a query-bounded compile. "
+                                "Use the same query that failed in context_search when available."
+                            ),
+                        },
+                    },
+                },
+            },
+            {
                 "name": "context_read",
                 "description": (
                     "Read exact source context from Formsy's compiled repository memory. "
@@ -773,6 +832,9 @@ class FormsyContextEngine(ContextEngine):
 
     def handle_tool_call(self, name: str, args: dict[str, Any], **kwargs) -> str:
         """Handle Formsy context-engine tool calls."""
+        if name == "formsy_compile_repo":
+            self._observe_seed_uptake_tool(name)
+            return self._handle_formsy_compile_repo(args)
         if name == "context_read":
             self._observe_seed_uptake_tool(name)
             return self._handle_memory_read(args)
@@ -791,7 +853,7 @@ class FormsyContextEngine(ContextEngine):
             return json.dumps({"ok": False, "query": query, "error": "Formsy engine client is not initialized"})
 
         session_id = self._session_id or self._context.get("session_id") or "unknown"
-        repo_id, revision = self._resolve_repository_identity()
+        repo_id, revision = self._resolve_repository_identity(args=args)
         identity = self._current_runtime_identity()
         if not repo_id:
             return json.dumps({
@@ -884,14 +946,34 @@ class FormsyContextEngine(ContextEngine):
                 metadata=args.get("metadata") if isinstance(args.get("metadata"), dict) else {},
             )
             self._degraded_guidance_packet = guidance_packet
+            compile_status = self._last_memory_compile_status or "compile_unavailable"
+            compile_error = self._last_memory_compile_error or self._last_async_error
+            compile_next_step = (
+                "context_search"
+                if compile_status == "compile_in_progress"
+                else "formsy_compile_repo"
+            )
+            compile_feedback = (
+                "Memory compile is still in progress. Wait briefly, then retry context_search. "
+                "If it later reports unavailable or timeout, call formsy_compile_repo once."
+                if compile_status == "compile_in_progress"
+                else (
+                    "Memory compile failed. Call formsy_compile_repo once with the same query, "
+                    "then retry context_search. If the repair also fails, use at most one "
+                    "targeted search_files call, then read_file the likely target. Do not "
+                    "repeat identical terminal repro commands."
+                )
+            )
             payload = {
                 "ok": True,
                 "query": query,
                 "repo_id": repo_id,
                 "revision": revision,
                 "warning": "Formsy memory compile unavailable before context_search",
-                "error_code": "MEMORY_COMPILE_UNAVAILABLE",
-                "compile_error": self._last_async_error,
+                "error_code": self._memory_compile_error_code(),
+                "compile_status": compile_status,
+                "compile_error": compile_error,
+                "compile_repair_tool": "formsy_compile_repo",
                 "tocs_identity_status": tocs_identity_status,
                 "diagnostic_reason": (
                     "missing_tocs_lookup_identity_or_compile_unavailable"
@@ -902,14 +984,11 @@ class FormsyContextEngine(ContextEngine):
                 "recovery_mode": "degraded_recovery",
                 "preferred_next_step": "context_read"
                 if guidance_packet.get("next_tool_directive")
-                else "bounded_shell_inspection",
-                "allowed_tools": ["terminal", "read_file", "search_files"],
+                else compile_next_step,
+                "allowed_tools": ["context_search", "formsy_compile_repo", "terminal", "read_file", "search_files"],
                 "guidance_packet": guidance_packet,
                 "retrieval_feedback": (
-                    "Memory compile failed. Falling back to bounded shell inspection. "
-                    "Use at most one targeted search_files call, then read_file the likely "
-                    "target. Do not repeat identical terminal repro commands; patch or rerun "
-                    "context_search after the server compile issue is fixed."
+                    compile_feedback
                     + (
                         " No tocs_lookup_identity was available, so FormSy could not "
                         "resolve TOCS guidance for this degraded run."
@@ -1194,6 +1273,51 @@ class FormsyContextEngine(ContextEngine):
         coverage = str(payload.get("coverage") or "").strip().lower()
         return bool(matches) and coverage != "poor"
 
+    def _handle_formsy_compile_repo(self, args: dict[str, Any]) -> str:
+        """Explicit repair path for compiled repository memory."""
+        session_id = self._session_id or self._context.get("session_id") or "unknown"
+        repo_id, revision = self._resolve_repository_identity(args=args)
+        query = str(args.get("query") or self._task_instruction_text or "context search repair").strip()
+        if not repo_id:
+            return json.dumps({
+                "ok": False,
+                "error": "formsy_compile_repo could not infer repo_id from the current git remote.",
+                "next_step": "bounded_shell_inspection",
+            })
+        if not self._engine_client or not hasattr(self._engine_client, "compile_repo"):
+            return json.dumps({
+                "ok": False,
+                "repo_id": repo_id,
+                "revision": revision,
+                "compile_status": "compile_client_unavailable",
+                "error": "Formsy engine client does not expose compile_repo.",
+                "next_step": "bounded_shell_inspection",
+            })
+
+        compiled = self._ensure_memory_compiled(
+            repo_id=repo_id,
+            revision=revision,
+            query=query,
+            session_id=session_id,
+        )
+        payload = {
+            "ok": bool(compiled),
+            "repo_id": repo_id,
+            "revision": self._memory_compile_revision or revision,
+            "query": query,
+            "compile_status": self._last_memory_compile_status
+            or ("compiled" if compiled else "compile_unavailable"),
+            "compile_error": "" if compiled else (self._last_memory_compile_error or self._last_async_error),
+            "next_step": "context_search" if compiled else "bounded_shell_inspection",
+        }
+        self._notify_constraint_keeper_tool_result(
+            "formsy_compile_repo",
+            args=args,
+            result=json.dumps(payload),
+            session_id=session_id,
+        )
+        return json.dumps(payload)
+
     def _handle_memory_read(self, args: dict[str, Any]) -> str:
         requested_path = str(args.get("path") or "").strip()
         path = self._normalize_repo_path(requested_path)
@@ -1468,6 +1592,35 @@ class FormsyContextEngine(ContextEngine):
             return None
 
     @staticmethod
+    def _memory_compile_status_from_error(error: str) -> str:
+        normalized = str(error or "").strip().lower()
+        if not normalized:
+            return "compile_unavailable"
+        if "timeout" in normalized or "timed out" in normalized:
+            return "compile_timeout"
+        if "404" in normalized or "not found" in normalized:
+            return "compile_missing_or_unavailable"
+        return "compile_failed"
+
+    def _memory_compile_error_code(self) -> str:
+        status = str(self._last_memory_compile_status or "").strip().lower()
+        if status == "compile_in_progress":
+            return "MEMORY_COMPILE_IN_PROGRESS"
+        if status == "compile_timeout":
+            return "MEMORY_COMPILE_TIMEOUT"
+        return "MEMORY_COMPILE_UNAVAILABLE"
+
+    @staticmethod
+    def _compile_status_is_in_progress(status: dict[str, Any] | None) -> bool:
+        if not isinstance(status, dict):
+            return False
+        for key in ("status", "compile_status", "state"):
+            value = str(status.get(key) or "").strip().lower()
+            if value in {"pending", "in_progress", "running", "processing"}:
+                return True
+        return False
+
+    @staticmethod
     def _coerce_positive_int(value: Any, default: int) -> int:
         try:
             number = int(value)
@@ -1485,12 +1638,17 @@ class FormsyContextEngine(ContextEngine):
             return None
         return max(1, number)
 
-    def _resolve_repository_identity(self) -> tuple[str, str]:
+    def _resolve_repository_identity(
+        self, args: dict[str, Any] | None = None
+    ) -> tuple[str, str]:
         if self._identity_snapshot is not None:
             repo_id = str(getattr(self._identity_snapshot, "repo_id", "") or "").strip()
             revision = str(getattr(self._identity_snapshot, "revision", "") or "").strip()
             if repo_id:
                 return repo_id, revision or "latest"
+        supplied_repo_id, supplied_revision = self._repo_identity_from_tool_args(args or {})
+        if supplied_repo_id:
+            return supplied_repo_id, supplied_revision or "latest"
         repo_id = ""
         revision = ""
         remote_url = self._git_output(["git", "remote", "get-url", "origin"])
@@ -1515,6 +1673,28 @@ class FormsyContextEngine(ContextEngine):
                 if hasattr(self._identity_snapshot, "clear_limited"):
                     self._identity_snapshot.clear_limited("revision_unknown")
         return repo_id, revision or "latest"
+
+    @staticmethod
+    def _repo_identity_from_tool_args(args: dict[str, Any]) -> tuple[str, str]:
+        metadata = args.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        candidates: list[dict[str, Any]] = []
+        lookup_identity = metadata.get("tocs_lookup_identity")
+        if isinstance(lookup_identity, dict):
+            candidates.append(lookup_identity)
+        candidates.append(metadata)
+        for candidate in candidates:
+            repo_id = str(candidate.get("repo_id") or "").strip()
+            revision = str(
+                candidate.get("revision")
+                or candidate.get("base_revision")
+                or candidate.get("target_revision")
+                or ""
+            ).strip()
+            if repo_id:
+                return repo_id, revision
+        return "", ""
 
     def _current_runtime_identity(self) -> dict[str, Any]:
         if self._identity_snapshot is not None:
@@ -1542,15 +1722,29 @@ class FormsyContextEngine(ContextEngine):
             revision=revision,
             query_signature=query_signature,
         ):
+            self._last_memory_compile_status = "compiled"
+            self._last_memory_compile_error = ""
             return True
         if not self._engine_client or not hasattr(self._engine_client, "compile_repo"):
             return True
 
+        self._last_memory_compile_status = ""
+        self._last_memory_compile_error = ""
+        self._last_compile_status_error = ""
         status = self._compile_status(
             repo_id=repo_id,
             revision=revision,
             session_id=session_id,
         )
+        if self._compile_status_is_in_progress(status):
+            self._last_memory_compile_status = "compile_in_progress"
+            self._last_memory_compile_error = ""
+            self._memory_compile_revision = (
+                str(status.get("revision") or "").strip()
+                if isinstance(status, dict)
+                else ""
+            ) or revision
+            return False
         if self._existing_compile_satisfies_query(status, query):
             self._memory_compiled_identity = self._compiled_identity_from_status(
                 status,
@@ -1560,7 +1754,10 @@ class FormsyContextEngine(ContextEngine):
             )
             status_revision = str(status.get("revision") or "").strip() if isinstance(status, dict) else ""
             self._memory_compile_revision = status_revision or revision
+            self._last_memory_compile_status = "compiled"
+            self._last_memory_compile_error = ""
             return True
+        status_error = self._last_compile_status_error
 
         files = self._collect_memory_source_files(Path.cwd(), query=query)
         result = self._run_async(
@@ -1583,9 +1780,12 @@ class FormsyContextEngine(ContextEngine):
             )
         )
         if result is None:
-            client_error = getattr(self._engine_client, "last_error", "")
-            if client_error:
-                self._last_async_error = str(client_error)
+            client_error = str(getattr(self._engine_client, "last_error", "") or "")
+            compile_error = client_error or self._last_async_error or status_error
+            if compile_error:
+                self._last_async_error = compile_error
+            self._last_memory_compile_error = compile_error
+            self._last_memory_compile_status = self._memory_compile_status_from_error(compile_error)
             return False
 
         self._memory_compiled_identity = identity_key
@@ -1593,6 +1793,8 @@ class FormsyContextEngine(ContextEngine):
             result.get("revision") if isinstance(result, dict) else ""
             or revision
         )
+        self._last_memory_compile_status = "compiled"
+        self._last_memory_compile_error = ""
         return True
 
     def _compile_status(
@@ -1611,6 +1813,12 @@ class FormsyContextEngine(ContextEngine):
                 session_id=session_id,
             )
         )
+        if not isinstance(result, dict):
+            self._last_compile_status_error = str(
+                getattr(self._engine_client, "last_error", "") or self._last_async_error or ""
+            )
+            return None
+        self._last_compile_status_error = ""
         return result if isinstance(result, dict) else None
 
     @staticmethod

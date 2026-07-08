@@ -30,11 +30,13 @@ class RuntimeClient:
         api_key: str = "",
         timeout_s: int = 30,
         max_retries: int = 3,
+        trust_env: bool = False,
     ):
         self.base_url = base_url.rstrip("/")
         self.memory_search_endpoint = self._normalize_endpoint(memory_search_endpoint)
         self.timeout_s = timeout_s
         self.max_retries = max_retries
+        self.trust_env = trust_env
         self.auth_manager = AuthManager(api_key_env, api_key=api_key)
         self._client: Optional[httpx.AsyncClient] = None
 
@@ -50,6 +52,7 @@ class RuntimeClient:
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(self.timeout_s),
             follow_redirects=True,
+            trust_env=self.trust_env,
         )
         return self
 

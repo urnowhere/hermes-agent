@@ -223,12 +223,48 @@ def test_formsy_engine_compress_returns_messages_without_runtime_compile(monkeyp
     assert engine.compression_count == 0
 
 
+def test_formsy_engine_compress_captures_full_user_task_for_first_context_search():
+    engine = FormsyContextEngine()
+    full_task = (
+        "In ansible, `Request.open` should handle gzip `Content-Encoding` responses correctly "
+        "and respect `decompress=False`.\n\n"
+        "Expected behavior:\n"
+        "- gzip `Content-Encoding` responses are decoded by default.\n"
+        "- when `decompress=False`, gzip responses should remain compressed / raw.\n"
+        "- non-gzip responses should keep existing behavior."
+    )
+
+    messages = [
+        {"role": "system", "content": "SYSTEM PROMPT MUST NOT LEAK"},
+        {"role": "user", "content": full_task},
+    ]
+
+    assert engine.compress(messages, current_tokens=100) is messages
+    metadata = engine._build_query_metadata(
+        {
+            "query": "Request.open gzip",
+            "metadata": {"full_task_description": "short stale query"},
+        },
+        repo_id="ansible__ansible",
+        session_id="session-123",
+    )
+
+    assert metadata["full_task_description"] == full_task
+    assert "Expected behavior" in metadata["full_task_description"]
+    assert "decompress=False" in metadata["full_task_description"]
+    assert "SYSTEM PROMPT MUST NOT LEAK" not in json.dumps(metadata)
+
+
 def test_formsy_engine_exposes_memory_search_tool():
     engine = FormsyContextEngine()
 
     schemas = engine.get_tool_schemas()
 
-    assert [schema["name"] for schema in schemas] == ["context_search", "context_read"]
+    assert [schema["name"] for schema in schemas] == [
+        "context_search",
+        "formsy_compile_repo",
+        "context_read",
+    ]
     params = schemas[0]["parameters"]
     assert params["required"] == ["query"]
     assert "query" in params["properties"]
@@ -252,13 +288,49 @@ def test_formsy_engine_exposes_memory_search_tool():
     assert "runtime/plugin-provided" in tocs_lookup_identity["description"]
     assert "fallback" in metadata["properties"]["grounding_phase"]["enum"]
     assert "proactively" in schemas[0]["description"]
+    assert "already completed before the task starts" not in schemas[0]["description"]
+    assert "formsy_compile_repo" in schemas[0]["description"]
     assert "current git remote URL and commit" in schemas[0]["description"]
-    read_params = schemas[1]["parameters"]
+    compile_params = schemas[1]["parameters"]
+    assert compile_params["properties"]["query"]["type"] == "string"
+    assert "repo_id" not in compile_params["properties"]
+    assert "revision" not in compile_params["properties"]
+    read_params = schemas[2]["parameters"]
     assert read_params["required"] == ["path"]
     assert "repo_id" not in read_params["properties"]
     assert "revision" not in read_params["properties"]
     assert "start_line" in read_params["properties"]
     assert "end_line" in read_params["properties"]
+
+
+def test_formsy_engine_context_search_metadata_includes_full_task_without_system_prompt():
+    engine = FormsyContextEngine()
+    engine._task_instruction_text = (
+        "In ansible, `Request.open` should handle gzip `Content-Encoding` responses.\n"
+        "Expected behavior:\n"
+        "- gzip `Content-Encoding` responses are decoded by default.\n"
+        "- when `decompress=False`, gzip responses should remain compressed / raw.\n"
+        "- non-gzip responses should keep existing behavior."
+    )
+
+    metadata = engine._build_query_metadata(
+        {
+            "metadata": {
+                "full_task_description": "Request.open gzip only",
+                "system_prompt": "SYSTEM PROMPT MUST NOT LEAK",
+                "messages": [{"role": "system", "content": "hidden"}],
+            }
+        },
+        repo_id="ansible__ansible",
+        session_id="session-123",
+    )
+
+    assert metadata["full_task_description"] == engine._task_instruction_text
+    assert "decompress=False" in metadata["full_task_description"]
+    assert "Expected behavior" in metadata["full_task_description"]
+    assert "system_prompt" not in metadata
+    assert "messages" not in metadata
+    assert "SYSTEM PROMPT MUST NOT LEAK" not in json.dumps(metadata)
 
 
 def test_formsy_engine_infers_repo_id_from_common_git_urls():
@@ -420,6 +492,47 @@ def test_formsy_engine_injects_config_tocs_lookup_identity_without_runtime_snaps
 
     assert json.loads(result)["ok"] is True
     assert calls[0]["metadata"]["tocs_lookup_identity"] == lookup_identity
+
+
+def test_formsy_engine_uses_supplied_tocs_identity_when_git_identity_missing(monkeypatch):
+    engine = FormsyContextEngine()
+    calls = []
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            calls.append(kwargs)
+            return {"matches": []}
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="not a git repo")
+
+    monkeypatch.setattr("plugins.context_engine.formsy.engine.subprocess.run", fake_run)
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "",
+        "revision": "",
+        "query_budget": 4000,
+        "timeout_s": 120,
+    })()
+    engine._session_id = "session-123"
+
+    result = engine.handle_tool_call(
+        "context_search",
+        {
+            "query": "ansible iptables chain_management create delete check mode",
+            "metadata": {
+                "tocs_lookup_identity": {
+                    "repo_id": "ansible__ansible",
+                    "revision": "173091e2e36d38c978002990795f66cfc0af30ad",
+                }
+            },
+        },
+    )
+
+    data = json.loads(result)
+    assert data["ok"] is True
+    assert calls[0]["repo_id"] == "ansible__ansible"
+    assert calls[0]["revision"] == "173091e2e36d38c978002990795f66cfc0af30ad"
 
 
 def test_formsy_engine_uses_runtime_tocs_identity_when_compile_fails(monkeypatch):
@@ -1787,6 +1900,10 @@ def test_formsy_engine_compile_failure_returns_degraded_guidance_and_notifies_bu
 
     assert result["ok"] is True
     assert result["warning"] == "Formsy memory compile unavailable before context_search"
+    assert result["error_code"] == "MEMORY_COMPILE_TIMEOUT"
+    assert result["compile_status"] == "compile_timeout"
+    assert result["compile_error"] == "compile timeout"
+    assert result["compile_repair_tool"] == "formsy_compile_repo"
     assert result["tocs_identity_status"] == "missing"
     assert result["diagnostic_reason"] == (
         "missing_tocs_lookup_identity_or_compile_unavailable"
@@ -1800,6 +1917,117 @@ def test_formsy_engine_compile_failure_returns_degraded_guidance_and_notifies_bu
     assert observed_tool == "context_search"
     assert observed_session_id == "session-123"
     assert observed_result["guidance_packet"]["probe_budget"]["terminal_or_execute_code"] == 2
+
+
+def test_formsy_engine_compile_failure_preserves_status_error_when_compile_has_no_error():
+    engine = FormsyContextEngine()
+
+    class FakeClient:
+        last_error = ""
+
+        async def compile_status(self, **kwargs):
+            self.last_error = "RuntimeAPIError: compiled repo not found"
+            return None
+
+        async def compile_repo(self, **kwargs):
+            self.last_error = ""
+            return None
+
+        async def memory_prefetch(self, **kwargs):
+            return {"memory_status": "miss"}
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "rev",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+
+    result = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {"query": "parser state handling"},
+        )
+    )
+
+    assert result["compile_status"] == "compile_missing_or_unavailable"
+    assert result["compile_error"] == "RuntimeAPIError: compiled repo not found"
+
+
+def test_formsy_engine_compile_status_in_progress_does_not_start_duplicate_compile():
+    engine = FormsyContextEngine()
+    calls = []
+
+    class FakeClient:
+        last_error = ""
+
+        async def compile_status(self, **kwargs):
+            calls.append(("status", kwargs))
+            return {"status": "in_progress", "revision": "rev"}
+
+        async def compile_repo(self, **kwargs):
+            calls.append(("compile", kwargs))
+            return {"revision": "rev"}
+
+        async def memory_prefetch(self, **kwargs):
+            return {"memory_status": "miss"}
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "rev",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+
+    result = json.loads(
+        engine.handle_tool_call(
+            "context_search",
+            {"query": "parser state handling"},
+        )
+    )
+
+    assert result["error_code"] == "MEMORY_COMPILE_IN_PROGRESS"
+    assert result["compile_status"] == "compile_in_progress"
+    assert [name for name, _ in calls] == ["status"]
+
+
+def test_formsy_engine_compile_repo_tool_repairs_memory_compile():
+    engine = FormsyContextEngine()
+    calls = []
+
+    class FakeClient:
+        last_error = ""
+
+        async def compile_status(self, **kwargs):
+            calls.append(("status", kwargs))
+            return None
+
+        async def compile_repo(self, **kwargs):
+            calls.append(("compile", kwargs))
+            return {"revision": "rev__query_bounded__abc"}
+
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {
+        "repo_id": "ansible__ansible",
+        "revision": "rev",
+        "query_budget": 4000,
+    })()
+    engine._session_id = "session-123"
+
+    result = json.loads(
+        engine.handle_tool_call(
+            "formsy_compile_repo",
+            {"query": "parser state handling"},
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["compile_status"] == "compiled"
+    assert result["next_step"] == "context_search"
+    assert result["revision"] == "rev__query_bounded__abc"
+    assert [name for name, _ in calls] == ["status", "compile"]
 
 
 def test_formsy_engine_degraded_guidance_canonicalizes_absolute_memory_hints():

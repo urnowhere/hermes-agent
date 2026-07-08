@@ -225,6 +225,214 @@ def test_pre_llm_seed_logs_delivery_observability_once(tmp_path, caplog):
     assert "context_hash=" in message
 
 
+def test_validation_only_delegate_turn_does_not_replace_parent_identity(tmp_path):
+    client = FakeClient()
+    coordinator = ConstraintKeeperCoordinator(
+        client=client, spool_root=tmp_path, identity=_identity()
+    )
+    parent_task = (
+        "In ansible, iptables chain management should handle chain creation and "
+        "deletion while respecting check mode."
+    )
+    coordinator.on_user_turn(user_message=parent_task, session_id="parent-session")
+    parent_identity = coordinator.identity
+
+    coordinator.on_user_turn(
+        user_message=(
+            "Run the iptables unit tests in the Ansible repo at "
+            "/Users/wayneliu/dev/ansible and report the result. Use the "
+            "appropriate pytest command and PYTHONPATH setup."
+        ),
+        session_id="delegate-session",
+    )
+    result = coordinator.verify_completion(session_id="parent-session")
+
+    verify_calls = [call for call in client.calls if call[0] == "verify"]
+    assert verify_calls
+    assert coordinator.identity == parent_identity
+    assert verify_calls[-1][1]["payload"]["task_id"] == parent_identity.task_id
+    assert verify_calls[-1][1]["payload"]["run_id"] == parent_identity.run_id
+    bootstrap = verify_calls[-1][1]["payload"]["completion_bootstrap"]
+    assert bootstrap["instruction"] == parent_task
+    assert "Run the iptables unit tests" not in bootstrap["instruction"]
+
+
+def test_execution_instruction_only_turn_does_not_become_task_goal(tmp_path):
+    client = FakeClient()
+    coordinator = ConstraintKeeperCoordinator(
+        client=client, spool_root=tmp_path, identity=_identity()
+    )
+    coordinator.on_user_turn(
+        user_message=(
+            "Do not stop to ask design questions. Make the best implementation "
+            "decision from the existing module style, patch the code, add focused "
+            "unit tests, run the tests, and only then report uncertainty if any "
+            "remains."
+        ),
+        session_id="sess-1",
+    )
+    real_task = (
+        "In ansible, iptables chain management should handle chain creation and "
+        "deletion while respecting check mode.\nExpected behavior:\n"
+        "- chain creation and deletion should use the correct chain-management commands."
+    )
+    coordinator.on_user_turn(user_message=real_task, session_id="sess-1")
+
+    coordinator.verify_completion(session_id="sess-1")
+
+    verify_calls = [call for call in client.calls if call[0] == "verify"]
+    bootstrap = verify_calls[-1][1]["payload"]["completion_bootstrap"]
+    assert bootstrap["instruction"] == real_task
+    assert "Do not stop to ask design questions" not in bootstrap["instruction"]
+
+
+def test_compile_context_bundle_records_strong_direct_matches_as_accepted_targets(tmp_path):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
+
+    coordinator.compile_context_bundle(
+        query="chain_management module option",
+        instruction="fix chain management",
+        query_plan={"retrieval_mode": "symbolic"},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={
+            "coverage": "partial",
+            "matches": [
+                {
+                    "path": "lib/ansible/modules/iptables.py",
+                    "kind": "direct_query_match",
+                    "symbol": "chain_management",
+                    "why_relevant": "explicit symbol anchor matched the compiled source snapshot.",
+                },
+                {
+                    "path": "test/units/modules/test_iptables.py",
+                    "kind": "direct_query_match",
+                    "symbol": "chain_management",
+                },
+            ],
+        },
+    )
+    coordinator.verify_completion(session_id="sess-1")
+
+    verify_calls = [call for call in coordinator.client.calls if call[0] == "verify"]
+    bootstrap = verify_calls[-1][1]["payload"]["completion_bootstrap"]
+    assert bootstrap["context_bundle_hint"]["accepted_targets"] == [
+        "lib/ansible/modules/iptables.py"
+    ]
+
+
+def test_compile_context_bundle_promotes_first_real_query_to_task_goal(tmp_path):
+    client = FakeClient()
+    coordinator = ConstraintKeeperCoordinator(
+        client=client, spool_root=tmp_path, identity=_identity()
+    )
+    coordinator.on_user_turn(
+        user_message=(
+            "Do not stop to ask design questions. Make the best implementation "
+            "decision from the existing module style, patch the code, add focused "
+            "unit tests, run the tests, and only then report uncertainty if any "
+            "remains."
+        ),
+        session_id="sess-1",
+    )
+    task_query = (
+        "In ansible, iptables chain management should handle chain creation "
+        "and deletion while respecting check mode."
+    )
+
+    coordinator.compile_context_bundle(
+        query=task_query,
+        instruction="",
+        query_plan={"retrieval_mode": "symbolic"},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={"query": task_query},
+        session_id="sess-1",
+    )
+    coordinator.verify_completion(session_id="sess-1")
+
+    verify_calls = [call for call in client.calls if call[0] == "verify"]
+    bootstrap = verify_calls[-1][1]["payload"]["completion_bootstrap"]
+    assert bootstrap["instruction"] == task_query
+    assert "Do not stop to ask design questions" not in bootstrap["instruction"]
+
+
+def test_compile_context_bundle_replaces_stale_policy_goal_with_real_query(tmp_path):
+    client = FakeClient()
+    coordinator = ConstraintKeeperCoordinator(
+        client=client, spool_root=tmp_path, identity=_identity()
+    )
+    coordinator._latest_user_task_text = (  # noqa: SLF001 - regression fixture.
+        "Do not stop to ask design questions. Make the best implementation "
+        "decision from the existing module style, patch the code, add focused "
+        "unit tests, run the tests, and only then report uncertainty if any "
+        "remains."
+    )
+    task_query = (
+        "In ansible, iptables chain management should handle chain creation "
+        "and deletion while respecting check mode."
+    )
+
+    coordinator.compile_context_bundle(
+        query=task_query,
+        instruction="",
+        query_plan={"retrieval_mode": "symbolic"},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={"query": task_query},
+        session_id="sess-1",
+    )
+    coordinator.verify_completion(session_id="sess-1")
+
+    verify_calls = [call for call in client.calls if call[0] == "verify"]
+    bootstrap = verify_calls[-1][1]["payload"]["completion_bootstrap"]
+    assert bootstrap["instruction"] == task_query
+    assert "Do not stop to ask design questions" not in bootstrap["instruction"]
+
+
+def test_compile_context_bundle_accepts_specific_basename_anchor_not_generic_commands(
+    tmp_path,
+):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(), spool_root=tmp_path, identity=_identity()
+    )
+
+    coordinator.compile_context_bundle(
+        query=(
+            "In ansible, iptables chain management should use the correct "
+            "chain-management commands."
+        ),
+        instruction="fix chain management",
+        query_plan={"retrieval_mode": "symbolic"},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={
+            "query": (
+                "In ansible, iptables chain management should use the correct "
+                "chain-management commands."
+            ),
+            "coverage": "partial",
+            "matches": [
+                {
+                    "path": "hacking/build_library/build_ansible/commands.py",
+                    "kind": "direct_query_match",
+                    "why_relevant": "exact basename query anchor matched the file name.",
+                },
+                {
+                    "path": "lib/ansible/modules/iptables.py",
+                    "kind": "direct_query_match",
+                    "why_relevant": "exact basename query anchor matched the file name.",
+                },
+            ],
+        },
+    )
+    coordinator.verify_completion(session_id="sess-1")
+
+    verify_calls = [call for call in coordinator.client.calls if call[0] == "verify"]
+    bootstrap = verify_calls[-1][1]["payload"]["completion_bootstrap"]
+    assert bootstrap["context_bundle_hint"]["accepted_targets"] == [
+        "lib/ansible/modules/iptables.py"
+    ]
+
+
 def test_pre_llm_seed_logs_advisory_uptake_miss_on_first_effective_deviation(
     tmp_path, caplog
 ):
@@ -3053,6 +3261,67 @@ def test_verify_completion_blocks_unreviewed_written_validation_script(tmp_path)
     assert not [call for call in client.calls if call[0] == "verify"]
 
 
+def test_verify_completion_includes_written_product_test_file_in_diff(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    client = FakeClient()
+    client.verify_response = {"decision": "ACCEPT_DONE"}
+    diff = """diff --git a/lib/ansible/module_utils/urls.py b/lib/ansible/module_utils/urls.py
+--- a/lib/ansible/module_utils/urls.py
++++ b/lib/ansible/module_utils/urls.py
+@@ -1,2 +1,3 @@
++HAS_GZIP = True
+ def open_url():
+     return None
+"""
+    test_path = "test/units/module_utils/urls/test_gzip.py"
+    test_source = "def test_gzip_response_decoded():\n    assert True\n"
+    target = tmp_path / test_path
+    target.parent.mkdir(parents=True)
+    target.write_text(test_source, encoding="utf-8")
+    coordinator = ConstraintKeeperCoordinator(
+        client=client,
+        spool_root=tmp_path / "spool",
+        identity=_identity(),
+        diff_provider=lambda: diff,
+    )
+    coordinator.compile_context_bundle(
+        query="Request.open gzip",
+        instruction="fix gzip decoding",
+        query_plan={},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={"accepted_targets": ["lib/ansible/module_utils/urls.py"]},
+    )
+    coordinator.observe_tool_result(
+        "write_file",
+        {
+            "path": test_path,
+            "content": test_source,
+        },
+        {"ok": True},
+        session_id="sess-1",
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": f"python3 -m pytest {test_path} -q"},
+        {"exit_code": 0, "output": "1 passed"},
+        session_id="sess-1",
+    )
+
+    result = coordinator.verify_completion(session_id="sess-1")
+
+    assert result["decision"] == "ACCEPT_DONE"
+    verify_calls = [call for call in client.calls if call[0] == "verify"]
+    assert verify_calls
+    completion_bootstrap = verify_calls[-1][1]["payload"]["completion_bootstrap"]
+    assert test_path in completion_bootstrap["changed_files"]
+    assert (
+        f"diff --git a/{test_path} b/{test_path}"
+        in completion_bootstrap["unified_diff"]
+    )
+
+
 def test_verify_completion_ignores_deleted_temporary_validation_script(tmp_path):
     client = FakeClient()
     client.verify_response = {"decision": "ACCEPT_DONE"}
@@ -3151,6 +3420,84 @@ def test_verify_completion_blocks_unresolved_failed_validation_after_narrow_pass
         "python3 -m pytest test/units/module_utils/urls -q"
     ]
     assert not [call for call in client.calls if call[0] == "verify"]
+
+
+def test_verify_completion_ignores_broad_unrelated_failed_validation_after_focused_pass(
+    tmp_path,
+):
+    client = FakeClient()
+    client.verify_response = {"decision": "ACCEPT_DONE"}
+    diff = """diff --git a/lib/ansible/module_utils/urls.py b/lib/ansible/module_utils/urls.py
+--- a/lib/ansible/module_utils/urls.py
++++ b/lib/ansible/module_utils/urls.py
+@@ -1,2 +1,3 @@
++HAS_GZIP = True
+ def open_url():
+     return None
+diff --git a/test/units/module_utils/urls/test_Request.py b/test/units/module_utils/urls/test_Request.py
+--- a/test/units/module_utils/urls/test_Request.py
++++ b/test/units/module_utils/urls/test_Request.py
+@@ -1,2 +1,5 @@
++def test_request_open_gzip_response_decompress():
++    assert True
+"""
+    coordinator = ConstraintKeeperCoordinator(
+        client=client,
+        spool_root=tmp_path,
+        identity=_identity(),
+        diff_provider=lambda: diff,
+    )
+    focused_command = (
+        "python3 -m pytest "
+        "test/units/module_utils/urls/test_Request.py::"
+        "test_request_open_gzip_response_decompress -q"
+    )
+    coordinator.compile_context_bundle(
+        query="Request.open gzip",
+        instruction="fix gzip decoding",
+        query_plan={},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={
+            "accepted_targets": ["lib/ansible/module_utils/urls.py"],
+            "guidance": {
+                "tocs": {
+                    "candidate_tests": [
+                        {
+                            "test_id": (
+                                "test/units/module_utils/urls/test_Request.py::"
+                                "test_request_open_gzip_response_decompress"
+                            ),
+                            "command": focused_command,
+                        }
+                    ]
+                }
+            },
+        },
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": "python3 -m pytest test/units/module_utils/urls -q"},
+        {
+            "exit_code": 1,
+            "output": (
+                "FAILED test/units/module_utils/urls/test_fetch_url.py::test_proxy_error\n"
+                "FAILED test/units/module_utils/urls/test_uri.py::test_legacy_timeout\n"
+                "2 failed, 81 passed"
+            ),
+        },
+        session_id="sess-1",
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": focused_command},
+        {"exit_code": 0, "output": "1 passed"},
+        session_id="sess-1",
+    )
+
+    result = coordinator.verify_completion(session_id="sess-1")
+
+    assert result["decision"] == "ACCEPT_DONE"
+    assert [call for call in client.calls if call[0] == "verify"]
 
 
 def test_verify_completion_accepts_equivalent_venv_pytest_after_python3_failure(

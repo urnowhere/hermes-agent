@@ -10,6 +10,28 @@ from plugins.formsy.runtime_client import RuntimeClient
 
 
 @pytest.mark.asyncio
+async def test_runtime_client_ignores_environment_proxy(monkeypatch):
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:3128")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
+    seen_kwargs = {}
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            seen_kwargs.update(kwargs)
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+
+    client = RuntimeClient(base_url="http://127.0.0.1:8000", api_key="test-key")
+    await client.__aenter__()
+    await client.__aexit__(None, None, None)
+
+    assert seen_kwargs["trust_env"] is False
+
+
+@pytest.mark.asyncio
 async def test_runtime_client_logs_http_error_context(caplog, monkeypatch):
     monkeypatch.setenv("FORMSY_API_KEY", "fsy_test_secret_token")
     client = RuntimeClient(base_url="https://runtime.example", api_key_env="FORMSY_API_KEY")
