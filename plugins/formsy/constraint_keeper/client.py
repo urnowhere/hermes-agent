@@ -108,6 +108,19 @@ class ConstraintKeeperClient:
             session_id=session_id,
         )
 
+    async def request_human_review(
+        self,
+        payload: dict[str, Any],
+        *,
+        session_id: str = "",
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/v1/runtime/constraints/human_review",
+            data=payload,
+            session_id=session_id,
+        )
+
     async def status(
         self,
         task_id: str,

@@ -123,6 +123,8 @@ class ConstraintKeeperCoordinator:
         self._active_context_directive: dict[str, Any] | None = None
         self._active_probe_budget_directive: dict[str, Any] | None = None
         self._active_next_tool_directive: dict[str, Any] | None = None
+        self._active_completion_next_step: dict[str, Any] = {}
+        self._human_review_requested: dict[str, str] = {}
         self._next_tool_deviation_count = 0
         self._next_tool_visible_delivery_count = 0
         self._next_tool_failed = False
@@ -433,6 +435,48 @@ class ConstraintKeeperCoordinator:
         if self._task_closed:
             return None
         final_submit = is_final_submit(tool_name, args or {})
+        if (
+            self._human_review_terminal_handoff_active()
+            and not final_submit
+            and not self._human_review_terminal_handoff_allowed_tool(tool_name)
+        ):
+            self._append_policy_event(
+                action="blocked",
+                reason="Human review terminal handoff is active.",
+                category="human_review_terminal_handoff",
+            )
+            return (
+                "FormSy human review terminal handoff is active. "
+                "Stop using continuation tools and report that human review was requested."
+            )
+        active_state = self._active_completion_runtime_state()
+        if active_state == "Validation" and tool_name == "execute_code":
+            structured = self._active_completion_next_step.get(
+                "next_action_structured"
+            )
+            if not isinstance(structured, dict):
+                structured = {}
+            self._append_policy_event(
+                action="blocked",
+                reason="execute_code is diagnostic non-progress during Validation.",
+                category="validation_execute_code_non_progress",
+                next_step={
+                    "source": "adapter_local_guard",
+                    "runtime_state": "Validation",
+                    "reason": "execute_code is diagnostic non-progress during Validation.",
+                    "allowed_actions": structured.get("allowed_actions")
+                    or ["Run the focused terminal validation command."],
+                    "progress_means": structured.get("progress_means")
+                    or ["trusted_test_result_after_latest_diff"],
+                },
+            )
+            return "\n".join(
+                [
+                    "FormSy is in Validation state.",
+                    "execute_code is diagnostic non-progress for completion validation.",
+                    "Run the focused terminal validation command or request human review.",
+                ]
+            )
         if not final_submit:
             direct_source_write_message = (
                 self._execute_code_direct_source_write_block_message(
@@ -513,6 +557,8 @@ class ConstraintKeeperCoordinator:
         task_id: str = "",
     ) -> dict[str, str] | None:
         self.ensure_identity(session_id=session_id, task_id=task_id)
+        if self._human_review_terminal_handoff_active():
+            return None
         if self._completion_verified:
             return None
         if self._assistant_response_claims_completion_accept(assistant_response):
@@ -578,7 +624,7 @@ class ConstraintKeeperCoordinator:
             }
         )
         self.flush_pending()
-        return self._run_async(
+        result = self._run_async(
             self.client.verify_completion(
                 {
                     "task_id": identity.task_id,
@@ -588,6 +634,50 @@ class ConstraintKeeperCoordinator:
                 session_id=identity.session_id,
             )
         )
+        projection = _projection_from_response(result)
+        if projection:
+            self._active_completion_next_step = projection
+        return result
+
+    def request_human_review(
+        self, *, reason: str, session_id: str = "", task_id: str = ""
+    ) -> dict[str, Any]:
+        identity = self.ensure_identity(session_id=session_id, task_id=task_id)
+        result = self._run_async(
+            self.client.request_human_review(
+                {
+                    "task_id": identity.task_id,
+                    "run_id": identity.run_id,
+                    "reason": reason,
+                    "actor": "agent",
+                },
+                session_id=identity.session_id,
+            )
+        )
+        projection = _projection_from_response(result)
+        if projection:
+            self._active_completion_next_step = projection
+        self._human_review_requested = {
+            "reason": reason,
+            "requested_at_ms": str(int(time.time() * 1000)),
+        }
+        return result
+
+    def _active_completion_runtime_state(self) -> str:
+        return str(self._active_completion_next_step.get("runtime_state") or "")
+
+    def _human_review_terminal_handoff_active(self) -> bool:
+        return (
+            self._active_completion_runtime_state() == "HumanReview"
+            or bool(self._human_review_requested)
+        )
+
+    @staticmethod
+    def _human_review_terminal_handoff_allowed_tool(tool_name: str) -> bool:
+        return tool_name in {
+            "formsy_constraint_status",
+            "formsy_request_human_review",
+        }
 
     def _record_contract_accepted_targets(self, payload: Any) -> None:
         tocs_targets = self._extract_resolved_tocs_repair_targets(payload)
@@ -1820,18 +1910,26 @@ class ConstraintKeeperCoordinator:
         return enriched
 
     def _append_policy_event(
-        self, *, action: str, reason: str, category: str
+        self,
+        *,
+        action: str,
+        reason: str,
+        category: str,
+        next_step: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        payload = {
+            "policy_mode": "advisory",
+            "enforcement_action": action,
+            "category": category,
+            "reason": reason,
+        }
+        if next_step is not None:
+            payload["next_step"] = next_step
         return self._append_event(
             {
                 "event_kind": "enforcement_decision",
                 "trust": "plugin_observed",
-                "payload": {
-                    "policy_mode": "advisory",
-                    "enforcement_action": action,
-                    "category": category,
-                    "reason": reason,
-                },
+                "payload": payload,
             }
         )
 
@@ -1920,6 +2018,8 @@ class ConstraintKeeperCoordinator:
         self._active_context_directive = None
         self._active_probe_budget_directive = None
         self._active_next_tool_directive = None
+        self._active_completion_next_step = {}
+        self._human_review_requested = {}
         self._next_tool_deviation_count = 0
         self._next_tool_visible_delivery_count = 0
         self._next_tool_failed = False
@@ -3790,6 +3890,15 @@ def _result_total_count(result: Any) -> int | None:
         value = parsed.get("total_count")
         return value if isinstance(value, int) else None
     return None
+
+
+def _projection_from_response(response: Any) -> dict[str, Any]:
+    data = _result_dict(response)
+    audit = data.get("completion_audit")
+    if not isinstance(audit, dict):
+        return {}
+    projection = audit.get("projection")
+    return projection if isinstance(projection, dict) else {}
 
 
 def _result_dict(result: Any) -> dict[str, Any]:
