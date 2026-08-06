@@ -225,12 +225,12 @@ def _tool_verify_completion(args: dict[str, Any] | None = None, **kwargs: Any) -
 
 def _tool_request_human_review(args: dict[str, Any] | None = None, **kwargs: Any) -> str:
     args = args if isinstance(args, dict) else {}
-    return _json_result({
-        "ok": True,
-        "requested": True,
-        "reason": str(args.get("reason") or ""),
-        "note": "Human review requested. This tool does not submit a trusted FormSy override.",
-    })
+    return _json_result(
+        _get_coordinator().request_human_review(
+            reason=str(args.get("reason") or ""),
+            session_id=str(kwargs.get("session_id") or ""),
+        )
+    )
 
 
 def _get_coordinator() -> ConstraintKeeperCoordinator:

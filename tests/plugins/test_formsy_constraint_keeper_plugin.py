@@ -211,6 +211,36 @@ def test_tool_hooks_do_not_forward_hermes_task_id_as_formsy_task_id(monkeypatch)
     ]
 
 
+def test_request_human_review_tool_routes_through_coordinator(monkeypatch):
+    module = _load_plugin_module()
+    calls = []
+
+    class Coordinator:
+        def request_human_review(
+            self, *, reason: str, session_id: str = "", task_id: str = ""
+        ):
+            calls.append(
+                {"reason": reason, "session_id": session_id, "task_id": task_id}
+            )
+            return {"decision": "NEED_HUMAN_REVIEW"}
+
+    monkeypatch.setattr(module, "_coordinator", Coordinator())
+
+    result = module._tool_request_human_review(
+        {"reason": "Focused validation cannot be produced safely."},
+        session_id="sess-1",
+    )
+
+    assert '"NEED_HUMAN_REVIEW"' in result
+    assert calls == [
+        {
+            "reason": "Focused validation cannot be produced safely.",
+            "session_id": "sess-1",
+            "task_id": "",
+        }
+    ]
+
+
 def test_transform_tool_result_returns_only_string_replacements(monkeypatch):
     module = _load_plugin_module()
 

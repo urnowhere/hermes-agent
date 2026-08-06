@@ -11,6 +11,7 @@ from plugins.formsy.identity import derive_formsy_identity
 class FakeClient:
     def __init__(self):
         self.calls = []
+        self.human_review_payloads = []
         self.verify_response = {"gate_decision": "accepted"}
         self.compile_error: Exception | None = None
         self.verify_error: Exception | None = None
@@ -37,6 +38,27 @@ class FakeClient:
             raise self.verify_error
         return self.verify_response
 
+    async def request_human_review(self, payload, *, session_id=""):
+        self.calls.append(
+            ("human_review", {"payload": payload, "session_id": session_id})
+        )
+        self.human_review_payloads.append(payload)
+        return {
+            "decision": "NEED_HUMAN_REVIEW",
+            "completion_audit": {
+                "projection": {
+                    "source": "server",
+                    "runtime_state": "HumanReview",
+                    "runtime_signal": {
+                        "agent_loop_terminal": True,
+                        "final_response_allowed": True,
+                        "human_review_required": True,
+                        "completion_accepted": False,
+                    },
+                }
+            },
+        }
+
     async def recover(self, payload, session_id=""):
         self.calls.append(("recover", {"payload": payload, "session_id": session_id}))
         return {"protocol_text": "recover now"}
@@ -56,6 +78,112 @@ def _identity():
         repo_id="repo-1",
         revision="rev-1",
         workspace_id="ws-1",
+    )
+
+
+def test_request_human_review_tool_records_server_handoff(tmp_path):
+    client = FakeClient()
+    coordinator = ConstraintKeeperCoordinator(
+        client=client,
+        spool_root=tmp_path,
+        identity=_identity(),
+    )
+    result = coordinator.request_human_review(
+        reason="Focused validation cannot be produced safely.",
+        session_id="sess-1",
+    )
+
+    assert result["decision"] == "NEED_HUMAN_REVIEW"
+    assert client.human_review_payloads == [
+        {
+            "task_id": "task-1",
+            "run_id": "run-1",
+            "reason": "Focused validation cannot be produced safely.",
+            "actor": "agent",
+        }
+    ]
+
+
+def test_human_review_projection_blocks_continuation_tools_and_allows_final_report(
+    tmp_path,
+):
+    client = FakeClient()
+    coordinator = ConstraintKeeperCoordinator(
+        client=client,
+        spool_root=tmp_path,
+        identity=_identity(),
+        diff_provider=lambda: (
+            "diff --git a/lib/example.py b/lib/example.py\n"
+            "--- a/lib/example.py\n"
+            "+++ b/lib/example.py\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+new\n"
+        ),
+    )
+    coordinator.request_human_review(
+        reason="Focused validation cannot be produced safely.",
+        session_id="sess-1",
+    )
+
+    message = coordinator.pre_tool_call_block_message(
+        "terminal",
+        {"command": "pytest tests/test_gzip.py"},
+        session_id="sess-1",
+    )
+    assert message is not None
+    assert "human review" in message.lower()
+    assert "stop" in message.lower()
+
+    directive = coordinator.post_llm_call_final_response_directive(
+        assistant_response=(
+            "Human review requested for focused validation blocker. "
+            "Implemented the fix and ready for review."
+        ),
+        session_id="sess-1",
+    )
+    assert directive is None
+
+
+def test_validation_next_step_blocks_execute_code_as_completion_validation(tmp_path):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(),
+        spool_root=tmp_path,
+        identity=_identity(),
+    )
+    coordinator._active_completion_next_step = {
+        "source": "server",
+        "runtime_state": "Validation",
+        "runtime_signal": {
+            "agent_loop_terminal": False,
+            "final_response_allowed": False,
+            "human_review_required": False,
+            "completion_accepted": False,
+        },
+        "next_action_kind": "run_focused_validation",
+        "next_action_structured": {
+            "allowed_actions": ["Run focused pytest."],
+            "progress_means": ["trusted_test_result_after_latest_diff"],
+        },
+    }
+
+    message = coordinator.pre_tool_call_block_message(
+        "execute_code",
+        {"code": "print('gzip ok')"},
+        session_id="sess-1",
+    )
+
+    assert message is not None
+    assert "execute_code" in message
+    assert "diagnostic" in message.lower()
+    pending = coordinator.spool.pending("task-1", "run-1")
+    assert any(
+        event["event_kind"] == "enforcement_decision"
+        and event["payload"].get("next_step", {}).get("source")
+        == "adapter_local_guard"
+        and event["payload"].get("next_step", {}).get("runtime_state")
+        == "Validation"
+        for event in pending
     )
 
 
