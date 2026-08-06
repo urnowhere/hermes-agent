@@ -112,6 +112,7 @@ class EngineClient:
         revision: str = "latest",
         start_line: int | None = None,
         end_line: int | None = None,
+        known_read_keys: list[str] | None = None,
         identity: Optional[dict[str, Any]] = None,
     ) -> Optional[dict[str, Any]]:
         """Read exact source context from Formsy compiled repository memory."""
@@ -124,6 +125,7 @@ class EngineClient:
                 revision=revision,
                 start_line=start_line,
                 end_line=end_line,
+                known_read_keys=known_read_keys,
                 **({"identity": identity} if identity else {}),
             )
         except (RuntimeAPIError, FormalCCTimeoutError) as e:

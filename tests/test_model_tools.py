@@ -85,6 +85,60 @@ class TestHandleFunctionCall:
             ),
         ]
 
+    def test_registry_dispatch_does_not_project_status_cards(self):
+        observed = []
+
+        def fake_invoke_hook(hook_name, **kwargs):
+            if hook_name in {"post_tool_call", "transform_tool_result"}:
+                observed.append((hook_name, kwargs["result"]))
+            if hook_name == "transform_tool_result":
+                return ['{"rewritten":true}']
+            return []
+
+        with (
+            patch("model_tools.registry.dispatch", return_value='{"raw":true}'),
+            patch("hermes_cli.plugins.invoke_hook", side_effect=fake_invoke_hook),
+        ):
+            result = handle_function_call(
+                "web_search",
+                {"q": "test"},
+                task_id="task-1",
+                tool_call_id="call-1",
+                session_id="session-1",
+            )
+
+        assert result == '{"rewritten":true}'
+        assert observed == [
+            ("post_tool_call", '{"raw":true}'),
+            ("transform_tool_result", '{"raw":true}'),
+        ]
+
+        from hermes_cli.tool_status_cards import drain_tool_status_cards
+
+        assert drain_tool_status_cards("call-1") == []
+
+    def test_registry_dispatch_does_not_invoke_status_card_hook(self):
+        hook_calls = []
+
+        def fake_invoke_hook(hook_name, **kwargs):
+            hook_calls.append(hook_name)
+            return []
+
+        with (
+            patch("model_tools.registry.dispatch", return_value='{"ok":true}'),
+            patch("hermes_cli.plugins.invoke_hook", side_effect=fake_invoke_hook),
+        ):
+            result = handle_function_call(
+                "web_search",
+                {"q": "test"},
+                task_id="task-1",
+                tool_call_id="call-2",
+                session_id="session-1",
+            )
+
+        assert "project_tool_status_cards" not in hook_calls
+        assert result == '{"ok":true}'
+
     def test_post_tool_call_receives_non_negative_integer_duration_ms(self):
         """Regression: post_tool_call and transform_tool_result hooks must
         receive a non-negative integer ``duration_ms`` kwarg measuring

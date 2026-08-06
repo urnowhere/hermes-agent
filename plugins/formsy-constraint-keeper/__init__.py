@@ -7,13 +7,16 @@ It must not depend on Hermes agent-loop internals.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
+from hermes_cli.formsy_status import formsy_tool_status_cards_from_tool_result
 from plugins.formsy.constraint_keeper.coordinator import ConstraintKeeperCoordinator
 from plugins.formsy.constraint_keeper.runtime import get_default_coordinator, reset_default_coordinator
 
 _TOOLSET = "plugin_formsy_constraint_keeper"
 _coordinator: ConstraintKeeperCoordinator | None = None
+_latest_code_plan_url_by_session: dict[str, str] = {}
 
 
 def register(ctx: Any) -> None:
@@ -22,6 +25,7 @@ def register(ctx: Any) -> None:
     ctx.register_hook("post_llm_call", _on_post_llm_call)
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
     ctx.register_hook("post_tool_call", _on_post_tool_call)
+    ctx.register_hook("project_tool_status_cards", _on_project_tool_status_cards)
     ctx.register_hook("transform_tool_result", _on_transform_tool_result)
     ctx.register_hook("on_session_end", _on_session_end)
     ctx.register_hook("on_session_reset", _on_session_reset)
@@ -139,6 +143,34 @@ def _on_post_tool_call(
     )
 
 
+def _on_project_tool_status_cards(
+    tool_name: str = "",
+    args: dict[str, Any] | None = None,
+    result: Any = None,
+    session_id: str = "",
+    task_id: str = "",
+    tool_call_id: str = "",
+    **_: Any,
+) -> list[dict[str, Any]] | None:
+    session_key = session_id or task_id or "default"
+    fallback_code_plan_url = _latest_code_plan_url_by_session.get(session_key, "")
+    cards = formsy_tool_status_cards_from_tool_result(
+        tool_name,
+        args or {},
+        str(result or ""),
+        fs_console_base_url=_formsy_fs_console_base_url(),
+        fallback_code_plan_url=fallback_code_plan_url,
+        tool_call_id=tool_call_id,
+    )
+    for card in cards:
+        link = card.get("link")
+        if isinstance(link, dict):
+            url = str(link.get("url") or "").strip()
+            if url:
+                _latest_code_plan_url_by_session[session_key] = url
+    return cards or None
+
+
 def _on_transform_tool_result(
     tool_name: str = "",
     args: dict[str, Any] | None = None,
@@ -169,6 +201,7 @@ def _on_session_reset(**_: Any) -> None:
     except Exception:
         pass
     _coordinator = None
+    _latest_code_plan_url_by_session.clear()
     reset_default_coordinator()
 
 
@@ -217,3 +250,22 @@ def _tool_schema(name: str, description: str, properties: dict[str, Any]) -> dic
 
 def _json_result(payload: Any) -> str:
     return json.dumps(payload if payload is not None else {}, ensure_ascii=False)
+
+
+def _formsy_fs_console_base_url() -> str:
+    configured = os.environ.get("FORMSY_FS_CONSOLE_BASE_URL", "").strip()
+    if configured:
+        return configured
+    try:
+        from hermes_cli.config import load_config
+
+        formsy_config = (load_config() or {}).get("formsy")
+    except Exception:
+        formsy_config = None
+    if not isinstance(formsy_config, dict):
+        return ""
+    return str(
+        formsy_config.get("fs_console_base_url")
+        or formsy_config.get("console_base_url")
+        or ""
+    ).strip()

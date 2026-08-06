@@ -786,10 +786,10 @@ def handle_function_call(
             pass
 
         # Generic tool-result canonicalization seam: plugins receive the
-        # final result string (JSON, usually) and may replace it by
-        # returning a string from transform_tool_result. Runs after
-        # post_tool_call (which stays observational) and before the result
-        # is appended back into conversation context. Fail-open; the first
+        # final result string (JSON, usually) and may replace it by returning
+        # a string from transform_tool_result. Display-only status cards are
+        # projected by the shared agent completion boundary so Context Engine
+        # tools and registry tools follow the same path. Fail-open; the first
         # valid string return wins; non-string returns are ignored.
         try:
             from hermes_cli.plugins import invoke_hook

@@ -346,6 +346,7 @@ class RuntimeClient:
         revision: str = "latest",
         start_line: int | None = None,
         end_line: int | None = None,
+        known_read_keys: list[str] | None = None,
         identity: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Call repository source read endpoint (for tool calls)."""
@@ -359,6 +360,10 @@ class RuntimeClient:
             request_body["start_line"] = start_line
         if end_line is not None:
             request_body["end_line"] = end_line
+        if known_read_keys:
+            request_body["known_read_keys"] = [
+                str(item).strip() for item in known_read_keys if str(item).strip()
+            ]
         if identity:
             request_body["identity"] = identity
 

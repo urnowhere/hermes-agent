@@ -399,6 +399,88 @@ def _apply_post_llm_call_final_response_directives(
     return updated
 
 
+_AGENT_TERMINAL_BOOL_KEYS = frozenset({
+    "agent_loop_terminal",
+    "agent_terminal",
+    "loop_terminal",
+    "conversation_terminal",
+    "ready_for_final_response",
+    "final_response_ready",
+    "requires_final_response",
+})
+
+
+def _normalize_agent_terminal_token(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(value).strip().lower()).strip("_")
+
+
+def _parse_tool_result_payload(content: Any) -> Any:
+    if isinstance(content, (dict, list)):
+        return content
+    if not isinstance(content, str):
+        return None
+    stripped = content.strip()
+    if not stripped:
+        return None
+    try:
+        return json.loads(stripped)
+    except Exception:
+        return None
+
+
+def _payload_has_agent_terminal_signal(payload: Any) -> bool:
+    """Return True when a tool payload says the *agent loop* can finalize.
+
+    This deliberately does not treat ordinary tool success fields such as
+    ``status: completed`` as terminal, and it does not interpret domain
+    decisions such as verifier gate labels.  The signal must be an explicit
+    runtime boolean such as ``agent_loop_terminal``.
+    """
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            normalized_key = _normalize_agent_terminal_token(key)
+            if normalized_key in _AGENT_TERMINAL_BOOL_KEYS and value is True:
+                return True
+        return any(_payload_has_agent_terminal_signal(value) for value in payload.values())
+    if isinstance(payload, list):
+        return any(_payload_has_agent_terminal_signal(item) for item in payload)
+    return False
+
+
+def _recent_tool_results_appear_terminal(messages: list[dict], window: int = 5) -> bool:
+    """Return True when recent tool results indicate final response is due."""
+    for message in messages[-window:]:
+        if not isinstance(message, dict) or message.get("role") != "tool":
+            continue
+        payload = _parse_tool_result_payload(message.get("content"))
+        if _payload_has_agent_terminal_signal(payload):
+            return True
+    return False
+
+
+def _post_tool_empty_nudge_content(messages: list[dict]) -> str:
+    if _recent_tool_results_appear_terminal(messages):
+        return (
+            "You just executed tool calls whose results appear terminal/finalizable "
+            "for this agent loop. Please provide the final response now, "
+            "summarizing the outcome for the user. Do not call additional tools "
+            "unless the tool result explicitly requests more work."
+        )
+    return (
+        "You just executed tool calls but returned an empty response. "
+        "Please process the tool results above and continue with the task."
+    )
+
+
+def _post_tool_empty_status_text(messages: list[dict]) -> str:
+    if _recent_tool_results_appear_terminal(messages):
+        return (
+            "⚠️ Model returned empty after terminal tool result — "
+            "nudging for final response"
+        )
+    return "⚠️ Model returned empty after tool calls — nudging to continue"
+
+
 def _should_parallelize_tool_batch(tool_calls) -> bool:
     """Return True when a tool-call batch is safe to run concurrently."""
     if len(tool_calls) <= 1:
@@ -9754,6 +9836,51 @@ class AIAgent:
         finally:
             self._executing_tools = False
 
+    def _project_and_notify_tool_completion(
+        self,
+        *,
+        tool_call_id: str,
+        function_name: str,
+        function_args: dict,
+        function_result: str,
+        effective_task_id: str,
+        tool_duration: float,
+        execution_blocked: bool,
+    ) -> None:
+        """Project developer-only cards, then notify the active UI surface."""
+        if execution_blocked:
+            return
+
+        try:
+            from hermes_cli.tool_status_cards import project_and_queue_tool_status_cards
+
+            project_and_queue_tool_status_cards(
+                tool_name=function_name,
+                args=function_args,
+                result=function_result,
+                task_id=effective_task_id,
+                session_id=str(getattr(self, "session_id", "") or ""),
+                tool_call_id=tool_call_id,
+                duration_ms=max(0, int(tool_duration * 1000)),
+            )
+        except Exception:
+            logging.debug(
+                "Tool status card projection failed for %s",
+                function_name,
+                exc_info=True,
+            )
+
+        if self.tool_complete_callback:
+            try:
+                self.tool_complete_callback(
+                    tool_call_id,
+                    function_name,
+                    function_args,
+                    function_result,
+                )
+            except Exception as cb_err:
+                logging.debug(f"Tool complete callback error: {cb_err}")
+
     def _dispatch_delegate_task(self, function_args: dict) -> str:
         """Single call site for delegate_task dispatch.
 
@@ -10229,11 +10356,15 @@ class AIAgent:
             self._current_tool = None
             self._touch_activity(f"tool completed: {name} ({tool_duration:.1f}s)")
 
-            if not blocked_by_guardrail and self.tool_complete_callback:
-                try:
-                    self.tool_complete_callback(tc.id, name, args, function_result)
-                except Exception as cb_err:
-                    logging.debug(f"Tool complete callback error: {cb_err}")
+            self._project_and_notify_tool_completion(
+                tool_call_id=tc.id,
+                function_name=name,
+                function_args=args,
+                function_result=function_result,
+                effective_task_id=effective_task_id,
+                tool_duration=tool_duration,
+                execution_blocked=blocked_by_guardrail,
+            )
 
             if not blocked_by_guardrail:
                 self._record_external_memory_tool_evidence(name, args, function_result)
@@ -10534,6 +10665,27 @@ class AIAgent:
                         spinner.stop(cute_msg)
                     elif self._should_emit_quiet_tool_messages():
                         self._vprint(f"  {cute_msg}")
+                # Context Engine tools bypass model_tools.handle_function_call,
+                # so they must publish the same observation hook explicitly.
+                try:
+                    from hermes_cli.plugins import invoke_hook
+
+                    invoke_hook(
+                        "post_tool_call",
+                        tool_name=function_name,
+                        args=function_args,
+                        result=function_result,
+                        task_id=effective_task_id or "",
+                        session_id=self.session_id or "",
+                        tool_call_id=tool_call.id or "",
+                        duration_ms=max(0, int(tool_duration * 1000)),
+                    )
+                except Exception:
+                    logger.debug(
+                        "post_tool_call hook failed for Context Engine tool %s",
+                        function_name,
+                        exc_info=True,
+                    )
             elif self._memory_manager and self._memory_manager.has_tool(function_name):
                 # Memory provider tools (hindsight_retain, honcho_search, etc.)
                 # These are not in the tool registry — route through MemoryManager.
@@ -10655,11 +10807,15 @@ class AIAgent:
                 logging.debug(f"Tool {function_name} completed in {tool_duration:.2f}s")
                 logging.debug(f"Tool result ({len(function_result)} chars): {function_result}")
 
-            if not _execution_blocked and self.tool_complete_callback:
-                try:
-                    self.tool_complete_callback(tool_call.id, function_name, function_args, function_result)
-                except Exception as cb_err:
-                    logging.debug(f"Tool complete callback error: {cb_err}")
+            self._project_and_notify_tool_completion(
+                tool_call_id=tool_call.id,
+                function_name=function_name,
+                function_args=function_args,
+                function_result=function_result,
+                effective_task_id=effective_task_id,
+                tool_duration=tool_duration,
+                execution_blocked=_execution_blocked,
+            )
 
             if not _execution_blocked:
                 self._record_external_memory_tool_evidence(function_name, function_args, function_result)
@@ -14050,12 +14206,14 @@ class AIAgent:
                         #  (b) Prior turn had content + SUBSTANTIVE tools (the
                         #      fallback above was skipped because the content
                         #      was mid-task narration, not a final answer)
-                        # Instead of giving up, nudge the model to continue by
-                        # appending a user-level hint.  This is the #9400 case:
-                        # weaker models (mimo-v2-pro, GLM-5, etc.) sometimes
-                        # return empty after tool results instead of continuing
-                        # to the next step.  One retry with a nudge usually
-                        # fixes it.
+                        # Instead of giving up, nudge the model by appending a
+                        # user-level hint.  This is the #9400 case: weaker
+                        # models (mimo-v2-pro, GLM-5, etc.) sometimes return
+                        # empty after tool results instead of advancing the
+                        # agent loop.  When the recent tool result already says
+                        # the loop is terminal/finalizable, the nudge asks for
+                        # a final response instead of telling the model to keep
+                        # working.
                         _prior_was_tool = any(
                             m.get("role") == "tool"
                             for m in messages[-5:]  # check recent messages
@@ -14084,12 +14242,9 @@ class AIAgent:
                             self._last_content_tools_all_housekeeping = False
                             logger.info(
                                 "Empty response after tool calls — nudging model "
-                                "to continue processing"
+                                "with protocol-aware follow-up"
                             )
-                            self._emit_status(
-                                "⚠️ Model returned empty after tool calls — "
-                                "nudging to continue"
-                            )
+                            self._emit_status(_post_tool_empty_status_text(messages))
                             # Append the empty assistant message first so the
                             # message sequence stays valid:
                             #   tool(result) → assistant("(empty)") → user(nudge)
@@ -14100,11 +14255,7 @@ class AIAgent:
                             messages.append(_nudge_msg)
                             messages.append({
                                 "role": "user",
-                                "content": (
-                                    "You just executed tool calls but returned an "
-                                    "empty response. Please process the tool "
-                                    "results above and continue with the task."
-                                ),
+                                "content": _post_tool_empty_nudge_content(messages),
                             })
                             continue
 

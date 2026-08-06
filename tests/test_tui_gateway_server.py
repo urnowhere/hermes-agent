@@ -680,6 +680,82 @@ def test_formsy_verify_completion_tool_completion_emits_finish_gate_status():
     )
 
 
+def test_formsy_verify_completion_status_includes_code_plan_link(monkeypatch):
+    monkeypatch.setenv("FORMSY_FS_CONSOLE_BASE_URL", "http://localhost:5173")
+    result = json.dumps({
+        "decision": "NEED_MORE_VALIDATION",
+        "code_plan_id": "cp_9c00c34d458e2e47",
+        "protocol": {
+            "summary": "Completion proof is incomplete.",
+            "gate_decision": "NEED_MORE_VALIDATION",
+        },
+    })
+
+    with patch("tui_gateway.server._emit") as emit:
+        server._on_tool_complete(
+            "sid",
+            "tool-link",
+            "formsy_verify_completion",
+            {},
+            result,
+        )
+
+    emit.assert_any_call(
+        "status.update",
+        "sid",
+        {
+            "kind": "formsy.finish_gate",
+            "text": (
+                "[FormSy Finish Gate] Needs validation\n"
+                "Decision: NEED_MORE_VALIDATION\n"
+                "Reason: Completion proof is incomplete.\n"
+                "Task Workflow: http://localhost:5173/code-plans/cp_9c00c34d458e2e47"
+            ),
+        },
+    )
+
+
+def test_formsy_finish_gate_inherits_code_plan_link_from_context_search(monkeypatch):
+    monkeypatch.setenv("FORMSY_FS_CONSOLE_BASE_URL", "http://localhost:5173")
+    context_result = json.dumps({
+        "ok": True,
+        "query": "Request.open gzip Content-Encoding",
+        "coverage": "partial",
+        "accepted_targets": ["lib/ansible/module_utils/urls.py"],
+        "guidance": {
+            "code_plan_review": {
+                "code_plan_id": "cp_52359f4a1cb3e765",
+                "url": "http://localhost:3000/code-plans/cp_52359f4a1cb3e765",
+            }
+        },
+    })
+    finish_result = json.dumps({
+        "decision": "NEED_MORE_VALIDATION",
+        "protocol": {
+            "summary": "Public interface evidence is incomplete.",
+            "gate_decision": "NEED_MORE_VALIDATION",
+        },
+    })
+
+    with patch("tui_gateway.server._emit") as emit:
+        server._on_tool_complete("sid", "tool-context", "context_search", {}, context_result)
+        server._on_tool_complete("sid", "tool-finish", "formsy_verify_completion", {}, finish_result)
+
+    emit.assert_any_call(
+        "status.update",
+        "sid",
+        {
+            "kind": "formsy.finish_gate",
+            "text": (
+                "[FormSy Finish Gate] Needs validation\n"
+                "Decision: NEED_MORE_VALIDATION\n"
+                "Reason: Public interface evidence is incomplete.\n"
+                "Task Workflow: http://localhost:5173/code-plans/cp_52359f4a1cb3e765"
+            ),
+        },
+    )
+
+
 def test_malformed_formsy_tool_completion_does_not_emit_status():
     with patch("tui_gateway.server._emit") as emit:
         server._on_tool_complete(

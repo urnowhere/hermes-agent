@@ -58,6 +58,31 @@ def _make_cli(tool_progress="all"):
             return mod.HermesCLI()
 
 
+def _formsy_cards(
+    name,
+    args,
+    result,
+    *,
+    tool_call_id="tool-1",
+    fs_console_base_url="",
+    fallback_code_plan_url="",
+):
+    from hermes_cli.formsy_status import formsy_tool_status_cards_from_tool_result
+
+    return formsy_tool_status_cards_from_tool_result(
+        name,
+        args,
+        result,
+        fs_console_base_url=fs_console_base_url,
+        fallback_code_plan_url=fallback_code_plan_url,
+        tool_call_id=tool_call_id,
+    )
+
+
+def _drain_from(cards_by_tool_call_id):
+    return lambda tool_call_id: cards_by_tool_call_id.get(tool_call_id, [])
+
+
 class TestToolProgressScrollback:
     """Stacked scrollback lines for 'all' and 'new' modes."""
 
@@ -199,21 +224,96 @@ class TestToolProgressScrollback:
             "memory_status": "hit",
             "accepted_targets": ["lib/ansible/executor/play_iterator.py"],
         })
+        cards = _formsy_cards(
+            "context_search",
+            {"query": "PlayIterator public states"},
+            result,
+            tool_call_id="tool-1",
+        )
 
-        with patch.object(_cli_mod, "_cprint_inline") as mock_print:
+        with patch.object(_cli_mod, "drain_tool_status_cards", return_value=cards), \
+             patch.object(_cli_mod, "_cprint_inline") as mock_print:
             cli._on_tool_complete(
                 "tool-1",
                 "context_search",
                 {"query": "PlayIterator public states"},
                 result,
             )
-            cli._flush_formsy_status_projection()
+            cli._flush_tool_status_cards()
 
         printed = "\n".join(str(call.args[0]) for call in mock_print.call_args_list)
         assert "╭─ ◆ FormSy Context" in printed
         assert "[FormSy] Context Pack ready" in printed
         assert "Primary target: lib/ansible/executor/play_iterator.py" in printed
         assert "╰" in printed
+
+    def test_cli_flush_prints_tool_status_card(self):
+        """Generic ToolStatusCard entries are rendered from the CLI thread flush."""
+        cli = _make_cli(tool_progress="all")
+        cards = [
+            {
+                "source": "test_runner",
+                "kind": "summary",
+                "title": "Test Runner",
+                "body": ["3 passed", "0 failed"],
+                "severity": "success",
+                "dedupe_key": "test-runner:summary:1",
+                "link": {
+                    "label": "Code plan",
+                    "url": "http://localhost:3000/code-plans/cp_test",
+                },
+            }
+        ]
+
+        with patch.object(_cli_mod, "drain_tool_status_cards", return_value=cards), \
+             patch.object(_cli_mod, "_cprint_inline") as mock_print:
+            cli._on_tool_complete("tool-generic", "pytest", {}, "{}")
+            assert len(cli._pending_tool_status_cards) == 1
+            cli._flush_tool_status_cards()
+
+        printed = "\n".join(str(call.args[0]) for call in mock_print.call_args_list)
+        assert "╭─ ◆ Test Runner" in printed
+        assert "3 passed" in printed
+        assert "0 failed" in printed
+        assert "Code plan: http://localhost:3000/code-plans/cp_test" in printed
+
+    def test_cli_flush_keeps_only_latest_tool_status_card_by_group(self):
+        """Generic latest cards collapse by group_key without FormSy-specific logic."""
+        cli = _make_cli(tool_progress="all")
+        old_card = {
+            "source": "review",
+            "kind": "gate",
+            "title": "Review Gate",
+            "body": ["Reason: old"],
+            "severity": "warning",
+            "dedupe_key": "review:gate:old",
+            "group_key": "review:gate",
+            "replace_policy": "latest",
+        }
+        new_card = {
+            "source": "review",
+            "kind": "gate",
+            "title": "Review Gate",
+            "body": ["Reason: new"],
+            "severity": "warning",
+            "dedupe_key": "review:gate:new",
+            "group_key": "review:gate",
+            "replace_policy": "latest",
+        }
+
+        def _drain(tool_call_id):
+            return {"tool-old": [old_card], "tool-new": [new_card]}.get(tool_call_id, [])
+
+        with patch.object(_cli_mod, "drain_tool_status_cards", side_effect=_drain), \
+             patch.object(_cli_mod, "_cprint_inline") as mock_print:
+            cli._on_tool_complete("tool-old", "review_tool", {}, "{}")
+            cli._on_tool_complete("tool-new", "review_tool", {}, "{}")
+            assert len(cli._pending_tool_status_cards) == 2
+            cli._flush_tool_status_cards()
+
+        printed = "\n".join(str(call.args[0]) for call in mock_print.call_args_list)
+        assert "Reason: new" in printed
+        assert "Reason: old" not in printed
 
     def test_cli_flush_prints_formsy_status_synchronously(self):
         """FormSy status flush must not use the async cross-thread print helper."""
@@ -225,8 +325,15 @@ class TestToolProgressScrollback:
             "memory_status": "hit",
             "accepted_targets": ["lib/ansible/executor/play_iterator.py"],
         })
+        cards = _formsy_cards(
+            "context_search",
+            {"query": "PlayIterator public states"},
+            result,
+            tool_call_id="tool-1",
+        )
 
-        with patch.object(_cli_mod, "_cprint") as mock_cprint, \
+        with patch.object(_cli_mod, "drain_tool_status_cards", return_value=cards), \
+             patch.object(_cli_mod, "_cprint") as mock_cprint, \
              patch.object(_cli_mod, "_pt_print") as mock_pt_print:
             cli._on_tool_complete(
                 "tool-1",
@@ -234,7 +341,7 @@ class TestToolProgressScrollback:
                 {"query": "PlayIterator public states"},
                 result,
             )
-            cli._flush_formsy_status_projection()
+            cli._flush_tool_status_cards()
 
         mock_cprint.assert_not_called()
         assert mock_pt_print.call_count >= 1
@@ -252,15 +359,22 @@ class TestToolProgressScrollback:
                 "primary_edit_files": ["lib/ansible/executor/play_iterator.py"],
             }],
         })
+        cards = _formsy_cards(
+            "context_search",
+            {"query": "PlayIterator public states"},
+            result,
+            tool_call_id="tool-1",
+        )
 
-        with patch.object(_cli_mod, "_cprint_inline") as mock_print:
+        with patch.object(_cli_mod, "drain_tool_status_cards", return_value=cards), \
+             patch.object(_cli_mod, "_cprint_inline") as mock_print:
             cli._on_tool_complete(
                 "tool-1",
                 "context_search",
                 {"query": "PlayIterator public states"},
                 result,
             )
-            cli._flush_formsy_status_projection()
+            cli._flush_tool_status_cards()
 
         assert mock_print.call_count == 1
         printed = str(mock_print.call_args.args[0])
@@ -278,8 +392,15 @@ class TestToolProgressScrollback:
             "memory_status": "hit",
             "accepted_targets": ["lib/ansible/executor/play_iterator.py"],
         })
+        cards = _formsy_cards(
+            "context_search",
+            {"query": "PlayIterator public states"},
+            result,
+            tool_call_id="tool-1",
+        )
 
-        with patch.object(_cli_mod, "_cprint_inline"), \
+        with patch.object(_cli_mod, "drain_tool_status_cards", return_value=cards), \
+             patch.object(_cli_mod, "_cprint_inline"), \
              patch.object(_cli_mod.logger, "info") as mock_info:
             cli._on_tool_complete(
                 "tool-1",
@@ -290,7 +411,7 @@ class TestToolProgressScrollback:
 
         assert any(
             call.args[:3] == (
-                "FormSy CLI status projection: tool=%s statuses=%d",
+                "Tool status card projection: tool=%s cards=%d",
                 "context_search",
                 1,
             )
@@ -307,18 +428,181 @@ class TestToolProgressScrollback:
                 "gate_decision": "ACCEPT_DONE",
             },
         })
+        cards = _formsy_cards(
+            "formsy_verify_completion",
+            {},
+            result,
+            tool_call_id="tool-2",
+        )
 
-        with patch.object(_cli_mod, "_cprint_inline") as mock_print:
+        with patch.object(_cli_mod, "drain_tool_status_cards", return_value=cards), \
+             patch.object(_cli_mod, "_cprint_inline") as mock_print:
             cli._on_tool_complete(
                 "tool-2",
                 "formsy_verify_completion",
                 {},
                 result,
             )
-            cli._flush_formsy_status_projection()
+            cli._flush_tool_status_cards()
 
         printed = "\n".join(str(call.args[0]) for call in mock_print.call_args_list)
         assert "╭─ ◆ FormSy Finish Gate" in printed
-        assert "[FormSy Finish Gate] Accepted" in printed
+        assert "Decision: ACCEPT_DONE" in printed
         assert "Evidence: Completion proof satisfies P0 contracts." in printed
         assert "╰" in printed
+
+    def test_cli_flush_prints_formsy_finish_gate_code_plan_link(self):
+        """Finish Gate cards include the fs-console code plan link when configured."""
+        cli = _make_cli(tool_progress="all")
+        result = json.dumps({
+            "decision": "NEED_MORE_VALIDATION",
+            "code_plan_id": "cp_9c00c34d458e2e47",
+            "protocol": {
+                "summary": "Completion proof is incomplete.",
+                "gate_decision": "NEED_MORE_VALIDATION",
+            },
+        })
+        cards = _formsy_cards(
+            "formsy_verify_completion",
+            {},
+            result,
+            tool_call_id="tool-3",
+            fs_console_base_url="http://localhost:5173",
+        )
+
+        with patch.object(_cli_mod, "drain_tool_status_cards", return_value=cards), \
+             patch.object(_cli_mod, "_cprint_inline") as mock_print:
+            cli._on_tool_complete(
+                "tool-3",
+                "formsy_verify_completion",
+                {},
+                result,
+            )
+            cli._flush_tool_status_cards()
+
+        printed = "\n".join(str(call.args[0]) for call in mock_print.call_args_list)
+        assert "Task Workflow: http://localhost:5173/code-plans/cp_9c00c34d458e2e47" in printed
+
+    def test_cli_finish_gate_inherits_code_plan_link_from_context_search(self):
+        """Finish Gate cards inherit the latest context_search code plan when verify lacks one."""
+        cli = _make_cli(tool_progress="all")
+        context_result = json.dumps({
+            "ok": True,
+            "query": "Request.open gzip Content-Encoding",
+            "coverage": "partial",
+            "accepted_targets": ["lib/ansible/module_utils/urls.py"],
+            "guidance": {
+                "code_plan_review": {
+                    "code_plan_id": "cp_52359f4a1cb3e765",
+                    "url": "http://localhost:3000/code-plans/cp_52359f4a1cb3e765",
+                }
+            },
+        })
+        finish_result = json.dumps({
+            "decision": "NEED_MORE_VALIDATION",
+            "protocol": {
+                "summary": "Public interface evidence is incomplete.",
+                "gate_decision": "NEED_MORE_VALIDATION",
+            },
+        })
+        context_cards = _formsy_cards(
+            "context_search",
+            {},
+            context_result,
+            tool_call_id="tool-context",
+            fs_console_base_url="http://localhost:5173",
+        )
+        finish_cards = _formsy_cards(
+            "formsy_verify_completion",
+            {},
+            finish_result,
+            tool_call_id="tool-finish",
+            fallback_code_plan_url="http://localhost:5173/code-plans/cp_52359f4a1cb3e765",
+        )
+
+        with patch.object(_cli_mod, "drain_tool_status_cards", side_effect=_drain_from({
+            "tool-context": context_cards,
+            "tool-finish": finish_cards,
+        })), patch.object(_cli_mod, "_cprint_inline") as mock_print:
+            cli._on_tool_complete("tool-context", "context_search", {}, context_result)
+            cli._on_tool_complete("tool-finish", "formsy_verify_completion", {}, finish_result)
+            cli._flush_tool_status_cards()
+
+        printed = "\n".join(str(call.args[0]) for call in mock_print.call_args_list)
+        assert "Task Workflow: http://localhost:5173/code-plans/cp_52359f4a1cb3e765" in printed
+
+    def test_cli_flush_keeps_only_latest_formsy_finish_gate(self):
+        """A retry loop should not print stale Finish Gate cards with old code plan URLs."""
+        cli = _make_cli(tool_progress="all")
+        first_context = json.dumps({
+            "ok": True,
+            "query": "Request.open gzip Content-Encoding",
+            "coverage": "partial",
+            "accepted_targets": ["lib/ansible/module_utils/urls.py"],
+            "guidance": {"code_plan_review": {"code_plan_id": "cp_first"}},
+        })
+        second_context = json.dumps({
+            "ok": True,
+            "query": "Request.open gzip tests",
+            "coverage": "partial",
+            "accepted_targets": ["lib/ansible/module_utils/urls.py"],
+            "guidance": {"code_plan_review": {"code_plan_id": "cp_second"}},
+        })
+        first_finish = json.dumps({
+            "decision": "NEED_MORE_VALIDATION",
+            "protocol": {
+                "summary": "Search coverage is insufficient.",
+                "gate_decision": "NEED_MORE_VALIDATION",
+            },
+        })
+        second_finish = json.dumps({
+            "decision": "NEED_MORE_VALIDATION",
+            "protocol": {
+                "summary": "Public interface evidence is incomplete.",
+                "gate_decision": "NEED_MORE_VALIDATION",
+            },
+        })
+        cards_by_tool = {
+            "tool-context-1": _formsy_cards(
+                "context_search",
+                {},
+                first_context,
+                tool_call_id="tool-context-1",
+                fs_console_base_url="http://localhost:5173",
+            ),
+            "tool-finish-1": _formsy_cards(
+                "formsy_verify_completion",
+                {},
+                first_finish,
+                tool_call_id="tool-finish-1",
+                fallback_code_plan_url="http://localhost:5173/code-plans/cp_first",
+            ),
+            "tool-context-2": _formsy_cards(
+                "context_search",
+                {},
+                second_context,
+                tool_call_id="tool-context-2",
+                fs_console_base_url="http://localhost:5173",
+            ),
+            "tool-finish-2": _formsy_cards(
+                "formsy_verify_completion",
+                {},
+                second_finish,
+                tool_call_id="tool-finish-2",
+                fallback_code_plan_url="http://localhost:5173/code-plans/cp_second",
+            ),
+        }
+
+        with patch.object(_cli_mod, "drain_tool_status_cards", side_effect=_drain_from(cards_by_tool)), \
+             patch.object(_cli_mod, "_cprint_inline") as mock_print:
+            cli._on_tool_complete("tool-context-1", "context_search", {}, first_context)
+            cli._on_tool_complete("tool-finish-1", "formsy_verify_completion", {}, first_finish)
+            cli._on_tool_complete("tool-context-2", "context_search", {}, second_context)
+            cli._on_tool_complete("tool-finish-2", "formsy_verify_completion", {}, second_finish)
+            cli._flush_tool_status_cards()
+
+        printed = "\n".join(str(call.args[0]) for call in mock_print.call_args_list)
+        assert "Task Workflow: http://localhost:5173/code-plans/cp_second" in printed
+        assert "Task Workflow: http://localhost:5173/code-plans/cp_first" not in printed
+        assert "Reason: Public interface evidence is incomplete." in printed
+        assert "Reason: Search coverage is insufficient." not in printed

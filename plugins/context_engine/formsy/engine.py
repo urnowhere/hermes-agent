@@ -6,6 +6,7 @@ import logging
 import re
 import shlex
 import subprocess
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -316,6 +317,37 @@ class WriteScopePolicy:
 
 class FormsyContextEngine(ContextEngine):
     """Formsy context engine for Hermes."""
+
+    _AGENT_CONTEXT_EXTRA_CHARS = 8_000
+    _AGENT_CONTEXT_LIST_LIMIT = 12
+    _AGENT_CONTEXT_MATCH_LIMIT = 12
+    _AGENT_CONTEXT_STRING_CHARS = 2_000
+    _MEMORY_COMPILE_MAX_FILES = 32
+    _MEMORY_COMPILE_MAX_BYTES = 500_000
+    _MEMORY_SOURCE_FALLBACK_FILES = 16
+    _MEMORY_SOURCE_QUERY_STOP_WORDS = frozenset({
+        "and",
+        "are",
+        "behavior",
+        "code",
+        "expected",
+        "false",
+        "for",
+        "from",
+        "into",
+        "must",
+        "none",
+        "not",
+        "null",
+        "should",
+        "task",
+        "that",
+        "the",
+        "this",
+        "true",
+        "when",
+        "with",
+    })
 
     def __init__(self):
         self._config: Optional[EngineConfig] = None
@@ -687,15 +719,16 @@ class FormsyContextEngine(ContextEngine):
                 "name": "context_search",
                 "description": (
                     "Search Formsy's compiled code memory/context for information "
-                    "relevant to a natural-language query. Use context_search proactively "
-                    "and repeatedly to understand the codebase faster. Prefer several "
-                    "targeted queries, such as symbols, file paths, PR behavior, call flow, "
-                    "and edge cases, over one broad query. Treat this tool as mandatory for "
-                    "retrieval: after a seed search, continue only if matches is non-empty "
-                    "and coverage is not poor, or rerun with grounded/legacy metadata. When "
-                    "context_search returns a candidate file or span, use context_read next "
-                    "instead of shell grep/find or direct file reads. context_search will "
-                    "try to compile the current repository memory when needed. If it returns "
+                    "relevant to a natural-language query. When the response includes "
+                    "semantic_context_action_package, treat that package as the primary "
+                    "action contract: follow next_action before broad source exploration. "
+                    "Do not repeat context_search, native grep/search, or full-file reads "
+                    "for the same semantic terms until the package's suggested "
+                    "context_read has been used. Prefer one focused seed query, then "
+                    "context_read on the returned target, then patch or ask a narrower "
+                    "missing-evidence query only if the package says evidence is "
+                    "insufficient. context_search will try to compile the current "
+                    "repository memory when needed. If it returns "
                     "MEMORY_COMPILE_UNAVAILABLE or MEMORY_COMPILE_TIMEOUT, call "
                     "formsy_compile_repo once, then retry context_search; if that still "
                     "fails, fall back to bounded shell inspection. Repository identity is "
@@ -763,6 +796,14 @@ class FormsyContextEngine(ContextEngine):
                                     "type": "string",
                                     "description": "Optional feedback about retrieval quality or contradictions to carry into the next query.",
                                 },
+                                "context_verbosity": {
+                                    "type": "string",
+                                    "enum": ["compact", "debug", "full", "verbose"],
+                                    "description": (
+                                        "Use compact by default. Use debug/full only "
+                                        "when diagnosing raw legacy extra_context."
+                                    ),
+                                },
                                 "tocs_lookup_identity": {
                                     "type": "object",
                                     "description": (
@@ -804,8 +845,10 @@ class FormsyContextEngine(ContextEngine):
                 "description": (
                     "Read exact source context from Formsy's compiled repository memory. "
                     "Use context_read after context_search returns a relevant file path or "
-                    "line range. This is the preferred way to inspect source code for "
-                    "SWE-bench tasks when direct file-content reads are discouraged."
+                    "line range. Preserve context_meta.read_key from successful reads and "
+                    "pass prior keys as known_read_keys on repeat reads. Do not repeat "
+                    "unchanged source text; duplicate reads may return compact "
+                    "content_omitted responses."
                 ),
                 "parameters": {
                     "type": "object",
@@ -823,6 +866,14 @@ class FormsyContextEngine(ContextEngine):
                             "type": "integer",
                             "description": "Optional inclusive 1-indexed last source line to read.",
                             "minimum": 1,
+                        },
+                        "known_read_keys": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Previously delivered context_meta.read_key values. "
+                                "Pass these to avoid receiving unchanged source text again."
+                            ),
                         },
                     },
                     "required": ["path"],
@@ -894,6 +945,7 @@ class FormsyContextEngine(ContextEngine):
             ):
                 if value is not None and not metadata.get(key):
                     metadata[key] = value
+        query = self._effective_context_search_query(query, metadata)
         if not self._ensure_memory_compiled(repo_id=repo_id, revision=revision, query=query, session_id=session_id):
             if isinstance(metadata.get("tocs_lookup_identity"), dict):
                 failed_metadata = dict(metadata)
@@ -925,45 +977,41 @@ class FormsyContextEngine(ContextEngine):
                         metadata=failed_metadata,
                         result=delivery_result,
                     )
-            # Source compile failed — attempt a memory-only prefetch before falling back to
-            # degraded_recovery. This surfaces episodes/facts from previous runs without
-            # requiring compiled source, enabling a memory hit on repeated tasks.
-            memory_hit = self._try_memory_prefetch_fallback(
-                query=query, repo_id=repo_id, session_id=session_id
-            )
-            if memory_hit is not None:
-                return memory_hit
-            self._retrieval_state = "degraded_recovery"
+            self._retrieval_state = "compile_required"
             self._sync_trace_state(state=self._retrieval_state)
             tocs_identity_status = (
                 "present"
                 if isinstance(metadata.get("tocs_lookup_identity"), dict)
                 else "missing"
             )
-            guidance_packet = self._build_degraded_guidance_packet(
-                query=query,
-                payload={},
-                metadata=args.get("metadata") if isinstance(args.get("metadata"), dict) else {},
-            )
-            self._degraded_guidance_packet = guidance_packet
             compile_status = self._last_memory_compile_status or "compile_unavailable"
             compile_error = self._last_memory_compile_error or self._last_async_error
-            compile_next_step = (
-                "context_search"
-                if compile_status == "compile_in_progress"
-                else "formsy_compile_repo"
-            )
-            compile_feedback = (
-                "Memory compile is still in progress. Wait briefly, then retry context_search. "
-                "If it later reports unavailable or timeout, call formsy_compile_repo once."
-                if compile_status == "compile_in_progress"
-                else (
-                    "Memory compile failed. Call formsy_compile_repo once with the same query, "
-                    "then retry context_search. If the repair also fails, use at most one "
-                    "targeted search_files call, then read_file the likely target. Do not "
-                    "repeat identical terminal repro commands."
-                )
-            )
+            compile_in_progress = compile_status == "compile_in_progress"
+            compile_next_step = "context_search" if compile_in_progress else "formsy_compile_repo"
+            guidance_packet = {
+                "mode": "compile_required",
+                "reason": compile_status,
+                "can_patch_now": False,
+                "target_candidates": [],
+                "likely_edit_files": [],
+                "recommended_first_reads": [],
+                "next_tool_directive": {
+                    "tool": compile_next_step,
+                    "args": {},
+                    "reason": (
+                        "Wait for the active repository compile before retrying context_search."
+                        if compile_in_progress
+                        else "Compile the repository before requesting source or contract guidance."
+                    ),
+                    "enforcement": "required",
+                    "max_attempts": 1,
+                },
+                "probe_budget": {
+                    "search_files": 0,
+                    "read_file": 0,
+                    "terminal_or_execute_code": 0,
+                },
+            }
             payload = {
                 "ok": True,
                 "query": query,
@@ -981,23 +1029,17 @@ class FormsyContextEngine(ContextEngine):
                     else "compile_unavailable_without_resolved_tocs"
                 ),
                 "retrieval_status": "failed",
-                "recovery_mode": "degraded_recovery",
-                "preferred_next_step": "context_read"
-                if guidance_packet.get("next_tool_directive")
-                else compile_next_step,
-                "allowed_tools": ["context_search", "formsy_compile_repo", "terminal", "read_file", "search_files"],
+                "retrieval_state": "compile_required",
+                "recovery_mode": "compile_required",
+                "preferred_next_step": compile_next_step,
+                "allowed_tools": [compile_next_step],
                 "guidance_packet": guidance_packet,
                 "retrieval_feedback": (
-                    compile_feedback
-                    + (
-                        " No tocs_lookup_identity was available, so FormSy could not "
-                        "resolve TOCS guidance for this degraded run."
-                        if tocs_identity_status == "missing"
-                        else ""
-                    )
+                    "Repository compilation is still in progress; retry context_search after it finishes."
+                    if compile_in_progress
+                    else "Repository source context is unavailable. Run formsy_compile_repo before context_search."
                 ),
             }
-            self._apply_next_tool_directive_fields(payload)
             self._notify_constraint_keeper_tool_result(
                 "context_search",
                 args=args,
@@ -1122,7 +1164,230 @@ class FormsyContextEngine(ContextEngine):
             result=json.dumps(payload),
             session_id=session_id,
         )
-        return json.dumps(payload)
+        return json.dumps(self._compact_context_search_agent_payload(payload))
+
+    @classmethod
+    def _compact_context_search_agent_payload(
+        cls,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Project the full search result into a bounded, agent-actionable view."""
+        compact: dict[str, Any] = {}
+        scalar_keys = (
+            "ok",
+            "query",
+            "retrieval_budget",
+            "coverage",
+            "retrieval_status",
+            "retrieval_state",
+            "recovery_mode",
+            "preferred_next_step",
+            "exploration_closed",
+            "blocked_tool_reason",
+            "error_code",
+            "warning",
+            "compile_status",
+            "compile_error",
+            "compile_repair_tool",
+            "tocs_identity_status",
+            "retrieval_feedback",
+            "memory_status",
+            "memory_freshness",
+            "memory_recall",
+            "guidance_contracts_present",
+            "constraint_protocol_warning",
+            "constraint_protocol_text",
+            "next_tool_directive_text",
+        )
+        for key in scalar_keys:
+            if key in payload:
+                compact[key] = cls._compact_agent_scalar(payload[key])
+
+        extra_context = str(payload.get("extra_context") or "")
+        if extra_context:
+            compact["extra_context"] = extra_context[: cls._AGENT_CONTEXT_EXTRA_CHARS]
+
+        matches = payload.get("matches")
+        if isinstance(matches, list):
+            compact["matches"] = [
+                cls._compact_agent_record(
+                    match,
+                    allowed_keys={
+                        "path",
+                        "file",
+                        "symbol",
+                        "kind",
+                        "score",
+                        "start_line",
+                        "end_line",
+                        "line",
+                        "reason",
+                        "source",
+                        "source_type",
+                    },
+                )
+                for match in matches[: cls._AGENT_CONTEXT_MATCH_LIMIT]
+                if isinstance(match, dict)
+            ]
+
+        list_keys = (
+            "suggested_queries",
+            "missing_context",
+            "retrieval_targets",
+            "grounded_symbols",
+            "grounded_files",
+            "accepted_targets",
+            "candidate_targets",
+            "stale_accepted_targets",
+            "superseded_targets",
+            "tocs_repair_targets",
+            "allowed_tools",
+            "direct_match_files",
+            "bundle_primary_files",
+            "bundle_must_edit",
+            "memory_query_hints",
+            "memory_test_hints",
+            "verified_solution_recipes",
+        )
+        for key in list_keys:
+            value = payload.get(key)
+            if isinstance(value, list):
+                compact[key] = cls._compact_agent_list(value)
+
+        for key in ("guidance", "guidance_packet"):
+            value = payload.get(key)
+            if isinstance(value, dict):
+                compact[key] = cls._compact_agent_guidance(value)
+
+        semantic_context = payload.get("tocs_semantic_context")
+        if isinstance(semantic_context, dict):
+            compact["tocs_semantic_context"] = cls._compact_agent_semantic_context(
+                semantic_context
+            )
+
+        for key in (
+            "tocs_contract_context",
+            "tocs_contract_projection",
+            "test_plan",
+            "context_package",
+            "next_tool_directive",
+            "next_retrieval",
+            "retrieval_decision",
+            "diagnostics",
+        ):
+            value = payload.get(key)
+            if isinstance(value, dict):
+                compact[key] = cls._compact_agent_mapping(value)
+
+        return compact
+
+    @classmethod
+    def _compact_agent_scalar(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value[: cls._AGENT_CONTEXT_STRING_CHARS]
+        if isinstance(value, (bool, int, float)) or value is None:
+            return value
+        return str(value)[: cls._AGENT_CONTEXT_STRING_CHARS]
+
+    @classmethod
+    def _compact_agent_list(cls, value: list[Any]) -> list[Any]:
+        compact: list[Any] = []
+        for item in value[: cls._AGENT_CONTEXT_LIST_LIMIT]:
+            if isinstance(item, dict):
+                compact.append(cls._compact_agent_mapping(item))
+            elif isinstance(item, list):
+                compact.append(cls._compact_agent_list(item))
+            else:
+                compact.append(cls._compact_agent_scalar(item))
+        return compact
+
+    @classmethod
+    def _compact_agent_mapping(cls, value: dict[str, Any]) -> dict[str, Any]:
+        compact: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in {"content", "internal_blob", "raw_payload", "raw_result"}:
+                continue
+            if isinstance(item, dict):
+                compact[key] = cls._compact_agent_mapping(item)
+            elif isinstance(item, list):
+                compact[key] = cls._compact_agent_list(item)
+            else:
+                compact[key] = cls._compact_agent_scalar(item)
+        return compact
+
+    @classmethod
+    def _compact_agent_record(
+        cls,
+        value: dict[str, Any],
+        *,
+        allowed_keys: set[str],
+    ) -> dict[str, Any]:
+        return {
+            key: cls._compact_agent_scalar(item)
+            for key, item in value.items()
+            if key in allowed_keys and not isinstance(item, (dict, list))
+        }
+
+    @classmethod
+    def _compact_agent_guidance(cls, value: dict[str, Any]) -> dict[str, Any]:
+        allowed_keys = {
+            "mode",
+            "summary",
+            "reason",
+            "fs_console",
+            "code_plan_review",
+            "can_patch_now",
+            "run_id",
+            "task_identity",
+            "grounding_confidence",
+            "pre_seed_workspace_reads",
+            "primary_edit_target",
+            "accepted_edit_targets",
+            "candidate_targets",
+            "target_candidates",
+            "likely_edit_files",
+            "read_only_context_files",
+            "recommended_first_reads",
+            "recommended_reads",
+            "useful_context",
+            "suggested_next_actions",
+            "next_tool_directive",
+            "probe_budget",
+            "patch_now_threshold",
+            "target_conflict",
+            "reviewed_targets",
+            "reviewed_target_source",
+            "tocs_target_resolution_status",
+            "contract_readiness",
+            "retrieval_state",
+            "preferred_next_step",
+        }
+        return {
+            key: cls._compact_agent_mapping({key: item})[key]
+            for key, item in value.items()
+            if key in allowed_keys
+        }
+
+    @classmethod
+    def _compact_agent_semantic_context(
+        cls,
+        value: dict[str, Any],
+    ) -> dict[str, Any]:
+        compact: dict[str, Any] = {}
+        for key in (
+            "status",
+            "task_summary",
+            "semantic_anchors",
+            "semantic_claims",
+            "recommended_reads",
+            "coverage_gaps",
+        ):
+            item = value.get(key)
+            if isinstance(item, list):
+                compact[key] = cls._compact_agent_list(item)
+            elif item is not None:
+                compact[key] = cls._compact_agent_scalar(item)
+        return compact
 
     def _should_suppress_duplicate_symbolic_seed_search(self, args: dict[str, Any]) -> bool:
         if self._retrieval_state != "inspect_candidates":
@@ -1249,7 +1514,7 @@ class FormsyContextEngine(ContextEngine):
         has_primary_context = bool(bundle.get("primary_files") or bundle.get("must_edit") or payload.get("accepted_targets"))
         if grounded and has_primary_context:
             coverage = str(bundle.get("coverage") or "").strip().lower()
-            if coverage in {"", "insufficient", "sufficient_for_reading"}:
+            if coverage in {"", "insufficient", "partial", "sufficient_for_reading"}:
                 bundle["coverage"] = "sufficient_for_first_patch"
         return bundle
 
@@ -1325,6 +1590,11 @@ class FormsyContextEngine(ContextEngine):
             return json.dumps({"ok": False, "error": "context_read requires a non-empty path"})
         start_line = self._optional_positive_int(args.get("start_line"))
         end_line = self._optional_positive_int(args.get("end_line"))
+        known_read_keys = [
+            str(item).strip()
+            for item in args.get("known_read_keys") or []
+            if str(item).strip()
+        ]
         notify_args = dict(args)
         notify_args["path"] = path
         if requested_path != path:
@@ -1388,6 +1658,7 @@ class FormsyContextEngine(ContextEngine):
                 revision=revision,
                 start_line=start_line,
                 end_line=end_line,
+                known_read_keys=known_read_keys,
                 **({"identity": identity} if identity else {}),
             )
         )
@@ -1905,7 +2176,8 @@ class FormsyContextEngine(ContextEngine):
         root: Path,
         *,
         query: str = "",
-        max_files: int = 500,
+        max_files: int = _MEMORY_COMPILE_MAX_FILES,
+        max_bytes: int = _MEMORY_COMPILE_MAX_BYTES,
     ) -> list[dict[str, Any]]:
         allowed_suffixes = {
             ".py",
@@ -1937,11 +2209,17 @@ class FormsyContextEngine(ContextEngine):
             ".mypy_cache",
         }
 
-        query_terms = {
-            token
-            for token in re.findall(r"[a-zA-Z_][a-zA-Z0-9_]{2,}", str(query or "").lower())
-        }
-        ranked_files: list[tuple[int, str, dict[str, Any]]] = []
+        query_terms, compound_terms, preferred_terms = cls._memory_source_query_terms(query)
+        source_rows: list[
+            tuple[
+                str,
+                dict[str, Any],
+                set[str],
+                set[str],
+                int,
+            ]
+        ] = []
+        document_frequency = {term: 0 for term in query_terms}
         try:
             paths = list(root.rglob("*"))
         except Exception:
@@ -1957,16 +2235,135 @@ class FormsyContextEngine(ContextEngine):
             except Exception:
                 continue
             is_test = cls._is_memory_source_test_path(rel)
-            score = cls._memory_source_relevance_score(rel, content, query_terms)
             entry = {
                 "path": rel,
                 "content": content,
                 "language": path.suffix.lower().lstrip(".") or "text",
                 "is_test": is_test,
             }
+            path_text = rel.lower()
+            content_text = content.lower()
+            path_hits = {term for term in query_terms if term in path_text}
+            content_hits = {term for term in query_terms if term in content_text}
+            for term in path_hits | content_hits:
+                document_frequency[term] += 1
+            compound_hits = sum(
+                1
+                for components in compound_terms
+                if all(component in path_text or component in content_text for component in components)
+            )
+            source_rows.append((rel, entry, path_hits, content_hits, compound_hits))
+
+        active_terms = cls._memory_source_active_terms(
+            document_frequency,
+            document_count=len(source_rows),
+            preferred_terms=preferred_terms,
+        )
+        ranked_files: list[tuple[int, str, dict[str, Any]]] = []
+        for rel, entry, path_hits, content_hits, compound_hits in source_rows:
+            score = cls._memory_source_relevance_score(
+                path_hits=path_hits,
+                content_hits=content_hits,
+                active_terms=active_terms,
+                compound_hits=compound_hits,
+            )
             ranked_files.append((score, rel, entry))
         ranked_files.sort(key=lambda item: (-item[0], item[1]))
-        return [entry for _, _, entry in ranked_files[:max_files]]
+        relevant_files = [item for item in ranked_files if item[0] > 0]
+        candidates = relevant_files or ranked_files[: cls._MEMORY_SOURCE_FALLBACK_FILES]
+
+        selected: list[dict[str, Any]] = []
+        selected_bytes = 0
+        file_limit = max(1, int(max_files))
+        byte_limit = max(1, int(max_bytes))
+        for _, _, entry in candidates:
+            content_bytes = len(str(entry.get("content") or "").encode("utf-8"))
+            if content_bytes > byte_limit or selected_bytes + content_bytes > byte_limit:
+                continue
+            selected.append(entry)
+            selected_bytes += content_bytes
+            if len(selected) >= file_limit:
+                break
+        return selected
+
+    @classmethod
+    def _memory_source_query_terms(
+        cls,
+        query: str,
+    ) -> tuple[set[str], tuple[tuple[str, ...], ...], set[str]]:
+        text = str(query or "")
+        raw_tokens = re.findall(r"[a-zA-Z_][a-zA-Z0-9_]{2,}", text)
+        normalized_tokens = [token.lower() for token in raw_tokens]
+        token_counts = Counter(normalized_tokens)
+        terms = {
+            token
+            for token in normalized_tokens
+            if token not in cls._MEMORY_SOURCE_QUERY_STOP_WORDS
+        }
+        preferred_terms = {
+            token
+            for raw_token, token in zip(raw_tokens, normalized_tokens)
+            if token not in cls._MEMORY_SOURCE_QUERY_STOP_WORDS
+            and (
+                token_counts[token] >= 2
+                or "_" in raw_token
+                or any(character.isupper() for character in raw_token[1:])
+            )
+        }
+        for marked_value in re.findall(r"`([^`]+)`", text):
+            preferred_terms.update(
+                token.lower()
+                for token in re.findall(r"[a-zA-Z_][a-zA-Z0-9_]{2,}", marked_value)
+                if token.lower() not in cls._MEMORY_SOURCE_QUERY_STOP_WORDS
+            )
+        compounds: list[tuple[str, ...]] = []
+        for value in re.findall(
+            r"[a-zA-Z_][a-zA-Z0-9_]*(?:[.-][a-zA-Z_][a-zA-Z0-9_]*)+",
+            text,
+        ):
+            components = tuple(
+                component.lower()
+                for component in re.split(r"[.-]", value)
+                if len(component) >= 3
+                and component.lower() not in cls._MEMORY_SOURCE_QUERY_STOP_WORDS
+            )
+            if len(components) >= 2 and components not in compounds:
+                compounds.append(components)
+                terms.update(components)
+                preferred_terms.update(components)
+        return terms, tuple(compounds), preferred_terms
+
+    @staticmethod
+    def _memory_source_active_terms(
+        document_frequency: dict[str, int],
+        *,
+        document_count: int,
+        preferred_terms: set[str],
+    ) -> set[str]:
+        if not document_frequency or document_count <= 0:
+            return set()
+        frequency_limit = max(8, (document_count + 19) // 20)
+        active = {
+            term
+            for term, frequency in document_frequency.items()
+            if 0 < frequency <= frequency_limit
+        }
+        if active:
+            preferred_active = active & preferred_terms
+            candidates = preferred_active or active
+            ranked_active = sorted(
+                candidates,
+                key=lambda term: (document_frequency[term], term),
+            )
+            return set(ranked_active[:8])
+        ranked = sorted(
+            (
+                (frequency, term)
+                for term, frequency in document_frequency.items()
+                if frequency > 0
+            )
+        )
+        return {term for _, term in ranked[:3]}
 
     @staticmethod
     def _is_memory_source_test_path(path: str) -> bool:
@@ -1984,17 +2381,16 @@ class FormsyContextEngine(ContextEngine):
         )
 
     @staticmethod
-    def _memory_source_relevance_score(path: str, content: str, query_terms: set[str]) -> int:
-        if not query_terms:
-            return 0
-        haystack = f"{path}\n{content[:20000]}".lower()
-        score = 0
-        for term in query_terms:
-            if term in haystack:
-                score += 1
-            if term in str(path).lower():
-                score += 2
-        return score
+    def _memory_source_relevance_score(
+        *,
+        path_hits: set[str],
+        content_hits: set[str],
+        active_terms: set[str],
+        compound_hits: int,
+    ) -> int:
+        path_score = len(path_hits & active_terms) * 4
+        content_score = len(content_hits & active_terms) * 2
+        return path_score + content_score + (compound_hits * 6)
 
     @staticmethod
     def _git_output(cmd: list[str]) -> str:
@@ -2096,6 +2492,16 @@ class FormsyContextEngine(ContextEngine):
             metadata["confirmed_source_reads"] = confirmed_reads
         return metadata
 
+    @staticmethod
+    def _effective_context_search_query(query: str, metadata: dict[str, Any]) -> str:
+        """Use the full user task for the initial retrieval, not for focused follow-ups."""
+        requested_query = str(query or "").strip()
+        phase = str(metadata.get("grounding_phase") or "seed").strip().lower()
+        full_task = str(metadata.get("full_task_description") or "").strip()
+        if phase == "seed" and full_task:
+            return full_task
+        return requested_query
+
     def _confirmed_source_reads_metadata(self) -> list[dict[str, Any]]:
         reads: list[dict[str, Any]] = []
         for entries in self._context_read_cache.values():
@@ -2193,8 +2599,22 @@ class FormsyContextEngine(ContextEngine):
             for source in (payload.get("guidance"), payload.get("guidance_packet"))
             if isinstance(source, dict)
         ]
+        bundle = payload.get("bundle")
+        if isinstance(bundle, dict):
+            bundle_guidance = bundle.get("guidance")
+            if isinstance(bundle_guidance, dict):
+                sources.append(bundle_guidance)
         if not sources:
             return
+
+        for key in ("tocs_semantic_context", "tocs_contract_context"):
+            if isinstance(payload.get(key), dict):
+                continue
+            for source in sources:
+                value = source.get(key)
+                if isinstance(value, dict):
+                    payload[key] = value
+                    break
 
         if not payload.get("retrieval_state"):
             for source in sources:

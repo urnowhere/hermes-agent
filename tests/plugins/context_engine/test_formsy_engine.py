@@ -283,11 +283,20 @@ def test_formsy_engine_exposes_memory_search_tool():
     assert "grounded_files" in metadata["properties"]
     assert "retrieval_feedback" in metadata["properties"]
     assert "tocs_lookup_identity" in metadata["properties"]
+    search_description = schemas[0]["description"]
+    assert "semantic_context_action_package" in search_description
+    assert "Do not repeat context_search" in search_description
+    assert "Use context_search proactively and repeatedly" not in search_description
+    read_description = schemas[2]["description"]
+    assert "known_read_keys" in read_description
+    assert "Do not repeat unchanged source text" in read_description
+    read_params = schemas[2]["parameters"]["properties"]
+    assert "known_read_keys" in read_params
     tocs_lookup_identity = metadata["properties"]["tocs_lookup_identity"]
     assert tocs_lookup_identity["type"] == "object"
     assert "runtime/plugin-provided" in tocs_lookup_identity["description"]
     assert "fallback" in metadata["properties"]["grounding_phase"]["enum"]
-    assert "proactively" in schemas[0]["description"]
+    assert "follow next_action" in schemas[0]["description"]
     assert "already completed before the task starts" not in schemas[0]["description"]
     assert "formsy_compile_repo" in schemas[0]["description"]
     assert "current git remote URL and commit" in schemas[0]["description"]
@@ -622,7 +631,7 @@ def test_formsy_engine_uses_runtime_tocs_identity_when_compile_fails(monkeypatch
     assert calls[1][1]["metadata"]["compile_error"] == "compile timeout"
 
 
-def test_formsy_engine_compile_failure_without_resolved_tocs_stays_degraded():
+def test_formsy_engine_compile_failure_without_resolved_tocs_requires_compile():
     engine = FormsyContextEngine()
     calls = []
 
@@ -670,9 +679,12 @@ def test_formsy_engine_compile_failure_without_resolved_tocs_stays_degraded():
         engine.handle_tool_call("context_search", {"query": "unknown task"})
     )
 
-    assert result["recovery_mode"] == "degraded_recovery"
+    assert result["retrieval_state"] == "compile_required"
+    assert result["recovery_mode"] == "compile_required"
     assert result["warning"] == "Formsy memory compile unavailable before context_search"
     assert "tocs_repair_targets" not in result
+    assert result["allowed_tools"] == ["formsy_compile_repo"]
+    assert result["guidance_packet"]["target_candidates"] == []
     assert [name for name, _ in calls] == ["compile", "memory_search"]
 
 
@@ -801,6 +813,100 @@ def test_formsy_engine_memory_search_compiles_before_query(monkeypatch):
     assert calls[1][1]["revision"] == "abc123def456"
 
 
+def test_formsy_engine_seed_search_uses_full_user_task_for_compile_and_retrieval(monkeypatch):
+    engine = FormsyContextEngine()
+    calls = []
+    full_task = (
+        "In ansible, uri must preserve an explicitly supplied Authorization header.\n\n"
+        "Expected behavior:\n"
+        "- Explicit Authorization takes precedence over netrc credentials.\n"
+        "- netrc remains available when Authorization is not supplied."
+    )
+
+    class FakeClient:
+        async def compile_repo(self, **kwargs):
+            calls.append(("compile", kwargs))
+            return {"repo_id": kwargs["repo_id"], "revision": kwargs["revision"]}
+
+        async def memory_search(self, **kwargs):
+            calls.append(("memory_search", kwargs))
+            return {"matches": []}
+
+    def fake_run(cmd, **kwargs):
+        if cmd == ["git", "remote", "get-url", "origin"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="https://github.com/ansible/ansible.git\n")
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="base-revision\n")
+        raise AssertionError(f"unexpected git command: {cmd}")
+
+    monkeypatch.setattr("plugins.context_engine.formsy.engine.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        FormsyContextEngine,
+        "_collect_memory_source_files",
+        staticmethod(lambda root, query="": [{"path": "lib/ansible/module_utils/urls.py", "content": "x\n"}]),
+    )
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {"repo_id": "", "revision": "latest", "query_budget": 4000})()
+    engine._session_id = "session-123"
+    engine._task_instruction_text = full_task
+
+    payload = json.loads(engine.handle_tool_call(
+        "context_search",
+        {
+            "query": "uri authorization header Expected behavior Explicit",
+            "metadata": {"grounding_phase": "seed", "system_prompt": "must not leak"},
+        },
+    ))
+
+    assert payload["ok"] is True
+    assert payload["query"] == full_task
+    assert [name for name, _ in calls] == ["compile", "memory_search"]
+    assert calls[0][1]["metadata"]["query"] == full_task
+    assert calls[1][1]["query"] == full_task
+    assert calls[1][1]["metadata"]["full_task_description"] == full_task
+    assert "system_prompt" not in calls[1][1]["metadata"]
+
+
+def test_formsy_engine_grounded_search_keeps_focused_query(monkeypatch):
+    engine = FormsyContextEngine()
+    calls = []
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            calls.append(kwargs)
+            return {"matches": []}
+
+    def fake_run(cmd, **kwargs):
+        if cmd == ["git", "remote", "get-url", "origin"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="https://github.com/ansible/ansible.git\n")
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="base-revision\n")
+        raise AssertionError(f"unexpected git command: {cmd}")
+
+    monkeypatch.setattr("plugins.context_engine.formsy.engine.subprocess.run", fake_run)
+    engine._engine_client = FakeClient()
+    engine._config = type("Config", (), {"repo_id": "", "revision": "latest", "query_budget": 4000})()
+    engine._session_id = "session-123"
+    engine._memory_compiled_identity = (
+        "ansible__ansible",
+        "base-revision",
+        engine._query_signature("focused Request.open authorization propagation"),
+    )
+    engine._task_instruction_text = "A full user task with multiple Expected behavior bullets."
+
+    payload = json.loads(engine.handle_tool_call(
+        "context_search",
+        {
+            "query": "focused Request.open authorization propagation",
+            "metadata": {"grounding_phase": "grounded"},
+        },
+    ))
+
+    assert payload["ok"] is True
+    assert payload["query"] == "focused Request.open authorization propagation"
+    assert calls[0]["query"] == "focused Request.open authorization propagation"
+
+
 def test_formsy_engine_compile_payload_reserves_query_relevant_tests(tmp_path):
     source_root = tmp_path / "repo"
     source_root.mkdir()
@@ -830,9 +936,137 @@ def test_formsy_engine_compile_payload_reserves_query_relevant_tests(tmp_path):
     )
 
     paths = [entry["path"] for entry in files]
-    assert len(files) == 500
+    assert paths == ["tests/auth_tests/test_validators.py"]
     assert "tests/auth_tests/test_validators.py" in paths
     assert any(entry["is_test"] for entry in files)
+
+
+def test_formsy_engine_compile_payload_excludes_low_information_matches(tmp_path):
+    source_root = tmp_path / "repo"
+    source_root.mkdir()
+    package = source_root / "lib" / "sample"
+    package.mkdir(parents=True)
+    for index in range(12):
+        (package / f"unrelated_{index:02d}.py").write_text(
+            "request_enabled = False\n",
+            encoding="utf-8",
+        )
+
+    target = package / "transport.py"
+    target.write_text(
+        "class Request:\n"
+        "    def open(self, decompress=True):\n"
+        "        return decode_gzip(decompress)\n",
+        encoding="utf-8",
+    )
+    target_test = source_root / "tests" / "test_transport_gzip.py"
+    target_test.parent.mkdir(parents=True)
+    target_test.write_text(
+        "def test_gzip_decompression():\n"
+        "    assert Request().open(decompress=False)\n",
+        encoding="utf-8",
+    )
+
+    files = FormsyContextEngine._collect_memory_source_files(
+        source_root,
+        query="Request.open gzip decompress False",
+        max_files=20,
+    )
+
+    assert {entry["path"] for entry in files} == {
+        "lib/sample/transport.py",
+        "tests/test_transport_gzip.py",
+    }
+
+
+def test_formsy_engine_compile_payload_prefers_structured_and_repeated_query_terms(tmp_path):
+    source_root = tmp_path / "repo"
+    source_root.mkdir()
+    package = source_root / "lib" / "sample"
+    package.mkdir(parents=True)
+    for index, prose_term in enumerate(
+        ("correctly", "respect", "decoded", "default", "remain", "compressed", "raw", "existing")
+    ):
+        (package / f"unrelated_{index:02d}.py").write_text(
+            f"description = '{prose_term}'\n",
+            encoding="utf-8",
+        )
+
+    target = package / "transport.py"
+    target.write_text(
+        "class Request:\n"
+        "    def open(self, decompress=True):\n"
+        "        return decode_gzip(decompress)\n",
+        encoding="utf-8",
+    )
+    target_test = source_root / "tests" / "test_transport_gzip.py"
+    target_test.parent.mkdir(parents=True)
+    target_test.write_text(
+        "def test_gzip_decompression():\n"
+        "    assert Request().open(decompress=False)\n",
+        encoding="utf-8",
+    )
+    query = """`Request.open` should handle gzip `Content-Encoding` responses correctly and respect `decompress=False`.
+Expected behavior: gzip responses are decoded by default; gzip remains compressed/raw when requested; existing behavior remains."""
+
+    files = FormsyContextEngine._collect_memory_source_files(
+        source_root,
+        query=query,
+        max_files=20,
+    )
+
+    assert {entry["path"] for entry in files} == {
+        "lib/sample/transport.py",
+        "tests/test_transport_gzip.py",
+    }
+
+
+def test_formsy_engine_compile_payload_enforces_total_content_byte_budget(tmp_path):
+    source_root = tmp_path / "repo"
+    source_root.mkdir()
+    (source_root / "a_oversized.py").write_text(
+        "needle = '" + ("x" * 180) + "'\n",
+        encoding="utf-8",
+    )
+    (source_root / "b_primary.py").write_text(
+        "needle = '" + ("y" * 38) + "'\n",
+        encoding="utf-8",
+    )
+    (source_root / "c_secondary.py").write_text(
+        "needle = '" + ("z" * 28) + "'\n",
+        encoding="utf-8",
+    )
+
+    files = FormsyContextEngine._collect_memory_source_files(
+        source_root,
+        query="needle",
+        max_files=10,
+        max_bytes=100,
+    )
+
+    paths = [entry["path"] for entry in files]
+    content_bytes = sum(len(entry["content"].encode("utf-8")) for entry in files)
+    assert paths == ["b_primary.py", "c_secondary.py"]
+    assert content_bytes <= 100
+
+
+def test_formsy_engine_compile_payload_has_tight_default_file_and_byte_budgets(tmp_path):
+    source_root = tmp_path / "repo"
+    source_root.mkdir()
+    for index in range(40):
+        (source_root / f"relevant_{index:02d}.py").write_text(
+            f"needle_{index} = '" + ("x" * 20_000) + "'\n",
+            encoding="utf-8",
+        )
+
+    files = FormsyContextEngine._collect_memory_source_files(
+        source_root,
+        query="needle",
+    )
+
+    content_bytes = sum(len(entry["content"].encode("utf-8")) for entry in files)
+    assert len(files) <= 32
+    assert content_bytes <= 500_000
 
 
 def test_formsy_engine_memory_search_tool_queries_runtime():
@@ -897,12 +1131,7 @@ def test_formsy_engine_memory_search_tool_queries_runtime():
     assert data["missing_context"] == ["No test constraints were selected for this query."]
     assert data["guidance"]["useful_context"] == [{"path": "parser.py", "rank": 1}]
     assert data["guidance"]["suggested_next_actions"] == ["context_read parser.py"]
-    assert data["symbolic_prompt"] == (
-        "Formal Semantics:\n"
-        "Constraints:\n"
-        "Retrieval Strategy:\n"
-        "Retrieved Facts:"
-    )
+    assert "symbolic_prompt" not in data
     assert data["direct_match_files"] == ["parser.py"]
     assert data["bundle_primary_files"] == []
     assert data["bundle_must_edit"] == []
@@ -928,6 +1157,151 @@ def test_formsy_engine_memory_search_tool_queries_runtime():
             "fanout_timeout_s": 90,
         },
     }]
+
+
+def test_formsy_engine_returns_compact_agent_projection_but_notifies_full_payload(
+    monkeypatch,
+):
+    engine = FormsyContextEngine()
+    observed = []
+
+    semantic_context = {
+        "status": "partial",
+        "task_summary": ["gzip responses decode by default"],
+        "semantic_anchors": [
+            {"text": "Request.open", "kind": "symbol"},
+            {"text": "decompress=False", "kind": "parameter"},
+        ],
+        "semantic_claims": [
+            {
+                "subject": "Request.open",
+                "relation": "behavior_semantics",
+                "statement": "gzip responses decode by default",
+                "evidence_refs": [
+                    {
+                        "source_locator": "lib/ansible/module_utils/urls.py:1649",
+                        "internal_blob": "e" * 8_000,
+                    }
+                ],
+            }
+        ],
+        "recommended_reads": [
+            {"path": "lib/ansible/module_utils/urls.py", "symbol": "Request.open"}
+        ],
+        "coverage_gaps": [{"reason": "structural_only"}],
+    }
+    result = {
+        "extra_context": "x" * 20_000,
+        "symbolic_prompt": "s" * 40_000,
+        "matches": [
+            {
+                "path": f"lib/ansible/module_utils/relevant_{index}.py",
+                "symbol": "Request.open",
+                "kind": "direct_query_match",
+                "score": 10 - index,
+                "content": "m" * 2_000,
+            }
+            for index in range(20)
+        ],
+        "coverage": "partial",
+        "missing_context": ["No test constraints were selected."],
+        "test_plan": {
+            "commands": ["pytest test/units/module_utils/urls/test_gzip.py -v"],
+            "files": ["test/units/module_utils/urls/test_gzip.py"],
+        },
+        "guidance": {
+            "summary": "Use the grounded Request.open implementation and gzip tests.",
+            "fs_console": {
+                "code_plan_id": "cp-gzip",
+                "url": "http://localhost:3000/code-plans/cp-gzip",
+            },
+            "code_plan_review": {
+                "code_plan_id": "cp-gzip",
+                "url": "http://localhost:3000/code-plans/cp-gzip",
+            },
+            "accepted_edit_targets": ["lib/ansible/module_utils/urls.py"],
+            "recommended_first_reads": [
+                {"path": "lib/ansible/module_utils/urls.py", "start_line": 1600}
+            ],
+            "internal_blob": "g" * 40_000,
+        },
+        "bundle": {
+            "bundle_id": "ctx-large",
+            "internal_blob": "b" * 80_000,
+            "guidance": {
+                "tocs_semantic_context": semantic_context,
+                "tocs_contract_context": {
+                    "contract_readiness": "partial",
+                    "unresolved_obligation_count": 2,
+                },
+            },
+        },
+        "retrieval_state": "inspect_candidates",
+        "preferred_next_step": "context_read",
+        "grounded_files": ["lib/ansible/module_utils/urls.py"],
+        "accepted_targets": ["lib/ansible/module_utils/urls.py"],
+        "exploration_closed": True,
+    }
+
+    class FakeCoordinator:
+        def compile_context_bundle(self, **kwargs):
+            return (
+                "FormSy Constraint Protocol\n"
+                "- Run focused baseline validation before changing source."
+            )
+
+        def observe_tool_result(self, tool_name, args, payload, *, session_id=""):
+            observed.append((tool_name, args, json.loads(payload), session_id))
+
+    monkeypatch.setattr(
+        "plugins.context_engine.formsy.engine._get_constraint_keeper_coordinator",
+        lambda: FakeCoordinator(),
+    )
+    engine._config = type("Config", (), {"workspace_id": "ws-test"})()
+
+    agent_json = engine._memory_search_payload_json(
+        args={"query": "Request.open gzip"},
+        query="Request.open gzip",
+        repo_id="ansible__ansible",
+        revision="rev",
+        session_id="session-123",
+        budget=4000,
+        metadata={"grounding_phase": "grounded"},
+        result=result,
+    )
+
+    agent_payload = json.loads(agent_json)
+    assert len(agent_json.encode("utf-8")) < 32_000
+    assert "bundle" not in agent_payload
+    assert "symbolic_prompt" not in agent_payload
+    assert "internal_blob" not in agent_payload["guidance"]
+    assert agent_payload["guidance"]["fs_console"] == {
+        "code_plan_id": "cp-gzip",
+        "url": "http://localhost:3000/code-plans/cp-gzip",
+    }
+    assert agent_payload["guidance"]["code_plan_review"] == {
+        "code_plan_id": "cp-gzip",
+        "url": "http://localhost:3000/code-plans/cp-gzip",
+    }
+    assert len(agent_payload["extra_context"]) <= 8_000
+    assert len(agent_payload["matches"]) == 12
+    assert all("content" not in match for match in agent_payload["matches"])
+    assert agent_payload["tocs_semantic_context"]["semantic_anchors"] == [
+        {"text": "Request.open", "kind": "symbol"},
+        {"text": "decompress=False", "kind": "parameter"},
+    ]
+    assert agent_payload["accepted_targets"] == ["lib/ansible/module_utils/urls.py"]
+    assert "Run focused baseline validation before changing source" in agent_payload[
+        "constraint_protocol_text"
+    ]
+    assert agent_payload["test_plan"]["files"] == [
+        "test/units/module_utils/urls/test_gzip.py"
+    ]
+
+    assert observed
+    full_payload = observed[-1][2]
+    assert full_payload["bundle"]["internal_blob"] == "b" * 80_000
+    assert full_payload["symbolic_prompt"] == "s" * 40_000
 
 
 def test_formsy_engine_memory_search_prefers_nested_metadata():
@@ -1538,6 +1912,98 @@ def test_formsy_engine_projects_guidance_packet_accepted_targets_into_retrieval_
     ]
 
 
+def test_formsy_engine_projects_bundle_tocs_context_from_server_response():
+    engine = FormsyContextEngine()
+    semantic_context = {
+        "status": "partial",
+        "task_summary": ["gzip responses decode by default"],
+        "semantic_anchors": [{"text": "decompress", "kind": "parameter"}],
+        "recommended_reads": [
+            {"path": "lib/ansible/module_utils/urls.py", "symbol": "Request.open"}
+        ],
+        "semantic_claims": [],
+        "coverage_gaps": [],
+    }
+    contract_context = {
+        "contract_readiness": "partial",
+        "unresolved_obligation_count": 1,
+    }
+    payload = {
+        "guidance": {"mode": "normal"},
+        "bundle": {
+            "guidance": {
+                "tocs_semantic_context": semantic_context,
+                "tocs_contract_context": contract_context,
+            }
+        },
+    }
+
+    engine._apply_nested_guidance_projection(payload)
+
+    assert payload["tocs_semantic_context"] == semantic_context
+    assert payload["tocs_contract_context"] == contract_context
+    assert payload.get("accepted_targets") is None
+    assert payload.get("exploration_closed") is None
+
+
+def test_context_search_exposes_server_bundle_tocs_context_in_tool_payload():
+    engine = FormsyContextEngine()
+
+    class FakeClient:
+        async def memory_search(self, **kwargs):
+            return {
+                "extra_context": (
+                    "## FormSy Guidance\n"
+                    "- TOCS semantic anchors: decompress"
+                ),
+                "matches": [],
+                "coverage": "partial",
+                "guidance": {"mode": "normal"},
+                "bundle": {
+                    "guidance": {
+                        "tocs_semantic_context": {
+                            "status": "partial",
+                            "semantic_anchors": [
+                                {"text": "decompress", "kind": "parameter"}
+                            ],
+                            "semantic_claims": [],
+                            "recommended_reads": [],
+                            "coverage_gaps": [],
+                        },
+                        "tocs_contract_context": {
+                            "contract_readiness": "partial",
+                            "unresolved_obligation_count": 1,
+                        },
+                    }
+                },
+            }
+
+    engine._engine_client = FakeClient()
+    engine._config = type(
+        "Config",
+        (),
+        {
+            "repo_id": "ansible__ansible",
+            "revision": "latest",
+            "query_budget": 4000,
+            "timeout_s": 120,
+            "workspace_id": "ws-test",
+        },
+    )()
+    engine._session_id = "session-123"
+
+    payload = json.loads(
+        engine.handle_tool_call("context_search", {"query": "gzip response"})
+    )
+
+    assert payload["tocs_semantic_context"]["semantic_anchors"] == [
+        {"text": "decompress", "kind": "parameter"}
+    ]
+    assert payload["tocs_contract_context"]["contract_readiness"] == "partial"
+    assert payload["accepted_targets"] == []
+    assert payload["exploration_closed"] is False
+
+
 def test_formsy_engine_persists_guidance_packet_accepted_targets_when_server_top_level_is_empty():
     engine = FormsyContextEngine()
 
@@ -1851,7 +2317,7 @@ def test_formsy_engine_context_read_clears_real_constraint_keeper_next_tool(
     ) is None
 
 
-def test_formsy_engine_compile_failure_returns_degraded_guidance_and_notifies_budget(
+def test_formsy_engine_compile_failure_returns_compact_compile_repair_guidance(
     monkeypatch,
 ):
     engine = FormsyContextEngine()
@@ -1908,15 +2374,20 @@ def test_formsy_engine_compile_failure_returns_degraded_guidance_and_notifies_bu
     assert result["diagnostic_reason"] == (
         "missing_tocs_lookup_identity_or_compile_unavailable"
     )
-    assert result["recovery_mode"] == "degraded_recovery"
-    assert result["guidance_packet"]["target_candidates"] == [
-        "lib/ansible/executor/play_iterator.py"
-    ]
+    assert result["retrieval_state"] == "compile_required"
+    assert result["recovery_mode"] == "compile_required"
+    assert result["preferred_next_step"] == "formsy_compile_repo"
+    assert result["allowed_tools"] == ["formsy_compile_repo"]
+    assert result["guidance_packet"]["mode"] == "compile_required"
+    assert result["guidance_packet"]["target_candidates"] == []
+    assert result["guidance_packet"]["probe_budget"]["search_files"] == 0
+    assert result["guidance_packet"]["probe_budget"]["read_file"] == 0
+    assert result["guidance_packet"]["probe_budget"]["terminal_or_execute_code"] == 0
     assert coordinator.observed
     observed_tool, _observed_args, observed_result, observed_session_id = coordinator.observed[0]
     assert observed_tool == "context_search"
     assert observed_session_id == "session-123"
-    assert observed_result["guidance_packet"]["probe_budget"]["terminal_or_execute_code"] == 2
+    assert observed_result["guidance_packet"]["probe_budget"]["terminal_or_execute_code"] == 0
 
 
 def test_formsy_engine_compile_failure_preserves_status_error_when_compile_has_no_error():

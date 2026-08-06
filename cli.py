@@ -73,7 +73,7 @@ from agent.usage_pricing import (
 # top — it transitively pulls the OpenAI SDK chain (~230 ms cold) and is only
 # needed when the user runs `/limits`. Lazy-imported inside the handler below.
 from hermes_cli.banner import _format_context_length, format_banner_version_label
-from hermes_cli.formsy_status import formsy_statuses_from_tool_result
+from hermes_cli.tool_status_cards import drain_tool_status_cards
 
 _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
@@ -1453,8 +1453,8 @@ def _cprint_inline(text: str):
         print(text)
 
 
-def _format_formsy_status_card(title: str, body: str, width: int = 100) -> str:
-    """Render a small Hermes-style FormSy status card."""
+def _format_tool_status_card(title: str, body: str, width: int = 100) -> str:
+    """Render a small Hermes-style tool status card."""
     try:
         width = int(width)
     except Exception:
@@ -2464,9 +2464,9 @@ class HermesCLI:
         self._tool_start_time: float = 0.0  # monotonic timestamp when current tool started (for live elapsed)
         self._pending_tool_info: dict = {}  # function_name -> list of (preview, args) for stacked scrollback
         self._last_scrollback_tool: str = ""  # last tool name printed to scrollback (for "new" dedup)
-        self._formsy_status_lock = threading.Lock()
-        self._pending_formsy_statuses: list[tuple[str, str]] = []
-        self._formsy_status_seen: set[str] = set()
+        self._tool_status_card_lock = threading.Lock()
+        self._pending_tool_status_cards: list[dict] = []
+        self._tool_status_card_seen: set[str] = set()
         self._command_running = False
         self._command_status = ""
         self._attached_images: list[Path] = []
@@ -8557,27 +8557,23 @@ class HermesCLI:
     def _on_tool_complete(self, tool_call_id: str, function_name: str, function_args: dict, function_result: str):
         """Render file edits with inline diff after write-capable tools complete."""
         try:
-            statuses = formsy_statuses_from_tool_result(
-                function_name,
-                function_args,
-                function_result,
-            )
-            if statuses:
+            cards = drain_tool_status_cards(tool_call_id)
+            if cards:
                 logger.info(
-                    "FormSy CLI status projection: tool=%s statuses=%d",
+                    "Tool status card projection: tool=%s cards=%d",
                     function_name,
-                    len(statuses),
+                    len(cards),
                 )
-            if statuses:
-                with self._formsy_status_lock:
-                    for kind, text in statuses:
-                        dedupe_key = f"{tool_call_id}:{kind}:{text}"
-                        if dedupe_key in self._formsy_status_seen:
+            if cards:
+                with self._tool_status_card_lock:
+                    for card in cards:
+                        dedupe_key = str(card.get("dedupe_key") or f"{tool_call_id}:{card}")
+                        if dedupe_key in self._tool_status_card_seen:
                             continue
-                        self._formsy_status_seen.add(dedupe_key)
-                        self._pending_formsy_statuses.append((kind, text))
+                        self._tool_status_card_seen.add(dedupe_key)
+                        self._pending_tool_status_cards.append(card)
         except Exception:
-            logger.debug("FormSy status projection failed for %s", function_name, exc_info=True)
+            logger.debug("Tool status card projection failed for %s", function_name, exc_info=True)
 
         if not self._inline_diffs_enabled:
             return
@@ -8595,42 +8591,66 @@ class HermesCLI:
         except Exception:
             logger.debug("Edit diff preview failed for %s", function_name, exc_info=True)
 
-    def _flush_formsy_status_projection(self, phase: str = "final"):
-        """Print queued FormSy statuses from the CLI/UI thread."""
+    def _flush_tool_status_cards(self, phase: str = "final"):
+        """Print queued ToolStatusCards from the CLI/UI thread."""
         try:
-            with self._formsy_status_lock:
-                statuses = list(self._pending_formsy_statuses)
-                self._pending_formsy_statuses.clear()
+            with self._tool_status_card_lock:
+                cards = list(self._pending_tool_status_cards)
+                self._pending_tool_status_cards.clear()
         except Exception:
-            logger.debug("FormSy status projection flush failed", exc_info=True)
+            logger.debug("Tool status card flush failed", exc_info=True)
             return
 
-        if statuses:
+        if cards:
             logger.info(
-                "FormSy CLI status flush: phase=%s statuses=%d",
+                "Tool status card flush: phase=%s cards=%d",
                 phase,
-                len(statuses),
+                len(cards),
             )
         try:
             width = int(getattr(self.console, "width", 100) or 100)
         except Exception:
             width = 100
 
-        context_blocks = [
-            text for kind, text in statuses
-            if kind in {"formsy.context_ready", "formsy.verified_recipe"}
-        ]
-        for kind, text in statuses:
-            if kind in {"formsy.context_ready", "formsy.verified_recipe"}:
-                continue
-            title = "FormSy Finish Gate" if kind == "formsy.finish_gate" else "FormSy"
-            _cprint_inline(_format_formsy_status_card(title, text, width=width))
-        if context_blocks:
-            _cprint_inline(_format_formsy_status_card(
-                "FormSy Context",
-                "\n".join(context_blocks),
+        for card in self._collapse_tool_status_cards(cards):
+            body_lines = [str(line) for line in card.get("body") or []]
+            link = card.get("link")
+            if isinstance(link, dict):
+                link_url = str(link.get("url") or "").strip()
+                if link_url:
+                    link_label = str(link.get("label") or "Open").strip() or "Open"
+                    link_line = f"{link_label}: {link_url}"
+                    if link_line not in body_lines:
+                        body_lines.append(link_line)
+            _cprint_inline(_format_tool_status_card(
+                str(card.get("title") or "Tool Status"),
+                "\n".join(body_lines),
                 width=width,
             ))
+
+    @staticmethod
+    def _collapse_tool_status_cards(cards: list[dict]) -> list[dict]:
+        grouped: dict[str, dict] = {}
+        order: list[str] = []
+        for index, raw_card in enumerate(cards):
+            if not isinstance(raw_card, dict):
+                continue
+            group_key = str(raw_card.get("group_key") or raw_card.get("dedupe_key") or index)
+            replace_policy = str(raw_card.get("replace_policy") or "append").lower()
+            if group_key not in grouped:
+                grouped[group_key] = dict(raw_card)
+                grouped[group_key]["body"] = list(raw_card.get("body") or [])
+                order.append(group_key)
+                continue
+            if replace_policy == "latest":
+                grouped[group_key] = dict(raw_card)
+                grouped[group_key]["body"] = list(raw_card.get("body") or [])
+                continue
+            grouped[group_key].setdefault("body", [])
+            grouped[group_key]["body"].extend(list(raw_card.get("body") or []))
+            if raw_card.get("link"):
+                grouped[group_key]["link"] = raw_card.get("link")
+        return [grouped[key] for key in order if key in grouped]
 
     # ====================================================================
     # Voice mode methods
@@ -9814,7 +9834,7 @@ class HermesCLI:
                     # Fallback for non-interactive mode (e.g., single-query)
                     agent_thread.join(0.1)
 
-                self._flush_formsy_status_projection(phase="agent_running")
+                self._flush_tool_status_cards(phase="agent_running")
 
             # Wait for the agent thread to finish.  After an interrupt the
             # agent may take a few seconds to clean up (kill subprocess, persist
@@ -9875,7 +9895,7 @@ class HermesCLI:
             # sleep lets the renderer actually paint it before we draw.
             sys.stdout.flush()
             time.sleep(0.15)
-            self._flush_formsy_status_projection(phase="final")
+            self._flush_tool_status_cards(phase="final")
 
             # Update history with full conversation
             self.conversation_history = result.get("messages", self.conversation_history) if result else self.conversation_history

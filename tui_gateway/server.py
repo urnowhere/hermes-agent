@@ -17,7 +17,10 @@ from typing import Any, Optional
 
 from hermes_constants import get_hermes_home
 from hermes_cli.env_loader import load_hermes_dotenv
-from hermes_cli.formsy_status import formsy_statuses_from_tool_result
+from hermes_cli.formsy_status import (
+    formsy_code_plan_url_from_tool_result,
+    formsy_statuses_from_tool_result,
+)
 from utils import is_truthy_value
 from tui_gateway.transport import (
     StdioTransport,
@@ -117,6 +120,7 @@ except Exception:
 from tui_gateway.render import make_stream_renderer, render_diff, render_message
 
 _sessions: dict[str, dict] = {}
+_last_formsy_code_plan_urls: dict[str, str] = {}
 _methods: dict[str, callable] = {}
 _pending: dict[str, tuple[str, threading.Event]] = {}
 _answers: dict[str, str] = {}
@@ -1493,11 +1497,31 @@ def _emit_formsy_status_from_tool_result(
     args: dict,
     result: str,
 ) -> None:
-    statuses = formsy_statuses_from_tool_result(name, args, result)
+    fs_console_base_url = _formsy_fs_console_base_url()
+    session = _sessions.get(sid)
+    code_plan_url = formsy_code_plan_url_from_tool_result(
+        name,
+        result,
+        fs_console_base_url=fs_console_base_url,
+    )
+    if code_plan_url:
+        _last_formsy_code_plan_urls[sid] = code_plan_url
+        if session is not None:
+            session["last_formsy_code_plan_url"] = code_plan_url
+    statuses = formsy_statuses_from_tool_result(
+        name,
+        args,
+        result,
+        fs_console_base_url=fs_console_base_url,
+        fallback_code_plan_url=str(
+            (session or {}).get("last_formsy_code_plan_url")
+            or _last_formsy_code_plan_urls.get(sid)
+            or ""
+        ),
+    )
     if not statuses:
         return
 
-    session = _sessions.get(sid)
     seen = session.setdefault("formsy_status_seen", set()) if session is not None else set()
     for kind, text in statuses:
         dedupe_key = f"{tool_call_id}:{kind}:{text}"
@@ -1505,6 +1529,20 @@ def _emit_formsy_status_from_tool_result(
             continue
         seen.add(dedupe_key)
         _status_update(sid, kind, text)
+
+
+def _formsy_fs_console_base_url() -> str:
+    configured = os.environ.get("FORMSY_FS_CONSOLE_BASE_URL", "").strip()
+    if configured:
+        return configured
+    formsy_config = _load_cfg().get("formsy")
+    if not isinstance(formsy_config, dict):
+        return ""
+    return str(
+        formsy_config.get("fs_console_base_url")
+        or formsy_config.get("console_base_url")
+        or ""
+    ).strip()
 
 
 def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):

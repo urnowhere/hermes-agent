@@ -78,6 +78,7 @@ logger = logging.getLogger(__name__)
 VALID_HOOKS: Set[str] = {
     "pre_tool_call",
     "post_tool_call",
+    "project_tool_status_cards",
     "transform_terminal_output",
     "transform_tool_result",
     "pre_llm_call",

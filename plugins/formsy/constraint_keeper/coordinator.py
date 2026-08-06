@@ -10,6 +10,7 @@ import re
 import shlex
 import time
 import uuid
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
@@ -78,6 +79,14 @@ class _GroundingState(str, Enum):
     CLOSED = "closed"
 
 
+@dataclass(frozen=True)
+class PatchAuthorizationScope:
+    contract_set_id: str
+    contract_revision: int
+    accepted_targets: tuple[str, ...]
+    strict_target_scope: bool
+
+
 class ConstraintKeeperCoordinator:
     def __init__(
         self,
@@ -141,9 +150,15 @@ class ConstraintKeeperCoordinator:
         self._latest_diff_payload: dict[str, Any] = {}
         self._latest_warning_bearing_validation: dict[str, Any] = {}
         self._latest_accepted_targets: list[str] = []
+        self._active_patch_authorization: PatchAuthorizationScope | None = None
+        self._edit_patch_authorization: PatchAuthorizationScope | None = None
+        self._latest_diff_patch_authorization: PatchAuthorizationScope | None = None
+        self._next_compile_reason = "context_refresh"
         self._latest_context_bundle_hint: dict[str, Any] = {}
         self._latest_candidate_test_commands: list[str] = []
         self._latest_candidate_test_paths: list[str] = []
+        self._latest_validation_collateral_paths: list[str] = []
+        self._human_review_requested: dict[str, str] = {}
         self._latest_passing_validations: list[dict[str, str]] = []
         self._unresolved_failed_validations: dict[str, dict[str, Any]] = {}
         self._completion_guard_repeat_counts: dict[str, int] = {}
@@ -164,6 +179,9 @@ class ConstraintKeeperCoordinator:
             and user_message.strip()
             and not auxiliary_turn
         ):
+            if self._active_patch_authorization is not None:
+                self._next_compile_reason = "user_requirement_change"
+            self._human_review_requested = {}
             self._latest_user_task_text = user_message
         self.ensure_identity(
             session_id=session_id,
@@ -261,6 +279,7 @@ class ConstraintKeeperCoordinator:
                         "context_bundle": context_bundle,
                         "search_payload": search_payload,
                         "query": query,
+                        "compile_reason": self._next_compile_reason,
                     },
                     session_id=identity.session_id,
                 )
@@ -275,11 +294,15 @@ class ConstraintKeeperCoordinator:
         self._record_context_bundle_hint(context_bundle, search_payload, response)
         self._record_contract_accepted_targets(search_payload)
         self._record_contract_accepted_targets(response)
+        self._record_patch_authorization(response)
+        self._record_contract_validation_collateral(search_payload)
+        self._record_contract_validation_collateral(response)
         self._record_contract_candidate_tests(search_payload)
         self._record_contract_candidate_tests(response)
         self._record_contract_candidate_test_paths(search_payload)
         self._record_contract_candidate_test_paths(response)
         self._capture_server_directive(response)
+        self._next_compile_reason = "context_refresh"
         protocol_text = self._protocol_text(response)
         self._set_protocol_text(protocol_text)
         return protocol_text
@@ -297,6 +320,7 @@ class ConstraintKeeperCoordinator:
         self._observe_skill_uptake(tool_name, args or {}, result)
         self._observe_guidance_signal(tool_name, args or {}, result)
         self._capture_guidance_packet(tool_name, result)
+        self._record_human_review_request(tool_name, args or {}, result)
         if tool_name == "formsy_verify_completion" and self._is_accepted(
             _result_dict(result)
         ):
@@ -434,6 +458,11 @@ class ConstraintKeeperCoordinator:
             return None
         final_submit = is_final_submit(tool_name, args or {})
         if not final_submit:
+            human_review_message = self._human_review_requested_block_message(
+                tool_name, args or {}
+            )
+            if human_review_message:
+                return human_review_message
             direct_source_write_message = (
                 self._execute_code_direct_source_write_block_message(
                     tool_name, args or {}
@@ -468,6 +497,8 @@ class ConstraintKeeperCoordinator:
             )
             if probe_budget_message:
                 return probe_budget_message
+            if is_edit_surface(tool_name, args or {}):
+                self._edit_patch_authorization = self._active_patch_authorization
         if not self.fail_closed_on_submit or not final_submit:
             return None
         try:
@@ -578,7 +609,7 @@ class ConstraintKeeperCoordinator:
             }
         )
         self.flush_pending()
-        return self._run_async(
+        result = self._run_async(
             self.client.verify_completion(
                 {
                     "task_id": identity.task_id,
@@ -588,6 +619,18 @@ class ConstraintKeeperCoordinator:
                 session_id=identity.session_id,
             )
         )
+        self._capture_next_compile_reason(result)
+        return result
+
+    def _capture_next_compile_reason(self, response: Any) -> None:
+        if not isinstance(response, dict):
+            return
+        audit = response.get("completion_audit")
+        projection = audit.get("projection") if isinstance(audit, dict) else None
+        if not isinstance(projection, dict):
+            return
+        if projection.get("next_action_kind") == "repair_patch":
+            self._next_compile_reason = "repair_patch"
 
     def _record_contract_accepted_targets(self, payload: Any) -> None:
         tocs_targets = self._extract_resolved_tocs_repair_targets(payload)
@@ -599,6 +642,42 @@ class ConstraintKeeperCoordinator:
         targets = self._extract_contract_accepted_targets(payload)
         if targets:
             self._latest_accepted_targets = targets
+
+    def _record_patch_authorization(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+        protocol = payload.get("protocol")
+        if not isinstance(protocol, dict):
+            protocol = payload
+        contract_set_id = protocol.get("contract_set_id")
+        contract_revision = protocol.get("contract_revision")
+        if not isinstance(contract_set_id, str) or not isinstance(
+            contract_revision, int
+        ):
+            return
+        self._active_patch_authorization = PatchAuthorizationScope(
+            contract_set_id=contract_set_id,
+            contract_revision=contract_revision,
+            accepted_targets=tuple(self._extract_contract_accepted_targets(payload)),
+            strict_target_scope=self._extract_strict_target_scope(payload),
+        )
+
+    @classmethod
+    def _extract_strict_target_scope(cls, payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        patch = payload.get("patch")
+        if isinstance(patch, dict) and isinstance(
+            patch.get("strict_target_scope"), bool
+        ):
+            return bool(patch["strict_target_scope"])
+        contracts = payload.get("contracts")
+        if isinstance(contracts, dict):
+            return cls._extract_strict_target_scope(contracts)
+        contract = payload.get("contract")
+        if isinstance(contract, dict):
+            return cls._extract_strict_target_scope(contract)
+        return False
 
     def _record_context_bundle_hint(
         self,
@@ -667,6 +746,73 @@ class ConstraintKeeperCoordinator:
         paths = self._extract_contract_candidate_test_paths(payload)
         if paths:
             self._latest_candidate_test_paths = paths
+
+    def _record_contract_validation_collateral(self, payload: Any) -> None:
+        paths = self._extract_contract_validation_collateral(payload)
+        if not paths:
+            return
+        merged = list(self._latest_validation_collateral_paths)
+        for path in paths:
+            if not any(_paths_equivalent(path, existing) for existing in merged):
+                merged.append(path)
+        self._latest_validation_collateral_paths = merged
+
+    def _record_human_review_request(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        result: Any,
+    ) -> None:
+        if tool_name != "formsy_request_human_review":
+            return
+        payload = _result_dict(result)
+        if payload.get("requested") is not True:
+            return
+        reason = str(payload.get("reason") or args.get("reason") or "").strip()
+        self._human_review_requested = {
+            "reason": reason,
+            "requested_at_ms": str(int(time.time() * 1000)),
+        }
+
+    def _human_review_requested_block_message(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+    ) -> str | None:
+        if not self._human_review_requested:
+            return None
+        if tool_name in {"formsy_request_human_review", "formsy_constraint_status"}:
+            return None
+        continuation_tools = {
+            "patch",
+            "write_file",
+            "terminal",
+            "execute_code",
+            "context_search",
+            "context_read",
+            "read_file",
+            "search_files",
+            "formsy_verify_completion",
+            "formsy_recover",
+        }
+        if tool_name not in continuation_tools and not is_edit_surface(
+            tool_name, args
+        ):
+            return None
+        reason = self._human_review_requested.get("reason") or "review requested"
+        self._append_policy_event(
+            action="blocked",
+            reason=f"human review already requested: {reason}",
+            category="human_review_requested_stop",
+        )
+        return "\n".join(
+            [
+                "Human review has already been requested for this FormSy run.",
+                "Do not continue patching, testing, searching, or recovery attempts in this turn.",
+                f"Review reason: {reason}",
+                "Stop and report the review request to the user.",
+            ]
+        )
 
     @classmethod
     def _extract_contract_accepted_targets(cls, payload: Any) -> list[str]:
@@ -851,19 +997,22 @@ class ConstraintKeeperCoordinator:
         command = str(payload.get("command") or "").strip()
         if not command or not is_validation_command(command):
             return
+        output = str(
+            payload.get("output")
+            or payload.get("truncated_output")
+            or payload.get("stderr")
+            or payload.get("stdout")
+            or ""
+        )
+        if self._is_repo_external_pytest_collection_probe(command, output):
+            return
         diff_hash = self._current_diff_hash_for_guard()
         if not diff_hash:
             return
         self._unresolved_failed_validations[command] = {
             "command": command,
             "diff_hash": diff_hash,
-            "output": str(
-                payload.get("output")
-                or payload.get("truncated_output")
-                or payload.get("stderr")
-                or payload.get("stdout")
-                or ""
-            ),
+            "output": output,
             "output_hash": str(payload.get("output_hash") or ""),
             "resolution_key": self._validation_resolution_key(command),
         }
@@ -945,6 +1094,41 @@ class ConstraintKeeperCoordinator:
         visit(payload)
         return paths
 
+    @classmethod
+    def _extract_contract_validation_collateral(cls, payload: Any) -> list[str]:
+        if not isinstance(payload, dict):
+            return []
+        values: list[str] = []
+
+        def add_paths(raw_values: Any) -> None:
+            for value in _string_list(raw_values):
+                path = _repo_relative_source_path(value.split("::", 1)[0])
+                if path and path not in values:
+                    values.append(path)
+
+        add_paths(payload.get("validation_collateral"))
+        patch = payload.get("patch")
+        if isinstance(patch, dict):
+            add_paths(patch.get("validation_collateral"))
+        completion_audit = payload.get("completion_audit")
+        if isinstance(completion_audit, dict):
+            evidence = completion_audit.get("evidence")
+            if isinstance(evidence, dict):
+                add_paths(evidence.get("validation_collateral"))
+        for nested_key in (
+            "contracts",
+            "contract",
+            "search_payload",
+            "response",
+            "context_bundle",
+        ):
+            nested = payload.get(nested_key)
+            if isinstance(nested, dict):
+                for path in cls._extract_contract_validation_collateral(nested):
+                    if path not in values:
+                        values.append(path)
+        return values
+
     def _clear_resolved_failed_validation(self, event: dict[str, Any]) -> None:
         payload = event.get("payload")
         if not isinstance(payload, dict) or payload.get("passed") is not True:
@@ -969,13 +1153,19 @@ class ConstraintKeeperCoordinator:
             return
 
         resolution_key = self._validation_resolution_key(command)
+        deselected_selectors = _pytest_deselected_selectors_from_command(command)
         resolved_commands: list[str] = []
         for failed_command, failure in list(
             self._unresolved_failed_validations.items()
         ):
             if failure.get("diff_hash") != current_diff_hash:
                 continue
-            if not resolution_key or failure.get("resolution_key") != resolution_key:
+            if (
+                not resolution_key
+                or failure.get("resolution_key") != resolution_key
+            ) and not self._passing_command_deselected_failed_nodes(
+                failure, deselected_selectors
+            ):
                 continue
             resolved_commands.append(failed_command)
             self._unresolved_failed_validations.pop(failed_command, None)
@@ -1042,7 +1232,12 @@ class ConstraintKeeperCoordinator:
     ) -> dict[str, Any] | None:
         if not isinstance(diff_payload, dict):
             return None
-        accepted_targets = list(self._latest_accepted_targets)
+        authorization = self._effective_local_patch_authorization()
+        accepted_targets = (
+            list(authorization.accepted_targets)
+            if authorization is not None
+            else list(self._latest_accepted_targets)
+        )
         if not accepted_targets:
             return None
         changed_files = [
@@ -1064,6 +1259,8 @@ class ConstraintKeeperCoordinator:
             and not any(_paths_equivalent(path, target) for target in accepted_targets)
         ]
         if not outside:
+            return None
+        if authorization is None or not authorization.strict_target_scope:
             return None
         outside_text = ", ".join(outside)
         accepted_text = ", ".join(accepted_targets)
@@ -1103,6 +1300,14 @@ class ConstraintKeeperCoordinator:
             },
         }
 
+    def _effective_local_patch_authorization(
+        self,
+    ) -> PatchAuthorizationScope | None:
+        return (
+            self._latest_diff_patch_authorization
+            or self._active_patch_authorization
+        )
+
     @staticmethod
     def _is_completion_auxiliary_path(path: str) -> bool:
         normalized = _normalize_path(path)
@@ -1139,6 +1344,7 @@ class ConstraintKeeperCoordinator:
         current_diff_paths = [path for path in current_diff_paths if path]
         collateral = self._unreviewed_written_validation_collateral(
             accepted_targets=accepted_targets,
+            authorized_validation_collateral=self._latest_validation_collateral_paths,
             current_diff_paths=current_diff_paths,
         )
         if not collateral:
@@ -1210,6 +1416,7 @@ class ConstraintKeeperCoordinator:
         self,
         *,
         accepted_targets: list[str],
+        authorized_validation_collateral: list[str],
         current_diff_paths: list[str],
     ) -> list[str]:
         collateral: list[str] = []
@@ -1217,6 +1424,11 @@ class ConstraintKeeperCoordinator:
             if not self._is_validation_collateral_path(path):
                 continue
             if any(_paths_equivalent(path, target) for target in accepted_targets):
+                continue
+            if any(
+                _paths_equivalent(path, authorized)
+                for authorized in authorized_validation_collateral
+            ):
                 continue
             if any(_paths_equivalent(path, changed) for changed in current_diff_paths):
                 continue
@@ -1306,6 +1518,44 @@ class ConstraintKeeperCoordinator:
             },
         }
 
+    @classmethod
+    def _is_repo_external_pytest_collection_probe(
+        cls, command: str, output: str
+    ) -> bool:
+        lowered_output = str(output or "").lower()
+        if not (
+            "error collecting" in lowered_output
+            or "error during collection" in lowered_output
+        ):
+            return False
+        if (
+            "modulenotfounderror" not in lowered_output
+            and "importerror" not in lowered_output
+        ):
+            return False
+        selectors = _pytest_selectors_from_command(command)
+        if not selectors:
+            return False
+        for selector in selectors:
+            path = selector.split("::", 1)[0]
+            if not cls._is_repo_external_temp_path(path):
+                return False
+        return True
+
+    @staticmethod
+    def _is_repo_external_temp_path(path: str) -> bool:
+        candidate = str(path or "").strip()
+        if not candidate:
+            return False
+        if not candidate.startswith("/"):
+            return False
+        normalized = candidate.replace("\\", "/")
+        return (
+            normalized.startswith("/tmp/")
+            or normalized.startswith("/private/tmp/")
+            or "/var/folders/" in normalized
+        )
+
     @staticmethod
     def _failed_validation_repeat_key(diff_hash: str, commands: list[str]) -> str:
         normalized_commands = sorted(
@@ -1319,6 +1569,10 @@ class ConstraintKeeperCoordinator:
     def _is_broad_unrelated_validation_failure(
         self, failure: dict[str, Any], diff_hash: str
     ) -> bool:
+        if self._failure_resolved_by_prior_deselected_passing_validation(
+            failure, diff_hash
+        ):
+            return True
         failed_paths = self._explicit_failed_validation_paths(
             str(failure.get("output") or "")
         )
@@ -1339,6 +1593,20 @@ class ConstraintKeeperCoordinator:
             not any(_paths_equivalent(failed, protected) for protected in protected_paths)
             for failed in failed_paths
         )
+
+    def _failure_resolved_by_prior_deselected_passing_validation(
+        self, failure: dict[str, Any], diff_hash: str
+    ) -> bool:
+        for validation in self._latest_passing_validations:
+            if validation.get("diff_hash") != diff_hash:
+                continue
+            command = str(validation.get("command") or "")
+            deselected_selectors = _pytest_deselected_selectors_from_command(command)
+            if self._passing_command_deselected_failed_nodes(
+                failure, deselected_selectors
+            ):
+                return True
+        return False
 
     def _focused_validation_paths_for_diff(self, diff_hash: str) -> set[str]:
         paths: set[str] = {
@@ -1367,6 +1635,17 @@ class ConstraintKeeperCoordinator:
     @staticmethod
     def _explicit_failed_validation_paths(output: str) -> set[str]:
         paths: set[str] = set()
+        for node in ConstraintKeeperCoordinator._explicit_failed_validation_nodes(
+            output
+        ):
+            path = _repo_relative_source_path(node.split("::", 1)[0])
+            if path:
+                paths.add(path)
+        return paths
+
+    @staticmethod
+    def _explicit_failed_validation_nodes(output: str) -> set[str]:
+        nodes: set[str] = set()
         for line in str(output or "").splitlines():
             stripped = line.strip()
             if not stripped.startswith("FAILED "):
@@ -1374,10 +1653,35 @@ class ConstraintKeeperCoordinator:
             parts = stripped.split()
             if len(parts) < 2:
                 continue
-            path = _repo_relative_source_path(parts[1].split("::", 1)[0])
+            raw_node = parts[1].strip()
+            if not raw_node:
+                continue
+            path, sep, node = raw_node.partition("::")
+            path = _repo_relative_source_path(path)
             if path:
-                paths.add(path)
-        return paths
+                nodes.add(f"{path}{sep}{node}" if sep else path)
+        return nodes
+
+    @classmethod
+    def _passing_command_deselected_failed_nodes(
+        cls,
+        failure: dict[str, Any],
+        deselected_selectors: list[str],
+    ) -> bool:
+        if not deselected_selectors:
+            return False
+        failed_nodes = cls._explicit_failed_validation_nodes(
+            str(failure.get("output") or "")
+        )
+        if not failed_nodes:
+            return False
+        return all(
+            any(
+                _pytest_selector_covers_failed_node(selector, failed_node)
+                for selector in deselected_selectors
+            )
+            for failed_node in failed_nodes
+        )
 
     @staticmethod
     def _is_test_path(file_path: str) -> bool:
@@ -1661,6 +1965,16 @@ class ConstraintKeeperCoordinator:
             "diff_hash": diff_hash,
             "changed_files": changed_files,
         }
+        authorization = (
+            self._edit_patch_authorization
+            or self._latest_diff_patch_authorization
+            or self._active_patch_authorization
+        )
+        if authorization is not None:
+            payload["authorized_contract_set_id"] = authorization.contract_set_id
+            payload["authorized_contract_revision"] = (
+                authorization.contract_revision
+            )
         if post_patch_sources:
             payload["post_patch_sources"] = post_patch_sources
         if source_snapshot_hashes:
@@ -1669,6 +1983,8 @@ class ConstraintKeeperCoordinator:
         if diff_hash == self.latest_diff_hash:
             return payload
         self.latest_diff_hash = diff_hash
+        self._latest_diff_patch_authorization = authorization
+        self._edit_patch_authorization = None
         self._append_event(
             {
                 "event_kind": "diff_observed",
@@ -1938,6 +2254,10 @@ class ConstraintKeeperCoordinator:
             self._last_injected_protocol_text = ""
             self.latest_diff_hash = ""
             self.recovery_open = False
+            self._active_patch_authorization = None
+            self._edit_patch_authorization = None
+            self._latest_diff_patch_authorization = None
+            self._next_compile_reason = "context_refresh"
 
     @staticmethod
     def _workspace_revalidation_card() -> str:
@@ -3000,6 +3320,11 @@ class ConstraintKeeperCoordinator:
                 for target in self._latest_accepted_targets
             ):
                 continue
+            if any(
+                _paths_equivalent(candidate_path, collateral)
+                for collateral in self._latest_validation_collateral_paths
+            ):
+                continue
             path = candidate_path
             break
         if not path:
@@ -3019,6 +3344,13 @@ class ConstraintKeeperCoordinator:
                 "Candidate tests are validation obligations, not edit permission.",
                 f"Candidate test path: {path}",
                 f"Accepted targets: {accepted}",
+                (
+                    "Allowed validation collateral: "
+                    + (
+                        ", ".join(self._latest_validation_collateral_paths)
+                        or "<none>"
+                    )
+                ),
                 (
                     "Do not reconstruct missing candidate tests from compiled context, "
                     "memory, bytecode caches, git history, or copied snippets unless "
@@ -3887,6 +4219,47 @@ def _pytest_selector_from_command(command: str) -> str:
 
 
 def _pytest_selectors_from_command(command: str) -> list[str]:
+    tokens, start_index = _pytest_command_tokens(command)
+    if start_index is None:
+        return []
+
+    selectors: list[str] = []
+    skip_next = False
+    for token in tokens[start_index:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if token == "--deselect":
+            skip_next = True
+            continue
+        if token.startswith("--deselect="):
+            continue
+        if token.startswith("-") or "=" in token:
+            continue
+        if ("::" in token or token.endswith(".py")) and token not in selectors:
+            selectors.append(token)
+    return selectors
+
+
+def _pytest_deselected_selectors_from_command(command: str) -> list[str]:
+    tokens, start_index = _pytest_command_tokens(command)
+    if start_index is None:
+        return []
+
+    selectors: list[str] = []
+    iterator = iter(tokens[start_index:])
+    for token in iterator:
+        selector = ""
+        if token == "--deselect":
+            selector = next(iterator, "")
+        elif token.startswith("--deselect="):
+            selector = token.split("=", 1)[1]
+        if selector and selector not in selectors:
+            selectors.append(selector)
+    return selectors
+
+
+def _pytest_command_tokens(command: str) -> tuple[list[str], int | None]:
     try:
         tokens = shlex.split(_normalize_command_for_match(command))
     except ValueError:
@@ -3910,16 +4283,25 @@ def _pytest_selectors_from_command(command: str) -> list[str]:
         ):
             start_index = index + 3
             break
-    if start_index is None:
-        return []
+    return tokens, start_index
 
-    selectors: list[str] = []
-    for token in tokens[start_index:]:
-        if token.startswith("-") or "=" in token:
-            continue
-        if ("::" in token or token.endswith(".py")) and token not in selectors:
-            selectors.append(token)
-    return selectors
+
+def _pytest_selector_covers_failed_node(selector: str, failed_node: str) -> bool:
+    selector_path, selector_sep, selector_node = str(selector or "").partition("::")
+    failed_path, failed_sep, failed_name = str(failed_node or "").partition("::")
+    selector_path = _repo_relative_source_path(selector_path)
+    failed_path = _repo_relative_source_path(failed_path)
+    if (
+        not selector_path
+        or not failed_path
+        or not _paths_equivalent(selector_path, failed_path)
+    ):
+        return False
+    if not selector_sep:
+        return False
+    if not failed_sep:
+        return False
+    return selector_node == failed_name
 
 
 def _paths_equivalent(left: str, right: str) -> bool:

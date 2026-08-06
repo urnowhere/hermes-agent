@@ -52,6 +52,141 @@ def test_is_destructive_command_treats_install_as_mutating():
     assert run_agent._is_destructive_command("install template.env .env") is True
 
 
+def test_completed_context_engine_tool_projects_before_cli_callback(agent, monkeypatch):
+    """The context-engine branch must not bypass status-card projection."""
+    calls = []
+
+    def fake_project_and_queue(**kwargs):
+        calls.append(("project", kwargs))
+
+    monkeypatch.setattr(
+        "hermes_cli.tool_status_cards.project_and_queue_tool_status_cards",
+        fake_project_and_queue,
+        raising=False,
+    )
+    agent.tool_complete_callback = lambda *args: calls.append(("callback", args))
+
+    notify_completion = getattr(agent, "_project_and_notify_tool_completion", None)
+    assert callable(notify_completion)
+
+    notify_completion(
+        tool_call_id="call-context-1",
+        function_name="context_search",
+        function_args={"query": "iptables chain management"},
+        function_result='{"guidance":{"fs_console":{"url":"http://localhost:3000/code-plans/cp-context-1"}}}',
+        effective_task_id="task-1",
+        tool_duration=0.012,
+        execution_blocked=False,
+    )
+
+    assert calls[0] == (
+        "project",
+        {
+            "tool_name": "context_search",
+            "args": {"query": "iptables chain management"},
+            "result": '{"guidance":{"fs_console":{"url":"http://localhost:3000/code-plans/cp-context-1"}}}',
+            "task_id": "task-1",
+            "session_id": agent.session_id,
+            "tool_call_id": "call-context-1",
+            "duration_ms": 12,
+        },
+    )
+    assert calls[1] == (
+        "callback",
+        (
+            "call-context-1",
+            "context_search",
+            {"query": "iptables chain management"},
+            '{"guidance":{"fs_console":{"url":"http://localhost:3000/code-plans/cp-context-1"}}}',
+        ),
+    )
+
+
+def test_context_engine_completion_runs_post_hook_and_queues_formsy_context_card(
+    agent, monkeypatch
+):
+    """A Context Engine result publishes observation before its status card."""
+    from hermes_cli.tool_status_cards import drain_tool_status_cards
+
+    code_plan_url = "http://localhost:3000/code-plans/cp-context-1"
+    result = json.dumps(
+        {"guidance": {"fs_console": {"url": code_plan_url}}}
+    )
+    card = {
+        "source": "formsy",
+        "kind": "context_ready",
+        "title": "FormSy Context",
+        "body": ["Primary target: lib/ansible/modules/iptables.py"],
+        "severity": "info",
+        "dedupe_key": "formsy:context:call-context-1",
+        "group_key": "formsy:context",
+        "link": {"label": "Code plan", "url": code_plan_url},
+    }
+    hook_calls = []
+
+    def fake_invoke_hook(hook_name, **kwargs):
+        hook_calls.append((hook_name, kwargs))
+        if hook_name == "project_tool_status_cards":
+            return [card]
+        return []
+
+    agent._context_engine_tool_names = {"context_search"}
+    agent.context_compressor = MagicMock()
+    agent.context_compressor.get_tool_block_message.return_value = None
+    context_engine_inputs = []
+
+    def handle_context_engine_tool(tool_name, tool_args, *, messages):
+        context_engine_inputs.append((tool_name, tool_args, list(messages)))
+        return result
+
+    agent.context_compressor.handle_tool_call.side_effect = handle_context_engine_tool
+    complete_events = []
+    agent.tool_complete_callback = (
+        lambda tool_call_id, tool_name, *_: complete_events.append(
+            (tool_call_id, tool_name)
+        )
+    )
+    monkeypatch.setattr(
+        "hermes_cli.plugins.get_pre_tool_call_block_message",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", fake_invoke_hook)
+
+    tool_call = _mock_tool_call(
+        name="context_search",
+        arguments='{"query":"iptables chain management"}',
+        call_id="call-context-1",
+    )
+    messages = []
+    agent._execute_tool_calls_sequential(
+        _mock_assistant_msg(content="", tool_calls=[tool_call]),
+        messages,
+        "task-1",
+    )
+
+    assert context_engine_inputs == [
+        (
+            "context_search",
+            {"query": "iptables chain management"},
+            [],
+        )
+    ]
+    post_hook = next(
+        kwargs for hook_name, kwargs in hook_calls if hook_name == "post_tool_call"
+    )
+    assert post_hook["tool_name"] == "context_search"
+    assert post_hook["result"] == result
+    assert post_hook["tool_call_id"] == "call-context-1"
+    assert [hook_name for hook_name, _ in hook_calls] == [
+        "post_tool_call",
+        "project_tool_status_cards",
+    ]
+    cards = drain_tool_status_cards("call-context-1")
+    assert cards[0]["title"] == "FormSy Context"
+    assert cards[0]["link"]["url"] == code_plan_url
+    assert complete_events == [("call-context-1", "context_search")]
+
+
 def test_apply_post_llm_call_final_response_directives_replaces_response():
     assert run_agent._apply_post_llm_call_final_response_directives(
         "old response",
@@ -67,6 +202,74 @@ def test_apply_post_llm_call_final_response_directives_ignores_legacy_returns():
         "old response",
         ["ignored", {"context": "not a final-response directive"}],
     ) == "old response"
+
+
+def test_post_tool_empty_nudge_finalizes_terminal_tool_result():
+    messages = [
+        {
+            "role": "tool",
+            "content": json.dumps(
+                {
+                    "runtime": {"agent_loop_terminal": True},
+                    "reason": "completion proof accepted",
+                }
+            ),
+        }
+    ]
+
+    assert run_agent._recent_tool_results_appear_terminal(messages) is True
+    nudge = run_agent._post_tool_empty_nudge_content(messages)
+    status = run_agent._post_tool_empty_status_text(messages)
+
+    assert "final response" in nudge
+    assert "continue with the task" not in nudge
+    assert "terminal tool result" in status
+
+
+def test_post_tool_empty_nudge_does_not_interpret_domain_terminal_labels():
+    messages = [
+        {
+            "role": "tool",
+            "content": json.dumps(
+                {
+                    "completion_audit": {
+                        "gate_decision": "ACCEPT_DONE",
+                    },
+                    "reason": "verifier-specific label without runtime signal",
+                }
+            ),
+        }
+    ]
+
+    assert run_agent._recent_tool_results_appear_terminal(messages) is False
+    nudge = run_agent._post_tool_empty_nudge_content(messages)
+
+    assert "continue with the task" in nudge
+    assert "final response now" not in nudge
+
+
+def test_post_tool_empty_nudge_continues_non_terminal_tool_result():
+    messages = [
+        {
+            "role": "tool",
+            "content": json.dumps(
+                {
+                    "completion_audit": {
+                        "gate_decision": "NEED_MORE_VALIDATION",
+                        "projection": {"agent_loop_terminal": False},
+                    },
+                    "reason": "focused validation still required",
+                }
+            ),
+        }
+    ]
+
+    assert run_agent._recent_tool_results_appear_terminal(messages) is False
+    nudge = run_agent._post_tool_empty_nudge_content(messages)
+    status = run_agent._post_tool_empty_status_text(messages)
+
+    assert "continue with the task" in nudge
+    assert "terminal tool result" not in status
 
 
 @pytest.fixture()
@@ -2424,6 +2627,43 @@ class TestRunConversation:
         assert result["api_calls"] == 2
         assert mock_handle_function_call.call_args.kwargs["tool_call_id"] == "c1"
         assert mock_handle_function_call.call_args.kwargs["session_id"] == agent.session_id
+
+    def test_post_tool_empty_after_terminal_result_prompts_final_response(self, agent):
+        self._setup_agent(agent)
+        tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")
+        resp1 = _mock_response(content="", finish_reason="tool_calls", tool_calls=[tc])
+        empty_resp = _mock_response(content=None, finish_reason="stop")
+        final_resp = _mock_response(content="All done.", finish_reason="stop")
+        agent.client.chat.completions.create.side_effect = [
+            resp1,
+            empty_resp,
+            final_resp,
+        ]
+        terminal_result = json.dumps(
+            {
+                "runtime": {"agent_loop_terminal": True}
+            }
+        )
+
+        with (
+            patch("run_agent.handle_function_call", return_value=terminal_result),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("search something")
+
+        user_nudges = [
+            m.get("content", "")
+            for m in result["messages"]
+            if m.get("role") == "user"
+            and "final response now" in m.get("content", "")
+        ]
+        assert result["final_response"] == "All done."
+        assert result["api_calls"] == 3
+        assert len(user_nudges) == 1
+        assert "final response" in user_nudges[0]
+        assert "continue with the task" not in user_nudges[0]
 
     def test_request_scoped_api_hooks_fire_for_each_api_call(self, agent):
         self._setup_agent(agent)

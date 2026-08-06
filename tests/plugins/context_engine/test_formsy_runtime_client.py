@@ -240,6 +240,44 @@ async def test_runtime_client_memory_read_uses_read_endpoint(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_runtime_client_memory_read_passes_known_read_keys(monkeypatch):
+    monkeypatch.setenv("FORMSY_API_KEY", "fsy_test_secret_token")
+    calls = []
+    client = RuntimeClient(
+        base_url="https://runtime.example",
+        api_key_env="FORMSY_API_KEY",
+    )
+
+    class FakeAsyncClient:
+        async def request(self, method, url, json=None, headers=None):
+            calls.append({
+                "method": method,
+                "url": url,
+                "json": json,
+                "headers": headers,
+            })
+            return httpx.Response(
+                200,
+                json={"content": "[duplicate omitted]"},
+                request=httpx.Request(method, url, json=json, headers=headers),
+            )
+
+    client._client = FakeAsyncClient()
+
+    await client.memory_read(
+        repo_id="ansible__ansible",
+        session_id="session-1",
+        path="lib/ansible/module_utils/urls.py",
+        revision="rev",
+        known_read_keys=["lib/ansible/module_utils/urls.py:1-80"],
+    )
+
+    assert calls[0]["json"]["known_read_keys"] == [
+        "lib/ansible/module_utils/urls.py:1-80"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_runtime_client_compile_repo_uses_compile_endpoint(monkeypatch):
     monkeypatch.setenv("FORMSY_API_KEY", "fsy_test_secret_token")
     client = RuntimeClient(

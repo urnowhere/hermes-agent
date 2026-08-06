@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -40,6 +41,7 @@ def test_register_adds_expected_hooks_and_tools():
         "post_llm_call",
         "pre_tool_call",
         "post_tool_call",
+        "project_tool_status_cards",
         "transform_tool_result",
         "on_session_end",
         "on_session_reset",
@@ -51,6 +53,80 @@ def test_register_adds_expected_hooks_and_tools():
         "formsy_request_human_review",
     ]
     assert "formsy_human_override" not in [tool["name"] for tool in ctx.tools]
+
+
+def test_project_tool_status_cards_projects_formsy_context_and_finish_gate(monkeypatch):
+    module = _load_plugin_module()
+    monkeypatch.delenv("FORMSY_FS_CONSOLE_BASE_URL", raising=False)
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"formsy": {"fs_console_base_url": "http://localhost:5173"}},
+    )
+
+    context_result = {
+        "ok": True,
+        "query": "Request.open gzip Content-Encoding",
+        "coverage": "partial",
+        "accepted_targets": ["lib/ansible/module_utils/urls.py"],
+        "guidance": {
+            "code_plan_review": {
+                "code_plan_id": "cp_52359f4a1cb3e765",
+                "url": "http://localhost:3000/code-plans/cp_52359f4a1cb3e765",
+            }
+        },
+    }
+    context_cards = module._on_project_tool_status_cards(
+        tool_name="context_search",
+        args={},
+        result=json.dumps(context_result),
+        session_id="session-1",
+        tool_call_id="call-context",
+    )
+
+    assert context_cards
+    assert context_cards[0]["source"] == "formsy"
+    assert context_cards[0]["kind"] == "context_ready"
+    assert context_cards[0]["title"] == "FormSy Context"
+    assert context_cards[0]["link"] == {
+        "label": "Task Workflow",
+        "url": "http://localhost:5173/code-plans/cp_52359f4a1cb3e765",
+    }
+
+    finish_result = {
+        "decision": "NEED_MORE_VALIDATION",
+        "protocol": {
+            "summary": "Public interface evidence is incomplete.",
+            "gate_decision": "NEED_MORE_VALIDATION",
+        },
+    }
+    finish_cards = module._on_project_tool_status_cards(
+        tool_name="formsy_verify_completion",
+        args={},
+        result=json.dumps(finish_result),
+        session_id="session-1",
+        tool_call_id="call-finish",
+    )
+
+    assert finish_cards == [
+        {
+            "source": "formsy",
+            "kind": "finish_gate",
+            "title": "FormSy Finish Gate",
+            "body": [
+                "Decision: NEED_MORE_VALIDATION",
+                "Reason: Public interface evidence is incomplete.",
+                "Task Workflow: http://localhost:5173/code-plans/cp_52359f4a1cb3e765",
+            ],
+            "severity": "warning",
+            "link": {
+                "label": "Task Workflow",
+                "url": "http://localhost:5173/code-plans/cp_52359f4a1cb3e765",
+            },
+            "dedupe_key": "formsy:finish_gate:call-finish",
+            "group_key": "formsy:finish_gate",
+            "replace_policy": "latest",
+        }
+    ]
 
 
 def test_pre_tool_call_wraps_block_message_as_hermes_directive(monkeypatch):

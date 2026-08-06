@@ -26,6 +26,7 @@ context:
 
 formsy:
   base_url: http://127.0.0.1:8000
+  fs_console_base_url: http://localhost:5173
   api_key_env: FORMSY_API_KEY
   timeout_s: 180
   memory_search_endpoint: /api/v1/query
@@ -112,3 +113,19 @@ formsy_request_human_review
 The hooks still observe tool activity when the plugin is enabled, but these tools
 are only visible to the agent when `plugin_formsy_constraint_keeper` is included
 in the effective toolsets.
+
+## fs-console Review Links
+
+When `formsy.fs_console_base_url` is configured, Hermes displays a clickable
+Task Workflow URL in the FormSy Finish Gate card whenever the FormSy response
+contains a `code_plan_id`:
+
+```text
+Task Workflow: http://localhost:5173/code-plans/cp_...
+```
+
+For local debugging or temporary overrides, set:
+
+```bash
+export FORMSY_FS_CONSOLE_BASE_URL=http://localhost:5173
+```

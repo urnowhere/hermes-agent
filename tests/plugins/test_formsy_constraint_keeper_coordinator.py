@@ -1579,6 +1579,210 @@ def test_observe_tool_result_captures_diff_after_edit_surface(tmp_path):
     )
 
 
+def test_edit_diff_carries_contract_identity_captured_before_edit(tmp_path):
+    class ContractClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.revision = 0
+
+        async def compile_constraints(self, payload, session_id=""):
+            self.revision += 1
+            targets = ["pkg/a.py", "pkg/b.py"] if self.revision == 1 else ["pkg/a.py"]
+            return {
+                "protocol_text": "## FormSy Constraint Protocol\n- State: PATCH_ALLOWED",
+                "protocol": {
+                    "contract_set_id": "contract_scope",
+                    "contract_revision": self.revision,
+                    "patch_scope_id": f"contract_scope:patch:{self.revision}",
+                },
+                "contracts": {
+                    "patch": {
+                        "accepted_targets": targets,
+                        "strict_target_scope": False,
+                    }
+                },
+            }
+
+    client = ContractClient()
+    coordinator = ConstraintKeeperCoordinator(
+        client=client,
+        spool_root=tmp_path,
+        identity=_identity(),
+        diff_provider=lambda: (
+            "diff --git a/pkg/a.py b/pkg/a.py\n"
+            "diff --git a/pkg/b.py b/pkg/b.py\n"
+        ),
+    )
+    compile_args = {
+        "query": "requested behavior",
+        "instruction": "Implement the requested behavior.",
+        "query_plan": {"query": "requested behavior"},
+        "context_bundle": {"bundle_id": "bundle"},
+        "search_payload": {},
+    }
+    coordinator.compile_context_bundle(**compile_args)
+    assert coordinator.pre_tool_call_block_message(
+        "patch", {"path": "pkg/a.py"}, session_id="sess-1"
+    ) is None
+    coordinator.compile_context_bundle(**compile_args)
+
+    coordinator.observe_tool_result(
+        "patch", {"path": "pkg/a.py"}, "ok", session_id="sess-1"
+    )
+
+    pending = coordinator.spool.pending("task-1", "run-1")
+    diff_event = [event for event in pending if event["event_kind"] == "diff_observed"][-1]
+    assert diff_event["payload"]["authorized_contract_set_id"] == "contract_scope"
+    assert diff_event["payload"]["authorized_contract_revision"] == 1
+    assert "patch_scope" not in diff_event["payload"]
+
+
+def test_local_scope_guard_allows_advisory_outside_target(tmp_path):
+    class AdvisoryClient(FakeClient):
+        async def compile_constraints(self, payload, session_id=""):
+            return {
+                "protocol_text": "## FormSy Constraint Protocol\n- State: PATCH_ALLOWED",
+                "protocol": {
+                    "contract_set_id": "contract_scope",
+                    "contract_revision": 1,
+                },
+                "contracts": {
+                    "patch": {
+                        "accepted_targets": ["pkg/a.py"],
+                        "strict_target_scope": False,
+                    }
+                },
+            }
+
+    coordinator = ConstraintKeeperCoordinator(
+        client=AdvisoryClient(), spool_root=tmp_path, identity=_identity()
+    )
+    coordinator.compile_context_bundle(
+        query="requested behavior",
+        instruction="Implement it.",
+        query_plan={},
+        context_bundle={"bundle_id": "bundle"},
+        search_payload={},
+    )
+
+    assert coordinator._local_changed_files_scope_guard(  # noqa: SLF001
+        {"changed_files": ["pkg/a.py", "pkg/b.py"], "diff_hash": "sha256:1"}
+    ) is None
+
+
+def test_local_scope_guard_blocks_strict_outside_target(tmp_path):
+    class StrictClient(FakeClient):
+        async def compile_constraints(self, payload, session_id=""):
+            return {
+                "protocol_text": "## FormSy Constraint Protocol\n- State: PATCH_ALLOWED",
+                "protocol": {
+                    "contract_set_id": "contract_scope",
+                    "contract_revision": 1,
+                },
+                "contracts": {
+                    "patch": {
+                        "accepted_targets": ["pkg/a.py"],
+                        "strict_target_scope": True,
+                    }
+                },
+            }
+
+    coordinator = ConstraintKeeperCoordinator(
+        client=StrictClient(), spool_root=tmp_path, identity=_identity()
+    )
+    coordinator.compile_context_bundle(
+        query="requested behavior",
+        instruction="Implement it.",
+        query_plan={},
+        context_bundle={"bundle_id": "bundle"},
+        search_payload={},
+    )
+
+    result = coordinator._local_changed_files_scope_guard(  # noqa: SLF001
+        {"changed_files": ["pkg/a.py", "pkg/b.py"], "diff_hash": "sha256:1"}
+    )
+    assert result is not None
+    assert result["decision"] == "NEED_MORE_VALIDATION"
+
+
+def test_local_scope_guard_keeps_diff_scope_after_context_refresh(tmp_path):
+    class RefreshClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.revision = 0
+
+        async def compile_constraints(self, payload, session_id=""):
+            self.revision += 1
+            targets = ["pkg/a.py", "pkg/b.py"] if self.revision == 1 else ["pkg/a.py"]
+            return {
+                "protocol_text": "## FormSy Constraint Protocol\n- State: PATCH_ALLOWED",
+                "protocol": {
+                    "contract_set_id": "contract_scope",
+                    "contract_revision": self.revision,
+                },
+                "contracts": {
+                    "patch": {
+                        "accepted_targets": targets,
+                        "strict_target_scope": True,
+                    }
+                },
+            }
+
+    coordinator = ConstraintKeeperCoordinator(
+        client=RefreshClient(),
+        spool_root=tmp_path,
+        identity=_identity(),
+        diff_provider=lambda: (
+            "diff --git a/pkg/a.py b/pkg/a.py\n"
+            "diff --git a/pkg/b.py b/pkg/b.py\n"
+        ),
+    )
+    compile_args = {
+        "query": "requested behavior",
+        "instruction": "Implement it.",
+        "query_plan": {},
+        "context_bundle": {"bundle_id": "bundle"},
+        "search_payload": {},
+    }
+    coordinator.compile_context_bundle(**compile_args)
+    coordinator.pre_tool_call_block_message(
+        "patch", {"path": "pkg/a.py"}, session_id="sess-1"
+    )
+    coordinator.observe_tool_result(
+        "patch", {"path": "pkg/a.py"}, "ok", session_id="sess-1"
+    )
+    coordinator.compile_context_bundle(**compile_args)
+
+    assert coordinator._local_changed_files_scope_guard(  # noqa: SLF001
+        {"changed_files": ["pkg/a.py", "pkg/b.py"], "diff_hash": "sha256:1"}
+    ) is None
+
+
+def test_repair_projection_marks_next_compile_as_repair_patch(tmp_path):
+    client = FakeClient()
+    client.verify_response = {
+        "decision": "NEED_MORE_VALIDATION",
+        "completion_audit": {
+            "projection": {"next_action_kind": "repair_patch"}
+        },
+    }
+    coordinator = ConstraintKeeperCoordinator(
+        client=client, spool_root=tmp_path, identity=_identity()
+    )
+
+    coordinator.verify_completion(session_id="sess-1")
+    coordinator.compile_context_bundle(
+        query="repair requested behavior",
+        instruction="Repair the patch.",
+        query_plan={},
+        context_bundle={"bundle_id": "bundle"},
+        search_payload={},
+    )
+
+    compile_call = [call for call in client.calls if call[0] == "compile"][-1]
+    assert compile_call[1]["payload"]["compile_reason"] == "repair_patch"
+
+
 def test_observe_tool_result_attaches_changed_file_source_snapshots(tmp_path):
     coordinator = ConstraintKeeperCoordinator(
         client=FakeClient(),
@@ -2990,7 +3194,25 @@ def test_verify_completion_blocks_warning_bearing_validation_before_server_accep
 def test_verify_completion_blocks_product_diff_outside_accepted_targets_before_server_accept(
     tmp_path,
 ):
-    client = FakeClient()
+    class StrictScopeClient(FakeClient):
+        async def compile_constraints(self, payload, session_id=""):
+            return {
+                "protocol_text": "## FormSy Constraint Protocol\n- State: PATCH_ALLOWED",
+                "protocol": {
+                    "contract_set_id": "contract_scope",
+                    "contract_revision": 1,
+                },
+                "contracts": {
+                    "patch": {
+                        "accepted_targets": [
+                            "lib/ansible/module_utils/urls.py"
+                        ],
+                        "strict_target_scope": True,
+                    }
+                },
+            }
+
+    client = StrictScopeClient()
     client.verify_response = {"decision": "ACCEPT_DONE"}
     diff = """diff --git a/lib/ansible/module_utils/urls.py b/lib/ansible/module_utils/urls.py
 --- a/lib/ansible/module_utils/urls.py
@@ -3422,6 +3644,65 @@ def test_verify_completion_blocks_unresolved_failed_validation_after_narrow_pass
     assert not [call for call in client.calls if call[0] == "verify"]
 
 
+def test_verify_completion_ignores_repo_external_pytest_collection_probe_after_focused_pass(
+    tmp_path,
+):
+    client = FakeClient()
+    client.verify_response = {"decision": "ACCEPT_DONE"}
+    diff = """diff --git a/lib/ansible/modules/iptables.py b/lib/ansible/modules/iptables.py
+--- a/lib/ansible/modules/iptables.py
++++ b/lib/ansible/modules/iptables.py
+@@ -1,2 +1,3 @@
++CHAIN_MANAGEMENT_FIXED = True
+ def main():
+     return None
+diff --git a/test/units/modules/test_iptables.py b/test/units/modules/test_iptables.py
+--- a/test/units/modules/test_iptables.py
++++ b/test/units/modules/test_iptables.py
+@@ -1,2 +1,5 @@
++def test_chain_creation_check_mode():
++    assert True
+"""
+    coordinator = ConstraintKeeperCoordinator(
+        client=client,
+        spool_root=tmp_path,
+        identity=_identity(),
+        diff_provider=lambda: diff,
+    )
+    coordinator.compile_context_bundle(
+        query="iptables chain management check mode",
+        instruction="fix iptables chain management",
+        query_plan={},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={"accepted_targets": ["lib/ansible/modules/iptables.py"]},
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": 'pytest -v /tmp/orig_iptables_test.py -k "chain_creation or chain_deletion"'},
+        {
+            "exit_code": 2,
+            "output": (
+                "ERROR collecting /tmp/orig_iptables_test.py\n"
+                "E   ModuleNotFoundError: No module named 'units'\n"
+                "!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n"
+                "1 error in 0.23s"
+            ),
+        },
+        session_id="sess-1",
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": 'pytest -v test/units/modules/test_iptables.py -k "chain"'},
+        {"exit_code": 0, "output": "7 passed, 22 deselected"},
+        session_id="sess-1",
+    )
+
+    result = coordinator.verify_completion(session_id="sess-1")
+
+    assert result["decision"] == "ACCEPT_DONE"
+    assert [call for call in client.calls if call[0] == "verify"]
+
+
 def test_verify_completion_ignores_broad_unrelated_failed_validation_after_focused_pass(
     tmp_path,
 ):
@@ -3491,6 +3772,181 @@ diff --git a/test/units/module_utils/urls/test_Request.py b/test/units/module_ut
         "terminal",
         {"command": focused_command},
         {"exit_code": 0, "output": "1 passed"},
+        session_id="sess-1",
+    )
+
+    result = coordinator.verify_completion(session_id="sess-1")
+
+    assert result["decision"] == "ACCEPT_DONE"
+    assert [call for call in client.calls if call[0] == "verify"]
+
+
+def test_verify_completion_allows_explicitly_narrowed_validation_after_unrelated_failed_test(
+    tmp_path,
+):
+    client = FakeClient()
+    client.verify_response = {"decision": "ACCEPT_DONE"}
+    diff = """diff --git a/lib/ansible/module_utils/urls.py b/lib/ansible/module_utils/urls.py
+--- a/lib/ansible/module_utils/urls.py
++++ b/lib/ansible/module_utils/urls.py
+@@ -1,2 +1,3 @@
++HAS_GZIP = True
+ def open_url():
+     return None
+diff --git a/test/units/module_utils/urls/test_Request.py b/test/units/module_utils/urls/test_Request.py
+--- a/test/units/module_utils/urls/test_Request.py
++++ b/test/units/module_utils/urls/test_Request.py
+@@ -1,2 +1,5 @@
++def test_request_open_decompress_default():
++    assert True
+diff --git a/test/units/module_utils/urls/test_fetch_url.py b/test/units/module_utils/urls/test_fetch_url.py
+--- a/test/units/module_utils/urls/test_fetch_url.py
++++ b/test/units/module_utils/urls/test_fetch_url.py
+@@ -1,2 +1,3 @@
++def test_fetch_url_signature_keeps_default():
++    assert True
+"""
+    coordinator = ConstraintKeeperCoordinator(
+        client=client,
+        spool_root=tmp_path,
+        identity=_identity(),
+        diff_provider=lambda: diff,
+    )
+    coordinator.compile_context_bundle(
+        query="Request.open gzip",
+        instruction="fix gzip decoding",
+        query_plan={},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={"accepted_targets": ["lib/ansible/module_utils/urls.py"]},
+    )
+    failed_command = (
+        "python -m pytest test/units/module_utils/urls/test_gzip.py "
+        "test/units/module_utils/urls/test_Request.py "
+        "test/units/module_utils/urls/test_fetch_url.py -v"
+    )
+    narrowed_command = (
+        "python -m pytest test/units/module_utils/urls/test_gzip.py "
+        "test/units/module_utils/urls/test_Request.py "
+        "test/units/module_utils/urls/test_fetch_url.py "
+        "-v --deselect "
+        "test/units/module_utils/urls/test_fetch_url.py::test_fetch_url_cookies"
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": failed_command},
+        {
+            "exit_code": 1,
+            "output": (
+                "FAILED test/units/module_utils/urls/test_fetch_url.py::"
+                "test_fetch_url_cookies - AssertionError\n"
+                "1 failed, 56 passed"
+            ),
+        },
+        session_id="sess-1",
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {
+            "command": (
+                "python -m pytest test/units/module_utils/urls/"
+                "test_fetch_url.py::test_fetch_url_cookies -v -p no:randomly"
+            )
+        },
+        {
+            "exit_code": 1,
+            "output": (
+                "FAILED test/units/module_utils/urls/test_fetch_url.py::"
+                "test_fetch_url_cookies - AssertionError"
+            ),
+        },
+        session_id="sess-1",
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": narrowed_command},
+        {"exit_code": 0, "output": "56 passed, 1 deselected"},
+        session_id="sess-1",
+    )
+
+    result = coordinator.verify_completion(session_id="sess-1")
+
+    assert result["decision"] == "ACCEPT_DONE"
+    assert [call for call in client.calls if call[0] == "verify"]
+
+
+def test_verify_completion_ignores_repeated_broad_suite_failure_after_deselect_pass(
+    tmp_path,
+):
+    client = FakeClient()
+    client.verify_response = {"decision": "ACCEPT_DONE"}
+    diff = """diff --git a/lib/ansible/module_utils/urls.py b/lib/ansible/module_utils/urls.py
+--- a/lib/ansible/module_utils/urls.py
++++ b/lib/ansible/module_utils/urls.py
+@@ -1,2 +1,3 @@
++HAS_GZIP = True
+ def open_url():
+     return None
+diff --git a/test/units/module_utils/urls/test_Request.py b/test/units/module_utils/urls/test_Request.py
+--- a/test/units/module_utils/urls/test_Request.py
++++ b/test/units/module_utils/urls/test_Request.py
+@@ -1,2 +1,5 @@
++def test_Request_open_gzip():
++    assert True
+diff --git a/test/units/module_utils/urls/test_fetch_url.py b/test/units/module_utils/urls/test_fetch_url.py
+--- a/test/units/module_utils/urls/test_fetch_url.py
++++ b/test/units/module_utils/urls/test_fetch_url.py
+@@ -1,2 +1,5 @@
++def test_fetch_url_decompress_default():
++    assert True
+"""
+    coordinator = ConstraintKeeperCoordinator(
+        client=client,
+        spool_root=tmp_path,
+        identity=_identity(),
+        diff_provider=lambda: diff,
+    )
+    coordinator.compile_context_bundle(
+        query="Request.open gzip",
+        instruction="fix gzip decoding",
+        query_plan={},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={"accepted_targets": ["lib/ansible/module_utils/urls.py"]},
+    )
+    failed_output = (
+        "FAILED test/units/module_utils/urls/test_RedirectHandlerFactory.py::"
+        "test_redir_http_error_308_urllib2\n"
+        "FAILED test/units/module_utils/urls/test_fetch_url.py::"
+        "test_fetch_url_cookies\n"
+        "FAILED test/units/module_utils/urls/test_prepare_multipart.py::"
+        "test_prepare_multipart\n"
+        "3 failed, 71 passed"
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": "python -m pytest test/units/module_utils/urls/ -v"},
+        {"exit_code": 1, "output": failed_output},
+        session_id="sess-1",
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {
+            "command": (
+                "python -m pytest test/units/module_utils/urls/ -v "
+                "--deselect test/units/module_utils/urls/test_fetch_url.py::"
+                "test_fetch_url_cookies "
+                "--deselect test/units/module_utils/urls/"
+                "test_RedirectHandlerFactory.py::test_redir_http_error_308_urllib2 "
+                "--deselect test/units/module_utils/urls/test_prepare_multipart.py::"
+                "test_prepare_multipart"
+            )
+        },
+        {"exit_code": 0, "output": "71 passed, 3 deselected"},
+        session_id="sess-1",
+    )
+    coordinator.observe_tool_result(
+        "terminal",
+        {"command": "python -m pytest test/units/module_utils/urls/ -v"},
+        {"exit_code": 1, "output": failed_output},
         session_id="sess-1",
     )
 
@@ -3654,6 +4110,94 @@ def test_pre_tool_call_blocks_writing_candidate_test_outside_accepted_targets(tm
     assert "Candidate tests are validation obligations, not edit permission" in message
     assert "test/units/module_utils/urls/test_gzip.py" in message
     assert "lib/ansible/module_utils/urls.py" in message
+
+
+def test_pre_tool_call_allows_candidate_test_when_validation_collateral(tmp_path):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(),
+        spool_root=tmp_path,
+        identity=_identity(),
+    )
+    coordinator.compile_context_bundle(
+        query="Request.open gzip",
+        instruction="fix gzip decoding",
+        query_plan={},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={
+            "contracts": {
+                "patch": {
+                    "accepted_targets": ["lib/ansible/module_utils/urls.py"],
+                    "validation_collateral": [
+                        "test/units/module_utils/urls/test_gzip.py"
+                    ],
+                }
+            },
+            "guidance": {
+                "tocs": {
+                    "candidate_tests": [
+                        {
+                            "test_id": (
+                                "test/units/module_utils/urls/test_gzip.py::"
+                                "test_Request_open_gzip"
+                            ),
+                        }
+                    ],
+                }
+            },
+        },
+    )
+
+    message = coordinator.pre_tool_call_block_message(
+        "write_file",
+        {
+            "path": "test/units/module_utils/urls/test_gzip.py",
+            "content": "focused validation test",
+        },
+        session_id="sess-1",
+    )
+
+    assert message is None
+
+
+def test_pre_tool_call_blocks_edits_after_human_review_requested(tmp_path):
+    coordinator = ConstraintKeeperCoordinator(
+        client=FakeClient(),
+        spool_root=tmp_path,
+        identity=_identity(),
+    )
+    coordinator.compile_context_bundle(
+        query="Request.open gzip",
+        instruction="fix gzip decoding",
+        query_plan={},
+        context_bundle={"bundle_id": "bundle-1"},
+        search_payload={"accepted_targets": ["lib/ansible/module_utils/urls.py"]},
+    )
+    coordinator.observe_tool_result(
+        "formsy_request_human_review",
+        {"reason": "focused validation is blocked"},
+        json.dumps(
+            {
+                "ok": True,
+                "requested": True,
+                "reason": "focused validation is blocked",
+            }
+        ),
+        session_id="sess-1",
+    )
+
+    message = coordinator.pre_tool_call_block_message(
+        "patch",
+        {
+            "path": "test/units/module_utils/urls/test_fetch_url.py",
+            "old": "assert old",
+            "new": "assert new",
+        },
+        session_id="sess-1",
+    )
+
+    assert message is not None
+    assert "Human review has already been requested" in message
+    assert "Do not continue patching" in message
 
 
 def test_pre_tool_call_blocks_terminal_candidate_test_redirection_outside_accepted_targets(

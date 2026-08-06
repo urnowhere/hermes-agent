@@ -129,6 +129,56 @@ def test_context_search_promotes_grounded_bundle_for_constraint_compile(monkeypa
     }
 
 
+def test_context_search_promotes_partial_grounded_bundle_for_constraint_compile(monkeypatch):
+    engine = _engine()
+
+    class PartialGroundedSearchClient:
+        async def memory_search(self, **kwargs):
+            return {
+                "matches": [{"path": "lib/ansible/module_utils/urls.py", "score": 0.9}],
+                "coverage": "partial",
+                "accepted_targets": ["lib/ansible/module_utils/urls.py"],
+                "bundle": {
+                    "bundle_id": "bundle-1",
+                    "coverage": "partial",
+                    "primary_files": [
+                        {
+                            "path": "lib/ansible/module_utils/urls.py",
+                            "priority": "must_edit",
+                        }
+                    ],
+                },
+            }
+
+    captured = {}
+
+    class Coordinator:
+        def compile_context_bundle(self, **kwargs):
+            captured.update(kwargs)
+            return "## FormSy Constraint Protocol\n- State: PATCH_ALLOWED_WITH_WARNINGS"
+
+    engine._engine_client = PartialGroundedSearchClient()
+    monkeypatch.setattr(
+        "plugins.context_engine.formsy.engine._get_constraint_keeper_coordinator",
+        lambda: Coordinator(),
+    )
+
+    result = engine.handle_tool_call(
+        "context_search",
+        {
+            "query": "Request.open gzip Content-Encoding decompress=False",
+            "metadata": {
+                "retrieval_mode": "symbolic",
+                "grounding_phase": "grounded",
+            },
+        },
+    )
+
+    data = json.loads(result)
+    assert data["ok"] is True
+    assert captured["context_bundle"]["coverage"] == "sufficient_for_first_patch"
+
+
 def test_context_search_uses_task_instruction_for_constraint_compile(monkeypatch):
     engine = _engine()
     task = (
